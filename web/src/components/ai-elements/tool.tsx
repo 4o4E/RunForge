@@ -1,6 +1,5 @@
 "use client";
 
-import { Badge } from "@/components/ui/badge";
 import {
   Collapsible,
   CollapsibleContent,
@@ -10,7 +9,7 @@ import { cn } from "@/lib/utils";
 import type { DynamicToolUIPart, ToolUIPart } from "ai";
 import {
   CheckCircleIcon,
-  ChevronRightIcon,
+  ChevronDownIcon,
   CircleIcon,
   ClockIcon,
   WrenchIcon,
@@ -23,11 +22,10 @@ import { CodeBlock } from "./code-block";
 
 export type ToolProps = ComponentProps<typeof Collapsible>;
 
-// Borderless: each tool call renders as a single text line that other lines can
-// stack against, not a boxed card. Collapsed siblings read as a compact list.
+// 工具调用和思考块保持同一层级：单行触发器 + 柔和展开内容。
 export const Tool = ({ className, ...props }: ToolProps) => (
   <Collapsible
-    className={cn("group/tool not-prose w-full", className)}
+    className={cn("group/tool not-prose mb-4 w-full", className)}
     {...props}
   />
 );
@@ -47,30 +45,30 @@ export type ToolHeaderProps = {
 );
 
 const statusLabels: Record<ToolPart["state"], string> = {
-  "approval-requested": "Awaiting Approval",
-  "approval-responded": "Responded",
-  "input-available": "Running",
-  "input-streaming": "Pending",
-  "output-available": "Completed",
-  "output-denied": "Denied",
-  "output-error": "Error",
+  "approval-requested": "等待确认",
+  "approval-responded": "已确认",
+  "input-available": "调用中",
+  "input-streaming": "准备中",
+  "output-available": "已完成",
+  "output-denied": "已拒绝",
+  "output-error": "调用失败",
 };
 
 const statusIcons: Record<ToolPart["state"], ReactNode> = {
-  "approval-requested": <ClockIcon className="size-3 text-yellow-600" />,
-  "approval-responded": <CheckCircleIcon className="size-3 text-blue-600" />,
-  "input-available": <ClockIcon className="size-3 animate-pulse" />,
-  "input-streaming": <CircleIcon className="size-3" />,
-  "output-available": <CheckCircleIcon className="size-3 text-green-600" />,
-  "output-denied": <XCircleIcon className="size-3 text-orange-600" />,
-  "output-error": <XCircleIcon className="size-3 text-red-600" />,
+  "approval-requested": <ClockIcon className="size-3.5 text-muted-foreground" />,
+  "approval-responded": <CheckCircleIcon className="size-3.5 text-muted-foreground" />,
+  "input-available": <ClockIcon className="size-3.5 animate-pulse text-muted-foreground" />,
+  "input-streaming": <CircleIcon className="size-3.5 text-muted-foreground" />,
+  "output-available": <CheckCircleIcon className="size-3.5 text-muted-foreground" />,
+  "output-denied": <XCircleIcon className="size-3.5 text-muted-foreground" />,
+  "output-error": <XCircleIcon className="size-3.5 text-destructive" />,
 };
 
 export const getStatusBadge = (status: ToolPart["state"]) => (
-  <Badge className="gap-1.5 rounded-full text-xs" variant="secondary">
+  <span className="inline-flex items-center gap-1.5 text-muted-foreground text-xs">
     {statusIcons[status]}
     {statusLabels[status]}
-  </Badge>
+  </span>
 );
 
 export const ToolHeader = ({
@@ -87,20 +85,20 @@ export const ToolHeader = ({
   return (
     <CollapsibleTrigger
       className={cn(
-        "flex w-full items-center gap-1.5 rounded py-0.5 text-left text-xs text-muted-foreground transition-colors hover:text-foreground",
+        "flex w-full items-center gap-2 text-left text-muted-foreground text-sm transition-colors hover:text-foreground",
         className
       )}
       {...props}
     >
-      <ChevronRightIcon className="size-3 shrink-0 transition-transform group-data-[state=open]/tool:rotate-90" />
-      <WrenchIcon className="size-3 shrink-0" />
-      <span className="font-mono font-medium text-foreground">
-        {title ?? derivedName}
+      <WrenchIcon className="size-4 shrink-0" />
+      <span className="min-w-0 truncate">
+        调用 <span className="font-mono text-foreground">{title ?? derivedName}</span>
       </span>
-      <span className="flex items-center gap-1">
+      <span className="flex shrink-0 items-center gap-1 text-xs">
         {statusIcons[state]}
         {statusLabels[state]}
       </span>
+      <ChevronDownIcon className="size-4 shrink-0 transition-transform group-data-[state=open]/tool:rotate-180" />
     </CollapsibleTrigger>
   );
 };
@@ -110,7 +108,8 @@ export type ToolContentProps = ComponentProps<typeof CollapsibleContent>;
 export const ToolContent = ({ className, ...props }: ToolContentProps) => (
   <CollapsibleContent
     className={cn(
-      "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 ml-1.5 space-y-2 border-l border-border/60 pb-1 pl-3 text-popover-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
+      "mt-4 space-y-3 text-muted-foreground text-sm",
+      "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
       className
     )}
     {...props}
@@ -123,12 +122,12 @@ export type ToolInputProps = ComponentProps<"div"> & {
 
 export const ToolInput = ({ className, input, ...props }: ToolInputProps) => (
   <div className={cn("space-y-1 overflow-hidden", className)} {...props}>
-    <h4 className="font-medium text-muted-foreground text-[10px] uppercase tracking-wide">
-      Parameters
+    <h4 className="font-medium text-muted-foreground text-xs">
+      参数
     </h4>
-    {/* Cap height so a large argument blob never pushes the rest off-screen. */}
-    <div className="max-h-[40vh] overflow-y-auto rounded-md bg-muted/50">
-      <CodeBlock code={JSON.stringify(input, null, 2)} language="json" />
+    {/* 限制参数高度，避免大对象把后续对话挤出视口。 */}
+    <div className="max-h-[40vh] overflow-y-auto rounded-md bg-muted/35">
+      <CodeBlock code={JSON.stringify(input ?? {}, null, 2)} language="json" />
     </div>
   </div>
 );
@@ -160,17 +159,16 @@ export const ToolOutput = ({
 
   return (
     <div className={cn("space-y-1", className)} {...props}>
-      <h4 className="font-medium text-muted-foreground text-[10px] uppercase tracking-wide">
-        {errorText ? "Error" : "Result"}
+      <h4 className="font-medium text-muted-foreground text-xs">
+        {errorText ? "错误" : "结果"}
       </h4>
-      {/* Shell/output blocks scroll inside a viewport-bounded box rather than
-          stretching the conversation to the full length of the output. */}
+      {/* 输出在视口内滚动，避免长结果把整段对话撑得过高。 */}
       <div
         className={cn(
           "max-h-[60vh] overflow-auto rounded-md text-xs [&_table]:w-full",
           errorText
             ? "bg-destructive/10 text-destructive"
-            : "bg-muted/50 text-foreground"
+            : "bg-muted/35 text-foreground"
         )}
       >
         {errorText && <div className="p-2">{errorText}</div>}
