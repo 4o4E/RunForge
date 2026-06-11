@@ -83,7 +83,29 @@ UI message stream。这样 executor / WS / PG 持久化全部不动,风险最低
 SSR `renderToStaticMarkup(<ChatView>)` 含工具卡/用户气泡/状态徽章。`.dark` 与
 现有 `useTheme` 零冲突。
 
+## Stage 2.1 — 改用 AI Elements 官方聊天组件 ✅
+
+手搓的气泡/工具卡风格与官方 chat 演示差距大;改用 **AI Elements**(Vercel 官方、基于
+shadcn、直接吃 AI SDK `UIMessage.parts`)。`npx ai-elements add conversation message
+reasoning tool prompt-input`(自动确认覆盖)。
+
+- 重写 [Conversation.tsx](../../web/src/components/Conversation.tsx):用 AI Elements
+  `Conversation/ConversationContent/ConversationEmptyState/ConversationScrollButton`、
+  `Message/MessageContent/MessageResponse`(Streamdown)、`Reasoning*`、`Tool*`;
+  `data-a2ui` 分片仍渲染我们的 `<A2uiSurface>`。
+- 重写 [Composer.tsx](../../web/src/components/Composer.tsx):用 `PromptInput*`(自管输入态、
+  Enter 发送、Submit 状态图标)。
+- AI Elements 装入 `src/components/ai-elements/` + 一批 `ui/`(collapsible/select/dialog/
+  dropdown/tooltip/input-group/…)与 radix/streamdown 插件依赖。
+- **旧 shadcn primitive 摩擦修复**:AI Elements 假设较新 shadcn,补
+  [button.tsx](../../web/src/components/ui/button.tsx) `icon-sm/icon-lg` size、
+  [select.tsx](../../web/src/components/ui/select.tsx) `SelectTrigger` 的 `size` prop。
+
+验收:`tsc -b` + `vite build` 绿(bundle 升至 ~2.3MB,含 Streamdown math/mermaid/shiki,
+后续可按需 lazy-load);SSR `ChatView` 渲染用户气泡 + 工具卡 + Reasoning + A2UI 表格 + 助手
+Markdown 全部正常。
+
 ## 后续(Stage 3/4)
 
 - A2UI 声明式 UI 以 `data-a2ui` 分片接入,`uiEventStreamToChunks` 已为 `a2ui` 预留分支位;
-  catalog 复用本阶段 shadcn 组件。
+  catalog 复用 shadcn 组件。
