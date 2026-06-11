@@ -2,7 +2,7 @@ import { config } from '../config.js';
 import { getProvider } from '../llm/index.js';
 import type { Provider } from '../llm/types.js';
 import { runTool, toolSchemas } from '../tools/registry.js';
-import { Context } from './context.js';
+import { ContextManager } from './context.js';
 import { runBus } from './bus.js';
 import type { AgentEvent } from './types.js';
 import { store as defaultStore } from '../store/index.js';
@@ -13,7 +13,8 @@ export interface ExecutorDeps {
   provider: Provider;
   store: Store;
   publish: (runId: string, event: AgentEvent) => void;
-  maxSteps: number;
+  /** Safety backstop, not the primary control — see config.agent.hardStepCap. */
+  hardStepCap: number;
   stream: boolean;
 }
 
@@ -22,7 +23,7 @@ function defaultDeps(): ExecutorDeps {
     provider: getProvider(),
     store: defaultStore,
     publish: (runId, event) => runBus.publish(runId, event),
-    maxSteps: config.agent.maxSteps,
+    hardStepCap: config.agent.hardStepCap,
     stream: config.llm.stream,
   };
 }
@@ -36,7 +37,7 @@ function defaultDeps(): ExecutorDeps {
  */
 export async function executeRun(runId: string, overrides: Partial<ExecutorDeps> = {}): Promise<void> {
   const deps = { ...defaultDeps(), ...overrides };
-  const { provider, store, publish, maxSteps, stream } = deps;
+  const { provider, store, publish, hardStepCap, stream } = deps;
 
   const run = await store.getRun(runId);
   if (!run) throw new Error(`run not found: ${runId}`);
@@ -53,7 +54,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
   try {
     await withSpan(
       'invoke_agent',
-      { 'run.id': runId, 'thread.id': threadId, 'agent.max_steps': maxSteps },
+      { 'run.id': runId, 'thread.id': threadId, 'agent.hard_step_cap': hardStepCap },
       () => runLoop(),
     );
   } catch (err) {
@@ -66,15 +67,36 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
   // the AI SDK chat / execute_tool spans nest underneath.
   async function runLoop(): Promise<void> {
     const prior = await store.loadThreadMessages(threadId);
-    const ctx = new Context(prior, userInput);
+    const ctx = new ContextManager(prior, userInput);
     // Persist the user turn (no step yet).
     await store.addMessage(threadId, runId, null, { role: 'user', content: userInput });
 
     const tools = toolSchemas();
 
-    for (let stepIdx = 1; stepIdx <= maxSteps; stepIdx++) {
+    // Long tasks are bounded by completion / cancellation / context budget, not a
+    // fixed step count. hardStepCap is only a runaway-loop backstop.
+    for (let stepIdx = 1; stepIdx <= hardStepCap; stepIdx++) {
+      // Cooperative cancellation: the cancel endpoint flips status to 'canceling';
+      // we observe it at the top of each step and stop cleanly.
+      const current = await store.getRun(runId);
+      if (current?.status === 'canceling') {
+        await emit(null, { type: 'error', step: stepIdx, message: 'Run canceled by user.' });
+        await store.setRunStatus(runId, 'canceled');
+        return;
+      }
+
       const step = await store.createStep(runId, stepIdx);
       await emit(step.id, { type: 'step_start', step: stepIdx });
+
+      // Keep the working context under budget before spending a model call. Masking
+      // decisions are persisted so they survive a restart (window drops are not).
+      const compaction = ctx.maybeCompact();
+      if (compaction) {
+        if (compaction.collapsedIds.length) {
+          await store.markMessagesCollapsed(compaction.collapsedIds, 'masked');
+        }
+        await emit(step.id, { type: 'compaction', step: stepIdx, ...compaction.info });
+      }
 
       // Stream when supported: publish incremental deltas live (bus only); the
       // consolidated text is persisted once at the end so replay stays compact.
@@ -96,6 +118,9 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       }
       if (!result) result = await provider.complete(ctx.all(), tools);
 
+      // Calibrate the token estimator from real usage for the next compaction check.
+      ctx.recordUsage(result.usage);
+
       const { content, reasoning, toolCalls } = result;
 
       // Reasoning: surfaced for display only, NOT fed back into context.
@@ -107,7 +132,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
 
       const assistantMsg = { role: 'assistant' as const, content, toolCalls: toolCalls.length ? toolCalls : undefined };
       ctx.add(assistantMsg);
-      await store.addMessage(threadId, runId, step.id, assistantMsg);
+      ctx.setLastDbId(await store.addMessage(threadId, runId, step.id, assistantMsg));
 
       if (content) {
         const ev = { type: 'llm_delta' as const, step: stepIdx, text: content };
@@ -152,12 +177,12 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
 
         const toolMsg = { role: 'tool' as const, content: result.text, toolCallId: call.id };
         ctx.add(toolMsg);
-        await store.addMessage(threadId, runId, step.id, toolMsg);
+        ctx.setLastDbId(await store.addMessage(threadId, runId, step.id, toolMsg));
       }
     }
 
-    const message = `Reached max steps (${maxSteps}) without a final answer.`;
-    await emit(null, { type: 'error', step: maxSteps, message });
+    const message = `Reached hard step cap (${hardStepCap}) without a final answer.`;
+    await emit(null, { type: 'error', step: hardStepCap, message });
     await store.setRunStatus(runId, 'error', { error: message });
   }
 }

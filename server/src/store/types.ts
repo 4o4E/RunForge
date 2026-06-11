@@ -32,6 +32,13 @@ export interface StoredEvent {
   event: AgentEvent;
 }
 
+/** A thread message as stored, carrying its DB id so the executor can mark it
+ *  collapsed during compaction. `content` is the LLM-facing view (already the
+ *  placeholder for masked rows); the original is preserved in the DB. */
+export interface ThreadMessage extends LlmMessage {
+  id: number;
+}
+
 /**
  * Persistence port. The executor depends on this interface, not on PG directly,
  * so it can be unit-tested with an in-memory implementation.
@@ -48,9 +55,13 @@ export interface Store {
 
   createStep(runId: string, idx: number): Promise<StepRow>;
 
-  /** Conversation history for a thread, in order, mapped to neutral LLM messages. */
-  loadThreadMessages(threadId: string): Promise<LlmMessage[]>;
-  addMessage(threadId: string, runId: string, stepId: string | null, msg: LlmMessage): Promise<void>;
+  /** Conversation history for a thread, in order, as the compacted LLM-facing view:
+   *  masked tool results return their placeholder, 'summarized' rows are omitted. */
+  loadThreadMessages(threadId: string): Promise<ThreadMessage[]>;
+  /** Append a message; returns its DB id so compaction can reference it later. */
+  addMessage(threadId: string, runId: string, stepId: string | null, msg: LlmMessage): Promise<number>;
+  /** Durably mark messages collapsed (context compaction). Originals are retained. */
+  markMessagesCollapsed(ids: number[], kind: 'masked' | 'summarized'): Promise<void>;
 
   addEvent(runId: string, stepId: string | null, event: AgentEvent): Promise<void>;
   getEvents(runId: string): Promise<AgentEvent[]>;

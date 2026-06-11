@@ -17,6 +17,9 @@ export interface LlmMessage {
   toolCalls?: LlmToolCall[];
   /** tool turns only — links the result to a prior tool call */
   toolCallId?: string;
+  /** Set by context compaction: 'masked' = tool output elided to a placeholder,
+   *  'summarized' = folded into a summary message. Prevents re-compacting. */
+  collapsed?: 'masked' | 'summarized';
 }
 
 /** Neutral tool definition. parameters is a JSON Schema object. */

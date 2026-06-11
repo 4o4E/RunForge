@@ -51,3 +51,15 @@ api.get('/runs/:id', async (req, res) => {
   const events = await store.getEvents(run.id);
   res.json({ run, events });
 });
+
+// Cancel a run. Cooperative: flips status to 'canceling'; the executor observes it
+// at the next step boundary and stops, setting status to 'canceled'.
+api.post('/runs/:id/cancel', async (req, res) => {
+  const run = await store.getRun(req.params.id);
+  if (!run) return res.status(404).json({ error: 'run not found' });
+  if (run.status === 'pending' || run.status === 'running') {
+    await store.setRunStatus(run.id, 'canceling');
+    return res.json({ id: run.id, status: 'canceling' });
+  }
+  res.json({ id: run.id, status: run.status });
+});

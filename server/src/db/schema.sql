@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS threads (
 CREATE TABLE IF NOT EXISTS runs (
   id          TEXT PRIMARY KEY,
   thread_id   TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-  status      TEXT NOT NULL DEFAULT 'pending',   -- pending | running | done | error
+  status      TEXT NOT NULL DEFAULT 'pending',   -- pending | running | done | error | canceling | canceled
   input       TEXT NOT NULL,
   output      TEXT,
   error       TEXT,
@@ -34,18 +34,23 @@ CREATE TABLE IF NOT EXISTS messages (
   run_id      TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
   step_id     TEXT REFERENCES steps(id) ON DELETE CASCADE,  -- null for the initial user message
   role        TEXT NOT NULL,                     -- user | assistant | tool
-  content     TEXT,
+  content     TEXT,                              -- ALWAYS the original; compaction never overwrites it
   tool_calls  JSONB,                             -- assistant tool call requests
   tool_call_id TEXT,                             -- for role=tool
+  collapsed   TEXT,                              -- null | 'masked' | 'summarized' (context compaction, durable)
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Durable context compaction (long-task design §4). Idempotent so re-running
+-- migrate() on an existing DB adds the column without touching data.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS collapsed TEXT;
 
 CREATE TABLE IF NOT EXISTS events (
   id          BIGSERIAL PRIMARY KEY,
   run_id      TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
   step_id     TEXT REFERENCES steps(id) ON DELETE CASCADE,
   idx         INTEGER NOT NULL DEFAULT 0,        -- step index this event belongs to
-  type        TEXT NOT NULL,                     -- step_start | llm_delta | tool_call | tool_result | final | error
+  type        TEXT NOT NULL,                     -- step_start | llm_delta | tool_call | tool_result | compaction | final | error
   data        JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );

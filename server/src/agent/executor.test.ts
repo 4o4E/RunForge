@@ -30,7 +30,7 @@ test('executeRun: runs the loop across steps and finalizes', async () => {
     store,
     provider: scriptedProvider(),
     publish: (_id, e) => published.push(e),
-    maxSteps: 5,
+    hardStepCap: 5,
   });
 
   const finished = await store.getRun(run.id);
@@ -62,7 +62,7 @@ test('executeRun: keeps multi-turn memory within a thread', async () => {
     store,
     provider: { name: 's', async complete() { return { content: 'ok1', toolCalls: [] }; } },
     publish: () => {},
-    maxSteps: 3,
+    hardStepCap: 3,
   });
 
   // Second run should see the first run's messages as prior context.
@@ -78,14 +78,14 @@ test('executeRun: keeps multi-turn memory within a thread', async () => {
       },
     },
     publish: () => {},
-    maxSteps: 3,
+    hardStepCap: 3,
   });
 
   // prior: user(first) + assistant(ok1) + new user(second) = 3
   assert.equal(seenPriorCount, 3);
 });
 
-test('executeRun: stops and errors at max steps', async () => {
+test('executeRun: stops and errors at the hard step cap', async () => {
   const store = new MemoryStore();
   const thread = await store.createThread();
   const run = await store.createRun(thread.id, 'loop forever');
@@ -100,10 +100,36 @@ test('executeRun: stops and errors at max steps', async () => {
       },
     },
     publish: () => {},
-    maxSteps: 2,
+    hardStepCap: 2,
   });
 
   const finished = await store.getRun(run.id);
   assert.equal(finished?.status, 'error');
-  assert.match(finished?.error ?? '', /max steps/);
+  assert.match(finished?.error ?? '', /hard step cap/);
+});
+
+test('executeRun: cancels cooperatively at a step boundary', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run = await store.createRun(thread.id, 'long task');
+
+  // Flip the run to 'canceling' the moment the loop starts its first step, so the
+  // top-of-step check observes it and stops before finalizing.
+  let turn = 0;
+  await executeRun(run.id, {
+    store,
+    provider: {
+      name: 'looper',
+      async complete() {
+        turn += 1;
+        if (turn === 1) await store.setRunStatus(run.id, 'canceling');
+        return { content: null, toolCalls: [{ id: 'c', name: 'glob', arguments: '{"pattern":"*"}' }] };
+      },
+    },
+    publish: () => {},
+    hardStepCap: 50,
+  });
+
+  const finished = await store.getRun(run.id);
+  assert.equal(finished?.status, 'canceled');
 });

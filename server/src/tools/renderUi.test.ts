@@ -58,7 +58,7 @@ test('executor emits an a2ui event when a tool returns a display', async () => {
   };
 
   const published: AgentEvent[] = [];
-  await executeRun(run.id, { store, provider, publish: (_id, e) => published.push(e), maxSteps: 5, stream: false });
+  await executeRun(run.id, { store, provider, publish: (_id, e) => published.push(e), hardStepCap: 5, stream: false });
 
   const a2ui = published.find((e) => e.type === 'a2ui');
   assert.ok(a2ui, 'expected an a2ui event');

@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { query } from '../db/pool.js';
 import type { AgentEvent, RunStatus } from '../agent/types.js';
 import type { LlmMessage } from '../llm/types.js';
-import type { RunRow, Store, StepRow, ThreadRow } from './types.js';
+import { maskPlaceholder } from '../agent/compaction.js';
+import type { RunRow, Store, StepRow, ThreadMessage, ThreadRow } from './types.js';
 
 export class PgStore implements Store {
   async createThread(title?: string): Promise<ThreadRow> {
@@ -66,28 +67,36 @@ export class PgStore implements Store {
     return rows[0];
   }
 
-  async loadThreadMessages(threadId: string): Promise<LlmMessage[]> {
+  async loadThreadMessages(threadId: string): Promise<ThreadMessage[]> {
     const { rows } = await query<{
+      id: string;
       role: LlmMessage['role'];
       content: string | null;
       tool_calls: LlmMessage['toolCalls'] | null;
       tool_call_id: string | null;
+      collapsed: 'masked' | 'summarized' | null;
     }>(
-      `SELECT role, content, tool_calls, tool_call_id FROM messages WHERE thread_id = $1 ORDER BY id`,
+      `SELECT id, role, content, tool_calls, tool_call_id, collapsed FROM messages WHERE thread_id = $1 ORDER BY id`,
       [threadId],
     );
-    return rows.map((r) => ({
-      role: r.role,
-      content: r.content,
-      toolCalls: r.tool_calls ?? undefined,
-      toolCallId: r.tool_call_id ?? undefined,
-    }));
+    // Build the compacted LLM-facing view. The original content stays in the DB;
+    // masked rows render their placeholder, 'summarized' rows are folded out.
+    return rows
+      .filter((r) => r.collapsed !== 'summarized')
+      .map((r) => ({
+        id: Number(r.id),
+        role: r.role,
+        content: r.collapsed === 'masked' ? maskPlaceholder((r.content ?? '').length) : r.content,
+        toolCalls: r.tool_calls ?? undefined,
+        toolCallId: r.tool_call_id ?? undefined,
+        collapsed: r.collapsed ?? undefined,
+      }));
   }
 
-  async addMessage(threadId: string, runId: string, stepId: string | null, msg: LlmMessage): Promise<void> {
-    await query(
+  async addMessage(threadId: string, runId: string, stepId: string | null, msg: LlmMessage): Promise<number> {
+    const { rows } = await query<{ id: string }>(
       `INSERT INTO messages (thread_id, run_id, step_id, role, content, tool_calls, tool_call_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
       [
         threadId,
         runId,
@@ -98,6 +107,12 @@ export class PgStore implements Store {
         msg.toolCallId ?? null,
       ],
     );
+    return Number(rows[0].id);
+  }
+
+  async markMessagesCollapsed(ids: number[], kind: 'masked' | 'summarized'): Promise<void> {
+    if (!ids.length) return;
+    await query(`UPDATE messages SET collapsed = $2 WHERE id = ANY($1::bigint[])`, [ids, kind]);
   }
 
   async addEvent(runId: string, stepId: string | null, event: AgentEvent): Promise<void> {

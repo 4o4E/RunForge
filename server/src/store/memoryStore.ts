@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentEvent, RunStatus } from '../agent/types.js';
 import type { LlmMessage } from '../llm/types.js';
-import type { RunRow, Store, StepRow, ThreadRow } from './types.js';
+import { maskPlaceholder } from '../agent/compaction.js';
+import type { RunRow, Store, StepRow, ThreadMessage, ThreadRow } from './types.js';
 
 interface StoredMsg {
   thread_id: string;
@@ -9,6 +10,7 @@ interface StoredMsg {
   content: string | null;
   toolCalls?: LlmMessage['toolCalls'];
   toolCallId?: string;
+  collapsed?: 'masked' | 'summarized';
   seq: number;
 }
 
@@ -69,21 +71,35 @@ export class MemoryStore implements Store {
     return row;
   }
 
-  async loadThreadMessages(threadId: string): Promise<LlmMessage[]> {
+  async loadThreadMessages(threadId: string): Promise<ThreadMessage[]> {
     return this.messages
-      .filter((m) => m.thread_id === threadId)
+      .filter((m) => m.thread_id === threadId && m.collapsed !== 'summarized')
       .sort((a, b) => a.seq - b.seq)
-      .map((m) => ({ role: m.role, content: m.content, toolCalls: m.toolCalls, toolCallId: m.toolCallId }));
+      .map((m) => ({
+        id: m.seq,
+        role: m.role,
+        content: m.collapsed === 'masked' ? maskPlaceholder((m.content ?? '').length) : m.content,
+        toolCalls: m.toolCalls,
+        toolCallId: m.toolCallId,
+        collapsed: m.collapsed,
+      }));
   }
-  async addMessage(threadId: string, _runId: string, _stepId: string | null, msg: LlmMessage) {
+  async addMessage(threadId: string, _runId: string, _stepId: string | null, msg: LlmMessage): Promise<number> {
+    const seq = this.seq++;
     this.messages.push({
       thread_id: threadId,
       role: msg.role,
       content: msg.content,
       toolCalls: msg.toolCalls,
       toolCallId: msg.toolCallId,
-      seq: this.seq++,
+      seq,
     });
+    return seq;
+  }
+
+  async markMessagesCollapsed(ids: number[], kind: 'masked' | 'summarized'): Promise<void> {
+    const set = new Set(ids);
+    for (const m of this.messages) if (set.has(m.seq)) m.collapsed = kind;
   }
 
   async addEvent(runId: string, _stepId: string | null, event: AgentEvent) {

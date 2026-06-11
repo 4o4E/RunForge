@@ -46,7 +46,19 @@ export const config = {
     reasoningTag: process.env.LLM_REASONING_TAG ?? 'think',
   },
   agent: {
-    maxSteps: Number(process.env.AGENT_MAX_STEPS ?? 25),
+    // Safety backstop only — NOT the primary control. Long tasks terminate when the
+    // model stops calling tools, the user cancels, or the context budget is exhausted.
+    // This very-high cap just guards against a runaway loop.
+    hardStepCap: Number(process.env.AGENT_HARD_STEP_CAP ?? 1000),
+    // Context budget in estimated tokens. Kept conservatively below the model window
+    // to avoid context rot. Compaction (mask → window) keeps the working set under it.
+    contextBudget: Number(process.env.LLM_CONTEXT_BUDGET ?? 120000),
+    // Fraction of budget that triggers L1 observation masking of old tool results.
+    compactWarnRatio: Number(process.env.AGENT_COMPACT_WARN_RATIO ?? 0.75),
+    // Fraction of budget that additionally triggers L2 sliding-window truncation.
+    compactHardRatio: Number(process.env.AGENT_COMPACT_HARD_RATIO ?? 0.9),
+    // Most-recent messages always kept verbatim (never masked or windowed out).
+    keepRecentMessages: Number(process.env.AGENT_KEEP_RECENT_MESSAGES ?? 12),
   },
   // Tool sandbox / permission policy (Phase 6). The product is a general-purpose
   // OS agent, so confinement is OPT-IN: TOOL_SANDBOX=enforce turns on path
