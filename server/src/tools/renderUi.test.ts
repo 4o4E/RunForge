@@ -31,10 +31,37 @@ test('render_ui rejects missing root / empty components', async () => {
   assert.equal(r.display, undefined);
 });
 
+test('render_ui rejects invalid component trees before emitting display', async () => {
+  const cases = [
+    { root: 'x', components: [{ id: 'x', component: 'Nope' }], match: /未知组件类型/ },
+    { root: 'x', components: [{ id: 'x', component: 'Mermaid' }], match: /Mermaid 需要/ },
+    { root: 'x', components: [{ id: 'x', component: 'Card', child: 'missing' }], match: /不存在的子组件/ },
+    {
+      root: 'a',
+      components: [
+        { id: 'a', component: 'Column', child: 'b' },
+        { id: 'b', component: 'Column', child: 'a' },
+      ],
+      match: /循环引用/,
+    },
+  ];
+
+  for (const item of cases) {
+    const r = (await renderUiTool.run(item)) as { text: string; display?: unknown };
+    assert.match(r.text, item.match);
+    assert.equal(r.display, undefined);
+  }
+});
+
 test('render_ui schema exposes Mermaid as a first-class component', () => {
-  const components = renderUiTool.parameters.properties.components as {
-    items: { properties: { component: { enum: string[] }; code: { description: string } } };
+  const parameters = renderUiTool.parameters as {
+    properties: {
+      components: {
+        items: { properties: { component: { enum: string[] }; code: { description: string } } };
+      };
+    };
   };
+  const components = parameters.properties.components;
   assert.ok(components.items.properties.component.enum.includes('Mermaid'));
   assert.match(components.items.properties.code.description, /Mermaid/);
 });
@@ -87,7 +114,7 @@ test('executor emits an a2ui event when a tool returns a display', async () => {
   assert.ok(dataModel._toolCalls?.[0]?.startedAt);
   assert.ok(dataModel._toolCalls?.[0]?.endedAt);
 
-  // Persisted too (history recovery renders it on reload).
+  // 持久化事件用于刷新页面后恢复 A2UI。
   const stored = await store.getEvents(run.id);
   assert.ok(stored.some((e) => e.type === 'a2ui'));
 });

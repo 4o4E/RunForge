@@ -1,20 +1,30 @@
 import { Streamdown } from 'streamdown';
-import { cjk } from '@streamdown/cjk';
-import { code } from '@streamdown/code';
-import { math } from '@streamdown/math';
-import { mermaid } from '@streamdown/mermaid';
+import type { StreamdownProps } from 'streamdown';
+import { cn } from '@/lib/utils';
+import { streamdownPlugins, useThemedMermaid } from './streamdownConfig';
 
-// Streamdown is a streaming-aware react-markdown drop-in: it completes partial
-// tokens mid-stream (no flicker), highlights code via Shiki (light/dark), and
-// ships copy/download controls, line numbers, tables, math and mermaid. It owns
-// all markdown rendering now — the old MarkdownContent + CodeBlock + the bespoke
-// `.md` prose CSS are gone.
-export function MarkdownContent({ text }: { text: string }) {
+// Streamdown 统一负责流式 Markdown、代码高亮、表格、数学公式和 Mermaid 渲染。
+export function MarkdownContent({
+  text,
+  className,
+  components,
+}: {
+  text: string;
+  className?: string;
+  components?: StreamdownProps['components'];
+}) {
+  const mermaid = useThemedMermaid();
+
   return (
     <Streamdown
-      className="text-sm leading-relaxed text-foreground [&_pre]:my-2 [&_pre]:max-h-[70vh] [&_pre]:overflow-auto"
+      className={cn(
+        'markdown-content text-sm leading-relaxed text-foreground [&_pre]:my-2 [&_pre]:max-h-[70vh] [&_pre]:overflow-auto',
+        className,
+      )}
+      components={components}
+      mermaid={mermaid}
       parseIncompleteMarkdown
-      plugins={{ cjk, code, math, mermaid }}
+      plugins={streamdownPlugins}
       shikiTheme={['github-light', 'github-dark']}
     >
       {text}

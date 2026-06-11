@@ -16,14 +16,16 @@ import type { A2uiMessage } from '@/a2ui/types';
 import { TableOfContents } from './TableOfContents';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { cn } from '@/lib/utils';
+import { MarkdownContent } from './MarkdownContent';
+import type { StreamdownProps } from 'streamdown';
 
 type Part = UIMessage['parts'][number];
 type Timing = { startedAt?: string; endedAt?: string; durationMs?: number };
 type ActivityEntry = { part: Part; index: number };
 type FileToken = { kind?: string; path: string; name?: string; size?: number };
-type TextSegment = { type: 'text'; text: string } | { type: 'path'; text: string; path: string };
 
 const RELATIVE_PATH_RE = /(?:\.{1,2}\/)?(?:server|web|docs|src|uploads|tests)\/[A-Za-z0-9._~+/@:-]+/g;
+const FILE_LINK_PREFIX = 'my-agent-file://';
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -109,10 +111,11 @@ function timingForPart(part: Part, maps: ReturnType<typeof buildTimingMaps>): Ti
   return undefined;
 }
 
-function trimPathToken(value: string): { text: string; path: string } {
-  let text = value.replace(/[),.;\]]+$/, '');
-  text = text.replace(/(?::\d+){1,2}$/, '');
-  return { text: value, path: text };
+function trimPathToken(value: string): { label: string; path: string; suffix: string } {
+  const withoutPunctuation = value.replace(/[),.;\]]+$/, '');
+  const suffix = value.slice(withoutPunctuation.length);
+  const path = withoutPunctuation.replace(/(?::\d+){1,2}$/, '');
+  return { label: withoutPunctuation, path, suffix };
 }
 
 function pathRegex(workspaceRoot: string | null): RegExp {
@@ -121,56 +124,70 @@ function pathRegex(workspaceRoot: string | null): RegExp {
   return new RegExp(root ? `${root}|${relative}` : relative, 'g');
 }
 
-function pathSegments(text: string, workspaceRoot: string | null): TextSegment[] {
-  const segments: TextSegment[] = [];
+function escapeMarkdownLinkLabel(value: string): string {
+  return value.replace(/([\\\[\]])/g, '\\$1');
+}
+
+function fileHref(path: string): string {
+  return `${FILE_LINK_PREFIX}${encodeURIComponent(path)}`;
+}
+
+function pathFromHref(href: string): string | null {
+  if (!href.startsWith(FILE_LINK_PREFIX)) return null;
+  try {
+    return decodeURIComponent(href.slice(FILE_LINK_PREFIX.length));
+  } catch {
+    return href.slice(FILE_LINK_PREFIX.length);
+  }
+}
+
+function linkifyPathChunk(text: string, workspaceRoot: string | null): string {
+  let linked = '';
   const re = pathRegex(workspaceRoot);
   let lastIndex = 0;
 
   for (const match of text.matchAll(re)) {
     const start = match.index ?? 0;
     const raw = match[0];
-    const { path } = trimPathToken(raw);
-    if (start > lastIndex) segments.push({ type: 'text', text: text.slice(lastIndex, start) });
-    segments.push({ type: 'path', text: raw, path });
+    const { label, path, suffix } = trimPathToken(raw);
+    linked += text.slice(lastIndex, start);
+    linked += `[${escapeMarkdownLinkLabel(label)}](${fileHref(path)})${suffix}`;
     lastIndex = start + raw.length;
   }
-  if (lastIndex < text.length) segments.push({ type: 'text', text: text.slice(lastIndex) });
-  return segments;
+  return linked + text.slice(lastIndex);
 }
 
-function PathButton({ label, path, onOpenRemoteFile }: { label: string; path: string; onOpenRemoteFile: (path: string) => void }) {
-  return (
-    <button
-      type="button"
-      onClick={() => onOpenRemoteFile(path)}
-      className="mx-0.5 inline-flex max-w-full items-center gap-1 rounded border bg-background px-1.5 py-0.5 align-baseline text-xs text-muted-foreground hover:text-foreground"
-      title={path}
-    >
-      <FileText className="size-3" />
-      <span className="truncate">{label}</span>
-    </button>
-  );
+function linkifyPaths(text: string, workspaceRoot: string | null): string {
+  return text
+    .split(/(```[\s\S]*?```|`[^`\n]*`)/g)
+    .map((chunk) => (chunk.startsWith('`') ? chunk : linkifyPathChunk(chunk, workspaceRoot)))
+    .join('');
 }
 
 function PathAwareResponse({ text, workspaceRoot, onOpenRemoteFile }: { text: string; workspaceRoot: string | null; onOpenRemoteFile: (path: string) => void }) {
-  const segments = pathSegments(text, workspaceRoot);
-  return (
-    <div className="whitespace-pre-wrap text-sm leading-relaxed">
-      {segments.map((segment, index) =>
-        segment.type === 'path' ? (
-          <PathButton key={`${segment.path}:${index}`} label={segment.text} path={segment.path} onOpenRemoteFile={onOpenRemoteFile} />
-        ) : (
-          <span key={index}>{segment.text}</span>
-        ),
-      )}
-    </div>
-  );
+  const linkedText = linkifyPaths(text, workspaceRoot);
+  const components: StreamdownProps['components'] = {
+    a: ({ href, children, ...props }) => {
+      const path = typeof href === 'string' ? pathFromHref(href) : null;
+      if (!path) return <a href={href} {...props}>{children}</a>;
+      return (
+        <button
+          type="button"
+          onClick={() => onOpenRemoteFile(path)}
+          className="mx-0.5 inline-flex max-w-full items-center gap-1 rounded border bg-background px-1.5 py-0.5 align-baseline text-xs text-muted-foreground hover:text-foreground"
+          title={path}
+        >
+          <FileText className="size-3" />
+          <span className="truncate">{children}</span>
+        </button>
+      );
+    },
+  };
+
+  return <MarkdownContent text={linkedText} components={components} />;
 }
 
-// `active` marks the most recent tool call. It stays expanded; as soon as a newer
-// tool call appears the previous one auto-collapses. The user can still toggle any
-// block manually (override), and the override is cleared when `active` flips so the
-// block rejoins the "only the latest stays open" rule.
+// `active` 标记最新工具调用；新工具出现时旧块自动折叠，用户手动切换会临时覆盖。
 function ToolBlock({ part, active, timing }: { part: Part; active: boolean; timing?: Timing }) {
   const p = part as {
     type: string;
@@ -475,8 +492,7 @@ export function Conversation({
 }) {
   const contentRef = useRef<HTMLDivElement>(null);
 
-  // Key (msgId:partIndex) of the last tool call across the whole conversation —
-  // only that one stays expanded; everything before it collapses.
+  // 记录整段对话里最后一个工具调用，只保持它展开，其余默认折叠。
   let lastToolKey: string | null = null;
   let lastActivityKey: string | null = null;
   if (busy) {
