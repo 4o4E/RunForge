@@ -1,26 +1,18 @@
-import ReactMarkdown, { type Components } from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { CodeBlock } from './CodeBlock';
+import { Streamdown } from 'streamdown';
 
-const components: Components = {
-  // Unwrap <pre> so fenced blocks are fully controlled by the code renderer below.
-  pre: ({ children }) => <>{children}</>,
-  code: ({ className, children }) => {
-    const text = String(children ?? '');
-    const match = /language-(\w+)/.exec(className || '');
-    const isBlock = Boolean(match) || text.includes('\n');
-    if (!isBlock) return <code className={className}>{children}</code>;
-    return <CodeBlock language={match?.[1] ?? 'text'} value={text.replace(/\n$/, '')} />;
-  },
-};
-
-/** Renders Markdown (GFM) with theme-aware styling; code blocks get highlighting. */
+// Streamdown is a streaming-aware react-markdown drop-in: it completes partial
+// tokens mid-stream (no flicker), highlights code via Shiki (light/dark), and
+// ships copy/download controls, line numbers, tables, math and mermaid. It owns
+// all markdown rendering now — the old MarkdownContent + CodeBlock + the bespoke
+// `.md` prose CSS are gone.
 export function MarkdownContent({ text }: { text: string }) {
   return (
-    <div className="md">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-        {text}
-      </ReactMarkdown>
-    </div>
+    <Streamdown
+      className="text-sm leading-relaxed text-surface-950 [&_pre]:my-2 [&_pre]:max-h-[70vh] [&_pre]:overflow-auto"
+      parseIncompleteMarkdown
+      shikiTheme={['github-light', 'github-dark']}
+    >
+      {text}
+    </Streamdown>
   );
 }

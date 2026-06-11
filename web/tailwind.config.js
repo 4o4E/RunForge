@@ -3,7 +3,13 @@ const surface = (n) => `rgb(var(--surface-${n}) / <alpha-value>)`;
 /** @type {import('tailwindcss').Config} */
 export default {
   darkMode: 'class',
-  content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
+  content: [
+    './index.html',
+    './src/**/*.{js,ts,jsx,tsx}',
+    // Streamdown styles its rendered output with Tailwind utilities; scan its
+    // dist so those classes are emitted. Hoisted to the repo-root node_modules.
+    '../node_modules/streamdown/dist/**/*.js',
+  ],
   theme: {
     extend: {
       // Color language borrowed from the reference console (teal primary + surfaces).
