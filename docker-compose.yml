@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: my-agent-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: my_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - my-agent-pgdata:/var/lib/postgresql/data
+
+volumes:
+  my-agent-pgdata:

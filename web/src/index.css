@@ -1,0 +1,120 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Role-preserving surface scale. 50 = panel bg ... 950 = primary text. */
+:root {
+  --surface-50: 255 255 255;
+  --surface-100: 248 250 252;
+  --surface-200: 241 245 249;
+  --surface-300: 226 232 240;
+  --surface-400: 203 213 225;
+  --surface-500: 148 163 184;
+  --surface-600: 100 116 139;
+  --surface-700: 71 85 105;
+  --surface-800: 51 65 85;
+  --surface-900: 30 41 59;
+  --surface-950: 15 23 42;
+}
+
+.dark {
+  --surface-50: 30 41 59;
+  --surface-100: 22 31 46;
+  --surface-200: 15 23 42;
+  --surface-300: 51 65 85;
+  --surface-400: 71 85 105;
+  --surface-500: 100 116 139;
+  --surface-600: 148 163 184;
+  --surface-700: 148 163 184;
+  --surface-800: 203 213 225;
+  --surface-900: 226 232 240;
+  --surface-950: 241 245 249;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-surface-200 text-surface-950 font-sans antialiased;
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: theme('colors.surface.500') transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: theme('colors.surface.500');
+    border-radius: 9999px;
+  }
+}
+
+/* Lightweight Markdown styling (theme-aware via surface vars). */
+.md {
+  @apply text-sm leading-relaxed text-surface-950;
+}
+.md > :first-child {
+  margin-top: 0;
+}
+.md > :last-child {
+  margin-bottom: 0;
+}
+.md p {
+  @apply my-2;
+}
+.md h1,
+.md h2,
+.md h3 {
+  @apply mb-2 mt-3 font-semibold text-surface-950;
+}
+.md h1 {
+  @apply text-base;
+}
+.md h2 {
+  @apply text-[15px];
+}
+.md ul {
+  @apply my-2 list-disc pl-5;
+}
+.md ol {
+  @apply my-2 list-decimal pl-5;
+}
+.md li {
+  @apply my-0.5;
+}
+.md a {
+  @apply text-primary-600 underline underline-offset-2;
+}
+.md strong {
+  @apply font-semibold;
+}
+.md code {
+  @apply rounded bg-surface-300 px-1 py-0.5 font-mono text-[0.85em] text-surface-900;
+}
+.md pre {
+  @apply my-2 overflow-x-auto rounded-lg bg-surface-300 p-3;
+}
+.md pre code {
+  @apply bg-transparent p-0 text-xs;
+}
+.md blockquote {
+  @apply my-2 border-l-2 border-surface-500 pl-3 text-surface-800;
+}
+.md table {
+  @apply my-2 w-full border-collapse text-xs;
+}
+.md th,
+.md td {
+  @apply border border-surface-400 px-2 py-1 text-left;
+}
+.md hr {
+  @apply my-3 border-surface-400;
+}
