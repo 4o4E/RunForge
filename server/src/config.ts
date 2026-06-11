@@ -11,8 +11,8 @@ export const config = {
   port: Number(process.env.PORT ?? 8080),
   databaseUrl: process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL,
   llm: {
-    // openai-responses | openai-chat | anthropic | mock
-    provider: process.env.LLM_PROVIDER ?? 'openai-responses',
+    // aisdk | openai-responses | openai-chat | anthropic | mock
+    provider: process.env.LLM_PROVIDER ?? 'aisdk',
     baseUrl: process.env.LLM_BASE_URL ?? 'https://api.openai.com/v1',
     apiKey: process.env.LLM_API_KEY ?? '',
     model: process.env.LLM_MODEL ?? 'gpt-4o-mini',
@@ -20,6 +20,12 @@ export const config = {
     timeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 120000),
     retries: Number(process.env.LLM_MAX_RETRIES ?? 2),
     stream: (process.env.LLM_STREAM ?? 'true') !== 'false',
+    // AI SDK provider (used when provider === 'aisdk'):
+    //   flavor: openai-compatible (tencentmaas/deepseek/vLLM/…) | openai | anthropic
+    //   reasoningTag: split <tag>…</tag> chain-of-thought out of content (DeepSeek);
+    //                 empty disables. Default 'think'.
+    aisdkFlavor: process.env.LLM_AISDK_FLAVOR ?? 'openai-compatible',
+    reasoningTag: process.env.LLM_REASONING_TAG ?? 'think',
   },
   agent: {
     maxSteps: Number(process.env.AGENT_MAX_STEPS ?? 25),

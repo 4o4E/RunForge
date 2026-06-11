@@ -1,14 +1,22 @@
 import { config } from '../config.js';
 import type { LlmConfig, Provider } from './types.js';
+import { createAiSdkProvider, type AiSdkFlavor } from './providers/aiSdk.js';
 import { createOpenAIResponsesProvider } from './providers/openaiResponses.js';
 import { createOpenAIChatProvider } from './providers/openaiChat.js';
 import { createAnthropicProvider } from './providers/anthropic.js';
 import { createMockProvider } from './providers/mock.js';
 
-export type ProviderName = 'openai-responses' | 'openai-chat' | 'anthropic' | 'mock';
+// `aisdk` is the default (Phase 2). The legacy hand-written providers are kept
+// selectable as a rollback path until the AI SDK path is validated in real use.
+export type ProviderName = 'aisdk' | 'openai-responses' | 'openai-chat' | 'anthropic' | 'mock';
 
 export function createProvider(name: ProviderName, cfg: LlmConfig): Provider {
   switch (name) {
+    case 'aisdk':
+      return createAiSdkProvider(cfg, {
+        flavor: config.llm.aisdkFlavor as AiSdkFlavor,
+        reasoningTag: config.llm.reasoningTag,
+      });
     case 'openai-responses':
       return createOpenAIResponsesProvider(cfg);
     case 'openai-chat':

@@ -8,16 +8,21 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "test": "node --import tsx --test src/tools/tools.test.ts src/llm/providers.test.ts src/agent/executor.test.ts",
+    "test": "node --import tsx --test src/tools/tools.test.ts src/llm/providers.test.ts src/llm/aiSdk.test.ts src/agent/executor.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "db:migrate": "tsx src/db/migrate.ts"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.82",
+    "@ai-sdk/openai": "^3.0.69",
+    "@ai-sdk/openai-compatible": "^2.0.48",
+    "ai": "^6.0.200",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
     "pg": "^8.13.1",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
