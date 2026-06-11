@@ -82,9 +82,10 @@
 @layer base {
   /* shadcn default border color: components use `border` (width only) and rely on
      this to color it. Without it Tailwind v3 falls back to currentColor (borders
-     render in the text color, which looked heavy/wrong). */
+     render in the text color, which looked heavy/wrong). Raw CSS (not
+     `@apply border-border`) so it never depends on utility generation. */
   * {
-    @apply border-border;
+    border-color: hsl(var(--border));
   }
   html,
   body,
