@@ -51,6 +51,7 @@ const DEFAULT_SHELL_ALLOW_COMMANDS = [
 ];
 
 export const config = {
+  host: process.env.HOST ?? '::',
   port: Number(process.env.PORT ?? 8080),
   databaseUrl: process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL,
   llm: {

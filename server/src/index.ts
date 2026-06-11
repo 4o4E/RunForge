@@ -23,9 +23,11 @@ app.use('/api', api);
 const server = createServer(app);
 attachWebSocket(server);
 
-server.listen(config.port, () => {
-  console.log(`🚀 my-agent server listening on http://localhost:${config.port}`);
-  console.log(`   WebSocket: ws://localhost:${config.port}/ws?runId=<id>`);
+const displayHost = config.host.includes(':') ? `[${config.host}]` : config.host;
+
+server.listen(config.port, config.host, () => {
+  console.log(`🚀 my-agent server listening on http://${displayHost}:${config.port}`);
+  console.log(`   WebSocket: ws://${displayHost}:${config.port}/ws?runId=<id>`);
   console.log(
     `   Tool sandbox: ${config.tools.sandbox}` +
       (config.tools.sandbox === 'enforce'
