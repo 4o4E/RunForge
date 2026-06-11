@@ -8,7 +8,7 @@ import { Streamdown } from 'streamdown';
 export function MarkdownContent({ text }: { text: string }) {
   return (
     <Streamdown
-      className="text-sm leading-relaxed text-surface-950 [&_pre]:my-2 [&_pre]:max-h-[70vh] [&_pre]:overflow-auto"
+      className="text-sm leading-relaxed text-foreground [&_pre]:my-2 [&_pre]:max-h-[70vh] [&_pre]:overflow-auto"
       parseIncompleteMarkdown
       shikiTheme={['github-light', 'github-dark']}
     >
