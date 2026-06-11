@@ -54,8 +54,36 @@ UI message stream。这样 executor / WS / PG 持久化全部不动,风险最低
     `start reasoning-start/delta×2/end tool-input-available[shell] tool-output-available text-start/delta/end finish`。✓
 - 后端未改;线程列表/切换/PG 恢复保持。
 
-## 后续(Stage 2)
+## Stage 2 — shadcn/ui 基础设施 + 全量重做对话外壳 ✅
 
-- 用 shadcn 全量重做对话外壳(侧栏/输入框/消息气泡/工具卡),`Conversation` 改 shadcn 风格。
-- A2UI 声明式 UI(Stage 3/4)将以 `data-a2ui` 分片接入,`uiEventStreamToChunks` 已为
-  `a2ui` 预留分支位。
+手动接入(当前 shadcn CLI 已 Tailwind v4 优先,手动避免覆盖现有自定义主题):
+
+- 依赖:`class-variance-authority clsx tailwind-merge lucide-react @radix-ui/react-slot`
+  (+ scroll-area/tooltip 备用),dev `tailwindcss-animate @types/node`。
+- 别名 `@/* → src/*`:[web/tsconfig.json](../../web/tsconfig.json)(baseUrl+paths)、
+  [web/vite.config.ts](../../web/vite.config.ts)(`resolve.alias`,`node:url`)。
+- 新增 [web/src/lib/utils.ts](../../web/src/lib/utils.ts)(`cn()`)、
+  [web/components.json](../../web/components.json)(v3 形态)。
+- 主题 token 共存([web/src/index.css](../../web/src/index.css) +
+  [web/tailwind.config.js](../../web/tailwind.config.js)):
+  - 新增 shadcn 语义 token(HSL,slate base + teal `--primary`);保留 `--surface-*`(rgb)
+    与 teal `primary` 50–900、`darkMode:'class'`、Streamdown content glob。
+  - `primary` 在 config 里**合并** `DEFAULT/foreground` 进 50–900,`bg-primary` 与
+    `bg-primary-500` 同时可用;`tailwindcss-animate` 插件 + `borderRadius` 变量。
+  - **未加**全局 `* {@apply border-border}`,避免改动既有边框。
+- 新增 copy-in 组件 [web/src/components/ui/](../../web/src/components/ui/):
+  `button card badge separator table textarea`(离线手写,Card/Table/Badge/Separator
+  也作 Stage 3 的 A2UI catalog 基座)。
+- 用 shadcn 重做外壳:[Sidebar](../../web/src/components/Sidebar.tsx)、
+  [Composer](../../web/src/components/Composer.tsx)、[ChatView](../../web/src/components/ChatView.tsx)、
+  [Conversation](../../web/src/components/Conversation.tsx)(气泡/工具卡/思考卡改 Card/Badge +
+  lucide 图标;Markdown 仍走 Streamdown)。
+
+验收:`tsc -b` + `vite build` 绿(CSS 25→28 kB,shadcn 类已收录);
+SSR `renderToStaticMarkup(<ChatView>)` 含工具卡/用户气泡/状态徽章。`.dark` 与
+现有 `useTheme` 零冲突。
+
+## 后续(Stage 3/4)
+
+- A2UI 声明式 UI 以 `data-a2ui` 分片接入,`uiEventStreamToChunks` 已为 `a2ui` 预留分支位;
+  catalog 复用本阶段 shadcn 组件。
