@@ -9,7 +9,7 @@ import type { AskUserSpec } from '../api';
 import type { UiEvent, UiTransport, UserInput } from './types';
 
 function defaultAskSpec(question: string): AskUserSpec {
-  return { question, mode: 'text', options: [], allowCustom: false };
+  return { question, mode: 'text', options: [], allowCustom: false, required: false };
 }
 
 /** Map one wire `AgentEvent` onto the normalized `UiEvent` model, or `null` for

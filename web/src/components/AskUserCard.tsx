@@ -1,4 +1,4 @@
-import { Check, Circle, Plus, Sparkles, SquareCheckBig } from 'lucide-react';
+import { Check, Circle, Plus, Sparkles, SquareCheckBig, X } from 'lucide-react';
 import type { AskUserAnswer, AskUserOption, AskUserSpec } from '@/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -14,7 +14,7 @@ export interface AskUserDraft {
 }
 
 export function emptyAskUserDraft(spec?: AskUserSpec): AskUserDraft {
-  const recommended = spec?.options.filter((o) => o.recommended).map((o) => o.id) ?? [];
+  const recommended = spec ? recommendedOptions(spec).map((o) => o.id) : [];
   return {
     selectedIds: spec?.mode === 'single' ? recommended.slice(0, 1) : recommended,
     customOptions: [],
@@ -55,6 +55,34 @@ function selectedOptions(spec: AskUserSpec, draft: AskUserDraft): AskUserOption[
   return draft.selectedIds.map((id) => byId.get(id)).filter((o): o is AskUserOption => !!o);
 }
 
+function requiredOptions(spec: AskUserSpec): AskUserOption[] {
+  return spec.options.filter((option) => option.required);
+}
+
+function uniqueOptions(options: AskUserOption[]): AskUserOption[] {
+  const seen = new Set<string>();
+  return options.filter((option) => {
+    if (seen.has(option.id)) return false;
+    seen.add(option.id);
+    return true;
+  });
+}
+
+function recommendedOptions(spec: AskUserSpec): AskUserOption[] {
+  const required = requiredOptions(spec);
+  const recommended = spec.options.filter((option) => option.recommended);
+  const candidates = uniqueOptions([...required, ...recommended]);
+  return spec.mode === 'single' ? candidates.slice(0, 1) : candidates;
+}
+
+function canSubmitDraft(spec: AskUserSpec, draft: AskUserDraft): boolean {
+  if (spec.mode === 'text') return spec.required ? !!draft.text.trim() : !!draft.text.trim() || !!draft.note.trim();
+  const selectedIds = new Set(draft.selectedIds);
+  const requiredSatisfied = requiredOptions(spec).every((option) => selectedIds.has(option.id));
+  if (!requiredSatisfied) return false;
+  return spec.required ? draft.selectedIds.length > 0 : draft.selectedIds.length > 0 || !!draft.note.trim();
+}
+
 export function answerFromDraft(spec: AskUserSpec, draft: AskUserDraft, usedRecommended = false): AskUserAnswer {
   return {
     mode: spec.mode,
@@ -67,7 +95,7 @@ export function answerFromDraft(spec: AskUserSpec, draft: AskUserDraft, usedReco
 }
 
 export function recommendedAnswer(spec: AskUserSpec, draft: AskUserDraft): AskUserAnswer {
-  const recommended = spec.options.filter((o) => o.recommended);
+  const recommended = recommendedOptions(spec);
   return {
     mode: spec.mode,
     selected: spec.mode === 'text' ? [] : recommended,
@@ -112,6 +140,7 @@ function OptionRow({
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-2">
           <span className="truncate font-medium">{option.label}</span>
+          {option.required && <span className="rounded-sm bg-destructive/10 px-1.5 py-0.5 text-[11px] text-destructive">必选</span>}
           {option.recommended && <span className="rounded-sm bg-primary/10 px-1.5 py-0.5 text-[11px] text-primary">推荐</span>}
         </span>
         {option.description && <span className="mt-0.5 block text-xs text-muted-foreground">{option.description}</span>}
@@ -127,6 +156,7 @@ export function AskUserQuestionCard({
   disabled,
   onDraftChange,
   onSubmit,
+  onCancel,
 }: {
   spec: AskUserSpec;
   draft: AskUserDraft;
@@ -134,12 +164,18 @@ export function AskUserQuestionCard({
   disabled?: boolean;
   onDraftChange: (draft: AskUserDraft) => void;
   onSubmit: (answer: AskUserAnswer) => void;
+  onCancel: () => void;
 }) {
   const readonly = !!answer;
   const viewDraft = answer ? draftFromAnswer(answer) : draft;
   const options = optionsForRender(spec, viewDraft, answer);
-  const canSubmit =
-    spec.mode === 'text' ? !!viewDraft.text.trim() || !!viewDraft.note.trim() : viewDraft.selectedIds.length > 0 || !!viewDraft.note.trim();
+  const canSubmit = canSubmitDraft(spec, viewDraft);
+  const canUseRecommended = canSubmitDraft(spec, {
+    ...draft,
+    selectedIds: recommendedOptions(spec).map((option) => option.id),
+    text: '',
+    note: draft.note.trim() || '按推荐选项处理。 / Use the recommended option(s).',
+  });
 
   const toggle = (id: string) => {
     if (readonly) return;
@@ -186,7 +222,7 @@ export function AskUserQuestionCard({
               option={option}
               multi={spec.mode === 'multiple'}
               checked={viewDraft.selectedIds.includes(option.id)}
-              disabled={readonly}
+              disabled={disabled || readonly}
               onClick={() => toggle(option.id)}
             />
           ))}
@@ -223,15 +259,21 @@ export function AskUserQuestionCard({
         />
       </label>
 
-      {!readonly && <div className="mt-3 flex flex-wrap justify-end gap-2">
-        <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={() => onSubmit(recommendedAnswer(spec, draft))}>
-          <Sparkles className="size-4" />
-          按推荐处理
-        </Button>
-        <Button type="button" size="sm" disabled={disabled || !canSubmit} onClick={() => onSubmit(answerFromDraft(spec, draft))}>
-          提交回答
-        </Button>
-      </div>}
+      {!readonly && (
+        <div className="mt-3 flex flex-wrap justify-end gap-2">
+          <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={onCancel}>
+            <X className="size-4" />
+            取消对话
+          </Button>
+          <Button type="button" variant="outline" size="sm" disabled={disabled || !canUseRecommended} onClick={() => onSubmit(recommendedAnswer(spec, draft))}>
+            <Sparkles className="size-4" />
+            按推荐处理
+          </Button>
+          <Button type="button" size="sm" disabled={disabled || !canSubmit} onClick={() => onSubmit(answerFromDraft(spec, draft))}>
+            提交回答
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

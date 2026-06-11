@@ -246,6 +246,7 @@ function AssistantPart({
   askUserDrafts,
   onAskUserDraftChange,
   onAskUserSubmit,
+  onAskUserCancel,
 }: {
   part: Part;
   answer?: AskUserAnswer;
@@ -257,6 +258,7 @@ function AssistantPart({
   askUserDrafts: Record<string, AskUserDraft>;
   onAskUserDraftChange: (runId: string, draft: AskUserDraft) => void;
   onAskUserSubmit: (runId: string, answer: AskUserAnswer) => void;
+  onAskUserCancel: (runId: string) => void;
 }) {
   if (part.type === 'text') return part.text ? <PathAwareResponse text={part.text} workspaceRoot={workspaceRoot} onOpenRemoteFile={onOpenRemoteFile} /> : null;
   if (part.type === 'reasoning') {
@@ -282,6 +284,7 @@ function AssistantPart({
         disabled={!runId}
         onDraftChange={(next) => runId && onAskUserDraftChange(runId, next)}
         onSubmit={(answer) => runId && onAskUserSubmit(runId, answer)}
+        onCancel={() => runId && onAskUserCancel(runId)}
       />
     );
   }
@@ -323,6 +326,7 @@ function ActivityGroup({
   askUserDrafts,
   onAskUserDraftChange,
   onAskUserSubmit,
+  onAskUserCancel,
 }: {
   entries: ActivityEntry[];
   active: boolean;
@@ -335,6 +339,7 @@ function ActivityGroup({
   askUserDrafts: Record<string, AskUserDraft>;
   onAskUserDraftChange: (runId: string, draft: AskUserDraft) => void;
   onAskUserSubmit: (runId: string, answer: AskUserAnswer) => void;
+  onAskUserCancel: (runId: string) => void;
 }) {
   const [override, setOverride] = useState<boolean | null>(null);
   const prevActive = useRef(active);
@@ -368,6 +373,7 @@ function ActivityGroup({
             askUserDrafts={askUserDrafts}
             onAskUserDraftChange={onAskUserDraftChange}
             onAskUserSubmit={onAskUserSubmit}
+            onAskUserCancel={onAskUserCancel}
           />
         ))}
       </CollapsibleContent>
@@ -485,6 +491,7 @@ function AssistantMessage({
   askUserDrafts,
   onAskUserDraftChange,
   onAskUserSubmit,
+  onAskUserCancel,
 }: {
   message: UIMessage;
   lastToolKey: string | null;
@@ -494,6 +501,7 @@ function AssistantMessage({
   askUserDrafts: Record<string, AskUserDraft>;
   onAskUserDraftChange: (runId: string, draft: AskUserDraft) => void;
   onAskUserSubmit: (runId: string, answer: AskUserAnswer) => void;
+  onAskUserCancel: (runId: string) => void;
 }) {
   const timingMaps = buildTimingMaps(message.parts);
   const runId = runIdFromAssistant(message);
@@ -517,6 +525,7 @@ function AssistantMessage({
         askUserDrafts={askUserDrafts}
         onAskUserDraftChange={onAskUserDraftChange}
         onAskUserSubmit={onAskUserSubmit}
+        onAskUserCancel={onAskUserCancel}
       />,
     );
     group = null;
@@ -547,6 +556,7 @@ function AssistantMessage({
         askUserDrafts={askUserDrafts}
         onAskUserDraftChange={onAskUserDraftChange}
         onAskUserSubmit={onAskUserSubmit}
+        onAskUserCancel={onAskUserCancel}
       />,
     );
   });
@@ -565,6 +575,7 @@ function AssistantMessage({
         askUserDrafts={askUserDrafts}
         onAskUserDraftChange={onAskUserDraftChange}
         onAskUserSubmit={onAskUserSubmit}
+        onAskUserCancel={onAskUserCancel}
       />,
     );
   }
@@ -580,6 +591,7 @@ export function Conversation({
   askUserDrafts,
   onAskUserDraftChange,
   onAskUserSubmit,
+  onAskUserCancel,
 }: {
   messages: UIMessage[];
   busy: boolean;
@@ -589,6 +601,7 @@ export function Conversation({
   askUserDrafts: Record<string, AskUserDraft>;
   onAskUserDraftChange: (runId: string, draft: AskUserDraft) => void;
   onAskUserSubmit: (runId: string, answer: AskUserAnswer) => void;
+  onAskUserCancel: (runId: string) => void;
 }) {
   const contentRef = useRef<HTMLDivElement>(null);
 
@@ -642,6 +655,7 @@ export function Conversation({
                         askUserDrafts={askUserDrafts}
                         onAskUserDraftChange={onAskUserDraftChange}
                         onAskUserSubmit={onAskUserSubmit}
+                        onAskUserCancel={onAskUserCancel}
                       />
                     </MessageContent>
                   )}

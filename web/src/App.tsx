@@ -83,7 +83,7 @@ function attachmentToken(att: ComposerAttachment): string {
 }
 
 function defaultAskSpec(question: string): AskUserSpec {
-  return { question, mode: 'text', options: [], allowCustom: false };
+  return { question, mode: 'text', options: [], allowCustom: false, required: false };
 }
 
 function waitingRunFrom(runs: RunWithEvents[]): { id: string; spec: AskUserSpec } | null {
@@ -329,23 +329,31 @@ export function App() {
       });
   }, [refreshActiveThread, refreshThreads]);
 
+  const cancelAskUser = useCallback((runId: string) => {
+    setWaitingRun((current) => (current?.id === runId ? null : current));
+    setAskUserDrafts((current) => {
+      const next = { ...current };
+      delete next[runId];
+      return next;
+    });
+    void cancelRun(runId)
+      .then(() => {
+        refreshActiveThread();
+        refreshThreads();
+      })
+      .catch((err) => {
+        console.error('cancel ask_user run failed', err);
+        refreshActiveThread();
+      });
+  }, [refreshActiveThread, refreshThreads]);
+
   function send(text: string) {
+    if (waitingRun) return;
     const finalText = attachments.length
       ? `${text}\n\n${attachments.map(attachmentToken).join('\n')}`
       : text;
     navigateChatRoute({ draft: '', threadId: activeThreadId }, 'replace');
     setAttachments([]);
-    if (waitingRun) {
-      resumeWithAnswer(waitingRun.id, {
-        mode: waitingRun.spec.mode,
-        selected: [],
-        customOptions: [],
-        text: waitingRun.spec.mode === 'text' ? finalText : '',
-        note: waitingRun.spec.mode === 'text' ? '' : finalText,
-        usedRecommended: false,
-      });
-      return;
-    }
     void sendMessage({ text: finalText });
   }
 
@@ -441,6 +449,7 @@ export function App() {
           onOpenRemoteFile={openRemoteFile}
           onAskUserDraftChange={(runId, next) => setAskUserDrafts((current) => ({ ...current, [runId]: next }))}
           onAskUserSubmit={resumeWithAnswer}
+          onAskUserCancel={cancelAskUser}
         />
       )}
       {activeView === 'chat' && rightPanelOpen && (

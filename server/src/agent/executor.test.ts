@@ -184,7 +184,7 @@ test('executeRun: ask_user pauses the run and keeps tool pairing intact', async 
               id: 'ask_1',
               name: 'ask_user',
               arguments:
-                '{"question":"继续吗？","mode":"single","allowCustom":true,"options":[{"id":"yes","label":"继续","recommended":true},{"id":"no","label":"暂停"}]}',
+                '{"question":"继续吗？","mode":"single","allowCustom":true,"required":true,"options":[{"id":"yes","label":"继续","recommended":true,"required":true},{"id":"no","label":"暂停"}]}',
             },
           ],
         };
@@ -200,7 +200,9 @@ test('executeRun: ask_user pauses the run and keeps tool pairing intact', async 
   const question = published.find((e) => e.type === 'user_question');
   assert.equal(question?.type === 'user_question' ? question.spec?.mode : undefined, 'single');
   assert.equal(question?.type === 'user_question' ? question.spec?.allowCustom : undefined, true);
+  assert.equal(question?.type === 'user_question' ? question.spec?.required : undefined, true);
   assert.equal(question?.type === 'user_question' ? question.spec?.options[0]?.recommended : undefined, true);
+  assert.equal(question?.type === 'user_question' ? question.spec?.options[0]?.required : undefined, true);
 
   const msgs = await store.loadThreadMessages(thread.id);
   assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'tool']);

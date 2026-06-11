@@ -29,6 +29,7 @@ interface Props {
   onOpenRemoteFile: (path: string) => void;
   onAskUserDraftChange: (runId: string, draft: AskUserDraft) => void;
   onAskUserSubmit: (runId: string, answer: AskUserAnswer) => void;
+  onAskUserCancel: (runId: string) => void;
 }
 
 export function ChatView({
@@ -53,6 +54,7 @@ export function ChatView({
   onOpenRemoteFile,
   onAskUserDraftChange,
   onAskUserSubmit,
+  onAskUserCancel,
 }: Props) {
   return (
     <main className="flex h-full min-w-0 flex-1 flex-col bg-background">
@@ -92,11 +94,12 @@ export function ChatView({
           onOpenRemoteFile={onOpenRemoteFile}
           onAskUserDraftChange={onAskUserDraftChange}
           onAskUserSubmit={onAskUserSubmit}
+          onAskUserCancel={onAskUserCancel}
         />
       </div>
 
       <Composer
-        disabled={busy && !waitingQuestion}
+        disabled={busy || !!waitingQuestion}
         waitingQuestion={waitingQuestion}
         draft={draft}
         wide={wide}

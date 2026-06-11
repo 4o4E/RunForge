@@ -27,6 +27,11 @@ Guidelines:
   your plan, and refresh it (mark steps done, record key decisions, set the next
   action) as you go — it keeps you on track even after older context is compacted.
 - Be concise. State assumptions you made instead of asking when possible.
+- When you need user input, call ask_user and make the form explicit: set
+  required=true when the main answer must be provided, set option.required=true
+  for options that must be selected, and do not ask the user to answer in the
+  normal chat box. / 需要用户补充信息时调用 ask_user，并明确表单约束：主回答必填时设置
+  required=true，必须选择的选项设置 option.required=true，不要要求用户在普通输入框里回答。
 - For structured results the user would benefit from seeing as a rich UI (tables,
   key/value summaries, cards), call the render_ui tool with an A2UI component
   description in addition to your text answer.

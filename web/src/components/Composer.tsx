@@ -65,6 +65,7 @@ export function Composer({
   onUploadLocal,
 }: Props) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const waitingForAskUser = !!waitingQuestion;
   const [localFile, setLocalFile] = useState<File | null>(null);
   const [uploadDir, setUploadDir] = useState('uploads');
   const [uploadName, setUploadName] = useState('');
@@ -76,7 +77,7 @@ export function Composer({
 
   function handleSubmit(message: PromptInputMessage) {
     const text = message.text?.trim();
-    if (!text || disabled) return;
+    if (!text || disabled || waitingForAskUser) return;
     onSend(text);
   }
 
@@ -152,7 +153,8 @@ export function Composer({
               <PromptInputBody>
                 <PromptInputTextarea
                   onChange={(event) => onDraftChange(event.currentTarget.value)}
-                  placeholder={waitingQuestion ? '输入回答后继续…（Enter 发送，Shift+Enter 换行）' : '描述一个任务…（Enter 发送，Shift+Enter 换行）'}
+                  disabled={disabled || waitingForAskUser}
+                  placeholder={waitingForAskUser ? '请在上方 ask_user 表单中回答' : '描述一个任务…（Enter 发送，Shift+Enter 换行）'}
                   value={draft}
                 />
               </PromptInputBody>
@@ -187,8 +189,8 @@ export function Composer({
                   </Button>
                 </PromptInputTools>
                 <PromptInputSubmit
-                  status={disabled ? 'streaming' : undefined}
-                  disabled={!disabled && !draft.trim()}
+                  status={disabled && !waitingForAskUser ? 'streaming' : undefined}
+                  disabled={waitingForAskUser || (!disabled && !draft.trim())}
                   onStop={onCancel}
                 />
               </PromptInputFooter>

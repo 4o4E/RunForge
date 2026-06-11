@@ -29,6 +29,7 @@ export interface AskUserOption {
   label: string;
   description?: string;
   recommended?: boolean;
+  required?: boolean;
 }
 
 export interface AskUserSpec {
@@ -36,6 +37,7 @@ export interface AskUserSpec {
   mode: AskUserMode;
   options: AskUserOption[];
   allowCustom: boolean;
+  required: boolean;
 }
 
 export interface AskUserAnswer {
@@ -154,7 +156,7 @@ export const startRun = (threadId: string, input: string) =>
   }).then(json<{ id: string }>);
 
 export const cancelRun = (runId: string) =>
-  fetch(`/api/runs/${runId}/cancel`, { method: 'POST' }).then(json<{ id: string; status: 'canceling' }>);
+  fetch(`/api/runs/${runId}/cancel`, { method: 'POST' }).then(json<{ id: string; status: 'canceling' | 'canceled' }>);
 
 export const answerRun = (runId: string, answer: AskUserAnswer) =>
   fetch(`/api/runs/${runId}/answer`, {

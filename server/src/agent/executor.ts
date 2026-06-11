@@ -139,6 +139,7 @@ function askUserOptions(value: unknown): AskUserOption[] {
       label,
       description: typeof raw.description === 'string' ? raw.description : undefined,
       recommended: raw.recommended === true,
+      required: raw.required === true,
     });
   });
   return options;
@@ -153,6 +154,7 @@ function normalizeAskUserSpec(args: Record<string, unknown>): AskUserSpec {
     mode,
     options,
     allowCustom: mode !== 'text' && args.allowCustom !== false,
+    required: args.required === true,
   };
 }
 

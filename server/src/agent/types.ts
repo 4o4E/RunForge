@@ -18,6 +18,7 @@ export interface AskUserOption {
   label: string;
   description?: string;
   recommended?: boolean;
+  required?: boolean;
 }
 
 export interface AskUserSpec {
@@ -25,6 +26,7 @@ export interface AskUserSpec {
   mode: AskUserMode;
   options: AskUserOption[];
   allowCustom: boolean;
+  required: boolean;
 }
 
 export interface AskUserAnswer {
