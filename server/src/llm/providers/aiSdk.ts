@@ -24,6 +24,7 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import type { LlmConfig, LlmDelta, LlmMessage, LlmResult, LlmTool, Provider } from '../types.js';
+import { config } from '../../config.js';
 
 export type AiSdkFlavor = 'openai-compatible' | 'openai' | 'anthropic';
 
@@ -137,20 +138,26 @@ function toToolSet(tools: LlmTool[]) {
 export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provider {
   const model = buildModel(cfg, opts);
 
-  const common = (messages: LlmMessage[], tools: LlmTool[]) => ({
+  const common = (messages: LlmMessage[], tools: LlmTool[], functionId: string) => ({
     model,
     messages: toModelMessages(messages),
     tools: toToolSet(tools),
     maxOutputTokens: cfg.maxTokens,
     maxRetries: cfg.retries,
     abortSignal: AbortSignal.timeout(cfg.timeoutMs),
+    // OTEL GenAI spans (chat + tool calls) when telemetry is on. No-op otherwise.
+    experimental_telemetry: {
+      isEnabled: config.telemetry.enabled,
+      functionId,
+      metadata: { model: cfg.model, flavor: opts.flavor },
+    },
   });
 
   return {
     name: `aisdk:${opts.flavor}`,
 
     async complete(messages, tools): Promise<LlmResult> {
-      const r = await generateText(common(messages, tools));
+      const r = await generateText(common(messages, tools, 'chat'));
       return {
         content: r.text || null,
         reasoning: r.reasoningText ?? null,
@@ -164,7 +171,7 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
     },
 
     async completeStream(messages, tools, onDelta: (d: LlmDelta) => void): Promise<LlmResult> {
-      const r = streamText(common(messages, tools));
+      const r = streamText(common(messages, tools, 'chat'));
       for await (const part of r.fullStream) {
         if (part.type === 'text-delta') onDelta({ content: part.text });
         else if (part.type === 'reasoning-delta') onDelta({ reasoning: part.text });

@@ -1,3 +1,10 @@
+import { initTelemetry } from './telemetry.js';
+
+// Register the tracer provider before the server handles any request. The AI SDK
+// and our executor read the global tracer at call time, so this is sufficient
+// (we use manual spans + experimental_telemetry, not import-time patching).
+initTelemetry();
+
 import { createServer } from 'node:http';
 import cors from 'cors';
 import express from 'express';

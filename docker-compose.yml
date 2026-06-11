@@ -12,5 +12,22 @@ services:
     volumes:
       - my-agent-pgdata:/var/lib/postgresql/data
 
+  # Opt-in tracing backend (Phase 4). Start with: docker compose --profile debug up
+  # Then run the server with:
+  #   OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+  # and open the Jaeger UI at http://localhost:16686 to see invoke_agent →
+  # chat → execute_tool spans, token usage and tool I/O. Any OTLP backend works
+  # the same way (Langfuse / Laminar): just point OTEL_EXPORTER_OTLP_ENDPOINT at it.
+  jaeger:
+    image: jaegertracing/all-in-one:1.62
+    container_name: my-agent-jaeger
+    restart: unless-stopped
+    profiles: ["debug"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # Jaeger UI
+      - "4318:4318"   # OTLP HTTP
+
 volumes:
   my-agent-pgdata:

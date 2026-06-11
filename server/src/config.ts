@@ -30,6 +30,16 @@ export const config = {
   agent: {
     maxSteps: Number(process.env.AGENT_MAX_STEPS ?? 25),
   },
+  // OpenTelemetry GenAI tracing (Phase 4). Disabled by default → zero overhead.
+  //   OTEL_ENABLED=true                          turn it on
+  //   OTEL_EXPORTER_OTLP_ENDPOINT=http://host:4318  send to Langfuse/Laminar/Jaeger
+  //   OTEL_CONSOLE=true                          also print spans to stdout (debug)
+  telemetry: {
+    enabled: (process.env.OTEL_ENABLED ?? 'false') === 'true',
+    serviceName: process.env.OTEL_SERVICE_NAME ?? 'my-agent',
+    otlpEndpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? '',
+    console: (process.env.OTEL_CONSOLE ?? 'false') === 'true',
+  },
 };
 
 export type Config = typeof config;

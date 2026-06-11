@@ -7,6 +7,7 @@ import { runBus } from './bus.js';
 import type { AgentEvent } from './types.js';
 import { store as defaultStore } from '../store/index.js';
 import type { Store } from '../store/types.js';
+import { withSpan } from '../telemetry.js';
 
 export interface ExecutorDeps {
   provider: Provider;
@@ -40,6 +41,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
   const run = await store.getRun(runId);
   if (!run) throw new Error(`run not found: ${runId}`);
   const threadId = run.thread_id;
+  const userInput = run.input;
 
   const emit = async (stepId: string | null, event: AgentEvent) => {
     publish(runId, event);
@@ -49,10 +51,24 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
   await store.setRunStatus(runId, 'running');
 
   try {
+    await withSpan(
+      'invoke_agent',
+      { 'run.id': runId, 'thread.id': threadId, 'agent.max_steps': maxSteps },
+      () => runLoop(),
+    );
+  } catch (err) {
+    const message = (err as Error).message;
+    await emit(null, { type: 'error', step: 0, message });
+    await store.setRunStatus(runId, 'error', { error: message });
+  }
+
+  // The agent loop body, kept as a closure so the invoke_agent span wraps it and
+  // the AI SDK chat / execute_tool spans nest underneath.
+  async function runLoop(): Promise<void> {
     const prior = await store.loadThreadMessages(threadId);
-    const ctx = new Context(prior, run.input);
+    const ctx = new Context(prior, userInput);
     // Persist the user turn (no step yet).
-    await store.addMessage(threadId, runId, null, { role: 'user', content: run.input });
+    await store.addMessage(threadId, runId, null, { role: 'user', content: userInput });
 
     const tools = toolSchemas();
 
@@ -117,7 +133,15 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         }
         await emit(step.id, { type: 'tool_call', step: stepIdx, id: call.id, name: call.name, args });
 
-        const result = await runTool(call.name, args);
+        const result = await withSpan(
+          'execute_tool',
+          { 'gen_ai.tool.name': call.name, 'tool.call_id': call.id },
+          async (span) => {
+            const out = await runTool(call.name, args);
+            span.setAttribute('tool.result.length', out.length);
+            return out;
+          },
+        );
         await emit(step.id, { type: 'tool_result', step: stepIdx, id: call.id, name: call.name, result });
 
         const toolMsg = { role: 'tool' as const, content: result, toolCallId: call.id };
@@ -128,10 +152,6 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
 
     const message = `Reached max steps (${maxSteps}) without a final answer.`;
     await emit(null, { type: 'error', step: maxSteps, message });
-    await store.setRunStatus(runId, 'error', { error: message });
-  } catch (err) {
-    const message = (err as Error).message;
-    await emit(null, { type: 'error', step: 0, message });
     await store.setRunStatus(runId, 'error', { error: message });
   }
 }
