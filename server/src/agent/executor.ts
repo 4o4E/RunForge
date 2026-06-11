@@ -9,6 +9,9 @@ import type { AgentEvent } from './types.js';
 import { store as defaultStore } from '../store/index.js';
 import type { Store } from '../store/types.js';
 import { withSpan } from '../telemetry.js';
+import type { A2uiMessage } from './a2ui.js';
+
+const FINISH_TOOL_NAME = 'finish_conversation';
 
 export interface ExecutorDeps {
   provider: Provider;
@@ -17,6 +20,37 @@ export interface ExecutorDeps {
   /** Safety backstop, not the primary control — see config.agent.hardStepCap. */
   hardStepCap: number;
   stream: boolean;
+}
+
+interface ToolTrace {
+  id: string;
+  name: string;
+  args: unknown;
+  result?: string;
+  startedAt: string;
+  endedAt?: string;
+  durationMs?: number;
+}
+
+function durationMs(startedAt: string, endedAt: string): number {
+  return Math.max(0, new Date(endedAt).getTime() - new Date(startedAt).getTime());
+}
+
+function withToolData(message: A2uiMessage, toolCalls: ToolTrace[]): A2uiMessage {
+  return {
+    ...message,
+    dataModel: {
+      ...(message.dataModel ?? {}),
+      _toolCalls: toolCalls,
+      _latestToolCall: toolCalls[toolCalls.length - 1] ?? null,
+    },
+  };
+}
+
+function finishOutput(args: Record<string, unknown>): string | null {
+  const progress = typeof args.progress === 'string' ? args.progress.trim() : '';
+  if (args.completed !== true || !progress) return null;
+  return progress;
 }
 
 function defaultDeps(): ExecutorDeps {
@@ -107,11 +141,16 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       let result;
       let liveStreamed = false;
       let publishedDelta = false;
+      const llmStartedAt = new Date().toISOString();
+      let reasoningStartedAt: string | null = null;
       if (stream && provider.completeStream) {
         try {
           result = await provider.completeStream(ctx.all(), tools, (d) => {
             publishedDelta = true;
-            if (d.reasoning) publish(runId, { type: 'reasoning', step: stepIdx, text: d.reasoning });
+            if (d.reasoning) {
+              reasoningStartedAt ??= new Date().toISOString();
+              publish(runId, { type: 'reasoning', step: stepIdx, text: d.reasoning, startedAt: reasoningStartedAt });
+            }
             if (d.content) publish(runId, { type: 'llm_delta', step: stepIdx, text: d.content });
           });
           liveStreamed = true;
@@ -121,6 +160,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         }
       }
       if (!result) result = await provider.complete(ctx.all(), tools);
+      const llmEndedAt = new Date().toISOString();
 
       // Calibrate the token estimator from real usage for the next compaction check.
       ctx.recordUsage(result.usage);
@@ -129,28 +169,39 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
 
       // Reasoning: surfaced for display only, NOT fed back into context.
       if (reasoning) {
-        const ev = { type: 'reasoning' as const, step: stepIdx, text: reasoning };
-        if (liveStreamed) await store.addEvent(runId, step.id, ev);
-        else await emit(step.id, ev);
+        const startedAt = reasoningStartedAt ?? llmStartedAt;
+        const timing = { startedAt, endedAt: llmEndedAt, durationMs: durationMs(startedAt, llmEndedAt) };
+        const ev = { type: 'reasoning' as const, step: stepIdx, text: reasoning, ...timing };
+        if (liveStreamed) {
+          await store.addEvent(runId, step.id, ev);
+          await emit(step.id, { type: 'reasoning_timing', step: stepIdx, ...timing });
+        } else {
+          await emit(step.id, ev);
+        }
       }
 
       const assistantMsg = { role: 'assistant' as const, content, toolCalls: toolCalls.length ? toolCalls : undefined };
       ctx.add(assistantMsg);
       ctx.setLastDbId(await store.addMessage(threadId, runId, step.id, assistantMsg));
 
-      if (content) {
+      if (content && toolCalls.length) {
         const ev = { type: 'llm_delta' as const, step: stepIdx, text: content };
         if (liveStreamed) await store.addEvent(runId, step.id, ev);
         else await emit(step.id, ev);
       }
 
-      // No tool calls → final answer.
+      // 没有调用结束工具不算完成；把规则提醒放回上下文，让模型继续收口。
       if (!toolCalls.length) {
-        const output = content ?? '';
-        await emit(step.id, { type: 'final', step: stepIdx, output });
-        await store.setRunStatus(runId, 'done', { output });
-        return;
+        ctx.add({
+          role: 'system',
+          content:
+            'finish_conversation is required before ending. Call render_ui for the final AgentUI summary first, then call finish_conversation with completed=true and progress.',
+        });
+        continue;
       }
+
+      const toolTraces: ToolTrace[] = [];
+      let completedOutput: string | null = null;
 
       // Execute each requested tool, feed results back.
       for (const call of toolCalls) {
@@ -160,7 +211,10 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         } catch {
           /* malformed JSON → empty args */
         }
-        await emit(step.id, { type: 'tool_call', step: stepIdx, id: call.id, name: call.name, args });
+        const startedAt = new Date().toISOString();
+        const trace: ToolTrace = { id: call.id, name: call.name, args, startedAt };
+        toolTraces.push(trace);
+        await emit(step.id, { type: 'tool_call', step: stepIdx, id: call.id, name: call.name, args, startedAt });
 
         const result = await withSpan(
           'execute_tool',
@@ -171,12 +225,30 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
             return out;
           },
         );
-        await emit(step.id, { type: 'tool_result', step: stepIdx, id: call.id, name: call.name, result: result.text });
+        const endedAt = new Date().toISOString();
+        trace.result = result.text;
+        trace.endedAt = endedAt;
+        trace.durationMs = durationMs(startedAt, endedAt);
+        await emit(step.id, {
+          type: 'tool_result',
+          step: stepIdx,
+          id: call.id,
+          name: call.name,
+          result: result.text,
+          startedAt,
+          endedAt,
+          durationMs: trace.durationMs,
+        });
 
-        // Structured display → an additional declarative-UI surface event.
+        // 结构化展示会自动附带本 step 已完成的工具参数和结果，方便 A2UI 多次补全同一界面。
         if (result.display?.type === 'a2ui') {
           const surfaceId = result.display.surfaceId ?? result.display.message.surfaceId ?? call.id;
-          await emit(step.id, { type: 'a2ui', step: stepIdx, surfaceId, message: result.display.message });
+          await emit(step.id, {
+            type: 'a2ui',
+            step: stepIdx,
+            surfaceId,
+            message: withToolData(result.display.message, toolTraces),
+          });
         }
 
         const toolMsg = { role: 'tool' as const, content: result.text, toolCallId: call.id };
@@ -189,6 +261,16 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           await store.setGoalState(runId, goal);
           ctx.setGoal(renderGoal(goal));
         }
+
+        if (call.name === FINISH_TOOL_NAME) {
+          completedOutput = finishOutput(args);
+        }
+      }
+
+      if (completedOutput) {
+        await emit(step.id, { type: 'final', step: stepIdx, output: completedOutput });
+        await store.setRunStatus(runId, 'done', { output: completedOutput });
+        return;
       }
     }
 

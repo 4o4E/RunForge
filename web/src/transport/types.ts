@@ -21,9 +21,10 @@ export interface UserInput {
  */
 export type UiEvent =
   | { kind: 'step_start'; step: number }
-  | { kind: 'reasoning'; step: number; delta: string }
+  | { kind: 'reasoning'; step: number; delta: string; startedAt?: string; endedAt?: string; durationMs?: number }
+  | { kind: 'reasoning_timing'; step: number; startedAt: string; endedAt: string; durationMs: number }
   | { kind: 'text'; step: number; delta: string }
-  | { kind: 'tool'; step: number; id: string; name: string; input?: unknown; output?: unknown }
+  | { kind: 'tool'; step: number; id: string; name: string; input?: unknown; output?: unknown; startedAt?: string; endedAt?: string; durationMs?: number }
   | { kind: 'a2ui'; step: number; surfaceId: string; message: unknown }
   | { kind: 'final'; step: number; output: string }
   | { kind: 'error'; step: number; message: string };

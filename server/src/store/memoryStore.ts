@@ -1,9 +1,9 @@
-import { randomUUID } from 'node:crypto';
 import type { AgentEvent, RunStatus } from '../agent/types.js';
 import type { LlmMessage } from '../llm/types.js';
 import { maskPlaceholder } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
 import type { RunRow, Store, StepRow, ThreadMessage, ThreadRow } from './types.js';
+import { newId } from '../id.js';
 
 interface StoredMsg {
   thread_id: string;
@@ -26,7 +26,7 @@ export class MemoryStore implements Store {
   private now = () => new Date().toISOString();
 
   async createThread(title?: string): Promise<ThreadRow> {
-    const row: ThreadRow = { id: randomUUID(), title: title ?? null, created_at: this.now(), updated_at: this.now() };
+    const row: ThreadRow = { id: newId(), title: title ?? null, created_at: this.now(), updated_at: this.now() };
     this.threads.set(row.id, row);
     return row;
   }
@@ -36,10 +36,22 @@ export class MemoryStore implements Store {
   async listThreads(limit = 50) {
     return [...this.threads.values()].slice(0, limit);
   }
+  async deleteThread(id: string) {
+    const existed = this.threads.delete(id);
+    if (!existed) return false;
+    const runIds = new Set([...this.runs.values()].filter((r) => r.thread_id === id).map((r) => r.id));
+    for (const runId of runIds) {
+      this.runs.delete(runId);
+      this.events.delete(runId);
+    }
+    this.steps = this.steps.filter((s) => !runIds.has(s.run_id));
+    this.messages = this.messages.filter((m) => m.thread_id !== id);
+    return true;
+  }
 
   async createRun(threadId: string, input: string): Promise<RunRow> {
     const row: RunRow = {
-      id: randomUUID(),
+      id: newId(),
       thread_id: threadId,
       status: 'pending',
       input,
@@ -75,7 +87,7 @@ export class MemoryStore implements Store {
   }
 
   async createStep(runId: string, idx: number): Promise<StepRow> {
-    const row: StepRow = { id: randomUUID(), run_id: runId, idx, created_at: this.now() };
+    const row: StepRow = { id: newId(), run_id: runId, idx, created_at: this.now() };
     this.steps.push(row);
     return row;
   }

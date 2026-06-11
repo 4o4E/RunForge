@@ -1,10 +1,11 @@
 // Mirror of the server's AgentEvent union (kept in sync manually for the skeleton).
 export type AgentEvent =
   | { type: 'step_start'; step: number }
-  | { type: 'reasoning'; step: number; text: string }
+  | { type: 'reasoning'; step: number; text: string; startedAt?: string; endedAt?: string; durationMs?: number }
+  | { type: 'reasoning_timing'; step: number; startedAt: string; endedAt: string; durationMs: number }
   | { type: 'llm_delta'; step: number; text: string }
-  | { type: 'tool_call'; step: number; name: string; args: unknown; id: string }
-  | { type: 'tool_result'; step: number; id: string; name: string; result: string }
+  | { type: 'tool_call'; step: number; name: string; args: unknown; id: string; startedAt: string }
+  | { type: 'tool_result'; step: number; id: string; name: string; result: string; startedAt: string; endedAt: string; durationMs: number }
   | { type: 'a2ui'; step: number; surfaceId: string; message: unknown }
   | { type: 'compaction'; step: number; estBefore: number; estAfter: number; masked: number; dropped: number }
   | { type: 'final'; step: number; output: string }
@@ -20,7 +21,7 @@ export interface Thread {
 export interface RunWithEvents {
   id: string;
   thread_id: string;
-  status: 'pending' | 'running' | 'done' | 'error';
+  status: 'pending' | 'running' | 'done' | 'error' | 'canceling' | 'canceled';
   input: string;
   output: string | null;
   error: string | null;
@@ -44,6 +45,11 @@ export const createThread = (title?: string) =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ title }),
   }).then(json<Thread>);
+
+export const deleteThread = (id: string) =>
+  fetch(`/api/threads/${id}`, { method: 'DELETE' }).then((res) => {
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  });
 
 export const startRun = (threadId: string, input: string) =>
   fetch(`/api/threads/${threadId}/runs`, {

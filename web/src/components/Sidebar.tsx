@@ -1,4 +1,4 @@
-import { Bot, Moon, Plus, Sun } from 'lucide-react';
+import { Bot, Moon, Plus, Sun, Trash2 } from 'lucide-react';
 import type { Thread } from '../api';
 import type { Theme } from '../useTheme';
 import { Button } from '@/components/ui/button';
@@ -12,6 +12,7 @@ interface Props {
   onToggleTheme: () => void;
   onNew: () => void;
   onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
 }
 
 function threadLabel(t: Thread): string {
@@ -19,7 +20,7 @@ function threadLabel(t: Thread): string {
   return `会话 ${t.id.slice(0, 8)}`;
 }
 
-export function Sidebar({ threads, activeId, theme, onToggleTheme, onNew, onSelect }: Props) {
+export function Sidebar({ threads, activeId, theme, onToggleTheme, onNew, onSelect, onDelete }: Props) {
   return (
     <aside className="flex h-full w-64 shrink-0 flex-col border-r bg-card">
       <div className="flex items-center gap-2 px-4 py-4">
@@ -39,19 +40,33 @@ export function Sidebar({ threads, activeId, theme, onToggleTheme, onNew, onSele
       <nav className="scrollbar-thin mt-1 flex-1 space-y-0.5 overflow-y-auto px-2 pb-4">
         {threads.length === 0 && <div className="px-2 py-3 text-xs text-muted-foreground">还没有会话</div>}
         {threads.map((t) => (
-          <button
+          <div
             key={t.id}
-            onClick={() => onSelect(t.id)}
-            title={threadLabel(t)}
             className={cn(
-              'block w-full truncate rounded-md px-3 py-2 text-left text-sm transition-colors',
-              t.id === activeId
-                ? 'bg-accent font-medium text-accent-foreground'
-                : 'text-foreground hover:bg-accent/60',
+              'group/thread flex items-center rounded-md transition-colors',
+              t.id === activeId ? 'bg-accent font-medium text-accent-foreground' : 'text-foreground hover:bg-accent/60',
             )}
           >
-            {threadLabel(t)}
-          </button>
+            <button
+              onClick={() => onSelect(t.id)}
+              title={threadLabel(t)}
+              className="min-w-0 flex-1 truncate px-3 py-2 text-left text-sm"
+            >
+              {threadLabel(t)}
+            </button>
+            <button
+              type="button"
+              title="删除会话"
+              onClick={(event) => {
+                event.stopPropagation();
+                onDelete(t.id);
+              }}
+              className="mr-1 flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover/thread:opacity-100"
+            >
+              <Trash2 className="size-3.5" />
+              <span className="sr-only">删除会话</span>
+            </button>
+          </div>
         ))}
       </nav>
 

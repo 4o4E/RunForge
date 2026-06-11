@@ -49,6 +49,7 @@ export interface Store {
   createThread(title?: string): Promise<ThreadRow>;
   getThread(id: string): Promise<ThreadRow | null>;
   listThreads(limit?: number): Promise<ThreadRow[]>;
+  deleteThread(id: string): Promise<boolean>;
 
   createRun(threadId: string, input: string): Promise<RunRow>;
   getRun(id: string): Promise<RunRow | null>;

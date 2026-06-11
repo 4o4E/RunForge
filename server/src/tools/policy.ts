@@ -53,6 +53,7 @@ const META: Record<string, ToolMeta> = {
   ask_user: { kind: 'safe' },
   render_ui: { kind: 'safe' },
   update_plan: { kind: 'safe' },
+  finish_conversation: { kind: 'safe' },
 };
 
 /** True when `target` resolves to a location at or under `root`. */

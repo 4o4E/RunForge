@@ -1,5 +1,5 @@
 import type { UIMessage } from 'ai';
-import { Bot } from 'lucide-react';
+import { Bot, ChevronDown, Copy, Fingerprint, Workflow } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import {
   Conversation as AIConversation,
@@ -7,25 +7,105 @@ import {
   ConversationEmptyState,
   ConversationScrollButton,
 } from '@/components/ai-elements/conversation';
-import { Message, MessageContent, MessageResponse } from '@/components/ai-elements/message';
+import { Message, MessageAction, MessageActions, MessageContent, MessageResponse } from '@/components/ai-elements/message';
 import { Reasoning, ReasoningContent, ReasoningTrigger } from '@/components/ai-elements/reasoning';
 import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput } from '@/components/ai-elements/tool';
 import type { ToolUIPart } from 'ai';
 import { A2uiSurface } from '@/a2ui/A2uiSurface';
 import type { A2uiMessage } from '@/a2ui/types';
 import { TableOfContents } from './TableOfContents';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { cn } from '@/lib/utils';
 
 type Part = UIMessage['parts'][number];
+type Timing = { startedAt?: string; endedAt?: string; durationMs?: number };
+type ActivityEntry = { part: Part; index: number };
 
 function isToolPart(p: Part): boolean {
   return p.type === 'dynamic-tool' || p.type.startsWith('tool-');
+}
+
+function isReasoningPart(p: Part): p is Extract<Part, { type: 'reasoning' }> {
+  return p.type === 'reasoning';
+}
+
+function isActivityPart(p: Part): boolean {
+  return isToolPart(p) || isReasoningPart(p);
+}
+
+function isHiddenDataPart(p: Part): boolean {
+  return p.type === 'data-run-id' || p.type === 'data-tool-timing' || p.type === 'data-reasoning-timing';
+}
+
+function durationFromTiming(t?: Timing): number | undefined {
+  if (!t) return undefined;
+  if (t.startedAt && t.endedAt) {
+    return Math.max(0, new Date(t.endedAt).getTime() - new Date(t.startedAt).getTime());
+  }
+  return t.durationMs;
+}
+
+function formatDuration(ms?: number): string | undefined {
+  if (ms === undefined) return undefined;
+  if (ms < 1000) return `${Math.max(1, Math.round(ms))}ms`;
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.round(seconds % 60).toString().padStart(2, '0');
+  return `${minutes}m ${rest}s`;
+}
+
+function groupDuration(entries: ActivityEntry[], timingMaps: ReturnType<typeof buildTimingMaps>): number | undefined {
+  let started: number | null = null;
+  let ended: number | null = null;
+
+  for (const entry of entries) {
+    const timing = timingForPart(entry.part, timingMaps);
+    if (!timing?.startedAt || !timing?.endedAt) continue;
+    const start = new Date(timing.startedAt).getTime();
+    const end = new Date(timing.endedAt).getTime();
+    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+    started = started == null ? start : Math.min(started, start);
+    ended = ended == null ? end : Math.max(ended, end);
+  }
+
+  return started != null && ended != null ? Math.max(0, ended - started) : undefined;
+}
+
+function partId(part: Part): string | undefined {
+  const p = part as { id?: string; toolCallId?: string };
+  return p.toolCallId ?? p.id;
+}
+
+function buildTimingMaps(parts: Part[]) {
+  const tools = new Map<string, Timing>();
+  const reasoning = new Map<string, Timing>();
+  for (const part of parts) {
+    if (part.type === 'data-tool-timing') {
+      const data = (part as { data?: Timing & { id?: string } }).data;
+      if (data?.id) tools.set(data.id, data);
+    }
+    if (part.type === 'data-reasoning-timing') {
+      const data = (part as { id?: string; data?: Timing & { step?: number } });
+      const id = data.id ?? (data.data?.step ? `r-${data.data.step}` : undefined);
+      if (id) reasoning.set(id, data.data ?? {});
+    }
+  }
+  return { tools, reasoning };
+}
+
+function timingForPart(part: Part, maps: ReturnType<typeof buildTimingMaps>): Timing | undefined {
+  const id = partId(part);
+  if (isToolPart(part)) return id ? maps.tools.get(id) ?? (part as unknown as Timing) : (part as unknown as Timing);
+  if (isReasoningPart(part)) return id ? maps.reasoning.get(id) ?? (part as unknown as Timing) : (part as unknown as Timing);
+  return undefined;
 }
 
 // `active` marks the most recent tool call. It stays expanded; as soon as a newer
 // tool call appears the previous one auto-collapses. The user can still toggle any
 // block manually (override), and the override is cleared when `active` flips so the
 // block rejoins the "only the latest stays open" rule.
-function ToolBlock({ part, active }: { part: Part; active: boolean }) {
+function ToolBlock({ part, active, timing }: { part: Part; active: boolean; timing?: Timing }) {
   const p = part as {
     type: string;
     toolName?: string;
@@ -46,9 +126,9 @@ function ToolBlock({ part, active }: { part: Part; active: boolean }) {
   return (
     <Tool open={open} onOpenChange={setOverride}>
       {p.type === 'dynamic-tool' ? (
-        <ToolHeader type="dynamic-tool" toolName={p.toolName ?? 'tool'} state={p.state} />
+        <ToolHeader type="dynamic-tool" toolName={p.toolName ?? 'tool'} state={p.state} duration={formatDuration(durationFromTiming(timing))} />
       ) : (
-        <ToolHeader type={p.type as ToolUIPart['type']} state={p.state} />
+        <ToolHeader type={p.type as ToolUIPart['type']} state={p.state} duration={formatDuration(durationFromTiming(timing))} />
       )}
       <ToolContent>
         <ToolInput input={p.input} />
@@ -58,11 +138,20 @@ function ToolBlock({ part, active }: { part: Part; active: boolean }) {
   );
 }
 
-function AssistantPart({ part, toolActive }: { part: Part; toolActive: boolean }) {
+function AssistantPart({
+  part,
+  toolActive,
+  timingMaps,
+}: {
+  part: Part;
+  toolActive: boolean;
+  timingMaps: ReturnType<typeof buildTimingMaps>;
+}) {
   if (part.type === 'text') return part.text ? <MessageResponse>{part.text}</MessageResponse> : null;
   if (part.type === 'reasoning') {
+    const duration = durationFromTiming(timingForPart(part, timingMaps));
     return part.text ? (
-      <Reasoning isStreaming={part.state === 'streaming'} defaultOpen={part.state === 'streaming'}>
+      <Reasoning isStreaming={part.state === 'streaming'} defaultOpen={part.state === 'streaming'} duration={duration ? Math.ceil(duration / 1000) : undefined}>
         <ReasoningTrigger />
         <ReasoningContent>{part.text}</ReasoningContent>
       </Reasoning>
@@ -71,8 +160,53 @@ function AssistantPart({ part, toolActive }: { part: Part; toolActive: boolean }
   if (part.type === 'data-a2ui') {
     return <A2uiSurface message={(part as { data: A2uiMessage }).data} />;
   }
-  if (isToolPart(part)) return <ToolBlock part={part} active={toolActive} />;
+  if (isToolPart(part)) return <ToolBlock part={part} active={toolActive} timing={timingForPart(part, timingMaps)} />;
   return null;
+}
+
+function ActivityGroup({
+  entries,
+  active,
+  lastToolKey,
+  messageId,
+  timingMaps,
+}: {
+  entries: ActivityEntry[];
+  active: boolean;
+  lastToolKey: string | null;
+  messageId: string;
+  timingMaps: ReturnType<typeof buildTimingMaps>;
+}) {
+  const [override, setOverride] = useState<boolean | null>(null);
+  const prevActive = useRef(active);
+  useEffect(() => {
+    if (prevActive.current !== active) {
+      prevActive.current = active;
+      setOverride(null);
+    }
+  }, [active]);
+  const open = override ?? active;
+  const totalMs = groupDuration(entries, timingMaps);
+  return (
+    <Collapsible open={open} onOpenChange={setOverride} className="not-prose my-1 w-full">
+      <CollapsibleTrigger className="inline-flex max-w-full items-center gap-2 text-left text-sm font-medium text-muted-foreground transition-colors hover:text-foreground">
+        <Workflow className="size-4 shrink-0" />
+        <span className="min-w-0 truncate">过程 · {entries.length} 项</span>
+        {totalMs !== undefined && <span className="shrink-0 text-xs font-normal">{formatDuration(totalMs)}</span>}
+        <ChevronDown className={cn('size-4 shrink-0 transition-transform', open && 'rotate-180')} />
+      </CollapsibleTrigger>
+      <CollapsibleContent className="mt-2 space-y-1">
+        {entries.map(({ part, index }) => (
+          <AssistantPart
+            key={index}
+            part={part}
+            toolActive={`${messageId}:${index}` === lastToolKey}
+            timingMaps={timingMaps}
+          />
+        ))}
+      </CollapsibleContent>
+    </Collapsible>
+  );
 }
 
 function userText(message: UIMessage): string {
@@ -82,16 +216,90 @@ function userText(message: UIMessage): string {
     .join('');
 }
 
+function runIdFromAssistant(message: UIMessage | undefined): string | null {
+  if (!message || message.role !== 'assistant') return null;
+  const part = message.parts.find((p) => p.type === 'data-run-id') as { data?: { runId?: string } } | undefined;
+  return part?.data?.runId ?? null;
+}
+
+function runIdForUser(messages: UIMessage[], index: number): string | null {
+  const fromId = messages[index]?.id?.endsWith(':u') ? messages[index].id.slice(0, -2) : null;
+  return fromId || runIdFromAssistant(messages[index + 1]);
+}
+
+function UserMessage({ message, runId }: { message: UIMessage; runId: string | null }) {
+  const text = userText(message);
+  const copy = (value: string) => {
+    void navigator.clipboard.writeText(value);
+  };
+  return (
+    <>
+      <div className="whitespace-pre-wrap">{text}</div>
+      <MessageActions className="justify-end pt-1 opacity-70 transition-opacity group-hover:opacity-100">
+        <MessageAction tooltip="复制消息文本" label="复制消息文本" onClick={() => copy(text)}>
+          <Copy className="size-3.5" />
+        </MessageAction>
+        <MessageAction tooltip={runId ? '复制 run id' : '暂无 run id'} label="复制 run id" disabled={!runId} onClick={() => runId && copy(runId)}>
+          <Fingerprint className="size-3.5" />
+        </MessageAction>
+      </MessageActions>
+    </>
+  );
+}
+
+function AssistantMessage({ message, lastToolKey, lastActivityKey }: { message: UIMessage; lastToolKey: string | null; lastActivityKey: string | null }) {
+  const timingMaps = buildTimingMaps(message.parts);
+  const nodes: JSX.Element[] = [];
+  let group: { entries: ActivityEntry[]; start: number } | null = null;
+  const flushGroup = () => {
+    if (!group) return;
+    const active = group.entries.some((entry) => `${message.id}:${entry.index}` === lastActivityKey);
+    nodes.push(
+      <ActivityGroup
+        key={`activity-${group.start}`}
+        entries={group.entries}
+        active={active}
+        lastToolKey={lastToolKey}
+        messageId={message.id}
+        timingMaps={timingMaps}
+      />,
+    );
+    group = null;
+  };
+
+  message.parts.forEach((part, i) => {
+    if (isHiddenDataPart(part)) return;
+    if (isActivityPart(part)) {
+      group ??= { entries: [], start: i };
+      group.entries.push({ part, index: i });
+      return;
+    }
+    flushGroup();
+    nodes.push(
+      <AssistantPart
+        key={i}
+        part={part}
+        toolActive={`${message.id}:${i}` === lastToolKey}
+        timingMaps={timingMaps}
+      />,
+    );
+  });
+  flushGroup();
+  return <>{nodes}</>;
+}
+
 export function Conversation({ messages, busy }: { messages: UIMessage[]; busy: boolean }) {
   const contentRef = useRef<HTMLDivElement>(null);
 
   // Key (msgId:partIndex) of the last tool call across the whole conversation —
   // only that one stays expanded; everything before it collapses.
   let lastToolKey: string | null = null;
+  let lastActivityKey: string | null = null;
   for (const m of messages) {
     if (m.role === 'user') continue;
     m.parts.forEach((part, i) => {
       if (isToolPart(part)) lastToolKey = `${m.id}:${i}`;
+      if (isActivityPart(part)) lastActivityKey = `${m.id}:${i}`;
     });
   }
 
@@ -107,19 +315,13 @@ export function Conversation({ messages, busy }: { messages: UIMessage[]; busy: 
                 description="通用 AI Agent。描述一个任务，它会自主调用工具（shell、文件、glob/grep、web）逐步完成。"
               />
             ) : (
-              messages.map((m) => (
+              messages.map((m, index) => (
                 <Message from={m.role} key={m.id}>
                   <MessageContent>
                     {m.role === 'user' ? (
-                      <div className="whitespace-pre-wrap">{userText(m)}</div>
+                      <UserMessage message={m} runId={runIdForUser(messages, index)} />
                     ) : (
-                      m.parts.map((part, i) => (
-                        <AssistantPart
-                          key={i}
-                          part={part}
-                          toolActive={`${m.id}:${i}` === lastToolKey}
-                        />
-                      ))
+                      <AssistantMessage message={m} lastToolKey={lastToolKey} lastActivityKey={lastActivityKey} />
                     )}
                   </MessageContent>
                 </Message>

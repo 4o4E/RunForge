@@ -1,14 +1,14 @@
-import { randomUUID } from 'node:crypto';
 import { query } from '../db/pool.js';
 import type { AgentEvent, RunStatus } from '../agent/types.js';
 import type { LlmMessage } from '../llm/types.js';
 import { maskPlaceholder } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
 import type { RunRow, Store, StepRow, ThreadMessage, ThreadRow } from './types.js';
+import { newId } from '../id.js';
 
 export class PgStore implements Store {
   async createThread(title?: string): Promise<ThreadRow> {
-    const id = randomUUID();
+    const id = newId();
     const { rows } = await query<ThreadRow>(
       `INSERT INTO threads (id, title) VALUES ($1, $2) RETURNING *`,
       [id, title ?? null],
@@ -29,8 +29,13 @@ export class PgStore implements Store {
     return rows;
   }
 
+  async deleteThread(id: string): Promise<boolean> {
+    const result = await query(`DELETE FROM threads WHERE id = $1`, [id]);
+    return (result.rowCount ?? 0) > 0;
+  }
+
   async createRun(threadId: string, input: string): Promise<RunRow> {
-    const id = randomUUID();
+    const id = newId();
     const { rows } = await query<RunRow>(
       `INSERT INTO runs (id, thread_id, status, input) VALUES ($1, $2, 'pending', $3) RETURNING *`,
       [id, threadId, input],
@@ -64,7 +69,7 @@ export class PgStore implements Store {
   }
 
   async createStep(runId: string, idx: number): Promise<StepRow> {
-    const id = randomUUID();
+    const id = newId();
     const { rows } = await query<StepRow>(
       `INSERT INTO steps (id, run_id, idx) VALUES ($1, $2, $3) RETURNING *`,
       [id, runId, idx],

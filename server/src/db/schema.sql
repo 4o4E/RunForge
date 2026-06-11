@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS events (
   run_id      TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
   step_id     TEXT REFERENCES steps(id) ON DELETE CASCADE,
   idx         INTEGER NOT NULL DEFAULT 0,        -- step index this event belongs to
-  type        TEXT NOT NULL,                     -- step_start | llm_delta | tool_call | tool_result | compaction | final | error
+  type        TEXT NOT NULL,                     -- step_start | reasoning | reasoning_timing | llm_delta | tool_call | tool_result | compaction | final | error
   data        JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );

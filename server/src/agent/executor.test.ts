@@ -5,7 +5,15 @@ import { MemoryStore } from '../store/memoryStore.js';
 import type { Provider } from '../llm/types.js';
 import type { AgentEvent } from './types.js';
 
-// A provider that calls the `glob` tool on its first turn, then finalizes.
+function finishCall(id: string, progress: string, completed = true) {
+  return {
+    id,
+    name: 'finish_conversation',
+    arguments: JSON.stringify({ progress, completed }),
+  };
+}
+
+// A provider that calls the `glob` tool on its first turn, then ends explicitly.
 function scriptedProvider(): Provider {
   let turn = 0;
   return {
@@ -15,7 +23,7 @@ function scriptedProvider(): Provider {
       if (turn === 1) {
         return { content: null, toolCalls: [{ id: 'call_1', name: 'glob', arguments: '{"pattern":"**/*.json"}' }] };
       }
-      return { content: 'all done', toolCalls: [] };
+      return { content: 'all done', toolCalls: [finishCall('finish_1', 'all done')] };
     },
   };
 }
@@ -37,7 +45,7 @@ test('executeRun: runs the loop across steps and finalizes', async () => {
   assert.equal(finished?.status, 'done');
   assert.equal(finished?.output, 'all done');
 
-  // Two steps: step 1 (tool call), step 2 (final).
+  // Two steps: step 1 (tool call), step 2 (explicit finish tool).
   const types = published.map((e) => `${e.step}:${e.type}`);
   assert.deepEqual(types, [
     '1:step_start',
@@ -45,12 +53,14 @@ test('executeRun: runs the loop across steps and finalizes', async () => {
     '1:tool_result',
     '2:step_start',
     '2:llm_delta',
+    '2:tool_call',
+    '2:tool_result',
     '2:final',
   ]);
 
-  // Conversation persisted as user + assistant(toolcall) + tool + assistant(final).
+  // Conversation persisted as user + assistant/tool for glob + assistant/tool for finish.
   const msgs = await store.loadThreadMessages(thread.id);
-  assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'tool', 'assistant']);
+  assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'tool', 'assistant', 'tool']);
 });
 
 test('executeRun: keeps multi-turn memory within a thread', async () => {
@@ -60,7 +70,7 @@ test('executeRun: keeps multi-turn memory within a thread', async () => {
   const run1 = await store.createRun(thread.id, 'first');
   await executeRun(run1.id, {
     store,
-    provider: { name: 's', async complete() { return { content: 'ok1', toolCalls: [] }; } },
+    provider: { name: 's', async complete() { return { content: 'ok1', toolCalls: [finishCall('f1', 'ok1')] }; } },
     publish: () => {},
     hardStepCap: 3,
   });
@@ -74,15 +84,37 @@ test('executeRun: keeps multi-turn memory within a thread', async () => {
       name: 's',
       async complete(messages) {
         seenPriorCount = messages.filter((m) => m.role !== 'system').length;
-        return { content: 'ok2', toolCalls: [] };
+        return { content: 'ok2', toolCalls: [finishCall('f2', 'ok2')] };
       },
     },
     publish: () => {},
     hardStepCap: 3,
   });
 
-  // prior: user(first) + assistant(ok1) + new user(second) = 3
-  assert.equal(seenPriorCount, 3);
+  // prior: user(first) + assistant(finish call) + tool(finish result) + new user(second) = 4
+  assert.equal(seenPriorCount, 4);
+});
+
+test('executeRun: text without finish_conversation is not completion', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run = await store.createRun(thread.id, 'answer directly');
+
+  await executeRun(run.id, {
+    store,
+    provider: {
+      name: 'no-finish',
+      async complete() {
+        return { content: 'premature final answer', toolCalls: [] };
+      },
+    },
+    publish: () => {},
+    hardStepCap: 2,
+  });
+
+  const finished = await store.getRun(run.id);
+  assert.equal(finished?.status, 'error');
+  assert.match(finished?.error ?? '', /hard step cap/);
 });
 
 test('executeRun: stops and errors at the hard step cap', async () => {
@@ -132,4 +164,18 @@ test('executeRun: cancels cooperatively at a step boundary', async () => {
 
   const finished = await store.getRun(run.id);
   assert.equal(finished?.status, 'canceled');
+});
+
+test('memory store: deleteThread removes dependent run data', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run = await store.createRun(thread.id, 'delete me');
+  await store.addMessage(thread.id, run.id, null, { role: 'user', content: 'delete me' });
+  await store.addEvent(run.id, null, { type: 'final', step: 1, output: 'done' });
+
+  assert.equal(await store.deleteThread(thread.id), true);
+  assert.equal(await store.getThread(thread.id), null);
+  assert.deepEqual(await store.listRuns(thread.id), []);
+  assert.deepEqual(await store.loadThreadMessages(thread.id), []);
+  assert.deepEqual(await store.getEvents(run.id), []);
 });

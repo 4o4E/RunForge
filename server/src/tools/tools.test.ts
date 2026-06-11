@@ -32,8 +32,17 @@ after(async () => {
 test('registry exposes neutral tool schemas and dispatches by name', async () => {
   const schemas = toolSchemas();
   assert.ok(schemas.find((s) => s.name === 'shell'));
+  assert.ok(schemas.find((s) => s.name === 'finish_conversation'));
   assert.ok(getTool('glob'));
   assert.match((await runTool('does_not_exist', {})).text, /Unknown tool/);
+});
+
+test('finish_conversation records progress and validates required progress', async () => {
+  assert.match(
+    (await runTool('finish_conversation', { progress: 'tests passed', completed: true })).text,
+    /Conversation finished/,
+  );
+  assert.match((await runTool('finish_conversation', { completed: true })).text, /progress.*required/);
 });
 
 test('shell runs a command (PowerShell on Windows, sh elsewhere)', async () => {

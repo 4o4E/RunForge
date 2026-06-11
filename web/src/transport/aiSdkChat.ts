@@ -70,6 +70,7 @@ export function uiEventStreamToChunks(
       };
 
       safe({ type: 'start' });
+      safe({ type: 'data-run-id', id: runId, data: { runId } } as unknown as UIMessageChunk);
 
       const onEvent = (e: UiEvent) => {
         switch (e.kind) {
@@ -91,6 +92,23 @@ export function uiEventStreamToChunks(
               openReason = id;
             }
             safe({ type: 'reasoning-delta', id, delta: e.delta });
+            if (e.startedAt && e.endedAt) {
+              safe({
+                type: 'data-reasoning-timing',
+                id,
+                data: { step: e.step, startedAt: e.startedAt, endedAt: e.endedAt, durationMs: e.durationMs },
+              } as unknown as UIMessageChunk);
+            }
+            break;
+          }
+          case 'reasoning_timing': {
+            const id = `r-${e.step}`;
+            closeReason();
+            safe({
+              type: 'data-reasoning-timing',
+              id,
+              data: { step: e.step, startedAt: e.startedAt, endedAt: e.endedAt, durationMs: e.durationMs },
+            } as unknown as UIMessageChunk);
             break;
           }
           case 'text': {
@@ -112,6 +130,13 @@ export function uiEventStreamToChunks(
             }
             if (e.output !== undefined) {
               safe({ type: 'tool-output-available', toolCallId: e.id, output: e.output });
+            }
+            if (e.startedAt && e.endedAt) {
+              safe({
+                type: 'data-tool-timing',
+                id: e.id,
+                data: { id: e.id, step: e.step, startedAt: e.startedAt, endedAt: e.endedAt, durationMs: e.durationMs },
+              } as unknown as UIMessageChunk);
             }
             break;
           }

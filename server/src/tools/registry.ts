@@ -13,6 +13,7 @@ import { webSearchTool } from './webSearch.js';
 import { askUserTool } from './askUser.js';
 import { renderUiTool } from './renderUi.js';
 import { updatePlanTool } from './updatePlan.js';
+import { finishConversationTool } from './finishConversation.js';
 
 const TOOLS: Tool[] = [
   shellTool,
@@ -26,6 +27,7 @@ const TOOLS: Tool[] = [
   askUserTool,
   renderUiTool,
   updatePlanTool,
+  finishConversationTool,
 ];
 
 const byName = new Map(TOOLS.map((t) => [t.name, t]));

@@ -25,7 +25,7 @@ export type ToolProps = ComponentProps<typeof Collapsible>;
 // 工具调用和思考块保持同一层级：单行触发器 + 柔和展开内容。
 export const Tool = ({ className, ...props }: ToolProps) => (
   <Collapsible
-    className={cn("group/tool not-prose mb-4 w-full", className)}
+    className={cn("group/tool not-prose mb-2 w-full", className)}
     {...props}
   />
 );
@@ -35,6 +35,7 @@ export type ToolPart = ToolUIPart | DynamicToolUIPart;
 export type ToolHeaderProps = {
   title?: string;
   className?: string;
+  duration?: string;
 } & (
   | { type: ToolUIPart["type"]; state: ToolUIPart["state"]; toolName?: never }
   | {
@@ -77,6 +78,7 @@ export const ToolHeader = ({
   type,
   state,
   toolName,
+  duration,
   ...props
 }: ToolHeaderProps) => {
   const derivedName =
@@ -98,6 +100,7 @@ export const ToolHeader = ({
         {statusIcons[state]}
         {statusLabels[state]}
       </span>
+      {duration && <span className="shrink-0 text-xs text-muted-foreground">{duration}</span>}
       <ChevronDownIcon className="size-4 shrink-0 transition-transform group-data-[state=open]/tool:rotate-180" />
     </CollapsibleTrigger>
   );
@@ -108,7 +111,7 @@ export type ToolContentProps = ComponentProps<typeof CollapsibleContent>;
 export const ToolContent = ({ className, ...props }: ToolContentProps) => (
   <CollapsibleContent
     className={cn(
-      "mt-4 space-y-3 text-muted-foreground text-sm",
+      "mt-2 space-y-2 text-muted-foreground text-sm",
       "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
       className
     )}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useChat } from '@ai-sdk/react';
-import { getThread, listThreads, type Thread } from './api';
+import { deleteThread, getThread, listThreads, type Thread } from './api';
 import { createAiSdkChatTransport, type ChatThreadHandle } from './transport/aiSdkChat';
 import { runsToUiMessages } from './history';
 import { Sidebar } from './components/Sidebar';
@@ -112,6 +112,17 @@ export function App() {
     navigateChatRoute({ draft: '', threadId: id });
   }
 
+  async function removeThread(id: string) {
+    if (!window.confirm('删除这个会话？相关运行记录也会一起删除。')) return;
+    stop();
+    await deleteThread(id);
+    setThreads((current) => current.filter((t) => t.id !== id));
+    if (activeThreadId === id) {
+      navigateChatRoute({ draft: '', threadId: null });
+      setMessages([]);
+    }
+  }
+
   function changeDraft(text: string) {
     navigateChatRoute({ draft: text, threadId: activeThreadId }, 'replace');
   }
@@ -133,6 +144,7 @@ export function App() {
         onToggleTheme={toggleTheme}
         onNew={newChat}
         onSelect={selectThread}
+        onDelete={(id) => void removeThread(id)}
       />
       <ChatView
         title={title}

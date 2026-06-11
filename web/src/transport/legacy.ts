@@ -18,13 +18,37 @@ export function toUiEvent(e: AgentEvent): UiEvent | null {
     case 'step_start':
       return { kind: 'step_start', step: e.step };
     case 'reasoning':
-      return { kind: 'reasoning', step: e.step, delta: e.text };
+      return {
+        kind: 'reasoning',
+        step: e.step,
+        delta: e.text,
+        startedAt: e.startedAt,
+        endedAt: e.endedAt,
+        durationMs: e.durationMs,
+      };
+    case 'reasoning_timing':
+      return {
+        kind: 'reasoning_timing',
+        step: e.step,
+        startedAt: e.startedAt,
+        endedAt: e.endedAt,
+        durationMs: e.durationMs,
+      };
     case 'llm_delta':
       return { kind: 'text', step: e.step, delta: e.text };
     case 'tool_call':
-      return { kind: 'tool', step: e.step, id: e.id, name: e.name, input: e.args };
+      return { kind: 'tool', step: e.step, id: e.id, name: e.name, input: e.args, startedAt: e.startedAt };
     case 'tool_result':
-      return { kind: 'tool', step: e.step, id: e.id, name: e.name, output: e.result };
+      return {
+        kind: 'tool',
+        step: e.step,
+        id: e.id,
+        name: e.name,
+        output: e.result,
+        startedAt: e.startedAt,
+        endedAt: e.endedAt,
+        durationMs: e.durationMs,
+      };
     case 'a2ui':
       return { kind: 'a2ui', step: e.step, surfaceId: e.surfaceId, message: e.message };
     case 'final':

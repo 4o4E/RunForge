@@ -29,6 +29,13 @@ api.get('/threads/:id', async (req, res) => {
   res.json({ thread, runs: withEvents });
 });
 
+// Delete a thread and all dependent run data. PostgreSQL handles the cascade.
+api.delete('/threads/:id', async (req, res) => {
+  const deleted = await store.deleteThread(req.params.id);
+  if (!deleted) return res.status(404).json({ error: 'thread not found' });
+  res.status(204).send();
+});
+
 // Start a run inside a thread
 api.post('/threads/:id/runs', async (req, res) => {
   const thread = await store.getThread(req.params.id);

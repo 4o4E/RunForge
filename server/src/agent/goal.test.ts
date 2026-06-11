@@ -65,7 +65,14 @@ test('executeRun: update_plan persists the goal anchor on the run', async () => 
           }],
         };
       }
-      return { content: 'done', toolCalls: [] };
+      return {
+        content: 'done',
+        toolCalls: [{
+          id: 'f1',
+          name: 'finish_conversation',
+          arguments: JSON.stringify({ progress: 'done', completed: true }),
+        }],
+      };
     },
   };
 

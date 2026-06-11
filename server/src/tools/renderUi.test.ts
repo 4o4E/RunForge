@@ -53,7 +53,14 @@ test('executor emits an a2ui event when a tool returns a display', async () => {
           toolCalls: [{ id: 'c1', name: 'render_ui', arguments: JSON.stringify(SAMPLE) }],
         };
       }
-      return { content: 'done', toolCalls: [] };
+      return {
+        content: 'done',
+        toolCalls: [{
+          id: 'f1',
+          name: 'finish_conversation',
+          arguments: JSON.stringify({ progress: 'done', completed: true }),
+        }],
+      };
     },
   };
 
@@ -63,6 +70,14 @@ test('executor emits an a2ui event when a tool returns a display', async () => {
   const a2ui = published.find((e) => e.type === 'a2ui');
   assert.ok(a2ui, 'expected an a2ui event');
   assert.equal((a2ui as Extract<AgentEvent, { type: 'a2ui' }>).surfaceId, 'ui-card');
+  const dataModel = (a2ui as Extract<AgentEvent, { type: 'a2ui' }>).message.dataModel as {
+    _toolCalls?: Array<{ id: string; name: string; args: unknown; result?: string; startedAt?: string; endedAt?: string }>;
+  };
+  assert.equal(dataModel._toolCalls?.[0]?.id, 'c1');
+  assert.equal(dataModel._toolCalls?.[0]?.name, 'render_ui');
+  assert.match(dataModel._toolCalls?.[0]?.result ?? '', /UI rendered/);
+  assert.ok(dataModel._toolCalls?.[0]?.startedAt);
+  assert.ok(dataModel._toolCalls?.[0]?.endedAt);
 
   // Persisted too (history recovery renders it on reload).
   const stored = await store.getEvents(run.id);
