@@ -10,10 +10,12 @@ import {
 
 interface Props {
   disabled: boolean;
+  draft: string;
+  onDraftChange: (text: string) => void;
   onSend: (text: string) => void;
 }
 
-export function Composer({ disabled, onSend }: Props) {
+export function Composer({ disabled, draft, onDraftChange, onSend }: Props) {
   function handleSubmit(message: PromptInputMessage) {
     const text = message.text?.trim();
     if (!text || disabled) return;
@@ -25,7 +27,11 @@ export function Composer({ disabled, onSend }: Props) {
       <div className="mx-auto max-w-3xl">
         <PromptInput onSubmit={handleSubmit}>
           <PromptInputBody>
-            <PromptInputTextarea placeholder="描述一个任务…（Enter 发送，Shift+Enter 换行）" />
+            <PromptInputTextarea
+              onChange={(event) => onDraftChange(event.currentTarget.value)}
+              placeholder="描述一个任务…（Enter 发送，Shift+Enter 换行）"
+              value={draft}
+            />
           </PromptInputBody>
           <PromptInputFooter>
             <PromptInputTools />
