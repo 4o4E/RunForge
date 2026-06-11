@@ -50,7 +50,7 @@ const statusLabels: Record<ToolPart["state"], string> = {
   "approval-responded": "已确认",
   "input-available": "调用中",
   "input-streaming": "准备中",
-  "output-available": "已完成",
+  "output-available": "",
   "output-denied": "已拒绝",
   "output-error": "调用失败",
 };
@@ -60,7 +60,7 @@ const statusIcons: Record<ToolPart["state"], ReactNode> = {
   "approval-responded": <CheckCircleIcon className="size-3.5 text-muted-foreground" />,
   "input-available": <ClockIcon className="size-3.5 animate-pulse text-muted-foreground" />,
   "input-streaming": <CircleIcon className="size-3.5 text-muted-foreground" />,
-  "output-available": <CheckCircleIcon className="size-3.5 text-muted-foreground" />,
+  "output-available": null,
   "output-denied": <XCircleIcon className="size-3.5 text-muted-foreground" />,
   "output-error": <XCircleIcon className="size-3.5 text-destructive" />,
 };
@@ -94,12 +94,14 @@ export const ToolHeader = ({
     >
       <WrenchIcon className="size-4 shrink-0" />
       <span className="min-w-0 truncate">
-        调用 <span className="font-mono text-foreground">{title ?? derivedName}</span>
+        调用 <span className="text-foreground">{title ?? derivedName}</span>
       </span>
-      <span className="flex shrink-0 items-center gap-1 text-xs">
-        {statusIcons[state]}
-        {statusLabels[state]}
-      </span>
+      {statusLabels[state] && (
+        <span className="flex shrink-0 items-center gap-1 text-xs">
+          {statusIcons[state]}
+          {statusLabels[state]}
+        </span>
+      )}
       {duration && <span className="shrink-0 text-xs text-muted-foreground">{duration}</span>}
       <ChevronDownIcon className="size-4 shrink-0 transition-transform group-data-[state=open]/tool:rotate-180" />
     </CollapsibleTrigger>
@@ -123,15 +125,90 @@ export type ToolInputProps = ComponentProps<"div"> & {
   input: ToolPart["input"];
 };
 
+type JsonLike = null | boolean | number | string | JsonLike[] | { [key: string]: JsonLike };
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) && !isValidElement(value);
+}
+
+function tryParseJson(value: string): unknown | null {
+  const trimmed = value.trim();
+  if (!trimmed || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) return null;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function scalarLabel(value: unknown): string {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
+}
+
+function JsonValue({ value, depth = 0 }: { value: unknown; depth?: number }) {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return <span className="text-muted-foreground">[]</span>;
+    return (
+      <div className="space-y-1">
+        {value.map((item, index) => (
+          <div key={index} className="grid min-w-0 grid-cols-[2rem,1fr] gap-2">
+            <span className="select-none text-right text-muted-foreground">{index}</span>
+            <JsonValue value={item} depth={depth + 1} />
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (isPlainObject(value)) {
+    const entries = Object.entries(value);
+    if (entries.length === 0) return <span className="text-muted-foreground">{'{}'}</span>;
+    return (
+      <div className={cn("space-y-1", depth > 0 && "rounded-md border border-border/50 p-2")}>
+        {entries.map(([key, item]) => (
+          <div key={key} className="grid min-w-0 grid-cols-[minmax(7rem,14rem),1fr] gap-2">
+            <span className="min-w-0 truncate font-medium text-muted-foreground" title={key}>
+              {key}
+            </span>
+            <div className="min-w-0">
+              <JsonValue value={item} depth={depth + 1} />
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <span
+      className={cn(
+        "break-words rounded-sm px-1 py-0.5 font-mono text-xs",
+        typeof value === "string" ? "bg-background" : "bg-muted text-muted-foreground"
+      )}
+    >
+      {scalarLabel(value)}
+    </span>
+  );
+}
+
+function JsonPanel({ value }: { value: unknown }) {
+  return (
+    <div className="scrollbar-thin max-h-[44vh] overflow-auto rounded-md border bg-background p-2 text-xs text-foreground">
+      <JsonValue value={value as JsonLike} />
+    </div>
+  );
+}
+
 export const ToolInput = ({ className, input, ...props }: ToolInputProps) => (
   <div className={cn("space-y-1 overflow-hidden", className)} {...props}>
     <h4 className="font-medium text-muted-foreground text-xs">
       参数
     </h4>
-    {/* 限制参数高度，避免大对象把后续对话挤出视口。 */}
-    <div className="max-h-[40vh] overflow-y-auto rounded-md bg-muted/35">
-      <CodeBlock code={JSON.stringify(input ?? {}, null, 2)} language="json" />
-    </div>
+    <JsonPanel value={input ?? {}} />
   </div>
 );
 
@@ -153,11 +230,15 @@ export const ToolOutput = ({
   let Output = <div>{output as ReactNode}</div>;
 
   if (typeof output === "object" && !isValidElement(output)) {
-    Output = (
-      <CodeBlock code={JSON.stringify(output, null, 2)} language="json" />
-    );
+    Output = <JsonPanel value={output} />;
   } else if (typeof output === "string") {
-    Output = <CodeBlock code={output} language="json" />;
+    const parsed = tryParseJson(output);
+    Output =
+      parsed && (Array.isArray(parsed) || isPlainObject(parsed)) ? (
+        <JsonPanel value={parsed} />
+      ) : (
+        <CodeBlock code={output} language="log" showGlance showWrapToggle />
+      );
   }
 
   return (

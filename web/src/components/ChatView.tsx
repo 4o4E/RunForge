@@ -1,6 +1,6 @@
 import type { UIMessage } from 'ai';
 import { Conversation } from './Conversation';
-import { Composer } from './Composer';
+import { Composer, type ComposerAttachment } from './Composer';
 import { Badge } from '@/components/ui/badge';
 
 interface Props {
@@ -8,8 +8,15 @@ interface Props {
   messages: UIMessage[];
   busy: boolean;
   draft: string;
+  wide: boolean;
+  attachments: ComposerAttachment[];
   onDraftChange: (text: string) => void;
   onSend: (text: string) => void;
+  onToggleWide: () => void;
+  onRemoveAttachment: (path: string) => void;
+  onOpenRemoteFiles: () => void;
+  onUploadLocal: (file: File, path: string) => Promise<void>;
+  onOpenRemoteFile: (path: string) => void;
 }
 
 export function ChatView({
@@ -17,8 +24,15 @@ export function ChatView({
   messages,
   busy,
   draft,
+  wide,
+  attachments,
   onDraftChange,
   onSend,
+  onToggleWide,
+  onRemoveAttachment,
+  onOpenRemoteFiles,
+  onUploadLocal,
+  onOpenRemoteFile,
 }: Props) {
   return (
     <main className="flex h-full min-w-0 flex-1 flex-col bg-background">
@@ -30,10 +44,21 @@ export function ChatView({
       </header>
 
       <div className="min-h-0 flex-1">
-        <Conversation messages={messages} busy={busy} />
+        <Conversation messages={messages} busy={busy} wide={wide} onOpenRemoteFile={onOpenRemoteFile} />
       </div>
 
-      <Composer disabled={busy} draft={draft} onDraftChange={onDraftChange} onSend={onSend} />
+      <Composer
+        disabled={busy}
+        draft={draft}
+        wide={wide}
+        attachments={attachments}
+        onDraftChange={onDraftChange}
+        onSend={onSend}
+        onToggleWide={onToggleWide}
+        onRemoveAttachment={onRemoveAttachment}
+        onOpenRemoteFiles={onOpenRemoteFiles}
+        onUploadLocal={onUploadLocal}
+      />
     </main>
   );
 }

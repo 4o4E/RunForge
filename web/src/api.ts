@@ -29,6 +29,30 @@ export interface RunWithEvents {
   events: AgentEvent[];
 }
 
+export interface RemoteFileEntry {
+  name: string;
+  path: string;
+  type: 'dir' | 'file';
+  size: number;
+  updatedAt: string;
+}
+
+export interface RemoteFileList {
+  path: string;
+  parent: string | null;
+  entries: RemoteFileEntry[];
+}
+
+export interface FilePreview {
+  path: string;
+  size: number;
+  mode: 'full' | 'chunk';
+  startLine: number;
+  lines: string[];
+  nextLine: number | null;
+  hasMore: boolean;
+}
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json() as Promise<T>;
@@ -50,6 +74,19 @@ export const deleteThread = (id: string) =>
   fetch(`/api/threads/${id}`, { method: 'DELETE' }).then((res) => {
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   });
+
+export const listRemoteFiles = (path = '.') =>
+  fetch(`/api/files/list?path=${encodeURIComponent(path)}`).then(json<RemoteFileList>);
+
+export const previewRemoteFile = (path: string, startLine = 1, limit = 200) =>
+  fetch(`/api/files/preview?path=${encodeURIComponent(path)}&startLine=${startLine}&limit=${limit}`).then(json<FilePreview>);
+
+export const uploadLocalFile = (path: string, contentBase64: string) =>
+  fetch('/api/files/upload', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path, contentBase64 }),
+  }).then(json<{ path: string; size: number }>);
 
 export const startRun = (threadId: string, input: string) =>
   fetch(`/api/threads/${threadId}/runs`, {

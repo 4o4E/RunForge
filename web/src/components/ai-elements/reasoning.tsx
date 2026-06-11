@@ -136,7 +136,7 @@ export const Reasoning = memo(
     return (
       <ReasoningContext.Provider value={contextValue}>
         <Collapsible
-          className={cn("not-prose mb-2", className)}
+          className={cn("not-prose mb-2 w-fit max-w-full", className)}
           onOpenChange={handleOpenChange}
           open={isOpen}
           {...props}
@@ -159,9 +159,9 @@ const defaultGetThinkingMessage = (isStreaming: boolean, duration?: number) => {
     return <Shimmer duration={1}>正在思考...</Shimmer>;
   }
   if (duration === undefined) {
-    return <p>思考耗时数秒</p>;
+    return <span>思考耗时数秒</span>;
   }
-  return <p>思考耗时 {duration} 秒</p>;
+  return <span>思考耗时 {duration} 秒</span>;
 };
 
 export const ReasoningTrigger = memo(
@@ -176,7 +176,7 @@ export const ReasoningTrigger = memo(
     return (
       <CollapsibleTrigger
         className={cn(
-          "flex w-full items-center gap-2 text-muted-foreground text-sm transition-colors hover:text-foreground",
+          "inline-flex max-w-full items-center gap-2 text-muted-foreground text-sm transition-colors hover:text-foreground",
           className
         )}
         {...props}
@@ -184,7 +184,7 @@ export const ReasoningTrigger = memo(
         {children ?? (
           <>
             <BrainIcon className="size-4" />
-            {getThinkingMessage(isStreaming, duration)}
+            <span className="min-w-0 truncate">{getThinkingMessage(isStreaming, duration)}</span>
             <ChevronDownIcon
               className={cn(
                 "size-4 transition-transform",

@@ -1,5 +1,5 @@
 import type { UIMessage } from 'ai';
-import { Bot, ChevronDown, Copy, Fingerprint, Workflow } from 'lucide-react';
+import { Bot, ChevronDown, Copy, Fingerprint, FileText, Workflow } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import {
   Conversation as AIConversation,
@@ -20,6 +20,8 @@ import { cn } from '@/lib/utils';
 type Part = UIMessage['parts'][number];
 type Timing = { startedAt?: string; endedAt?: string; durationMs?: number };
 type ActivityEntry = { part: Part; index: number };
+
+const PATH_RE = /(?:\/[A-Za-z0-9._~+/@:-]+|(?:\.{1,2}\/)?(?:server|web|docs|src|uploads|tests)\/[A-Za-z0-9._~+/@:-]+)/g;
 
 function isToolPart(p: Part): boolean {
   return p.type === 'dynamic-tool' || p.type.startsWith('tool-');
@@ -101,6 +103,40 @@ function timingForPart(part: Part, maps: ReturnType<typeof buildTimingMaps>): Ti
   return undefined;
 }
 
+function detectedPaths(text: string): string[] {
+  const found = new Set<string>();
+  for (const match of text.matchAll(PATH_RE)) {
+    const path = match[0].replace(/[),.;\]]+$/, '');
+    if (!path.includes('://')) found.add(path);
+  }
+  return [...found].slice(0, 12);
+}
+
+function PathAwareResponse({ text, onOpenRemoteFile }: { text: string; onOpenRemoteFile: (path: string) => void }) {
+  const paths = detectedPaths(text);
+  return (
+    <div className="space-y-2">
+      <MessageResponse>{text}</MessageResponse>
+      {paths.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {paths.map((path) => (
+            <button
+              key={path}
+              type="button"
+              onClick={() => onOpenRemoteFile(path)}
+              className="inline-flex max-w-full items-center gap-1 rounded-md border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+              title={path}
+            >
+              <FileText className="size-3" />
+              <span className="truncate">{path}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // `active` marks the most recent tool call. It stays expanded; as soon as a newer
 // tool call appears the previous one auto-collapses. The user can still toggle any
 // block manually (override), and the override is cleared when `active` flips so the
@@ -142,12 +178,14 @@ function AssistantPart({
   part,
   toolActive,
   timingMaps,
+  onOpenRemoteFile,
 }: {
   part: Part;
   toolActive: boolean;
   timingMaps: ReturnType<typeof buildTimingMaps>;
+  onOpenRemoteFile: (path: string) => void;
 }) {
-  if (part.type === 'text') return part.text ? <MessageResponse>{part.text}</MessageResponse> : null;
+  if (part.type === 'text') return part.text ? <PathAwareResponse text={part.text} onOpenRemoteFile={onOpenRemoteFile} /> : null;
   if (part.type === 'reasoning') {
     const duration = durationFromTiming(timingForPart(part, timingMaps));
     return part.text ? (
@@ -170,12 +208,14 @@ function ActivityGroup({
   lastToolKey,
   messageId,
   timingMaps,
+  onOpenRemoteFile,
 }: {
   entries: ActivityEntry[];
   active: boolean;
   lastToolKey: string | null;
   messageId: string;
   timingMaps: ReturnType<typeof buildTimingMaps>;
+  onOpenRemoteFile: (path: string) => void;
 }) {
   const [override, setOverride] = useState<boolean | null>(null);
   const prevActive = useRef(active);
@@ -195,13 +235,14 @@ function ActivityGroup({
         {totalMs !== undefined && <span className="shrink-0 text-xs font-normal">{formatDuration(totalMs)}</span>}
         <ChevronDown className={cn('size-4 shrink-0 transition-transform', open && 'rotate-180')} />
       </CollapsibleTrigger>
-      <CollapsibleContent className="mt-2 space-y-1">
+      <CollapsibleContent className="mt-2 flex w-full min-w-0 flex-col gap-1">
         {entries.map(({ part, index }) => (
           <AssistantPart
             key={index}
             part={part}
             toolActive={`${messageId}:${index}` === lastToolKey}
             timingMaps={timingMaps}
+            onOpenRemoteFile={onOpenRemoteFile}
           />
         ))}
       </CollapsibleContent>
@@ -227,29 +268,42 @@ function runIdForUser(messages: UIMessage[], index: number): string | null {
   return fromId || runIdFromAssistant(messages[index + 1]);
 }
 
-function UserMessage({ message, runId }: { message: UIMessage; runId: string | null }) {
+function copyToClipboard(value: string) {
+  void navigator.clipboard.writeText(value);
+}
+
+function UserMessageText({ message }: { message: UIMessage }) {
+  return <div className="whitespace-pre-wrap">{userText(message)}</div>;
+}
+
+function UserMessageActions({ message, runId }: { message: UIMessage; runId: string | null }) {
   const text = userText(message);
-  const copy = (value: string) => {
-    void navigator.clipboard.writeText(value);
-  };
   return (
-    <>
-      <div className="whitespace-pre-wrap">{text}</div>
-      <MessageActions className="justify-end pt-1 opacity-70 transition-opacity group-hover:opacity-100">
-        <MessageAction tooltip="复制消息文本" label="复制消息文本" onClick={() => copy(text)}>
-          <Copy className="size-3.5" />
-        </MessageAction>
-        <MessageAction tooltip={runId ? '复制 run id' : '暂无 run id'} label="复制 run id" disabled={!runId} onClick={() => runId && copy(runId)}>
-          <Fingerprint className="size-3.5" />
-        </MessageAction>
-      </MessageActions>
-    </>
+    <MessageActions className="ml-auto justify-end pr-1 opacity-70 transition-opacity group-hover:opacity-100">
+      <MessageAction tooltip="复制消息文本" label="复制消息文本" onClick={() => copyToClipboard(text)}>
+        <Copy className="size-3.5" />
+      </MessageAction>
+      <MessageAction tooltip={runId ? '复制 run id' : '暂无 run id'} label="复制 run id" disabled={!runId} onClick={() => runId && copyToClipboard(runId)}>
+        <Fingerprint className="size-3.5" />
+      </MessageAction>
+    </MessageActions>
   );
 }
 
-function AssistantMessage({ message, lastToolKey, lastActivityKey }: { message: UIMessage; lastToolKey: string | null; lastActivityKey: string | null }) {
+function AssistantMessage({
+  message,
+  lastToolKey,
+  lastActivityKey,
+  onOpenRemoteFile,
+}: {
+  message: UIMessage;
+  lastToolKey: string | null;
+  lastActivityKey: string | null;
+  onOpenRemoteFile: (path: string) => void;
+}) {
   const timingMaps = buildTimingMaps(message.parts);
   const nodes: JSX.Element[] = [];
+  const a2uiParts: Array<{ part: Part; index: number }> = [];
   let group: { entries: ActivityEntry[]; start: number } | null = null;
   const flushGroup = () => {
     if (!group) return;
@@ -262,6 +316,7 @@ function AssistantMessage({ message, lastToolKey, lastActivityKey }: { message: 
         lastToolKey={lastToolKey}
         messageId={message.id}
         timingMaps={timingMaps}
+        onOpenRemoteFile={onOpenRemoteFile}
       />,
     );
     group = null;
@@ -269,6 +324,10 @@ function AssistantMessage({ message, lastToolKey, lastActivityKey }: { message: 
 
   message.parts.forEach((part, i) => {
     if (isHiddenDataPart(part)) return;
+    if (part.type === 'data-a2ui') {
+      a2uiParts.push({ part, index: i });
+      return;
+    }
     if (isActivityPart(part)) {
       group ??= { entries: [], start: i };
       group.entries.push({ part, index: i });
@@ -281,32 +340,56 @@ function AssistantMessage({ message, lastToolKey, lastActivityKey }: { message: 
         part={part}
         toolActive={`${message.id}:${i}` === lastToolKey}
         timingMaps={timingMaps}
+        onOpenRemoteFile={onOpenRemoteFile}
       />,
     );
   });
   flushGroup();
+  for (const { part, index } of a2uiParts) {
+    nodes.push(
+      <AssistantPart
+        key={`a2ui-${index}`}
+        part={part}
+        toolActive={false}
+        timingMaps={timingMaps}
+        onOpenRemoteFile={onOpenRemoteFile}
+      />,
+    );
+  }
   return <>{nodes}</>;
 }
 
-export function Conversation({ messages, busy }: { messages: UIMessage[]; busy: boolean }) {
+export function Conversation({
+  messages,
+  busy,
+  wide,
+  onOpenRemoteFile,
+}: {
+  messages: UIMessage[];
+  busy: boolean;
+  wide: boolean;
+  onOpenRemoteFile: (path: string) => void;
+}) {
   const contentRef = useRef<HTMLDivElement>(null);
 
   // Key (msgId:partIndex) of the last tool call across the whole conversation —
   // only that one stays expanded; everything before it collapses.
   let lastToolKey: string | null = null;
   let lastActivityKey: string | null = null;
-  for (const m of messages) {
-    if (m.role === 'user') continue;
-    m.parts.forEach((part, i) => {
-      if (isToolPart(part)) lastToolKey = `${m.id}:${i}`;
-      if (isActivityPart(part)) lastActivityKey = `${m.id}:${i}`;
-    });
+  if (busy) {
+    for (const m of messages) {
+      if (m.role === 'user') continue;
+      m.parts.forEach((part, i) => {
+        if (isToolPart(part)) lastToolKey = `${m.id}:${i}`;
+        if (isActivityPart(part)) lastActivityKey = `${m.id}:${i}`;
+      });
+    }
   }
 
   return (
     <div className="relative flex h-full min-h-0">
       <AIConversation className="h-full flex-1">
-        <ConversationContent className="mx-auto max-w-3xl">
+        <ConversationContent className={cn('mx-auto', wide ? 'max-w-5xl' : 'max-w-3xl')}>
           <div ref={contentRef} className="flex flex-col gap-8">
             {messages.length === 0 ? (
               <ConversationEmptyState
@@ -317,13 +400,18 @@ export function Conversation({ messages, busy }: { messages: UIMessage[]; busy: 
             ) : (
               messages.map((m, index) => (
                 <Message from={m.role} key={m.id}>
-                  <MessageContent>
-                    {m.role === 'user' ? (
-                      <UserMessage message={m} runId={runIdForUser(messages, index)} />
-                    ) : (
-                      <AssistantMessage message={m} lastToolKey={lastToolKey} lastActivityKey={lastActivityKey} />
-                    )}
-                  </MessageContent>
+                  {m.role === 'user' ? (
+                    <>
+                      <MessageContent>
+                        <UserMessageText message={m} />
+                      </MessageContent>
+                      <UserMessageActions message={m} runId={runIdForUser(messages, index)} />
+                    </>
+                  ) : (
+                    <MessageContent>
+                      <AssistantMessage message={m} lastToolKey={lastToolKey} lastActivityKey={lastActivityKey} onOpenRemoteFile={onOpenRemoteFile} />
+                    </MessageContent>
+                  )}
                 </Message>
               ))
             )}

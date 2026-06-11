@@ -30,5 +30,5 @@ export function A2uiSurface({ message }: { message: A2uiMessage }) {
     return ctx.render(message.root, 0);
   }, [message]);
 
-  return <div className="a2ui-surface w-full max-w-[85%] space-y-2">{content}</div>;
+  return <div className="a2ui-surface w-full space-y-2">{content}</div>;
 }

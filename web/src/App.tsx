@@ -1,17 +1,69 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useChat } from '@ai-sdk/react';
-import { deleteThread, getThread, listThreads, type Thread } from './api';
+import { deleteThread, getThread, listThreads, uploadLocalFile, type Thread } from './api';
 import { createAiSdkChatTransport, type ChatThreadHandle } from './transport/aiSdkChat';
 import { runsToUiMessages } from './history';
 import { Sidebar } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
+import { RemoteFilesPanel } from './components/RemoteFilesPanel';
+import type { ComposerAttachment } from './components/Composer';
 import { buildChatPath, currentBrowserPath, readChatRoute, type ChatRoute } from './router';
 import { useThemeCtx } from './theme';
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error('failed to read file'));
+    reader.onload = () => {
+      const value = String(reader.result ?? '');
+      resolve(value.includes(',') ? value.split(',')[1] : value);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function beginHorizontalResize(
+  event: ReactPointerEvent,
+  options: { width: number; min: number; max: number; direction: 1 | -1; onChange: (width: number) => void },
+) {
+  event.preventDefault();
+  const startX = event.clientX;
+  const startWidth = options.width;
+  const previousCursor = document.body.style.cursor;
+  const previousUserSelect = document.body.style.userSelect;
+  document.body.style.cursor = 'col-resize';
+  document.body.style.userSelect = 'none';
+
+  const onMove = (moveEvent: PointerEvent) => {
+    const delta = (moveEvent.clientX - startX) * options.direction;
+    options.onChange(clamp(startWidth + delta, options.min, options.max));
+  };
+  const onUp = () => {
+    document.body.style.cursor = previousCursor;
+    document.body.style.userSelect = previousUserSelect;
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+  };
+
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp, { once: true });
+}
 
 export function App() {
   const [threads, setThreads] = useState<Thread[]>([]);
   const [route, setRoute] = useState<ChatRoute>(() => readChatRoute());
   const [draft, setDraft] = useState(route.draft);
+  const [wide, setWide] = useState(false);
+  const [rightPanelOpen, setRightPanelOpen] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(256);
+  const [filesPanelWidth, setFilesPanelWidth] = useState(720);
+  const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const { theme, toggle: toggleTheme } = useThemeCtx();
   const activeThreadId = route.threadId;
 
@@ -128,8 +180,30 @@ export function App() {
   }
 
   function send(text: string) {
+    const finalText = attachments.length
+      ? `${text}\n\n附件 / Attachments:\n${attachments.map((a) => `- ${a.kind === 'local' ? '本地上传' : '远程文件'}: ${a.path}`).join('\n')}`
+      : text;
     navigateChatRoute({ draft: '', threadId: activeThreadId }, 'replace');
-    void sendMessage({ text });
+    setAttachments([]);
+    void sendMessage({ text: finalText });
+  }
+
+  function addAttachment(next: ComposerAttachment) {
+    setAttachments((current) => {
+      if (current.some((a) => a.path === next.path)) return current;
+      return [...current, next];
+    });
+  }
+
+  async function uploadLocalAttachment(file: File, path: string) {
+    const contentBase64 = await fileToBase64(file);
+    const uploaded = await uploadLocalFile(path, contentBase64);
+    addAttachment({ kind: 'local', path: uploaded.path, name: file.name, size: uploaded.size });
+  }
+
+  function openRemoteFile(path: string) {
+    setPreviewPath(path);
+    setRightPanelOpen(true);
   }
 
   const activeThread = threads.find((t) => t.id === activeThreadId);
@@ -140,19 +214,67 @@ export function App() {
       <Sidebar
         threads={threads}
         activeId={activeThreadId}
+        width={sidebarWidth}
         theme={theme}
         onToggleTheme={toggleTheme}
         onNew={newChat}
         onSelect={selectThread}
         onDelete={(id) => void removeThread(id)}
       />
+      <div
+        role="separator"
+        aria-label="调整会话列表宽度"
+        className="h-full w-1 shrink-0 cursor-col-resize bg-border/40 transition-colors hover:bg-primary/60"
+        onPointerDown={(event) =>
+          beginHorizontalResize(event, {
+            width: sidebarWidth,
+            min: 200,
+            max: 420,
+            direction: 1,
+            onChange: setSidebarWidth,
+          })
+        }
+      />
       <ChatView
         title={title}
         messages={messages}
         busy={busy}
         draft={draft}
+        wide={wide}
+        attachments={attachments}
         onDraftChange={changeDraft}
         onSend={send}
+        onToggleWide={() => setWide((v) => !v)}
+        onRemoveAttachment={(path) => setAttachments((current) => current.filter((a) => a.path !== path))}
+        onOpenRemoteFiles={() => {
+          setPreviewPath(null);
+          setRightPanelOpen(true);
+        }}
+        onUploadLocal={uploadLocalAttachment}
+        onOpenRemoteFile={openRemoteFile}
+      />
+      {rightPanelOpen && (
+        <div
+          role="separator"
+          aria-label="调整文件区域宽度"
+          className="h-full w-1 shrink-0 cursor-col-resize bg-border/40 transition-colors hover:bg-primary/60"
+          onPointerDown={(event) =>
+            beginHorizontalResize(event, {
+              width: filesPanelWidth,
+              min: 460,
+              max: Math.max(520, window.innerWidth - sidebarWidth - 360),
+              direction: -1,
+              onChange: setFilesPanelWidth,
+            })
+          }
+        />
+      )}
+      <RemoteFilesPanel
+        open={rightPanelOpen}
+        width={filesPanelWidth}
+        previewPath={previewPath}
+        onClose={() => setRightPanelOpen(false)}
+        onAttach={addAttachment}
       />
     </div>
   );

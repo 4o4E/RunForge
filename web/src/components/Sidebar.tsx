@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils';
 interface Props {
   threads: Thread[];
   activeId: string | null;
+  width: number;
   theme: Theme;
   onToggleTheme: () => void;
   onNew: () => void;
@@ -20,9 +21,9 @@ function threadLabel(t: Thread): string {
   return `会话 ${t.id.slice(0, 8)}`;
 }
 
-export function Sidebar({ threads, activeId, theme, onToggleTheme, onNew, onSelect, onDelete }: Props) {
+export function Sidebar({ threads, activeId, width, theme, onToggleTheme, onNew, onSelect, onDelete }: Props) {
   return (
-    <aside className="flex h-full w-64 shrink-0 flex-col border-r bg-card">
+    <aside className="flex h-full shrink-0 flex-col bg-card" style={{ width }}>
       <div className="flex items-center gap-2 px-4 py-4">
         <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
           <Bot className="h-4 w-4" />

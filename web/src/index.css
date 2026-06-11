@@ -55,6 +55,8 @@
   --input: 214.3 31.8% 91.4%;
   --ring: 181 100% 39%;
   --radius: 0.5rem;
+  --scrollbar-thumb: 214.3 31.8% 78%;
+  --scrollbar-thumb-hover: 215.4 16.3% 58%;
 }
 
 .dark {
@@ -77,6 +79,8 @@
   --border: 217.2 32.6% 17.5%;
   --input: 217.2 32.6% 17.5%;
   --ring: 181 100% 41%;
+  --scrollbar-thumb: 217.2 32.6% 28%;
+  --scrollbar-thumb-hover: 215 20.2% 50%;
 }
 
 @layer base {
@@ -95,19 +99,39 @@
   body {
     @apply bg-background text-foreground font-sans antialiased;
   }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--scrollbar-thumb)) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--scrollbar-thumb));
+    border: 3px solid transparent;
+    border-radius: 9999px;
+    background-clip: content-box;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(var(--scrollbar-thumb-hover));
+  }
 }
 
 @layer utilities {
   .scrollbar-thin {
     scrollbar-width: thin;
-    scrollbar-color: theme('colors.surface.500') transparent;
+    scrollbar-color: hsl(var(--scrollbar-thumb)) transparent;
   }
   .scrollbar-thin::-webkit-scrollbar {
     width: 8px;
     height: 8px;
   }
   .scrollbar-thin::-webkit-scrollbar-thumb {
-    background: theme('colors.surface.500');
+    background-color: hsl(var(--scrollbar-thumb));
     border-radius: 9999px;
   }
 }

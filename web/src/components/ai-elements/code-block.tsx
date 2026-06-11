@@ -9,7 +9,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { CheckIcon, CopyIcon } from "lucide-react";
+import { AlignLeftIcon, CheckIcon, CopyIcon, MapIcon } from "lucide-react";
 import type { ComponentProps, CSSProperties, HTMLAttributes } from "react";
 import {
   createContext,
@@ -112,6 +112,9 @@ type CodeBlockProps = HTMLAttributes<HTMLDivElement> & {
   code: string;
   language: BundledLanguage;
   showLineNumbers?: boolean;
+  showGlance?: boolean;
+  showWrapToggle?: boolean;
+  defaultWrap?: boolean;
 };
 
 interface TokenizedCode {
@@ -249,10 +252,12 @@ const CodeBlockBody = memo(
   ({
     tokenized,
     showLineNumbers,
+    wrap,
     className,
   }: {
     tokenized: TokenizedCode;
     showLineNumbers: boolean;
+    wrap: boolean;
     className?: string;
   }) => {
     const preStyle = useMemo(
@@ -272,6 +277,7 @@ const CodeBlockBody = memo(
       <pre
         className={cn(
           "dark:!bg-[var(--shiki-dark-bg)] dark:!text-[var(--shiki-dark)] m-0 p-4 text-sm",
+          wrap ? "whitespace-pre-wrap break-words" : "whitespace-pre",
           className
         )}
         style={preStyle}
@@ -296,6 +302,7 @@ const CodeBlockBody = memo(
   (prevProps, nextProps) =>
     prevProps.tokenized === nextProps.tokenized &&
     prevProps.showLineNumbers === nextProps.showLineNumbers &&
+    prevProps.wrap === nextProps.wrap &&
     prevProps.className === nextProps.className
 );
 
@@ -375,10 +382,14 @@ export const CodeBlockContent = ({
   code,
   language,
   showLineNumbers = false,
+  showGlance = false,
+  wrap = false,
 }: {
   code: string;
   language: BundledLanguage;
   showLineNumbers?: boolean;
+  showGlance?: boolean;
+  wrap?: boolean;
 }) => {
   // Memoized raw tokens for immediate display
   const rawTokens = useMemo(() => createRawTokens(code), [code]);
@@ -419,30 +430,90 @@ export const CodeBlockContent = ({
   const tokenized = asyncTokens ?? syncTokens;
 
   return (
-    <div className="relative overflow-auto">
-      <CodeBlockBody showLineNumbers={showLineNumbers} tokenized={tokenized} />
+    <div className="relative flex min-w-0 overflow-hidden">
+      <div className="scrollbar-thin min-w-0 flex-1 overflow-auto">
+        <CodeBlockBody showLineNumbers={showLineNumbers} tokenized={tokenized} wrap={wrap} />
+      </div>
+      {showGlance && <CodeBlockGlance tokenized={tokenized} />}
     </div>
   );
 };
+
+function CodeBlockGlance({ tokenized }: { tokenized: TokenizedCode }) {
+  const keyedLines = useMemo(() => addKeysToTokens(tokenized.tokens), [tokenized.tokens]);
+
+  return (
+    <div className="hidden w-12 shrink-0 border-l bg-muted/30 px-1 py-2 sm:block" aria-hidden="true">
+      <div className="space-y-[2px]">
+        {keyedLines.slice(0, 220).map((line) => {
+          const first = line.tokens.find(({ token }) => token.content.trim().length > 0)?.token;
+          return (
+            <div
+              key={line.key}
+              className="h-[2px] rounded-full bg-muted-foreground/25"
+              style={first?.color ? { backgroundColor: first.color } : undefined}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 export const CodeBlock = ({
   code,
   language,
   showLineNumbers = false,
+  showGlance = false,
+  showWrapToggle = false,
+  defaultWrap = false,
   className,
   children,
   ...props
 }: CodeBlockProps) => {
   const contextValue = useMemo(() => ({ code }), [code]);
+  const [wrap, setWrap] = useState(defaultWrap);
+  const showDefaultHeader = showGlance || showWrapToggle;
 
   return (
     <CodeBlockContext.Provider value={contextValue}>
       <CodeBlockContainer className={className} language={language} {...props}>
         {children}
+        {showDefaultHeader && (
+          <CodeBlockHeader>
+            <CodeBlockTitle>
+              <CodeBlockFilename>{language}</CodeBlockFilename>
+            </CodeBlockTitle>
+            <CodeBlockActions>
+              {showGlance && (
+                <span className="inline-flex items-center gap-1 text-muted-foreground">
+                  <MapIcon className="size-3.5" />
+                  缩略图
+                </span>
+              )}
+              {showWrapToggle && (
+                <Button
+                  type="button"
+                  variant={wrap ? "secondary" : "ghost"}
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  onClick={() => setWrap((value) => !value)}
+                  title={wrap ? "关闭自动换行" : "开启自动换行"}
+                >
+                  <AlignLeftIcon className="size-3.5" />
+                  {wrap ? "换行" : "不换行"}
+                </Button>
+              )}
+              <CodeBlockCopyButton className="size-7" />
+            </CodeBlockActions>
+          </CodeBlockHeader>
+        )}
         <CodeBlockContent
           code={code}
           language={language}
           showLineNumbers={showLineNumbers}
+          showGlance={showGlance}
+          wrap={wrap}
         />
       </CodeBlockContainer>
     </CodeBlockContext.Provider>
