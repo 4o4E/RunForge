@@ -74,6 +74,18 @@ test('buildBwrapArgs can explicitly share network namespace', () => {
 
   assert.ok(args.includes('--share-net'));
   assert.ok(args.includes('/etc/resolv.conf'));
+  assert.ok(args.includes('/etc/ssl/certs') || args.includes('/usr/share/ca-certificates'));
+});
+
+test('buildBwrapArgs mounts git templates when git is allowed', () => {
+  const args = buildBwrapArgs({
+    workspaceRoot: resolve('/workspace/app'),
+    command: 'git init repo',
+    allowCommands: ['git'],
+    shareNet: false,
+  });
+
+  assert.equal(args.includes('/usr/share/git-core'), true);
 });
 
 test('describeShellSandbox reports effective shell mode', () => {
@@ -95,6 +107,6 @@ test('describeShellSandbox reports effective shell mode', () => {
       allowCommands: [],
       shareNet: false,
     }),
-    'bwrap, net: isolated',
+    'bwrap, net: disabled',
   );
 });

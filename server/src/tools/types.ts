@@ -1,5 +1,6 @@
 import type { LlmTool } from '../llm/types.js';
 import type { A2uiDisplay } from '../agent/a2ui.js';
+import type { ToolSettings } from '../settings.js';
 
 /** Structured tool result (refactor-plan §4): text for the LLM, plus an optional
  *  declarative display (A2UI) surfaced to the UI. */
@@ -17,7 +18,7 @@ export interface Tool {
    * Execute the tool with parsed args. Return a plain string (text for the LLM)
    * or a `ToolResult` to additionally emit a declarative UI surface.
    */
-  run(args: Record<string, unknown>): Promise<string | ToolResult>;
+  run(args: Record<string, unknown>, ctx?: { settings: ToolSettings }): Promise<string | ToolResult>;
 }
 
 export function toLlmTool(tool: Tool): LlmTool {

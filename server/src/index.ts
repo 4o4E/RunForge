@@ -12,6 +12,7 @@ import { config } from './config.js';
 import { api } from './api/http.js';
 import { attachWebSocket } from './api/ws.js';
 import { describeShellSandbox } from './tools/sandbox.js';
+import { getToolSettings } from './settings.js';
 
 const app = express();
 app.use(cors());
@@ -28,16 +29,18 @@ const displayHost = config.host.includes(':') ? `[${config.host}]` : config.host
 server.listen(config.port, config.host, () => {
   console.log(`🚀 my-agent server listening on http://${displayHost}:${config.port}`);
   console.log(`   WebSocket: ws://${displayHost}:${config.port}/ws?runId=<id>`);
-  console.log(
-    `   Tool sandbox: ${config.tools.sandbox}` +
-      (config.tools.sandbox === 'enforce'
-        ? ` (workspace: ${config.tools.workspaceRoot}, shell: ${describeShellSandbox({
-            policyMode: config.tools.sandbox,
-            backend: config.tools.sandboxBackend,
-            workspaceRoot: config.tools.workspaceRoot,
-            allowCommands: config.tools.shellAllowCommands,
-            shareNet: config.tools.shellShareNet,
-          })})`
-        : ''),
-  );
+  void getToolSettings().then((settings) => {
+    console.log(
+      `   Tool sandbox: ${settings.sandbox}` +
+        (settings.sandbox === 'enforce'
+          ? ` (workspace: ${settings.workspaceRoot}, shell: ${describeShellSandbox({
+              policyMode: settings.sandbox,
+              backend: settings.sandboxBackend,
+              workspaceRoot: settings.workspaceRoot,
+              allowCommands: settings.shellAllowCommands,
+              shareNet: settings.network === 'enabled',
+            })})`
+          : ''),
+    );
+  });
 });

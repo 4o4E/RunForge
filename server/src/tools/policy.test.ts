@@ -13,8 +13,7 @@ function cfg(over: Partial<ToolPolicyConfig> = {}): ToolPolicyConfig {
     deny: [],
     shellEnabled: true,
     shellDeny: ['rm\\s+-rf\\s+/'],
-    webEnabled: true,
-    webAllowHosts: [],
+    network: 'enabled',
     maxOutput: 50,
     ...over,
   };
@@ -60,12 +59,12 @@ test('enforce: shell denylist and disable', () => {
   assert.equal(createPolicy(cfg({ shellEnabled: false })).check('shell', { command: 'ls' }).ok, false);
 });
 
-test('enforce: web host allowlist', () => {
-  const p = createPolicy(cfg({ webAllowHosts: ['example.com'] }));
-  assert.equal(p.check('web_fetch', { url: 'https://example.com/x' }).ok, true);
-  assert.equal(p.check('web_fetch', { url: 'https://api.example.com/x' }).ok, true); // subdomain
-  assert.equal(p.check('web_fetch', { url: 'https://evil.test/x' }).ok, false);
-  assert.equal(createPolicy(cfg({ webEnabled: false })).check('web_search', { query: 'x' }).ok, false);
+test('enforce: network switch gates web tools', () => {
+  assert.equal(createPolicy(cfg({ network: 'enabled' })).check('web_fetch', { url: 'https://example.com/x' }).ok, true);
+  assert.equal(createPolicy(cfg({ network: 'enabled' })).check('web_search', { query: 'x' }).ok, true);
+  const blocked = createPolicy(cfg({ network: 'disabled' })).check('web_fetch', { url: 'https://example.com/x' });
+  assert.equal(blocked.ok, false);
+  assert.match((blocked as { reason: string }).reason, /network access is disabled/);
 });
 
 test('capOutput truncates oversized results', () => {

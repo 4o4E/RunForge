@@ -3,7 +3,7 @@ import { createReadStream } from 'node:fs';
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
-import { config } from '../config.js';
+import { getToolSettings } from '../settings.js';
 import { isWithin } from '../tools/policy.js';
 
 const SMALL_FILE_BYTES = 200 * 1024;
@@ -13,13 +13,13 @@ const MAX_PREVIEW_LINE_CHARS = 12_000;
 
 export const filesApi = Router();
 
-function workspaceRoot(): string {
-  return resolve(config.tools.workspaceRoot);
+function workspaceRoot(root: string): string {
+  return resolve(root);
 }
 
-function normalizeRemotePath(raw: unknown): string {
+function normalizeRemotePath(raw: unknown, configuredRoot: string): string {
   const input = String(raw ?? '.').trim() || '.';
-  const root = workspaceRoot();
+  const root = workspaceRoot(configuredRoot);
   const absolute = isAbsolute(input) ? resolve(input) : resolve(root, input);
   if (!isWithin(root, absolute)) {
     throw new Error(`path is outside workspace: ${input}`);
@@ -27,15 +27,15 @@ function normalizeRemotePath(raw: unknown): string {
   return absolute;
 }
 
-function toRemotePath(abs: string): string {
-  const rel = relative(workspaceRoot(), abs);
+function toRemotePath(abs: string, configuredRoot: string): string {
+  const rel = relative(workspaceRoot(configuredRoot), abs);
   return rel ? rel.split('\\').join('/') : '.';
 }
 
-function parentRemotePath(abs: string): string | null {
-  const root = workspaceRoot();
+function parentRemotePath(abs: string, configuredRoot: string): string | null {
+  const root = workspaceRoot(configuredRoot);
   if (resolve(abs) === root) return null;
-  return toRemotePath(dirname(abs));
+  return toRemotePath(dirname(abs), configuredRoot);
 }
 
 function previewLine(line: string): string {
@@ -43,14 +43,16 @@ function previewLine(line: string): string {
   return `${line.slice(0, MAX_PREVIEW_LINE_CHARS)} ... [预览已截断 ${line.length - MAX_PREVIEW_LINE_CHARS} 个字符]`;
 }
 
-filesApi.get('/info', (_req, res) => {
-  const root = workspaceRoot();
-  res.json({ workspaceRoot: root, rootPath: toRemotePath(root) });
+filesApi.get('/info', async (_req, res) => {
+  const settings = await getToolSettings();
+  const root = workspaceRoot(settings.workspaceRoot);
+  res.json({ workspaceRoot: root, rootPath: toRemotePath(root, settings.workspaceRoot) });
 });
 
 filesApi.get('/list', async (req, res) => {
   try {
-    const dir = normalizeRemotePath(req.query.path);
+    const settings = await getToolSettings();
+    const dir = normalizeRemotePath(req.query.path, settings.workspaceRoot);
     const info = await stat(dir);
     if (!info.isDirectory()) return res.status(400).json({ error: 'path is not a directory' });
 
@@ -60,7 +62,7 @@ filesApi.get('/list', async (req, res) => {
         const s = await stat(abs);
         return {
           name,
-          path: toRemotePath(abs),
+          path: toRemotePath(abs, settings.workspaceRoot),
           type: s.isDirectory() ? 'dir' : 'file',
           size: s.size,
           updatedAt: s.mtime.toISOString(),
@@ -69,7 +71,7 @@ filesApi.get('/list', async (req, res) => {
     );
 
     entries.sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1));
-    res.json({ path: toRemotePath(dir), parent: parentRemotePath(dir), entries });
+    res.json({ path: toRemotePath(dir, settings.workspaceRoot), parent: parentRemotePath(dir, settings.workspaceRoot), entries });
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }
@@ -77,14 +79,15 @@ filesApi.get('/list', async (req, res) => {
 
 filesApi.post('/upload', async (req, res) => {
   try {
-    const targetPath = normalizeRemotePath(req.body?.path);
+    const settings = await getToolSettings();
+    const targetPath = normalizeRemotePath(req.body?.path, settings.workspaceRoot);
     const contentBase64 = String(req.body?.contentBase64 ?? '');
     if (!contentBase64) return res.status(400).json({ error: 'contentBase64 is required' });
 
     const content = Buffer.from(contentBase64, 'base64');
     await mkdir(dirname(targetPath), { recursive: true });
     await writeFile(targetPath, content);
-    res.status(201).json({ path: toRemotePath(targetPath), size: content.length });
+    res.status(201).json({ path: toRemotePath(targetPath, settings.workspaceRoot), size: content.length });
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }
@@ -92,7 +95,8 @@ filesApi.post('/upload', async (req, res) => {
 
 filesApi.get('/preview', async (req, res) => {
   try {
-    const file = normalizeRemotePath(req.query.path);
+    const settings = await getToolSettings();
+    const file = normalizeRemotePath(req.query.path, settings.workspaceRoot);
     const info = await stat(file);
     if (!info.isFile()) return res.status(400).json({ error: 'path is not a file' });
 
@@ -103,7 +107,7 @@ filesApi.get('/preview', async (req, res) => {
       const text = await readFile(file, 'utf8');
       const lines = text.split(/\r?\n/).map(previewLine);
       return res.json({
-        path: toRemotePath(file),
+        path: toRemotePath(file, settings.workspaceRoot),
         size: info.size,
         mode: 'full',
         startLine: 1,
@@ -129,7 +133,7 @@ filesApi.get('/preview', async (req, res) => {
     }
 
     res.json({
-      path: toRemotePath(file),
+      path: toRemotePath(file, settings.workspaceRoot),
       size: info.size,
       mode: 'chunk',
       startLine,

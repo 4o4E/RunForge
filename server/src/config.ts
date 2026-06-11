@@ -27,6 +27,12 @@ function sandboxBackend(v: string | undefined): 'auto' | 'none' | 'bwrap' {
   return v === 'none' || v === 'bwrap' ? v : 'auto';
 }
 
+function networkMode(v: string | undefined): 'enabled' | 'disabled' {
+  if (v === 'enabled' || v === 'on' || v === 'true') return 'enabled';
+  if (v === 'disabled' || v === 'off' || v === 'false') return 'disabled';
+  return 'disabled';
+}
+
 const DEFAULT_DATABASE_URL = 'postgres://postgres:postgres@localhost:5432/my_agent';
 const DEFAULT_SHELL_ALLOW_COMMANDS = [
   'cat',
@@ -88,7 +94,7 @@ export const config = {
   },
   // Tool sandbox / permission policy (Phase 6). The product is a general-purpose
   // OS agent, so confinement is OPT-IN: TOOL_SANDBOX=enforce turns on path
-  // confinement, shell/web gating and host allowlists. `deny`/`allow` lists and
+  // confinement, shell gating and the network switch. `deny`/`allow` lists and
   // the output cap apply in any mode. Default 'off' preserves current behavior.
   tools: {
     sandbox: ((process.env.TOOL_SANDBOX ?? 'off') === 'enforce' ? 'enforce' : 'off') as 'off' | 'enforce',
@@ -103,15 +109,13 @@ export const config = {
     shellAllowCommands: list(process.env.SHELL_ALLOW_COMMANDS).length
       ? list(process.env.SHELL_ALLOW_COMMANDS)
       : DEFAULT_SHELL_ALLOW_COMMANDS,
-    // 默认不共享宿主网络命名空间;需要 shell 访问网络时显式打开。
-    shellShareNet: (process.env.SHELL_SHARE_NET ?? 'false') === 'true',
+    // 网络总开关:enabled=不限制网络,disabled=阻断网络。
+    network: networkMode(process.env.TOOL_NETWORK),
     // Command patterns blocked in enforce mode (regex, case-insensitive).
     // Override via SHELL_DENY (comma/newline separated, so patterns may contain spaces).
     shellDeny: patterns(process.env.SHELL_DENY).length
       ? patterns(process.env.SHELL_DENY)
       : ['rm\\s+-rf\\s+/', 'mkfs', ':\\(\\)\\s*\\{', 'Format-Volume', 'Remove-Item.*-Recurse.*[CD]:\\\\'],
-    webEnabled: (process.env.WEB_ENABLED ?? 'true') !== 'false',
-    webAllowHosts: list(process.env.WEB_ALLOW_HOSTS), // if non-empty, ONLY these hosts
     // Hard cap on a single tool result (chars). Always applied — the L0 first line
     // of context defense, so one huge observation (a recursive dir listing, a big
     // file) can't blow up the window. Kept tight; capOutput keeps head + tail.

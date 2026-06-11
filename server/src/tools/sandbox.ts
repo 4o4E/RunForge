@@ -129,10 +129,15 @@ export function buildBwrapArgs(opts: BwrapOptions): string[] {
       ? ['/etc/ld.so.cache', '/etc/hosts', '/etc/resolv.conf', '/etc/nsswitch.conf']
       : ['/etc/ld.so.cache'],
   );
+  const extraReadOnlyPaths = existing([
+    ...(opts.shareNet ? ['/etc/ssl/certs', '/usr/share/ca-certificates'] : []),
+    ...(commands.some((cmd) => cmd.name === 'git') ? ['/usr/share/git-core'] : []),
+  ]);
   const pathDirs = unique(commands.map((cmd) => dirname(cmd.dest)));
   const mountDirs = unique([
     ...libDirs.flatMap(parentDirs),
     ...etcFiles.flatMap(parentDirs),
+    ...extraReadOnlyPaths.flatMap(parentDirs),
     ...bindFiles.flatMap((file) => parentDirs(file.dest)),
     ...parentDirs(workspaceRoot),
   ]);
@@ -145,6 +150,7 @@ export function buildBwrapArgs(opts: BwrapOptions): string[] {
   args.push('--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp');
   for (const dir of libDirs) args.push('--ro-bind', dir, dir);
   for (const file of etcFiles) args.push('--ro-bind', file, file);
+  for (const path of extraReadOnlyPaths) args.push('--ro-bind', path, path);
   for (const file of bindFiles) args.push('--ro-bind', file.source, file.dest);
 
   args.push('--bind', workspaceRoot, workspaceRoot);
@@ -213,5 +219,5 @@ export async function runShellCommand(command: string, timeout: number, cfg: She
 export function describeShellSandbox(cfg: ShellSandboxConfig): string {
   if (cfg.policyMode !== 'enforce') return 'host';
   if (cfg.backend === 'none') return 'host (backend: none)';
-  return `${cfg.backend}${cfg.shareNet ? ', net: shared' : ', net: isolated'}`;
+  return `${cfg.backend}${cfg.shareNet ? ', net: enabled' : ', net: disabled'}`;
 }

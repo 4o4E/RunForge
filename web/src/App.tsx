@@ -7,6 +7,7 @@ import { runsToUiMessages } from './history';
 import { Sidebar } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
 import { RemoteFilesPanel } from './components/RemoteFilesPanel';
+import { SettingsView } from './components/SettingsView';
 import type { ComposerAttachment } from './components/Composer';
 import { buildChatPath, currentBrowserPath, readChatRoute, type ChatRoute } from './router';
 import { useThemeCtx } from './theme';
@@ -67,6 +68,9 @@ function attachmentToken(att: ComposerAttachment): string {
 export function App() {
   const [threads, setThreads] = useState<Thread[]>([]);
   const [route, setRoute] = useState<ChatRoute>(() => readChatRoute());
+  const [activeView, setActiveView] = useState<'chat' | 'settings'>(() =>
+    window.location.pathname === '/settings' ? 'settings' : 'chat',
+  );
   const [draft, setDraft] = useState(route.draft);
   const [wide, setWide] = useState(false);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
@@ -89,9 +93,10 @@ export function App() {
   }, []);
   useEffect(refreshThreads, [refreshThreads]);
 
-  useEffect(() => {
+  const refreshWorkspaceRoot = useCallback(() => {
     getRemoteFileInfo().then((info) => setWorkspaceRoot(info.workspaceRoot)).catch(() => setWorkspaceRoot(null));
   }, []);
+  useEffect(refreshWorkspaceRoot, [refreshWorkspaceRoot]);
 
   const navigateChatRoute = useCallback((next: ChatRoute, mode: 'push' | 'replace' = 'push') => {
     const path = buildChatPath(next);
@@ -101,6 +106,12 @@ export function App() {
     }
     setRoute(next);
     setDraft(next.draft);
+    setActiveView('chat');
+  }, []);
+
+  const navigateSettings = useCallback(() => {
+    if (currentBrowserPath() !== '/settings') window.history.pushState(null, '', '/settings');
+    setActiveView('settings');
   }, []);
 
   const handle = useMemo<ChatThreadHandle>(
@@ -122,6 +133,10 @@ export function App() {
 
   useEffect(() => {
     const path = buildChatPath(route);
+    if (activeView === 'settings') {
+      if (currentBrowserPath() !== '/settings') window.history.replaceState(null, '', '/settings');
+      return;
+    }
     if (currentBrowserPath() !== path) window.history.replaceState(null, '', path);
     // 仅首屏规范化旧地址或根路径，后续导航由 navigateChatRoute 负责。
   }, []);
@@ -129,6 +144,7 @@ export function App() {
   useEffect(() => {
     const onPopState = () => {
       stop();
+      setActiveView(window.location.pathname === '/settings' ? 'settings' : 'chat');
       const next = readChatRoute();
       setRoute(next);
       setDraft(next.draft);
@@ -170,13 +186,21 @@ export function App() {
 
   function newChat() {
     stop();
+    setRightPanelOpen(false);
     navigateChatRoute({ draft: '', threadId: null });
     setMessages([]);
   }
 
   function selectThread(id: string) {
     stop();
+    setRightPanelOpen(false);
     navigateChatRoute({ draft: '', threadId: id });
+  }
+
+  function openSettings() {
+    stop();
+    setRightPanelOpen(false);
+    navigateSettings();
   }
 
   async function removeThread(id: string) {
@@ -229,10 +253,12 @@ export function App() {
       <Sidebar
         threads={threads}
         activeId={activeThreadId}
+        activeView={activeView}
         width={sidebarWidth}
         theme={theme}
         onToggleTheme={toggleTheme}
         onNew={newChat}
+        onSettings={openSettings}
         onSelect={selectThread}
         onDelete={(id) => void removeThread(id)}
       />
@@ -250,26 +276,30 @@ export function App() {
           })
         }
       />
-      <ChatView
-        title={title}
-        messages={messages}
-        busy={busy}
-        draft={draft}
-        wide={wide}
-        workspaceRoot={workspaceRoot}
-        attachments={attachments}
-        onDraftChange={changeDraft}
-        onSend={send}
-        onToggleWide={() => setWide((v) => !v)}
-        onRemoveAttachment={(path) => setAttachments((current) => current.filter((a) => a.path !== path))}
-        onOpenRemoteFiles={() => {
-          setPreviewPath(null);
-          setRightPanelOpen(true);
-        }}
-        onUploadLocal={uploadLocalAttachment}
-        onOpenRemoteFile={openRemoteFile}
-      />
-      {rightPanelOpen && (
+      {activeView === 'settings' ? (
+        <SettingsView onWorkspaceChanged={refreshWorkspaceRoot} />
+      ) : (
+        <ChatView
+          title={title}
+          messages={messages}
+          busy={busy}
+          draft={draft}
+          wide={wide}
+          workspaceRoot={workspaceRoot}
+          attachments={attachments}
+          onDraftChange={changeDraft}
+          onSend={send}
+          onToggleWide={() => setWide((v) => !v)}
+          onRemoveAttachment={(path) => setAttachments((current) => current.filter((a) => a.path !== path))}
+          onOpenRemoteFiles={() => {
+            setPreviewPath(null);
+            setRightPanelOpen(true);
+          }}
+          onUploadLocal={uploadLocalAttachment}
+          onOpenRemoteFile={openRemoteFile}
+        />
+      )}
+      {activeView === 'chat' && rightPanelOpen && (
         <div
           role="separator"
           aria-label="调整文件区域宽度"
@@ -286,7 +316,7 @@ export function App() {
         />
       )}
       <RemoteFilesPanel
-        open={rightPanelOpen}
+        open={activeView === 'chat' && rightPanelOpen}
         width={filesPanelWidth}
         previewPath={previewPath}
         onClose={() => setRightPanelOpen(false)}

@@ -22,11 +22,14 @@
    - 工作区用可写 bind mount 投射;
    - 动态库目录只读投射;
    - shell 与白名单命令逐个只读投射;
-   - 默认隔离网络,需要时再显式共享网络。
+   - 网络由 `TOOL_NETWORK` 总开关控制,默认隔离网络。
 3. `shell` 工具统一经后端执行;默认 `TOOL_SANDBOX=off` 仍直通宿主。
-4. 新增 `SHELL_ALLOW_COMMANDS` 和 `SHELL_SHARE_NET`:
+4. 新增 `SHELL_ALLOW_COMMANDS` 和 `TOOL_NETWORK`:
    - `SHELL_ALLOW_COMMANDS` 控制 bwrap 内可见的外部命令;
-   - `SHELL_SHARE_NET=false` 时不共享宿主网络命名空间。
+   - `TOOL_NETWORK=disabled` 时不共享宿主网络命名空间,web 工具也会被策略层拒绝;
+   - `TOOL_NETWORK=enabled` 时共享宿主网络,不做域名/IP 白名单。
+   - shell 工具提示中明确:沙箱内 `/tmp` 是单次命令临时目录,clone 或创建项目文件要放到
+     持久工作区。
 5. 补单测覆盖可执行文件解析、bwrap 参数生成、命令白名单解析和后端描述。
 
 ## 验收结果
@@ -47,4 +50,4 @@
 - 工作区内 `pwd && cat package.json` 可执行。
 - 工作区外文件不可见。
 - `SHELL_ALLOW_COMMANDS` 之外的外部命令返回 `command not found`。
-- 默认不共享网络;`SHELL_SHARE_NET=true` 时网络按预期恢复。
+- 默认不共享网络;`TOOL_NETWORK=enabled` 时网络按预期恢复。

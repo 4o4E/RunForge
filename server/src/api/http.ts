@@ -2,10 +2,12 @@ import { Router } from 'express';
 import { executeRun } from '../agent/executor.js';
 import { store } from '../store/index.js';
 import { filesApi } from './files.js';
+import { settingsApi } from './settings.js';
 
 export const api = Router();
 
 api.use('/files', filesApi);
+api.use('/settings', settingsApi);
 
 // --- Threads ---
 

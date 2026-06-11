@@ -6,14 +6,13 @@
 //   - output size cap            (honored in any mode)
 //   - filesystem path confinement (enforce mode)
 //   - shell enable + command denylist (enforce mode)
-//   - web enable + host allowlist (enforce mode)
+//   - network switch for web tools (enforce mode)
 //
 // Container-level isolation (E2B / microsandbox / Docker) is a complementary,
 // heavier follow-up; this layer is process-local, dependency-free and always on
 // the call path so it composes with whatever isolation is added later.
 
 import { isAbsolute, relative, resolve } from 'node:path';
-import { config } from '../config.js';
 
 export interface ToolPolicyConfig {
   sandbox: 'off' | 'enforce';
@@ -22,8 +21,7 @@ export interface ToolPolicyConfig {
   deny: string[];
   shellEnabled: boolean;
   shellDeny: string[];
-  webEnabled: boolean;
-  webAllowHosts: string[];
+  network: 'enabled' | 'disabled';
   maxOutput: number;
 }
 
@@ -35,8 +33,6 @@ interface ToolMeta {
   kind: ToolKind;
   /** Arg keys that carry a filesystem path to confine. */
   pathArgs?: string[];
-  /** Arg keys that carry a URL to gate by host. */
-  urlArgs?: string[];
 }
 
 // Per-tool security metadata. Unknown tools default to 'safe' (only allow/deny
@@ -48,7 +44,7 @@ const META: Record<string, ToolMeta> = {
   glob: { kind: 'fs-read', pathArgs: ['path'] },
   grep: { kind: 'fs-read', pathArgs: ['path'] },
   shell: { kind: 'exec' },
-  web_fetch: { kind: 'net', urlArgs: ['url'] },
+  web_fetch: { kind: 'net' },
   web_search: { kind: 'net' },
   ask_user: { kind: 'safe' },
   render_ui: { kind: 'safe' },
@@ -102,24 +98,9 @@ export function createPolicy(cfg: ToolPolicyConfig): ToolPolicy {
       }
     }
 
-    // 4) network gating + host allowlist.
+    // 4) 网络总开关。域名/IP 白名单不在这里假实现,当前只有全开或全断。
     if (meta.kind === 'net') {
-      if (!cfg.webEnabled) return { ok: false, reason: 'web access is disabled' };
-      if (cfg.webAllowHosts.length && meta.urlArgs) {
-        for (const key of meta.urlArgs) {
-          const raw = args[key];
-          if (raw == null || raw === '') continue;
-          let host: string;
-          try {
-            host = new URL(String(raw)).hostname;
-          } catch {
-            return { ok: false, reason: `invalid URL: ${String(raw)}` };
-          }
-          if (!cfg.webAllowHosts.some((h) => host === h || host.endsWith(`.${h}`))) {
-            return { ok: false, reason: `host '${host}' is not in the web allow-list` };
-          }
-        }
-      }
+      if (cfg.network === 'disabled') return { ok: false, reason: 'network access is disabled' };
     }
 
     return { ok: true };
@@ -137,6 +118,3 @@ export function createPolicy(cfg: ToolPolicyConfig): ToolPolicy {
 
   return { config: cfg, check, capOutput };
 }
-
-/** The process-wide policy built from config. */
-export const policy = createPolicy(config.tools);

@@ -1,4 +1,4 @@
-import { Bot, Moon, Plus, Sun, Trash2 } from 'lucide-react';
+import { Bot, Moon, Plus, Settings, Sun, Trash2 } from 'lucide-react';
 import type { Thread } from '../api';
 import type { Theme } from '../useTheme';
 import { Button } from '@/components/ui/button';
@@ -8,10 +8,12 @@ import { cn } from '@/lib/utils';
 interface Props {
   threads: Thread[];
   activeId: string | null;
+  activeView: 'chat' | 'settings';
   width: number;
   theme: Theme;
   onToggleTheme: () => void;
   onNew: () => void;
+  onSettings: () => void;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
 }
@@ -21,7 +23,7 @@ function threadLabel(t: Thread): string {
   return `会话 ${t.id.slice(0, 8)}`;
 }
 
-export function Sidebar({ threads, activeId, width, theme, onToggleTheme, onNew, onSelect, onDelete }: Props) {
+export function Sidebar({ threads, activeId, activeView, width, theme, onToggleTheme, onNew, onSettings, onSelect, onDelete }: Props) {
   return (
     <aside className="flex h-full shrink-0 flex-col bg-card" style={{ width }}>
       <div className="flex items-center gap-2 px-4 py-4">
@@ -37,6 +39,16 @@ export function Sidebar({ threads, activeId, width, theme, onToggleTheme, onNew,
         </Button>
       </div>
 
+      <div className="mt-2 px-3">
+        <Button
+          variant={activeView === 'settings' ? 'secondary' : 'ghost'}
+          onClick={onSettings}
+          className="w-full justify-start text-muted-foreground"
+        >
+          <Settings className="h-4 w-4" /> 配置
+        </Button>
+      </div>
+
       <div className="mt-4 px-4 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">会话</div>
       <nav className="scrollbar-thin mt-1 flex-1 space-y-0.5 overflow-y-auto px-2 pb-4">
         {threads.length === 0 && <div className="px-2 py-3 text-xs text-muted-foreground">还没有会话</div>}
@@ -45,7 +57,9 @@ export function Sidebar({ threads, activeId, width, theme, onToggleTheme, onNew,
             key={t.id}
             className={cn(
               'group/thread flex items-center rounded-md transition-colors',
-              t.id === activeId ? 'bg-accent font-medium text-accent-foreground' : 'text-foreground hover:bg-accent/60',
+              activeView === 'chat' && t.id === activeId
+                ? 'bg-accent font-medium text-accent-foreground'
+                : 'text-foreground hover:bg-accent/60',
             )}
           >
             <button

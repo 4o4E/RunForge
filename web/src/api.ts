@@ -58,6 +58,19 @@ export interface RemoteFileInfo {
   rootPath: string;
 }
 
+export interface ToolSettings {
+  sandbox: 'off' | 'enforce';
+  sandboxBackend: 'auto' | 'none' | 'bwrap';
+  workspaceRoot: string;
+  allow: string[];
+  deny: string[];
+  shellEnabled: boolean;
+  shellAllowCommands: string[];
+  network: 'enabled' | 'disabled';
+  shellDeny: string[];
+  maxOutput: number;
+}
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json() as Promise<T>;
@@ -94,6 +107,15 @@ export const uploadLocalFile = (path: string, contentBase64: string) =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path, contentBase64 }),
   }).then(json<{ path: string; size: number }>);
+
+export const getToolSettings = () => fetch('/api/settings/tools').then(json<ToolSettings>);
+
+export const updateToolSettings = (settings: ToolSettings) =>
+  fetch('/api/settings/tools', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings),
+  }).then(json<ToolSettings>);
 
 export const startRun = (threadId: string, input: string) =>
   fetch(`/api/threads/${threadId}/runs`, {

@@ -1,7 +1,8 @@
 import type { Tool, ToolResult } from './types.js';
 import { toLlmTool } from './types.js';
 import type { LlmTool } from '../llm/types.js';
-import { policy } from './policy.js';
+import { createPolicy } from './policy.js';
+import { getToolSettings } from '../settings.js';
 import { shellTool } from './shell.js';
 import { fileReadTool } from './fileRead.js';
 import { fileWriteTool } from './fileWrite.js';
@@ -47,10 +48,12 @@ export async function runTool(name: string, args: Record<string, unknown>): Prom
   const tool = byName.get(name);
   if (!tool) return { text: `Unknown tool: ${name}` };
   // Every tool call passes through the sandbox/permission policy first.
+  const settings = await getToolSettings();
+  const policy = createPolicy(settings);
   const decision = policy.check(name, args);
   if (!decision.ok) return { text: `Blocked by tool policy: ${decision.reason}` };
   try {
-    const raw = await tool.run(args);
+    const raw = await tool.run(args, { settings });
     const result: ToolResult = typeof raw === 'string' ? { text: raw } : raw;
     return { text: policy.capOutput(result.text), display: result.display };
   } catch (err) {
