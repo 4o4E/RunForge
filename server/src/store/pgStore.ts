@@ -4,11 +4,11 @@ import type { LlmMessage } from '../llm/types.js';
 import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
 import type { RunRow, Store, StepRow, ThreadMessage, ThreadRow } from './types.js';
-import { newId } from '../id.js';
+import { newRunId, newStepId, newThreadId } from '../id.js';
 
 export class PgStore implements Store {
   async createThread(title?: string): Promise<ThreadRow> {
-    const id = newId();
+    const id = newThreadId();
     const { rows } = await query<ThreadRow>(
       `INSERT INTO threads (id, title) VALUES ($1, $2) RETURNING *`,
       [id, title ?? null],
@@ -35,7 +35,7 @@ export class PgStore implements Store {
   }
 
   async createRun(threadId: string, input: string): Promise<RunRow> {
-    const id = newId();
+    const id = newRunId();
     const { rows } = await query<RunRow>(
       `INSERT INTO runs (id, thread_id, status, input) VALUES ($1, $2, 'pending', $3) RETURNING *`,
       [id, threadId, input],
@@ -78,7 +78,7 @@ export class PgStore implements Store {
   }
 
   async createStep(runId: string, idx: number): Promise<StepRow> {
-    const id = newId();
+    const id = newStepId();
     const { rows } = await query<StepRow>(
       `INSERT INTO steps (id, run_id, idx) VALUES ($1, $2, $3) RETURNING *`,
       [id, runId, idx],

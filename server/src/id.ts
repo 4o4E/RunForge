@@ -4,6 +4,16 @@ const WORKER_BITS = 10n;
 const SEQUENCE_BITS = 12n;
 const MAX_WORKER_ID = (1n << WORKER_BITS) - 1n;
 const MAX_SEQUENCE = (1n << SEQUENCE_BITS) - 1n;
+const ID_SEPARATOR = '_';
+
+const ID_PREFIXES = {
+  run: 'ru',
+  thread: 'th',
+  step: 'st',
+} as const;
+
+export type EntityIdKind = keyof typeof ID_PREFIXES;
+export type EntityIdPrefix = (typeof ID_PREFIXES)[EntityIdKind];
 
 let lastMs = -1n;
 let sequence = 0n;
@@ -38,8 +48,8 @@ function waitNextMs(current: bigint): bigint {
   return now;
 }
 
-/** 生成自定义雪花 ID，并转换为更短的 base62 字符串，供公开主键使用。 */
-export function newId(): string {
+/** 生成自定义雪花 ID，并转换为更短的 base62 字符串。 */
+function newSnowflakeId(): string {
   let now = BigInt(Date.now());
   if (now < lastMs) now = lastMs;
 
@@ -56,3 +66,24 @@ export function newId(): string {
   return toBase62(id);
 }
 
+/** 生成无业务语义的核心 ID，主要用于底层测试。公开实体请使用 newRunId/newThreadId/newStepId。 */
+export function newId(): string {
+  return newSnowflakeId();
+}
+
+/** 给公开实体 ID 加统一两字母前缀，便于日志、URL 和数据库排查时区分类型。 */
+export function newEntityId(kind: EntityIdKind): string {
+  return `${ID_PREFIXES[kind]}${ID_SEPARATOR}${newSnowflakeId()}`;
+}
+
+export function newRunId(): string {
+  return newEntityId('run');
+}
+
+export function newThreadId(): string {
+  return newEntityId('thread');
+}
+
+export function newStepId(): string {
+  return newEntityId('step');
+}

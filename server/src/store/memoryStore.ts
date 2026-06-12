@@ -3,7 +3,7 @@ import type { LlmMessage } from '../llm/types.js';
 import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
 import type { RunRow, Store, StepRow, ThreadMessage, ThreadRow } from './types.js';
-import { newId } from '../id.js';
+import { newRunId, newStepId, newThreadId } from '../id.js';
 
 interface StoredMsg {
   thread_id: string;
@@ -29,7 +29,7 @@ export class MemoryStore implements Store {
   private now = () => new Date().toISOString();
 
   async createThread(title?: string): Promise<ThreadRow> {
-    const row: ThreadRow = { id: newId(), title: title ?? null, created_at: this.now(), updated_at: this.now() };
+    const row: ThreadRow = { id: newThreadId(), title: title ?? null, created_at: this.now(), updated_at: this.now() };
     this.threads.set(row.id, row);
     return row;
   }
@@ -54,7 +54,7 @@ export class MemoryStore implements Store {
 
   async createRun(threadId: string, input: string): Promise<RunRow> {
     const row: RunRow = {
-      id: newId(),
+      id: newRunId(),
       thread_id: threadId,
       status: 'pending',
       input,
@@ -94,7 +94,7 @@ export class MemoryStore implements Store {
   }
 
   async createStep(runId: string, idx: number): Promise<StepRow> {
-    const row: StepRow = { id: newId(), run_id: runId, idx, created_at: this.now() };
+    const row: StepRow = { id: newStepId(), run_id: runId, idx, created_at: this.now() };
     this.steps.push(row);
     return row;
   }

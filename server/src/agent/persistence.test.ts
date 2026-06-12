@@ -109,6 +109,17 @@ test('store persists collapsed flag and returns the masked view on reload', asyn
   assert.ok(ctx.all().some((m) => m.content === maskPlaceholder('y'.repeat(3000))));
 });
 
+test('store uses typed prefixes for thread, run and step ids', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run = await store.createRun(thread.id, 'task');
+  const step = await store.createStep(run.id, 1);
+
+  assert.match(thread.id, /^th_[0-9A-Za-z]+$/);
+  assert.match(run.id, /^ru_[0-9A-Za-z]+$/);
+  assert.match(step.id, /^st_[0-9A-Za-z]+$/);
+});
+
 test('store returns masked assistant tool-call args on reload', async () => {
   const store = new MemoryStore();
   const thread = await store.createThread();
