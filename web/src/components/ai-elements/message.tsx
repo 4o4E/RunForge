@@ -11,6 +11,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { useStreamdownComponents } from "@/components/streamdownComponents";
 import { streamdownPlugins, useThemedMermaid } from "@/components/streamdownConfig";
 import { cn } from "@/lib/utils";
 import type { UIMessage } from "ai";
@@ -319,8 +320,9 @@ export const MessageBranchPage = ({
 export type MessageResponseProps = ComponentProps<typeof Streamdown>;
 
 export const MessageResponse = memo(
-  ({ className, ...props }: MessageResponseProps) => {
+  ({ className, components, ...props }: MessageResponseProps) => {
     const mermaid = useThemedMermaid();
+    const mergedComponents = useStreamdownComponents(components);
 
     return (
       <Streamdown
@@ -331,6 +333,7 @@ export const MessageResponse = memo(
           className
         )}
         mermaid={mermaid}
+        components={mergedComponents}
         plugins={streamdownPlugins}
         {...props}
       />

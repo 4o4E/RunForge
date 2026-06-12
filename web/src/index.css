@@ -131,30 +131,53 @@
   }
 }
 
-/* Markdown 渲染由 Streamdown 负责，Mermaid 预留固定高度，避免加载后重排闪烁。 */
-.markdown-content [data-streamdown='mermaid'] {
+/* Mermaid 挂载时立即占满固定画布，加载态和 SVG 完成态保持同尺寸。 */
+[data-streamdown='mermaid-block'] {
+  contain: layout paint;
+}
+
+[data-streamdown='mermaid'] {
   contain: layout paint;
   height: min(70vh, 32rem);
   overflow: hidden;
 }
 
-.markdown-content [data-streamdown='mermaid'] > div,
-.markdown-content [data-streamdown='mermaid'] > div > div:not(.absolute),
-.markdown-content [data-streamdown='mermaid'] > div > div:not(.absolute) > div {
+[data-streamdown='mermaid'].mermaid-fullscreen {
   height: 100%;
-  min-height: 0;
+}
+
+[data-streamdown='mermaid'] > div,
+[data-streamdown='mermaid'] .mermaid-svg-shell,
+[data-streamdown='mermaid'] svg[id^='mermaid-'] {
+  height: 100%;
   width: 100%;
 }
 
-.markdown-content [data-streamdown='mermaid'] svg[id^='mermaid-'] {
-  display: block;
-  width: 100%;
+[data-streamdown='mermaid'].mermaid-fullscreen > div {
   height: 100%;
+  width: 100%;
+}
+
+[data-streamdown='mermaid'].mermaid-fullscreen .mermaid-svg-shell {
+  align-items: center;
+  display: inline-flex;
+  height: min(100%, calc(100vh - 2rem));
+  justify-content: center;
+  width: min(100%, calc(100vw - 2rem));
+}
+
+[data-streamdown='mermaid'].mermaid-fullscreen svg[id^='mermaid-'] {
+  height: 100%;
+  width: 100%;
+}
+
+[data-streamdown='mermaid'] svg[id^='mermaid-'] {
+  display: block;
   max-width: 100%;
 }
 
 @media (max-width: 640px) {
-  .markdown-content [data-streamdown='mermaid'] {
+  [data-streamdown='mermaid'] {
     height: min(65vh, 24rem);
   }
 }

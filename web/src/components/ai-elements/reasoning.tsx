@@ -7,6 +7,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
+import { useStreamdownComponents } from "@/components/streamdownComponents";
 import { streamdownPlugins, useThemedMermaid } from "@/components/streamdownConfig";
 import { BrainIcon, ChevronDownIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
@@ -204,6 +205,7 @@ export type ReasoningContentProps = ComponentProps<
 export const ReasoningContent = memo(
   ({ className, children, ...props }: ReasoningContentProps) => {
     const mermaid = useThemedMermaid();
+    const components = useStreamdownComponents();
 
     return (
       <CollapsibleContent
@@ -214,7 +216,7 @@ export const ReasoningContent = memo(
         )}
         {...props}
       >
-        <Streamdown mermaid={mermaid} plugins={streamdownPlugins}>{children}</Streamdown>
+        <Streamdown components={components} mermaid={mermaid} plugins={streamdownPlugins}>{children}</Streamdown>
       </CollapsibleContent>
     );
   }
