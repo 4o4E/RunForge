@@ -167,6 +167,7 @@ pnpm --filter server typecheck
 - [系统设计](docs/system-design.md)：总体架构、执行主线、对话模型、Provider、Store、API、数据模型。
 - [长任务设计](docs/long-task-design.md)：Goal 锚点、上下文压缩、token 预算、取消与长任务验证链路。
 - [工具沙箱设计](docs/tool-sandbox.md)：工具权限、bwrap 沙箱选型、读写范围与命令限制。
+- [Skill 系统设计](docs/skill-system-design.md)：内置/用户 skill、bash 资源暴露、allowed-tools、激活生命周期和安全边界。
 - [题面验收报告](docs/acceptance-report.md)：当前完成范围、未实现边界和后续平台化设计。
 - [架构改造方案](docs/refactor-plan.md)：AI SDK、AI Elements、Streamdown、HTML artifact、可观测和沙箱路线。
 - [实施日志](docs/impl-log/)：各阶段落地记录、验证结果和遗留事项。
