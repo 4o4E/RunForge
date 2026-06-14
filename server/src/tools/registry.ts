@@ -51,16 +51,20 @@ export function getTool(name: string): Tool | undefined {
 /** Run a tool by name, returning a normalized `ToolResult` ({ text }).
  *  Plain-string tool returns are wrapped; the policy gate runs first and the
  *  output cap is applied to `text`. */
-export async function runTool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+export async function runTool(
+  name: string,
+  args: Record<string, unknown>,
+  ctx: { settings?: Awaited<ReturnType<typeof getToolSettings>>; env?: Record<string, string> } = {},
+): Promise<ToolResult> {
   const tool = byName.get(name);
   if (!tool) return { text: `未知工具：${name}` };
   // Every tool call passes through the sandbox/permission policy first.
-  const settings = await getToolSettings();
+  const settings = ctx.settings ?? (await getToolSettings());
   const policy = createPolicy(settings);
   const decision = policy.check(name, args);
   if (!decision.ok) return { text: `工具策略已阻止：${decision.reason}` };
   try {
-    const raw = await tool.run(args, { settings });
+    const raw = await tool.run(args, { settings, env: ctx.env });
     const result: ToolResult = typeof raw === 'string' ? { text: raw } : raw;
     return { text: policy.capOutput(result.text) };
   } catch (err) {

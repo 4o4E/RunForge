@@ -22,6 +22,11 @@ function quoteLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+function roleSlug(value: string): string {
+  const slug = value.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
+  return slug || 'datasource';
+}
+
 async function withAdminClient<T>(datasource: DatasourceRow, fn: (client: pg.Client) => Promise<T>): Promise<T> {
   const client = new pg.Client({ connectionString: adminConnectionUrl(datasource) });
   await client.connect();
@@ -30,6 +35,49 @@ async function withAdminClient<T>(datasource: DatasourceRow, fn: (client: pg.Cli
   } finally {
     await client.end();
   }
+}
+
+export function defaultPostgresReadonlyRole(datasource: DatasourceRow): string {
+  return `ag_${roleSlug(datasource.name).slice(0, 48)}_readonly`.slice(0, 63);
+}
+
+export async function ensurePostgresReadonlyTemplateRole(datasource: DatasourceRow, roleName = defaultPostgresReadonlyRole(datasource)): Promise<string> {
+  if (datasource.type !== 'postgres') throw new Error(`数据源 ${datasource.id} 不是 PostgreSQL`);
+  const role = quoteIdent(roleName);
+  const database = stringField(datasource.connection.database);
+
+  await withAdminClient(datasource, async (client) => {
+    // 只读模板角色只授予 schema 使用权和已有表读取权；临时账号继承它即可。
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${quoteLiteral(roleName)}) THEN
+          CREATE ROLE ${role};
+        END IF;
+      END
+      $$;
+    `);
+    if (database) await client.query(`GRANT CONNECT ON DATABASE ${quoteIdent(database)} TO ${role}`);
+
+    const { rows } = await client.query<{ schema_name: string }>(
+      `SELECT nspname AS schema_name
+       FROM pg_namespace
+       WHERE nspname <> 'information_schema'
+         AND nspname NOT LIKE 'pg_%'
+       ORDER BY nspname`,
+    );
+
+    for (const row of rows) {
+      const schema = quoteIdent(row.schema_name);
+      await client.query(`GRANT USAGE ON SCHEMA ${schema} TO ${role}`);
+      await client.query(`GRANT SELECT ON ALL TABLES IN SCHEMA ${schema} TO ${role}`);
+      await client.query(`GRANT SELECT ON ALL SEQUENCES IN SCHEMA ${schema} TO ${role}`);
+      await client.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA ${schema} GRANT SELECT ON TABLES TO ${role}`);
+      await client.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA ${schema} GRANT SELECT ON SEQUENCES TO ${role}`);
+    }
+  });
+
+  return roleName;
 }
 
 export async function ensurePostgresAccount(

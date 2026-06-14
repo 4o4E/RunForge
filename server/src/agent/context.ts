@@ -32,6 +32,7 @@ const SYSTEM_PROMPT = `你是 my-agent，一个通用自主助手。
 - Mermaid 节点 ID 只使用英文字母、数字和下划线；节点标签包含中文、空格、符号、HTML 换行、斜杠或 @ 时必须写成 node_id["标签"]，不要写 http-server[...]/annotation[...<br/>...] 这类容易解析失败的形式。
 - 复杂报告或独立页面需要更丰富布局/前端交互时，使用 write_html_artifact 写完整 HTML 文件，并在最终回答中说明生成路径。
 - 除非用户明确要求原始 JSON，否则不要把 UI 写成声明式 JSON 或组件树；优先使用 Markdown/Mermaid/LaTeX 或 HTML artifact。
+- 涉及数据库、数据源、schema、库表、字段或数据统计时，必须先激活 database-access skill；不要使用宿主进程 DATABASE_URL、长期密码或服务端私密 env 作为捷径。
 - 标准流程：
   1. 先用需要的工具收集数据。
   2. 用 Markdown 组织结果；复杂页面则写入 workspace 下的 HTML artifact。
@@ -41,6 +42,7 @@ export interface RuntimeContextInfo {
   workspaceRoot: string;
   sandbox: 'off' | 'enforce';
   sandboxBackend: string;
+  shellUseHostPath: boolean;
   network: 'enabled' | 'disabled';
 }
 
@@ -49,7 +51,8 @@ export function renderRuntimeContext(info: RuntimeContextInfo): string {
 - 持久工作区根目录: ${info.workspaceRoot}
 - 请把这个目录视为本次 run 当前可用目录。clone 仓库、创建报告、写入任何需要保留的文件，都必须放在这个目录下。
 - 不要把需要保留的文件写到 /home/user、/tmp、应用仓库根目录或 workspace 之外的路径，除非用户明确要求且工具策略允许。
-- 工具沙箱: ${info.sandbox}; shell 后端: ${info.sandboxBackend}; 网络: ${info.network}.`;
+- Python 依赖必须安装在虚拟环境中；优先在工作区创建 .venv 并使用 uv 管理依赖，不要全局安装 pip 包。
+- 工具沙箱: ${info.sandbox}; shell 后端: ${info.sandboxBackend}; shell 使用宿主机 PATH: ${info.shellUseHostPath ? '是' : '否'}; 网络: ${info.network}.`;
 }
 
 /** What a compaction pass did, surfaced for events/telemetry. */

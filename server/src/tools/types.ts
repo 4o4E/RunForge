@@ -15,7 +15,7 @@ export interface Tool {
    * 使用解析后的参数执行工具。一般返回给 LLM 的纯文本；
    * 需要结构化文本包装时返回 ToolResult。
    */
-  run(args: Record<string, unknown>, ctx?: { settings: ToolSettings }): Promise<string | ToolResult>;
+  run(args: Record<string, unknown>, ctx?: { settings: ToolSettings; env?: Record<string, string> }): Promise<string | ToolResult>;
 }
 
 export function toLlmTool(tool: Tool): LlmTool {

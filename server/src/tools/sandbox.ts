@@ -13,7 +13,9 @@ export interface ShellSandboxConfig {
   backend: SandboxBackendName;
   workspaceRoot: string;
   allowCommands: string[];
+  useHostPath: boolean;
   shareNet: boolean;
+  env?: Record<string, string>;
 }
 
 export interface ShellExecResult {
@@ -33,6 +35,7 @@ interface BwrapOptions {
   allowCommands: string[];
   shareNet: boolean;
   envPath?: string;
+  env?: Record<string, string>;
 }
 
 const warned = new Set<string>();
@@ -103,6 +106,10 @@ function existing(paths: string[]): string[] {
   return paths.filter((p) => existsSync(p));
 }
 
+function safeEnvEntries(env: Record<string, string> | undefined): Array<[string, string]> {
+  return Object.entries(env ?? {}).filter(([key, value]) => /^[A-Z_][A-Z0-9_]*$/.test(key) && typeof value === 'string');
+}
+
 /** 把命令白名单解析成源路径和沙箱内目标路径,缺失命令会被跳过。 */
 export function resolveAllowedCommands(names: string[], envPath = process.env.PATH ?? ''): ResolvedCommand[] {
   return unique(names)
@@ -157,23 +164,34 @@ export function buildBwrapArgs(opts: BwrapOptions): string[] {
   args.push('--chdir', workspaceRoot);
   args.push('--setenv', 'PATH', pathDirs.length ? pathDirs.join(':') : '/usr/bin:/bin');
   args.push('--setenv', 'HOME', workspaceRoot, '--setenv', 'PWD', workspaceRoot);
+  for (const [key, value] of safeEnvEntries(opts.env)) args.push('--setenv', key, value);
   args.push('--', shell.dest, '-c', opts.command);
   return args;
 }
 
-function hostShell(command: string, timeout: number): Promise<ShellExecResult> {
+function hostShell(command: string, timeout: number, workspaceRoot: string, env?: Record<string, string>): Promise<ShellExecResult> {
+  const childEnv = {
+    PATH: process.env.PATH ?? '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+    ...(process.env.LANG ? { LANG: process.env.LANG } : {}),
+    ...(process.env.LC_ALL ? { LC_ALL: process.env.LC_ALL } : {}),
+    ...env,
+    HOME: workspaceRoot,
+    PWD: workspaceRoot,
+  };
   if (isWindows) {
     return execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
       timeout,
       maxBuffer: 1024 * 1024 * 10,
       windowsHide: true,
+      cwd: workspaceRoot,
+      env: childEnv,
     });
   }
-  return execFileAsync('/bin/sh', ['-c', command], { timeout, maxBuffer: 1024 * 1024 * 10 });
+  return execFileAsync('/bin/sh', ['-c', command], { timeout, maxBuffer: 1024 * 1024 * 10, cwd: workspaceRoot, env: childEnv });
 }
 
 function shouldUseBwrap(cfg: ShellSandboxConfig): { use: true; bwrapPath: string } | { use: false } {
-  if (isWindows || cfg.policyMode !== 'enforce' || cfg.backend === 'none') return { use: false };
+  if (isWindows || cfg.useHostPath || cfg.policyMode !== 'enforce' || cfg.backend === 'none') return { use: false };
   if (process.platform !== 'linux') {
     if (cfg.backend === 'bwrap') throw new Error('bwrap 沙箱需要 Linux 环境');
     warnOnce('bwrap-non-linux', '工具沙箱 auto 模式：当前不是 Linux，shell 回落到宿主执行。');
@@ -197,7 +215,7 @@ function shouldUseBwrap(cfg: ShellSandboxConfig): { use: true; bwrapPath: string
 /** shell 工具的统一执行入口:默认直通, enforce+bwrap 时切到 OS 沙箱。 */
 export async function runShellCommand(command: string, timeout: number, cfg: ShellSandboxConfig): Promise<ShellExecResult> {
   const selected = shouldUseBwrap(cfg);
-  if (!selected.use) return hostShell(command, timeout);
+  if (!selected.use) return hostShell(command, timeout, cfg.workspaceRoot, cfg.env);
 
   const missing = cfg.allowCommands.filter((name) => !findExecutable(name));
   if (missing.length) {
@@ -212,12 +230,14 @@ export async function runShellCommand(command: string, timeout: number, cfg: She
     command,
     allowCommands: cfg.allowCommands,
     shareNet: cfg.shareNet,
+    env: cfg.env,
   });
   return execFileAsync(selected.bwrapPath, args, { timeout, maxBuffer: 1024 * 1024 * 10 });
 }
 
 export function describeShellSandbox(cfg: ShellSandboxConfig): string {
   if (cfg.policyMode !== 'enforce') return 'host';
+  if (cfg.useHostPath) return 'host (PATH: host)';
   if (cfg.backend === 'none') return 'host (backend: none)';
   return `${cfg.backend}${cfg.shareNet ? ', net: enabled' : ', net: disabled'}`;
 }

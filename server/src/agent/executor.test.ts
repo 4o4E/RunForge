@@ -29,6 +29,7 @@ function testToolSettings(overrides: Partial<ToolSettings> = {}): ToolSettings {
     allow: [],
     deny: [],
     shellEnabled: true,
+    shellUseHostPath: true,
     shellAllowCommands: ['git', 'ls', 'sed', 'python', 'node'],
     network: 'enabled',
     shellDeny: [],
@@ -197,11 +198,59 @@ test('executeRun: activates a skill and trims tools to allowed-tools', async () 
   assert.equal(activated?.type === 'skill_activated' ? activated.name : '', 'sample-skill');
   assert.deepEqual(activated?.type === 'skill_activated' ? activated.allowedTools : [], ['file_read']);
   const msgs = await store.loadThreadMessages(thread.id);
-  assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'tool', 'tool', 'system', 'assistant', 'tool']);
+  assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'tool', 'tool', 'assistant', 'tool']);
   assert.equal(msgs[2].toolCallId, 'skill_1');
   assert.equal(msgs[3].toolCallId, 'read_1');
-  assert.match(msgs[4].content ?? '', /已激活 Skill/);
+  assert.equal(msgs.some((m) => m.role === 'system' && (m.content ?? '').includes('已激活 Skill')), false);
   assert.equal((await store.getRun(run.id))?.status, 'done');
+});
+
+test('executeRun: skill activation instructions do not leak into the next run history', async () => {
+  const skillRoot = join(testWorkspace, '.skills', 'leaky-skill');
+  await mkdir(skillRoot, { recursive: true });
+  await writeFile(
+    join(skillRoot, 'SKILL.md'),
+    ['---', 'name: leaky-skill', 'description: Use in leakage tests.', 'allowed-tools: file_read', '---', '', '# Leaky Skill'].join('\n'),
+    'utf8',
+  );
+
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run1 = await store.createRun(thread.id, 'activate skill');
+  let turn = 0;
+  await executeRun(run1.id, {
+    store,
+    provider: {
+      name: 'activate-then-finish',
+      async complete() {
+        turn += 1;
+        if (turn === 1) return { content: null, toolCalls: [{ id: 'skill_1', name: 'skill_activate', arguments: '{"name":"leaky-skill"}' }] };
+        return { content: null, toolCalls: [finishCall('finish_1', 'done')] };
+      },
+    },
+    publish: () => {},
+    hardStepCap: 3,
+    toolSettings: testToolSettings(),
+  });
+
+  const run2 = await store.createRun(thread.id, 'new run');
+  let secondRunSystemText = '';
+  await executeRun(run2.id, {
+    store,
+    provider: {
+      name: 'capture-next-run',
+      async complete(messages) {
+        secondRunSystemText = messages.filter((m) => m.role === 'system').map((m) => m.content ?? '').join('\n');
+        return { content: null, toolCalls: [finishCall('finish_2', 'done')] };
+      },
+    },
+    publish: () => {},
+    hardStepCap: 3,
+    toolSettings: testToolSettings(),
+  });
+
+  assert.equal(secondRunSystemText.includes('已激活 Skill'), false);
+  assert.equal(secondRunSystemText.includes('# Leaky Skill'), false);
 });
 
 test('executeRun: streams tool input stats without double counting final tool args', async () => {

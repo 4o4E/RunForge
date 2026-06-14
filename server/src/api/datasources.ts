@@ -3,6 +3,7 @@ import {
   createDatasource,
   createPermissionProfile,
   DatasourceError,
+  ensureReadonlyPermissionProfile,
   getDatasource,
   listDatasourceAccounts,
   listDatasourceLeases,
@@ -86,6 +87,15 @@ datasourcesApi.post('/:id/test', async (req, res) => {
 datasourcesApi.post('/:id/profiles', async (req, res) => {
   try {
     const profile = await createPermissionProfile(req.params.id, req.body);
+    res.status(201).json({ profile });
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
+datasourcesApi.post('/:id/profiles/readonly-default', async (req, res) => {
+  try {
+    const profile = await ensureReadonlyPermissionProfile(req.params.id);
     res.status(201).json({ profile });
   } catch (err) {
     handleError(res, err);

@@ -41,6 +41,7 @@ server.listen(config.port, config.host, () => {
               backend: settings.sandboxBackend,
               workspaceRoot: settings.workspaceRoot,
               allowCommands: settings.shellAllowCommands,
+              useHostPath: settings.shellUseHostPath,
               shareNet: settings.network === 'enabled',
             })})`
           : ''),

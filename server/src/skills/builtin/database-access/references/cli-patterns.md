@@ -144,6 +144,14 @@ credential = acquire_datasource_credential()
 # 把 credential 立即传给数据库驱动或 CLI；不要 print 密码。
 ```
 
+PostgreSQL CLI wrapper:
+
+```bash
+python3 /path/to/skill/scripts/psql_query.py --sql "select current_database(), current_user;"
+```
+
+这个 wrapper 会在同一进程内换取短期凭证并调用 `psql`，不要先单独打印完整凭证 JSON。
+
 Node.js:
 
 ```javascript

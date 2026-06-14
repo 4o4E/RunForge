@@ -23,6 +23,7 @@ import {
   type PermissionProfile,
   type PermissionProfileInput,
   type ToolSettings,
+  createReadonlyProfile,
 } from '../api';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -342,6 +343,18 @@ function ToolsSettingsPanel({
               </SelectContent>
             </Select>
           </Field>
+          <Field label="使用宿主机 PATH">
+            <Select
+              value={settings.shellUseHostPath ? 'true' : 'false'}
+              onValueChange={(value) => setSettings({ ...settings, shellUseHostPath: value === 'true' })}
+            >
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="true">true</SelectItem>
+                <SelectItem value="false">false</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
           <Field label="单条工具结果上限">
             <Input
               type="number"
@@ -371,6 +384,7 @@ function DatasourceSettingsPanel() {
   const [loading, setLoading] = useState(false);
   const [savingDatasource, setSavingDatasource] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
+  const [creatingReadonlyProfile, setCreatingReadonlyProfile] = useState(false);
   const [testingDatasource, setTestingDatasource] = useState(false);
   const [testResult, setTestResult] = useState<DatasourceTestResult | null>(null);
   const [message, setMessage] = useState('');
@@ -533,6 +547,21 @@ function DatasourceSettingsPanel() {
       setMessage(`保存权限档位失败：${(err as Error).message}`);
     } finally {
       setSavingProfile(false);
+    }
+  }
+
+  async function createDefaultReadonlyProfile() {
+    if (!selectedDatasource) return;
+    setCreatingReadonlyProfile(true);
+    setMessage('');
+    try {
+      await createReadonlyProfile(selectedDatasource.id);
+      setMessage('只读档位已创建');
+      await refreshDetail(selectedDatasource.id);
+    } catch (err) {
+      setMessage(`创建只读档位失败：${(err as Error).message}`);
+    } finally {
+      setCreatingReadonlyProfile(false);
     }
   }
 
@@ -727,10 +756,21 @@ function DatasourceSettingsPanel() {
                   <CardTitle className="text-base">权限档位</CardTitle>
                   <CardDescription>账号池账号继承模板角色</CardDescription>
                 </div>
-                <Button variant="outline" size="sm" onClick={() => setProfileForm(emptyProfileForm())} disabled={!selectedDatasource}>
-                  <Plus className="h-4 w-4" />
-                  新建档位
-                </Button>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void createDefaultReadonlyProfile()}
+                    disabled={!selectedDatasource || creatingReadonlyProfile}
+                  >
+                    <Shield className="h-4 w-4" />
+                    {creatingReadonlyProfile ? '创建中' : '创建只读档位'}
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => setProfileForm(emptyProfileForm())} disabled={!selectedDatasource}>
+                    <Plus className="h-4 w-4" />
+                    新建档位
+                  </Button>
+                </div>
               </div>
             </CardHeader>
             <CardContent className="grid gap-4">

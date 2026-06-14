@@ -92,12 +92,24 @@ test('describeShellSandbox reports effective shell mode', () => {
   assert.equal(
     describeShellSandbox({
       policyMode: 'off',
-      backend: 'auto',
-      workspaceRoot: '/workspace/app',
-      allowCommands: [],
-      shareNet: false,
-    }),
+    backend: 'auto',
+    workspaceRoot: '/workspace/app',
+    allowCommands: [],
+    useHostPath: false,
+    shareNet: false,
+  }),
     'host',
+  );
+  assert.equal(
+    describeShellSandbox({
+      policyMode: 'enforce',
+    backend: 'bwrap',
+    workspaceRoot: '/workspace/app',
+    allowCommands: [],
+    useHostPath: false,
+    shareNet: false,
+  }),
+    'bwrap, net: disabled',
   );
   assert.equal(
     describeShellSandbox({
@@ -105,8 +117,9 @@ test('describeShellSandbox reports effective shell mode', () => {
       backend: 'bwrap',
       workspaceRoot: '/workspace/app',
       allowCommands: [],
+      useHostPath: true,
       shareNet: false,
     }),
-    'bwrap, net: disabled',
+    'host (PATH: host)',
   );
 });

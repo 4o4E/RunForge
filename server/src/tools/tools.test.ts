@@ -95,6 +95,46 @@ test('shell runs a command (PowerShell on Windows, sh elsewhere)', async () => {
   assert.match(out, /agent-shell-ok/);
 });
 
+test('shell redacts credential-shaped output before returning it', async () => {
+  const out = text(await shellTool.run({ command: "printf '%s\\n' '{\"password\":\"secret\",\"username\":\"agent\"}' 'DATABASE_URL=postgres://root:123456@localhost:5432/my_agent'" }));
+  assert.match(out, /"password":"\[redacted\]"/);
+  assert.match(out, /DATABASE_URL=\[redacted\]/);
+  assert.equal(out.includes('secret'), false);
+  assert.equal(out.includes('123456'), false);
+});
+
+test('shell inherits host PATH but not backend secret environment', async () => {
+  const previous = process.env.LLM_API_KEY;
+  process.env.LLM_API_KEY = 'sk-test-secret';
+  try {
+    const out = text(await shellTool.run(
+      { command: 'printf "path=%s\\nhas_llm_api_key=%s\\n" "${PATH:+set}" "${LLM_API_KEY+yes}"' },
+      { settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }) },
+    ));
+    assert.match(out, /path=set/);
+    assert.match(out, /has_llm_api_key=\s*$/);
+    assert.equal(out.includes('sk-test-secret'), false);
+  } finally {
+    if (previous == null) delete process.env.LLM_API_KEY;
+    else process.env.LLM_API_KEY = previous;
+  }
+});
+
+test('shell blocks database CLI before database-access injects a workload token', async () => {
+  const blocked = text(await shellTool.run(
+    { command: 'psql "$DATABASE_URL" -c "select 1"' },
+    { settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }) },
+  ));
+  assert.match(blocked, /database-access/);
+  assert.match(blocked, /workload token/);
+
+  const allowed = text(await shellTool.run(
+    { command: 'printf ok' },
+    { settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }), env: { DB_WORKLOAD_TOKEN: 'wat_test' } },
+  ));
+  assert.equal(allowed, 'ok');
+});
+
 test('file_read reads content', async () => {
   const out = text(await fileReadTool.run({ path: join(dir, 'a.ts') }));
   assert.match(out, /export const a = 1/);

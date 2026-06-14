@@ -8,7 +8,7 @@ import {
   newWorkloadTokenId,
 } from '../id.js';
 import { store } from '../store/index.js';
-import { disablePostgresAccount, ensurePostgresAccount } from './postgresAdapter.js';
+import { disablePostgresAccount, ensurePostgresAccount, ensurePostgresReadonlyTemplateRole } from './postgresAdapter.js';
 import { generateWorkloadToken, hashWorkloadToken, iso, randomPassword, secondsFromNow } from './token.js';
 import type {
   CredentialLease,
@@ -223,6 +223,40 @@ export async function updatePermissionProfile(
     ],
   );
   return rows[0];
+}
+
+export async function ensureReadonlyPermissionProfile(datasourceId: string): Promise<PermissionProfileRow> {
+  const datasource = await getDatasource(datasourceId);
+  if (!datasource) throw new DatasourceError(404, '数据源不存在');
+  if (datasource.status !== 'active') throw new DatasourceError(409, '数据源已禁用');
+  if (datasource.type !== 'postgres') throw new DatasourceError(501, `暂未实现 ${datasource.type} 的只读档位初始化`);
+
+  const templateRole = await ensurePostgresReadonlyTemplateRole(datasource);
+  const { rows: existingRows } = await query<PermissionProfileRow>(
+    `SELECT * FROM datasource_permission_profiles WHERE datasource_id = $1 AND name = 'readonly'`,
+    [datasourceId],
+  );
+  const existing = existingRows[0];
+  if (existing) {
+    const { rows } = await query<PermissionProfileRow>(
+      `UPDATE datasource_permission_profiles
+       SET mode = 'readonly',
+           template_role = $3,
+           updated_at = now()
+       WHERE id = $1 AND datasource_id = $2
+       RETURNING *`,
+      [existing.id, datasourceId, templateRole],
+    );
+    return rows[0];
+  }
+
+  return createPermissionProfile(datasourceId, {
+    name: 'readonly',
+    mode: 'readonly',
+    templateRole,
+    grants: {},
+    poolConfig: {},
+  });
 }
 
 export async function listDatasourceAccounts(datasourceId: string): Promise<DatasourceAccountRow[]> {

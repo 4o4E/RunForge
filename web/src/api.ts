@@ -141,6 +141,7 @@ export interface ToolSettings {
   allow: string[];
   deny: string[];
   shellEnabled: boolean;
+  shellUseHostPath: boolean;
   shellAllowCommands: string[];
   network: 'enabled' | 'disabled';
   shellDeny: string[];
@@ -343,6 +344,12 @@ export const createPermissionProfile = (datasourceId: string, input: PermissionP
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
+  }).then(json<{ profile: PermissionProfile }>);
+
+export const createReadonlyProfile = (datasourceId: string) =>
+  fetch(`/api/datasources/${datasourceId}/profiles/readonly-default`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
   }).then(json<{ profile: PermissionProfile }>);
 
 export const updatePermissionProfile = (datasourceId: string, profileId: string, input: PermissionProfileInput) =>

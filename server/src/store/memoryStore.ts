@@ -5,6 +5,10 @@ import type { GoalState } from '../agent/goal.js';
 import type { RunRow, Store, StepRow, ThreadMessage, ThreadRow } from './types.js';
 import { newRunId, newStepId, newThreadId } from '../id.js';
 
+function isEphemeralSystemMessage(role: LlmMessage['role'], content: string | null): boolean {
+  return role === 'system' && typeof content === 'string' && content.startsWith('已激活 Skill / Activated Skill:');
+}
+
 interface StoredMsg {
   thread_id: string;
   run_id: string;
@@ -104,7 +108,7 @@ export class MemoryStore implements Store {
 
   async loadThreadMessages(threadId: string): Promise<ThreadMessage[]> {
     return this.messages
-      .filter((m) => m.thread_id === threadId && m.collapsed !== 'summarized')
+      .filter((m) => m.thread_id === threadId && m.collapsed !== 'summarized' && !isEphemeralSystemMessage(m.role, m.content))
       .sort((a, b) => (a.summaryOf?.[0] ?? a.seq) - (b.summaryOf?.[0] ?? b.seq))
       .map((m) => ({
         id: m.seq,

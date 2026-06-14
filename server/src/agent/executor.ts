@@ -7,6 +7,7 @@ import { runTool, toolSchemas } from '../tools/registry.js';
 import { ContextManager } from './context.js';
 import { activateSkill, activeAllowedTools, loadSkillIndex, renderSkillCatalog, renderSkillSystemRules } from '../skills/registry.js';
 import type { SkillIndexItem, SkillActivation } from '../skills/registry.js';
+import { createWorkloadToken, listDatasources, listPermissionProfiles } from '../datasources/accountPool.js';
 import { canFinishGoal, finishBlockedMessage, finishGoal, initGoal, mergeGoal, parseGoalPatch, renderGoal } from './goal.js';
 import { runBus } from './bus.js';
 import type { AgentEvent } from './types.js';
@@ -20,8 +21,10 @@ import { renderRuntimeContext } from './context.js';
 
 const FINISH_TOOL_NAME = 'finish_conversation';
 const ASK_USER_TOOL_NAME = 'ask_user';
+const DATABASE_ACCESS_SKILL_NAME = 'database-access';
 const STREAM_STATS_POINTS = 24;
 const STREAM_STATS_MIN_INTERVAL_MS = 250;
+const SECRET_KEY_RE = /(password|passwd|pwd|secret|token|key|credential|connectionurl)/i;
 
 export interface ExecutorDeps {
   provider: Provider;
@@ -145,6 +148,35 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function redactShellCommand(command: string): string {
+  return command
+    .replace(/\b([A-Z0-9_]*(?:PASSWORD|TOKEN|SECRET|KEY)[A-Z0-9_]*)=('[^']*'|"[^"]*"|[^\s;&|]+)/gi, '$1=[redacted]')
+    .replace(/(postgres(?:ql)?:\/\/)([^:\s/@]+):([^@\s]+)@/gi, '$1$2:[redacted]@')
+    .replace(/(--password(?:=|\s+))('[^']*'|"[^"]*"|[^\s;&|]+)/gi, '$1[redacted]');
+}
+
+function redactToolArgs(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactToolArgs);
+  if (!value || typeof value !== 'object') return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (SECRET_KEY_RE.test(key)) out[key] = '[redacted]';
+    else if (key === 'command' && typeof item === 'string') out[key] = redactShellCommand(item);
+    else out[key] = redactToolArgs(item);
+  }
+  return out;
+}
+
+function safeToolCallArguments(rawArguments: string): string {
+  const parsed = parseToolArguments(rawArguments || '{}');
+  if (!parsed.ok) return rawArguments;
+  return JSON.stringify(redactToolArgs(parsed.args));
+}
+
+function redactToolCalls(toolCalls: LlmMessage['toolCalls']): LlmMessage['toolCalls'] {
+  return toolCalls?.map((call) => ({ ...call, arguments: safeToolCallArguments(call.arguments) }));
+}
+
 function toolSignature(name: string, args: unknown): string {
   return `${name}:${stableJson(args)}`;
 }
@@ -228,6 +260,10 @@ function defaultAskUserAnswer(): AskUserAnswer {
     note: '按默认假设继续。',
     usedRecommended: true,
   };
+}
+
+function runtimeApiBase(): string {
+  return (process.env.MY_AGENT_RUNTIME_API_BASE ?? `http://127.0.0.1:${config.port}/api/runtime`).replace(/\/+$/, '');
 }
 
 /**
@@ -330,10 +366,44 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     }
 
     const activeSkills: SkillIndexItem[] = [];
+    const toolEnv: Record<string, string> = {};
     const streamStats = new StreamStatsTracker(runId, publish);
     const recentToolSignatures: string[] = [];
     const recentFailures: string[] = [];
     let noActionTurns = 0;
+
+    const ensureDatabaseToolEnv = async (activation: SkillActivation): Promise<string> => {
+      if (toolEnv.DB_WORKLOAD_TOKEN) return '数据库访问运行环境已存在，本次 run 复用同一个 workload token。';
+
+      const activeDatasources = (await listDatasources()).filter((datasource) => datasource.status === 'active');
+      const allowedDatasourceIds = activeDatasources.map((datasource) => datasource.id);
+      const created = await createWorkloadToken({
+        runId,
+        skillId: activation.skill.id,
+        allowedDatasourceIds,
+      });
+
+      toolEnv.DB_WORKLOAD_TOKEN = created.token;
+      toolEnv.MY_AGENT_RUNTIME_API_BASE = runtimeApiBase();
+      toolEnv.DATASOURCE_PROFILE = 'readonly';
+
+      if (activeDatasources.length === 1) {
+        const datasource = activeDatasources[0];
+        toolEnv.DATASOURCE_ID = datasource.id;
+        const profiles = await listPermissionProfiles(datasource.id);
+        const readonly = profiles.find((profile) => profile.name === 'readonly');
+        toolEnv.DATASOURCE_PROFILE = readonly?.name ?? profiles[0]?.name ?? 'readonly';
+      }
+
+      const visible = [
+        `DB_WORKLOAD_TOKEN=已注入`,
+        `MY_AGENT_RUNTIME_API_BASE=${toolEnv.MY_AGENT_RUNTIME_API_BASE}`,
+        toolEnv.DATASOURCE_ID ? `DATASOURCE_ID=${toolEnv.DATASOURCE_ID}` : 'DATASOURCE_ID=未自动选择',
+        `DATASOURCE_PROFILE=${toolEnv.DATASOURCE_PROFILE}`,
+        `allowedDatasourceIds=${allowedDatasourceIds.length ? allowedDatasourceIds.join(',') : '无'}`,
+      ];
+      return `数据库访问运行环境已注入：${visible.join('；')}。不要输出 token 或短期凭证。`;
+    };
 
     // Long tasks are bounded by completion / cancellation / context budget, not a
     // fixed step count. hardStepCap is only a runaway-loop backstop.
@@ -452,7 +522,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         }
       }
 
-      const assistantMsg = { role: 'assistant' as const, content, toolCalls: toolCalls.length ? toolCalls : undefined };
+      const assistantMsg = { role: 'assistant' as const, content, toolCalls: redactToolCalls(toolCalls.length ? toolCalls : undefined) };
       ctx.add(assistantMsg);
       ctx.setLastDbId(await store.addMessage(threadId, runId, step.id, assistantMsg));
 
@@ -496,7 +566,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         const toolInputChars = charCount(call.arguments);
         const streamedInputChars = streamedToolInputChars.get(call.id) ?? 0;
         streamStats.add(stepIdx, 'tool_call', 'toolInputChars', Math.max(0, toolInputChars - streamedInputChars), activeTool);
-        await emit(step.id, { type: 'tool_call', step: stepIdx, id: call.id, name: call.name, args, startedAt });
+        await emit(step.id, { type: 'tool_call', step: stepIdx, id: call.id, name: call.name, args: redactToolArgs(args), startedAt });
 
         if (!parsedArgs.ok) {
           const endedAt = new Date().toISOString();
@@ -550,7 +620,6 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           ctx.setLastDbId(await store.addMessage(threadId, runId, step.id, toolMsg));
           for (const msg of pendingSkillSystemMessages) {
             ctx.add(msg);
-            ctx.setLastDbId(await store.addMessage(threadId, runId, step.id, msg));
           }
           await store.setRunStatus(runId, 'waiting_for_user');
           return;
@@ -576,7 +645,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
                 span.setAttribute('tool.result.length', out.text.length);
                 return out;
               }
-              const out = await runTool(call.name, args);
+              const out = await runTool(call.name, args, { settings: toolSettings, env: toolEnv });
               span.setAttribute('tool.result.length', out.text.length);
               return out;
             } finally {
@@ -613,7 +682,15 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         if (activation) {
           const alreadyActive = activeSkills.some((skill) => skill.id === activation.skill.id);
           if (!alreadyActive) activeSkills.push(activation.skill);
-          const skillMsg = { role: 'system' as const, content: activation.systemMessage };
+          let runtimeEnvMessage = '';
+          if (activation.skill.name === DATABASE_ACCESS_SKILL_NAME) {
+            try {
+              runtimeEnvMessage = `\n\n${await ensureDatabaseToolEnv(activation)}`;
+            } catch (err) {
+              runtimeEnvMessage = `\n\n数据库访问运行环境注入失败：${(err as Error).message}`;
+            }
+          }
+          const skillMsg = { role: 'system' as const, content: `${activation.systemMessage}${runtimeEnvMessage}` };
           pendingSkillSystemMessages.push(skillMsg);
           await emit(step.id, {
             type: 'skill_activated',
@@ -661,7 +738,6 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       // tool_result 连续出现，所以 skill 的 system 注入必须等本轮工具结果全部回填后再追加。
       for (const msg of pendingSkillSystemMessages) {
         ctx.add(msg);
-        ctx.setLastDbId(await store.addMessage(threadId, runId, step.id, msg));
       }
 
       if (completedOutput) {

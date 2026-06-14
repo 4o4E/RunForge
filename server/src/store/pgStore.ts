@@ -6,6 +6,10 @@ import type { GoalState } from '../agent/goal.js';
 import type { RunRow, Store, StepRow, ThreadMessage, ThreadRow } from './types.js';
 import { newRunId, newStepId, newThreadId } from '../id.js';
 
+function isEphemeralSystemMessage(role: LlmMessage['role'], content: string | null): boolean {
+  return role === 'system' && typeof content === 'string' && content.startsWith('已激活 Skill / Activated Skill:');
+}
+
 export class PgStore implements Store {
   async createThread(title?: string): Promise<ThreadRow> {
     const id = newThreadId();
@@ -107,7 +111,7 @@ export class PgStore implements Store {
     // Build the compacted LLM-facing view. The original content/tool args stay in
     // the DB; masked rows render placeholders, summarized rows are folded out.
     return rows
-      .filter((r) => r.collapsed !== 'summarized')
+      .filter((r) => r.collapsed !== 'summarized' && !isEphemeralSystemMessage(r.role, r.content))
       .sort((a, b) => Number(a.summary_of?.[0] ?? a.id) - Number(b.summary_of?.[0] ?? b.id))
       .map((r) => ({
         id: Number(r.id),

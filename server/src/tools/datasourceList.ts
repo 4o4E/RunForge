@@ -22,6 +22,11 @@ export function publicDatasourceForTool(datasource: DatasourceRow, profiles: Per
     status: datasource.status,
     connection: redactValue(datasource.connection),
     hasAdminConfig: Object.keys(datasource.admin_config).length > 0,
+    usable: datasource.status === 'active' && profiles.length > 0,
+    issues: [
+      ...(profiles.length ? [] : ['profiles_empty']),
+      ...(Object.keys(datasource.admin_config).length > 0 ? [] : ['admin_config_empty']),
+    ],
     profiles: profiles.map((profile) => ({
       name: profile.name,
       mode: profile.mode,

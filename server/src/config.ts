@@ -70,6 +70,11 @@ const DEFAULT_SHELL_ALLOW_COMMANDS = [
   'rg',
   'node',
   'npm',
+  'python',
+  'python3',
+  'uv',
+  'curl',
+  'psql',
 ];
 
 export const config = {
@@ -123,6 +128,8 @@ export const config = {
     allow: list(process.env.TOOL_ALLOW), // if non-empty, ONLY these tools may run
     deny: list(process.env.TOOL_DENY), // these tools are always blocked
     shellEnabled: (process.env.SHELL_ENABLED ?? 'true') !== 'false',
+    // true 时 shell 直接使用宿主机 PATH 和 cwd=workspaceRoot，避免 bwrap 白名单漏投射 CLI。
+    shellUseHostPath: (process.env.SHELL_USE_HOST_PATH ?? 'true') !== 'false',
     // bwrap 模式只投射这些外部命令; shell 内建命令不需要配置。
     shellAllowCommands: list(process.env.SHELL_ALLOW_COMMANDS).length
       ? list(process.env.SHELL_ALLOW_COMMANDS)

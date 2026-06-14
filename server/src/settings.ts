@@ -7,6 +7,7 @@ import type { ToolPolicyConfig } from './tools/policy.js';
 export interface ToolSettings extends ToolPolicyConfig {
   sandboxBackend: SandboxBackendName;
   shellAllowCommands: string[];
+  shellUseHostPath: boolean;
 }
 
 type SettingRow = { key: string; value: unknown };
@@ -18,6 +19,7 @@ const TOOL_SETTING_KEYS = [
   'tools.allow',
   'tools.deny',
   'tools.shellEnabled',
+  'tools.shellUseHostPath',
   'tools.shellAllowCommands',
   'tools.network',
   'tools.shellDeny',
@@ -76,6 +78,7 @@ function defaultToolSettings(): ToolSettings {
     allow: config.tools.allow,
     deny: config.tools.deny,
     shellEnabled: config.tools.shellEnabled,
+    shellUseHostPath: config.tools.shellUseHostPath,
     shellAllowCommands: config.tools.shellAllowCommands,
     network: config.tools.network,
     shellDeny: config.tools.shellDeny,
@@ -96,6 +99,7 @@ function mergeToolSettings(values: Map<string, unknown>): ToolSettings {
     allow: stringList(values.get('tools.allow'), defaults.allow),
     deny: stringList(values.get('tools.deny'), defaults.deny),
     shellEnabled: boolValue(values.get('tools.shellEnabled'), defaults.shellEnabled),
+    shellUseHostPath: boolValue(values.get('tools.shellUseHostPath'), defaults.shellUseHostPath),
     shellAllowCommands: stringList(values.get('tools.shellAllowCommands'), defaults.shellAllowCommands),
     network: networkValue(values.get('tools.network'), defaults.network),
     shellDeny: stringList(values.get('tools.shellDeny'), defaults.shellDeny),
@@ -141,6 +145,7 @@ function toolSettingsToEntries(settings: ToolSettings): Array<[string, unknown]>
     ['tools.allow', settings.allow],
     ['tools.deny', settings.deny],
     ['tools.shellEnabled', settings.shellEnabled],
+    ['tools.shellUseHostPath', settings.shellUseHostPath],
     ['tools.shellAllowCommands', settings.shellAllowCommands],
     ['tools.network', settings.network],
     ['tools.shellDeny', settings.shellDeny],

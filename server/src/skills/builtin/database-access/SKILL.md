@@ -36,6 +36,7 @@ metadata:
 可复用 SDK：
 
 - Python: `scripts/db_credential.py`
+- PostgreSQL CLI wrapper: `scripts/psql_query.py`
 - Node.js: `scripts/dbCredential.mjs`
 - Shell: `scripts/db_credential.sh`
 
@@ -47,6 +48,14 @@ metadata:
 - `MY_AGENT_RUNTIME_API_BASE`：运行时 API 根路径，默认 `http://localhost:8080/api/runtime`。
 
 SDK 返回的凭证只在内存中使用；不要打印到最终回答、不要写入日志、不要保存到 workspace 文件。
+
+PostgreSQL 查询优先使用 `scripts/psql_query.py`，它会在同一进程内换取短期凭证并调用 `psql`，不会把密码输出给模型。例如：
+
+```bash
+python3 "$SKILL_DIR/scripts/psql_query.py" --sql "select current_database(), current_user;"
+```
+
+如果必须用 shell 函数，应该在同一个 `bash -c` 里调用 `db_credential_json` 并立即传给 CLI，不要单独打印完整凭证 JSON。
 
 ## Query Rules
 
