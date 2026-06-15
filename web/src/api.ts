@@ -342,8 +342,15 @@ export const listRemoteFiles = (path = '.') =>
 
 export const getRemoteFileInfo = () => fetch('/api/files/info').then(json<RemoteFileInfo>);
 
-export const previewRemoteFile = (path: string, startLine = 1, limit = 200) =>
-  fetch(`/api/files/preview?path=${encodeURIComponent(path)}&startLine=${startLine}&limit=${limit}`).then(json<FilePreview>);
+export const previewRemoteFile = (path: string, startLine = 1, limit = 200, options: { render?: boolean } = {}) => {
+  const params = new URLSearchParams({
+    path,
+    startLine: String(startLine),
+    limit: String(limit),
+  });
+  if (options.render) params.set('render', '1');
+  return fetch(`/api/files/preview?${params.toString()}`).then(json<FilePreview>);
+};
 
 export const uploadLocalFile = (path: string, contentBase64: string) =>
   fetch('/api/files/upload', {

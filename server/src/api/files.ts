@@ -7,6 +7,7 @@ import { getToolSettings } from '../settings.js';
 import { isWithin } from '../tools/policy.js';
 
 const SMALL_FILE_BYTES = 200 * 1024;
+const MAX_RENDER_FILE_BYTES = 2 * 1024 * 1024;
 const DEFAULT_LINE_LIMIT = 200;
 const MAX_LINE_LIMIT = 1000;
 const MAX_PREVIEW_LINE_CHARS = 12_000;
@@ -41,6 +42,11 @@ function parentRemotePath(abs: string, configuredRoot: string): string | null {
 function previewLine(line: string): string {
   if (line.length <= MAX_PREVIEW_LINE_CHARS) return line;
   return `${line.slice(0, MAX_PREVIEW_LINE_CHARS)} ... [预览已截断 ${line.length - MAX_PREVIEW_LINE_CHARS} 个字符]`;
+}
+
+export function previewTextLines(text: string, options: { truncateLongLines?: boolean } = {}): string[] {
+  const truncateLongLines = options.truncateLongLines !== false;
+  return text.split(/\r?\n/).map((line) => (truncateLongLines ? previewLine(line) : line));
 }
 
 filesApi.get('/info', async (_req, res) => {
@@ -102,10 +108,16 @@ filesApi.get('/preview', async (req, res) => {
 
     const startLine = Math.max(1, Number(req.query.startLine ?? 1) || 1);
     const limit = Math.min(MAX_LINE_LIMIT, Math.max(1, Number(req.query.limit ?? DEFAULT_LINE_LIMIT) || DEFAULT_LINE_LIMIT));
+    const renderMode = req.query.render === '1';
 
-    if (info.size <= SMALL_FILE_BYTES) {
+    if (renderMode && info.size > MAX_RENDER_FILE_BYTES) {
+      return res.status(413).json({ error: `文件超过渲染上限 ${MAX_RENDER_FILE_BYTES} 字节` });
+    }
+
+    if (info.size <= SMALL_FILE_BYTES || renderMode) {
       const text = await readFile(file, 'utf8');
-      const lines = text.split(/\r?\n/).map(previewLine);
+      // 渲染模式必须使用原文；截断后的 HTML/Markdown 会变成另一份损坏内容。
+      const lines = previewTextLines(text, { truncateLongLines: !renderMode });
       return res.json({
         path: toRemotePath(file, settings.workspaceRoot),
         size: info.size,

@@ -161,7 +161,8 @@ export function RemoteFilesPanel({ open, width, previewPath, embedded = false, o
     setError(null);
     try {
       const limit = startLine === 1 ? INITIAL_PREVIEW_LINES : MORE_PREVIEW_LINES;
-      const data = await previewRemoteFile(path, startLine, limit);
+      const renderable = ['html', 'htm', 'md'].includes(extOf(path));
+      const data = await previewRemoteFile(path, startLine, limit, { render: startLine === 1 && renderable });
       if (previewRequestRef.current !== requestId) return;
       setSelectedPath(data.path);
       setSelectedSize(size ?? data.size);
