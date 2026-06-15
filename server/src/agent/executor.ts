@@ -20,6 +20,7 @@ import { renderRuntimeContext } from './context.js';
 import { shellManager } from '../shell/manager.js';
 import { requiresDatabaseAccess } from '../tools/databaseAccessGuard.js';
 import type { SubagentRunRow } from '../store/types.js';
+import { loadWorkflowIndex, renderWorkflowCatalog, renderWorkflowSystemRules } from '../workflows/registry.js';
 
 const ASK_USER_TOOL_NAME = 'ask_user';
 const DATABASE_ACCESS_SKILL_NAME = 'database-access';
@@ -383,10 +384,12 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     if (!initialRun.goal_state) await store.setGoalState(runId, goal);
     const toolSettings = deps.toolSettings ?? (await getToolSettings());
     const skillIndex = await loadSkillIndex(toolSettings.workspaceRoot);
+    const workflowIndex = await loadWorkflowIndex(toolSettings.workspaceRoot);
     const skillRuntimeContext = [renderSkillSystemRules(), renderSkillCatalog(skillIndex)].join('\n\n');
+    const workflowRuntimeContext = [renderWorkflowSystemRules(), renderWorkflowCatalog(workflowIndex)].join('\n\n');
     const ctx = new ContextManager(prior, userInput, renderGoal(goal), {
       appendUserInput: !isResume,
-      runtimeContext: `${renderRuntimeContext(toolSettings)}\n\n${skillRuntimeContext}`,
+      runtimeContext: `${renderRuntimeContext(toolSettings)}\n\n${workflowRuntimeContext}\n\n${skillRuntimeContext}`,
     });
     currentCtx = ctx;
     if (!isResume) {

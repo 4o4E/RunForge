@@ -40,10 +40,13 @@ test('registry exposes neutral tool schemas and dispatches by name', async () =>
   assert.equal(schemas.some((s) => s.name === 'finish_conversation'), false);
   assert.ok(schemas.find((s) => s.name === 'write_html_artifact'));
   assert.ok(schemas.find((s) => s.name === 'skill_activate'));
+  assert.ok(schemas.find((s) => s.name === 'workflow_list'));
+  assert.ok(schemas.find((s) => s.name === 'workflow_read'));
   assert.ok(schemas.find((s) => s.name === 'datasource_list'));
   assert.ok(toolSchemas(['file_read']).some((s) => s.name === 'file_read'));
   assert.equal(toolSchemas(['file_read']).some((s) => s.name === 'shell'), false);
   assert.ok(toolSchemas(['file_read']).some((s) => s.name === 'update_plan'));
+  assert.ok(toolSchemas(['file_read']).some((s) => s.name === 'workflow_read'));
   assert.ok(toolSchemas(['datasource_list']).some((s) => s.name === 'datasource_list'));
   assert.ok(getTool('glob'));
   assert.match((await runTool('does_not_exist', {})).text, /未知工具/);

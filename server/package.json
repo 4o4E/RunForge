@@ -8,7 +8,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "test": "node --import tsx --test src/id.test.ts src/api/files.test.ts src/tools/tools.test.ts src/tools/policy.test.ts src/tools/sandbox.test.ts src/datasources/accountPool.test.ts src/llm/providers.test.ts src/llm/aiSdk.test.ts src/agent/executor.test.ts src/agent/compaction.test.ts src/agent/persistence.test.ts src/agent/goal.test.ts",
+    "test": "node --import tsx --test src/id.test.ts src/api/files.test.ts src/tools/tools.test.ts src/tools/policy.test.ts src/tools/sandbox.test.ts src/datasources/accountPool.test.ts src/llm/providers.test.ts src/llm/aiSdk.test.ts src/workflows/registry.test.ts src/agent/executor.test.ts src/agent/compaction.test.ts src/agent/persistence.test.ts src/agent/goal.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "db:migrate": "tsx src/db/migrate.ts"
   },

@@ -48,11 +48,14 @@ test('enforce: filesystem path confinement', () => {
   assert.equal(p.check('glob', { pattern: '**/*' }).ok, true);
 });
 
-test('skill materialized directory is readonly for file writes', () => {
+test('materialized agent resource directories are readonly for file writes', () => {
   const p = createPolicy(cfg({ sandbox: 'off' }));
-  const blocked = p.check('file_write', { path: resolve(ROOT, '.agents/skills/database-access/SKILL.md') });
-  assert.equal(blocked.ok, false);
-  assert.match((blocked as { reason: string }).reason, /只读/);
+  const blockedSkill = p.check('file_write', { path: resolve(ROOT, '.agents/skills/database-access/SKILL.md') });
+  assert.equal(blockedSkill.ok, false);
+  assert.match((blockedSkill as { reason: string }).reason, /只读/);
+  const blockedWorkflow = p.check('file_write', { path: resolve(ROOT, '.agents/workflows/software-development/WORKFLOW.md') });
+  assert.equal(blockedWorkflow.ok, false);
+  assert.match((blockedWorkflow as { reason: string }).reason, /只读/);
 });
 
 test('off mode skips path confinement but still caps/denies', () => {
