@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Circle, Paperclip, Pencil, Play, Plug, Power, RefreshCw, Square, Terminal, X } from 'lucide-react';
 import {
   closeShellSession,
@@ -96,6 +96,19 @@ function sortedCommands(session: ShellSession | null): ShellCommand[] {
   return [...(session?.commands ?? [])].sort((a, b) => new Date(a.started_at).getTime() - new Date(b.started_at).getTime());
 }
 
+function selectionTouchesElement(selection: Selection, element: HTMLElement): boolean {
+  const anchor = selection.anchorNode;
+  const focus = selection.focusNode;
+  return (!!anchor && element.contains(anchor)) || (!!focus && element.contains(focus));
+}
+
+function clearElementSelection(element: HTMLElement | null): void {
+  if (!element) return;
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return;
+  if (selectionTouchesElement(selection, element)) selection.removeAllRanges();
+}
+
 export function ShellPanel({ open, width, threadId, embedded = false, previewSessionId = null, onClose, onAttach }: Props) {
   const [sessions, setSessions] = useState<ShellSession[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -108,6 +121,7 @@ export function ShellPanel({ open, width, threadId, embedded = false, previewSes
   const [loading, setLoading] = useState(false);
   const [acting, setActing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const panelRef = useRef<HTMLElement>(null);
   const terminalRef = useRef<HTMLDivElement>(null);
   const refreshTimerRef = useRef<number | null>(null);
 
@@ -169,6 +183,20 @@ export function ShellPanel({ open, width, threadId, embedded = false, previewSes
   useEffect(() => {
     if (open) void refresh();
   }, [open, refresh]);
+
+  useLayoutEffect(() => {
+    // thread 或预览 session 切换时先清掉本地视图，避免旧 shell 输出和选区短暂残留。
+    clearElementSelection(panelRef.current);
+    setSessions([]);
+    setSelectedSessionId(previewSessionId ?? null);
+    setLogsByCommand({});
+    setCommandText('');
+    setError(null);
+  }, [previewSessionId, threadId]);
+
+  useEffect(() => {
+    return () => clearElementSelection(panelRef.current);
+  }, []);
 
   useEffect(() => {
     if (previewSessionId) setSelectedSessionId(previewSessionId);
@@ -328,7 +356,7 @@ export function ShellPanel({ open, width, threadId, embedded = false, previewSes
   const canRenameSelected = canDeleteSelected;
 
   return (
-    <aside className={cn('flex h-full shrink-0 flex-col bg-card', !embedded && 'border-l')} style={embedded ? undefined : { width }}>
+    <aside ref={panelRef} className={cn('flex h-full shrink-0 flex-col bg-card', !embedded && 'border-l')} style={embedded ? undefined : { width }}>
       <div className="flex h-14 items-center gap-2 border-b px-3">
         <Terminal className="size-4 shrink-0 text-primary" />
         <div className="min-w-0 flex-1">

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useChat } from '@ai-sdk/react';
 import type { UIMessage } from 'ai';
@@ -118,6 +118,50 @@ function rightTabsValue(value: unknown): RightTabId[] {
   return value.filter(isRightTabId).slice(0, 30);
 }
 
+interface ThreadPanelState {
+  rightPanelOpen: boolean;
+  rightPanelTabs: RightTabId[];
+  rightPanelMode: RightTabId | null;
+  statusCardOpen: boolean;
+}
+
+const EMPTY_THREAD_PANEL_STATE: ThreadPanelState = {
+  rightPanelOpen: false,
+  rightPanelTabs: [],
+  rightPanelMode: null,
+  statusCardOpen: false,
+};
+
+function threadPanelStateValue(value: unknown): ThreadPanelState {
+  const object = objectValue(value);
+  const tabs = rightTabsValue(object.rightPanelTabs);
+  const mode = isRightTabId(object.rightPanelMode) && tabs.includes(object.rightPanelMode) ? object.rightPanelMode : tabs[0] ?? null;
+  return {
+    rightPanelOpen: typeof object.rightPanelOpen === 'boolean' ? object.rightPanelOpen && tabs.length > 0 : false,
+    rightPanelTabs: tabs,
+    rightPanelMode: mode,
+    statusCardOpen: typeof object.statusCardOpen === 'boolean' ? object.statusCardOpen : false,
+  };
+}
+
+function threadPanelStatesValue(value: unknown): Record<string, ThreadPanelState> {
+  const object = objectValue(value);
+  const states: Record<string, ThreadPanelState> = {};
+  for (const [threadId, rawState] of Object.entries(object)) {
+    if (threadId) states[threadId] = threadPanelStateValue(rawState);
+  }
+  return states;
+}
+
+function threadDraftsValue(value: unknown): Record<string, string> {
+  const object = objectValue(value);
+  const drafts: Record<string, string> = {};
+  for (const [threadId, draftText] of Object.entries(object)) {
+    if (threadId && typeof draftText === 'string') drafts[threadId] = draftText;
+  }
+  return drafts;
+}
+
 function assistantMessageFromEvents(runId: string, events: AgentEvent[]): UIMessage {
   const parts = foldUiEventsToParts(events.map(toUiEvent).filter((e): e is NonNullable<ReturnType<typeof toUiEvent>> => e !== null));
   parts.unshift({ type: 'data-run-id', id: runId, data: { runId } } as unknown as UIMessage['parts'][number]);
@@ -142,6 +186,8 @@ export function App() {
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [rightPanelTabs, setRightPanelTabs] = useState<RightTabId[]>([]);
   const [rightPanelMode, setRightPanelMode] = useState<RightTabId | null>(null);
+  const [threadPanelStates, setThreadPanelStates] = useState<Record<string, ThreadPanelState>>({});
+  const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
   const [statusCardOpen, setStatusCardOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(256);
   const [filesPanelWidth, setFilesPanelWidth] = useState(720);
@@ -154,14 +200,48 @@ export function App() {
   const [pageStateLoaded, setPageStateLoaded] = useState(false);
   const { theme, toggle: toggleTheme } = useThemeCtx();
   const activeThreadId = route.threadId;
-  const initialThreadIdRef = useRef(activeThreadId);
   const conversationContentRef = useRef<HTMLDivElement>(null);
+  const previousPanelThreadIdRef = useRef(activeThreadId);
+  const threadPanelStatesRef = useRef<Record<string, ThreadPanelState>>({});
+  const threadDraftsRef = useRef<Record<string, string>>({});
 
   // 活跃会话 ID 放在 ref 中，稳定的 transport 可以读取和更新它，
   // 不需要在每次选择会话时重新创建 transport。
   const threadIdRef = useRef<string | null>(null);
   const skipNextHistoryLoadRef = useRef<string | null>(null);
   threadIdRef.current = activeThreadId;
+
+  const currentThreadPanelState = useCallback((): ThreadPanelState => ({
+    rightPanelOpen: rightPanelOpen && rightPanelTabs.length > 0,
+    rightPanelTabs,
+    rightPanelMode: rightPanelMode && rightPanelTabs.includes(rightPanelMode) ? rightPanelMode : rightPanelTabs[0] ?? null,
+    statusCardOpen,
+  }), [rightPanelMode, rightPanelOpen, rightPanelTabs, statusCardOpen]);
+
+  const rememberThreadPanelState = useCallback((threadId: string, state: ThreadPanelState) => {
+    setThreadPanelStates((current) => {
+      const next = { ...current, [threadId]: state };
+      threadPanelStatesRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const applyThreadPanelState = useCallback((state: ThreadPanelState) => {
+    setRightPanelTabs(state.rightPanelTabs);
+    setRightPanelMode(state.rightPanelMode);
+    setRightPanelOpen(state.rightPanelOpen);
+    setStatusCardOpen(state.statusCardOpen);
+  }, []);
+
+  const rememberThreadDraft = useCallback((threadId: string, draftText: string) => {
+    setThreadDrafts((current) => {
+      const next = { ...current };
+      if (draftText) next[threadId] = draftText;
+      else delete next[threadId];
+      threadDraftsRef.current = next;
+      return next;
+    });
+  }, []);
 
   const refreshThreads = useCallback(() => {
     listThreads().then(setThreads).catch(() => {});
@@ -181,20 +261,27 @@ export function App() {
         const layout = objectValue(state.layout);
         const chat = objectValue(state.chat);
         const savedThreadId = typeof chat.threadId === 'string' ? chat.threadId : null;
-        const canRestoreThreadScopedState = savedThreadId === initialThreadIdRef.current;
+        const savedThreadStates = threadPanelStatesValue(chat.threadStates);
+        const savedDrafts = threadDraftsValue(chat.threadDrafts);
+        if (savedThreadId && !savedThreadStates[savedThreadId]) {
+          savedThreadStates[savedThreadId] = threadPanelStateValue(chat);
+        }
+        if (savedThreadId && typeof chat.draft === 'string' && chat.draft) {
+          savedDrafts[savedThreadId] = chat.draft;
+        }
+        if (activeThreadId && draft) {
+          savedDrafts[activeThreadId] = draft;
+        }
 
         setSidebarWidth((current) => numberInRange(layout.sidebarWidth, current, 200, 420));
         setFilesPanelWidth((current) => numberInRange(layout.rightPanelWidth, current, 360, 1200));
         setWide(typeof chat.wide === 'boolean' ? chat.wide : false);
-
-        if (canRestoreThreadScopedState) {
-          const tabs = rightTabsValue(chat.rightPanelTabs);
-          const activeTab = isRightTabId(chat.rightPanelMode) && tabs.includes(chat.rightPanelMode) ? chat.rightPanelMode : tabs[0] ?? null;
-          setRightPanelTabs(tabs);
-          setRightPanelMode(activeTab);
-          setRightPanelOpen(typeof chat.rightPanelOpen === 'boolean' ? chat.rightPanelOpen && tabs.length > 0 : false);
-          setStatusCardOpen(typeof chat.statusCardOpen === 'boolean' ? chat.statusCardOpen : false);
-        }
+        setThreadPanelStates(savedThreadStates);
+        threadPanelStatesRef.current = savedThreadStates;
+        setThreadDrafts(savedDrafts);
+        threadDraftsRef.current = savedDrafts;
+        applyThreadPanelState(activeThreadId ? savedThreadStates[activeThreadId] ?? EMPTY_THREAD_PANEL_STATE : EMPTY_THREAD_PANEL_STATE);
+        if (activeThreadId && !draft) setDraft(savedDrafts[activeThreadId] ?? '');
       })
       .catch((err) => console.error('load page state failed', err))
       .finally(() => {
@@ -205,8 +292,29 @@ export function App() {
     };
   }, []);
 
+  useLayoutEffect(() => {
+    if (!pageStateLoaded) return;
+    const previousThreadId = previousPanelThreadIdRef.current;
+    if (previousThreadId === activeThreadId) return;
+    if (previousThreadId) rememberThreadPanelState(previousThreadId, currentThreadPanelState());
+    previousPanelThreadIdRef.current = activeThreadId;
+    applyThreadPanelState(activeThreadId ? threadPanelStatesRef.current[activeThreadId] ?? EMPTY_THREAD_PANEL_STATE : EMPTY_THREAD_PANEL_STATE);
+  }, [activeThreadId, applyThreadPanelState, currentThreadPanelState, pageStateLoaded, rememberThreadPanelState]);
+
+  useEffect(() => {
+    if (!pageStateLoaded || !activeThreadId) return;
+    rememberThreadPanelState(activeThreadId, currentThreadPanelState());
+  }, [activeThreadId, currentThreadPanelState, pageStateLoaded, rememberThreadPanelState]);
+
   useEffect(() => {
     if (!pageStateLoaded) return undefined;
+    const activePanelState = currentThreadPanelState();
+    const savedThreadStates = activeThreadId ? { ...threadPanelStates, [activeThreadId]: activePanelState } : threadPanelStates;
+    const savedThreadDrafts = { ...threadDrafts };
+    if (activeThreadId) {
+      if (draft) savedThreadDrafts[activeThreadId] = draft;
+      else delete savedThreadDrafts[activeThreadId];
+    }
     const state: PageState = {
       version: 1,
       view: activeView,
@@ -217,17 +325,20 @@ export function App() {
       chat: {
         threadId: activeThreadId,
         wide,
-        rightPanelOpen,
-        rightPanelTabs,
-        rightPanelMode,
-        statusCardOpen,
+        draft,
+        rightPanelOpen: activePanelState.rightPanelOpen,
+        rightPanelTabs: activePanelState.rightPanelTabs,
+        rightPanelMode: activePanelState.rightPanelMode,
+        statusCardOpen: activePanelState.statusCardOpen,
+        threadStates: savedThreadStates,
+        threadDrafts: savedThreadDrafts,
       },
     };
     const timer = window.setTimeout(() => {
       void updatePageState(state).catch((err) => console.error('save page state failed', err));
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [activeThreadId, activeView, filesPanelWidth, pageStateLoaded, rightPanelMode, rightPanelOpen, rightPanelTabs, sidebarWidth, statusCardOpen, wide]);
+  }, [activeThreadId, activeView, currentThreadPanelState, draft, filesPanelWidth, pageStateLoaded, sidebarWidth, threadDrafts, threadPanelStates, wide]);
 
   const navigateChatRoute = useCallback((next: ChatRoute, mode: 'push' | 'replace' = 'push') => {
     const path = buildChatPath(next);
@@ -339,26 +450,20 @@ export function App() {
 
   function newChat() {
     stop();
-    setRightPanelOpen(false);
-    setRightPanelTabs([]);
-    setRightPanelMode(null);
+    if (activeThreadId) rememberThreadDraft(activeThreadId, draft);
     navigateChatRoute({ draft: '', threadId: null });
     setMessages([]);
   }
 
   function selectThread(id: string) {
     stop();
-    setRightPanelOpen(false);
-    setRightPanelTabs([]);
-    setRightPanelMode(null);
-    navigateChatRoute({ draft: '', threadId: id });
+    if (activeThreadId) rememberThreadDraft(activeThreadId, draft);
+    navigateChatRoute({ draft: threadDraftsRef.current[id] ?? '', threadId: id });
   }
 
   function openSettings() {
     stop();
-    setRightPanelOpen(false);
-    setRightPanelTabs([]);
-    setRightPanelMode(null);
+    if (activeThreadId) rememberThreadDraft(activeThreadId, draft);
     navigateSettings();
   }
 
@@ -367,6 +472,18 @@ export function App() {
     stop();
     await deleteThread(id);
     setThreads((current) => current.filter((t) => t.id !== id));
+    setThreadPanelStates((current) => {
+      const next = { ...current };
+      delete next[id];
+      threadPanelStatesRef.current = next;
+      return next;
+    });
+    setThreadDrafts((current) => {
+      const next = { ...current };
+      delete next[id];
+      threadDraftsRef.current = next;
+      return next;
+    });
     if (activeThreadId === id) {
       navigateChatRoute({ draft: '', threadId: null });
       setMessages([]);
@@ -374,6 +491,7 @@ export function App() {
   }
 
   function changeDraft(text: string) {
+    if (activeThreadId) rememberThreadDraft(activeThreadId, text);
     navigateChatRoute({ draft: text, threadId: activeThreadId }, 'replace');
   }
 
@@ -443,6 +561,7 @@ export function App() {
     const finalText = attachments.length
       ? `${text}\n\n${attachments.map(attachmentToken).join('\n')}`
       : text;
+    if (activeThreadId) rememberThreadDraft(activeThreadId, '');
     navigateChatRoute({ draft: '', threadId: activeThreadId }, 'replace');
     setAttachments([]);
     void sendMessage({ text: finalText });
