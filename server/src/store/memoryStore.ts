@@ -10,11 +10,12 @@ import type {
   ShellLogStream,
   ShellSessionRow,
   Store,
+  SubagentRunRow,
   StepRow,
   ThreadMessage,
   ThreadRow,
 } from './types.js';
-import { newRunId, newShellCommandId, newShellSessionId, newStepId, newThreadId } from '../id.js';
+import { newRunId, newShellCommandId, newShellSessionId, newStepId, newSubagentRunId, newThreadId } from '../id.js';
 
 function isEphemeralSystemMessage(role: LlmMessage['role'], content: string | null): boolean {
   return role === 'system' && typeof content === 'string' && content.startsWith('已激活 Skill / Activated Skill:');
@@ -43,6 +44,7 @@ export class MemoryStore implements Store {
   private shellSessions = new Map<string, ShellSessionRow>();
   private shellCommands = new Map<string, ShellCommandRow>();
   private shellLogs = new Map<string, ShellCommandLogRow[]>();
+  private subagentRuns = new Map<string, SubagentRunRow>();
   private seq = 0;
   private shellLogSeq = 0;
   private now = () => new Date().toISOString();
@@ -65,6 +67,9 @@ export class MemoryStore implements Store {
     for (const runId of runIds) {
       this.runs.delete(runId);
       this.events.delete(runId);
+    }
+    for (const [subagentRunId, row] of this.subagentRuns) {
+      if (runIds.has(row.parent_run_id)) this.subagentRuns.delete(subagentRunId);
     }
     const sessionIds = new Set([...this.shellSessions.values()].filter((s) => s.thread_id === id).map((s) => s.id));
     const commandIds = new Set([...this.shellCommands.values()].filter((c) => sessionIds.has(c.session_id)).map((c) => c.id));
@@ -186,6 +191,62 @@ export class MemoryStore implements Store {
   }
   async getEvents(runId: string) {
     return this.events.get(runId) ?? [];
+  }
+
+  async createSubagentRun(input: {
+    parentRunId: string;
+    parentStepId?: string | null;
+    workflowId?: string | null;
+    stageId?: string | null;
+    runtimeProfileId?: string | null;
+    taskAssignment: Record<string, unknown>;
+    skillNames?: string[];
+  }): Promise<SubagentRunRow> {
+    const now = this.now();
+    const row: SubagentRunRow = {
+      id: newSubagentRunId(),
+      parent_run_id: input.parentRunId,
+      parent_step_id: input.parentStepId ?? null,
+      workflow_id: input.workflowId ?? null,
+      stage_id: input.stageId ?? null,
+      runtime_profile_id: input.runtimeProfileId ?? null,
+      status: 'running',
+      task_assignment: input.taskAssignment,
+      skill_names: input.skillNames ?? [],
+      output: null,
+      error: null,
+      usage: null,
+      created_at: now,
+      updated_at: now,
+      finished_at: null,
+    };
+    this.subagentRuns.set(row.id, row);
+    return row;
+  }
+
+  async finishSubagentRun(
+    id: string,
+    fields: { status: 'done' | 'error'; output?: string | null; error?: string | null; usage?: Record<string, unknown> | null },
+  ): Promise<void> {
+    const row = this.subagentRuns.get(id);
+    if (!row) return;
+    row.status = fields.status;
+    if (fields.output !== undefined) row.output = fields.output;
+    if (fields.error !== undefined) row.error = fields.error;
+    if (fields.usage !== undefined) row.usage = fields.usage;
+    row.updated_at = this.now();
+    row.finished_at = row.updated_at;
+  }
+
+  async getSubagentRun(id: string): Promise<SubagentRunRow | null> {
+    return this.subagentRuns.get(id) ?? null;
+  }
+
+  async listSubagentRunsByThread(threadId: string): Promise<SubagentRunRow[]> {
+    const runIds = new Set([...this.runs.values()].filter((run) => run.thread_id === threadId).map((run) => run.id));
+    return [...this.subagentRuns.values()]
+      .filter((row) => runIds.has(row.parent_run_id))
+      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
   }
 
   async createShellSession(input: {

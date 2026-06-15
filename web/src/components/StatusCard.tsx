@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { UIMessage } from 'ai';
-import { CheckCircle2, Circle, Gauge, LoaderCircle, Settings2, Terminal, XCircle } from 'lucide-react';
-import { listShellSessions, type PlanItem, type ShellSession } from '@/api';
+import { Bot, CheckCircle2, Circle, Gauge, LoaderCircle, Settings2, Terminal, XCircle } from 'lucide-react';
+import { listShellSessions, listSubagentRuns, type PlanItem, type ShellSession, type SubagentRun } from '@/api';
 import { Button } from '@/components/ui/button';
 import { latestPlanState, type UsageSnapshot } from './Conversation';
 import { cn } from '@/lib/utils';
@@ -14,6 +14,7 @@ interface Props {
   threadId: string | null;
   className?: string;
   onOpenShellPreview?: (sessionId: string) => void;
+  onOpenSubagentPreview?: (subagentId: string) => void;
 }
 
 const STORAGE_KEY = 'my-agent:right-status-fields';
@@ -21,7 +22,7 @@ const DEFAULT_FIELDS: StatusField[] = ['run', 'plan', 'shell', 'tokens', 'cache'
 const FIELD_LABELS: Record<StatusField, string> = {
   run: '当前信息',
   plan: '计划',
-  shell: 'Shell',
+  shell: '资源',
   tokens: 'Token',
   cache: '缓存命中率',
 };
@@ -78,6 +79,21 @@ function StatusRow({ label, value, title }: { label: string; value: string; titl
   );
 }
 
+function ResourceDivider({ label }: { label: string }) {
+  return (
+    <div className="flex items-center gap-2 pt-1">
+      <div className="h-px flex-1 bg-border" />
+      <span className="shrink-0 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{label}</span>
+      <div className="h-px flex-1 bg-border" />
+    </div>
+  );
+}
+
+function subagentLabel(subagent: SubagentRun): string {
+  const task = typeof subagent.task_assignment.task === 'string' ? subagent.task_assignment.task.trim() : '';
+  return task || subagent.stage_id || subagent.id;
+}
+
 function planIcon(item: PlanItem) {
   if (item.status === 'done') return <CheckCircle2 className="size-3.5 text-emerald-600 dark:text-emerald-400" />;
   if (item.status === 'doing') return <LoaderCircle className="size-3.5 animate-spin text-sky-600 dark:text-sky-400" />;
@@ -107,10 +123,11 @@ function PlanList({ messages }: { messages: UIMessage[] }) {
   );
 }
 
-export function AgentStatusCard({ messages, busy, threadId, className, onOpenShellPreview }: Props) {
+export function AgentStatusCard({ messages, busy, threadId, className, onOpenShellPreview, onOpenSubagentPreview }: Props) {
   const [fields, setFields] = useState<StatusField[]>(readFields);
   const [configOpen, setConfigOpen] = useState(false);
   const [sessions, setSessions] = useState<ShellSession[]>([]);
+  const [subagents, setSubagents] = useState<SubagentRun[]>([]);
   const usage = latestTokenUsage(messages);
   const messageSummary = useMemo(() => {
     const userCount = messages.filter((message) => message.role === 'user').length;
@@ -119,6 +136,7 @@ export function AgentStatusCard({ messages, busy, threadId, className, onOpenShe
   }, [messages]);
   const openShells = sessions.filter((session) => session.status !== 'closed');
   const runningShells = openShells.filter((session) => session.status === 'busy' || session.commands?.some((cmd) => cmd.status === 'queued' || cmd.status === 'running'));
+  const visibleSubagents = subagents.slice(-6);
 
   const refreshShells = useCallback(() => {
     if (!threadId) {
@@ -128,12 +146,24 @@ export function AgentStatusCard({ messages, busy, threadId, className, onOpenShe
     listShellSessions(threadId).then((data) => setSessions(data.sessions)).catch(() => setSessions([]));
   }, [threadId]);
 
+  const refreshSubagents = useCallback(() => {
+    if (!threadId) {
+      setSubagents([]);
+      return;
+    }
+    listSubagentRuns(threadId).then((data) => setSubagents(data.subagents)).catch(() => setSubagents([]));
+  }, [threadId]);
+
   useEffect(refreshShells, [refreshShells]);
+  useEffect(refreshSubagents, [refreshSubagents]);
   useEffect(() => {
     if (!threadId) return;
-    const timer = window.setInterval(refreshShells, 2500);
+    const timer = window.setInterval(() => {
+      refreshShells();
+      refreshSubagents();
+    }, 2500);
     return () => window.clearInterval(timer);
-  }, [refreshShells, threadId]);
+  }, [refreshShells, refreshSubagents, threadId]);
 
   const toggleField = (field: StatusField) => {
     setFields((current) => {
@@ -181,8 +211,8 @@ export function AgentStatusCard({ messages, busy, threadId, className, onOpenShe
         {show('plan') && <PlanList messages={messages} />}
         {show('shell') && (
           <StatusRow
-            label="Shell"
-            value={`${openShells.length} 打开 · ${runningShells.length} 运行`}
+            label="资源"
+            value={`Shell ${openShells.length} · Subagent ${subagents.length} · ${runningShells.length} 运行`}
           />
         )}
         {show('tokens') && (
@@ -201,20 +231,46 @@ export function AgentStatusCard({ messages, busy, threadId, className, onOpenShe
         )}
       </div>
 
-      {openShells.length > 0 && show('shell') && (
-        <div className="mt-2 flex flex-wrap gap-1">
-          {openShells.slice(0, 6).map((session) => (
-            <button
-              key={session.id}
-              type="button"
-              onClick={() => onOpenShellPreview?.(session.id)}
-              className="inline-flex max-w-full items-center gap-1 rounded border bg-background px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
-              title={session.name}
-            >
-              <Terminal className="size-3" />
-              <span className="truncate">{session.name}</span>
-            </button>
-          ))}
+      {show('shell') && (openShells.length > 0 || visibleSubagents.length > 0) && (
+        <div className="mt-2 space-y-1.5">
+          {openShells.length > 0 && (
+            <>
+              <ResourceDivider label="Shell" />
+              <div className="flex flex-wrap gap-1">
+                {openShells.slice(0, 6).map((session) => (
+                  <button
+                    key={session.id}
+                    type="button"
+                    onClick={() => onOpenShellPreview?.(session.id)}
+                    className="inline-flex max-w-full items-center gap-1 rounded border bg-background px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+                    title={session.name}
+                  >
+                    <Terminal className="size-3" />
+                    <span className="truncate">{session.name}</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+          {visibleSubagents.length > 0 && (
+            <>
+              <ResourceDivider label="Subagent" />
+              <div className="flex flex-wrap gap-1">
+                {visibleSubagents.map((subagent) => (
+                  <button
+                    key={subagent.id}
+                    type="button"
+                    onClick={() => onOpenSubagentPreview?.(subagent.id)}
+                    className="inline-flex max-w-full items-center gap-1 rounded border bg-background px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+                    title={subagentLabel(subagent)}
+                  >
+                    <Bot className="size-3" />
+                    <span className="truncate">{subagentLabel(subagent)}</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       )}
     </section>

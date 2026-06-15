@@ -102,7 +102,7 @@ function waitingRunFrom(runs: RunWithEvents[]): { id: string; spec: AskUserSpec 
 
 function isRightTabId(value: unknown): value is RightTabId {
   return value === 'files'
-    || (typeof value === 'string' && (value.startsWith('file:') || value.startsWith('shell:')));
+    || (typeof value === 'string' && (value.startsWith('file:') || value.startsWith('shell:') || value.startsWith('subagent:')));
 }
 
 function numberInRange(value: unknown, fallback: number, min: number, max: number): number {
@@ -558,6 +558,7 @@ export function App() {
           onToggleStatusCard={() => setStatusCardOpen((open) => !open)}
           onToggleRightPanel={toggleRightPanel}
           onOpenShellPreview={(sessionId) => openRightTab(`shell:${sessionId}`)}
+          onOpenSubagentPreview={(subagentId) => openRightTab(`subagent:${subagentId}`)}
           onOpenRemoteFiles={() => openRightTab('files')}
           onUploadLocal={uploadLocalAttachment}
           onOpenRemoteFile={openRemoteFile}
@@ -588,10 +589,12 @@ export function App() {
         tabs={rightPanelTabs}
         activeTab={rightPanelMode}
         threadId={activeThreadId}
+        workspaceRoot={workspaceRoot}
         onTabChange={setRightPanelMode}
         onOpenFileBrowser={() => openRightTab('files')}
         onOpenFileTab={openRemoteFile}
         onOpenShellTab={(sessionId) => openRightTab(`shell:${sessionId}`)}
+        onOpenSubagentTab={(subagentId) => openRightTab(`subagent:${subagentId}`)}
         onCloseTab={closeRightTab}
         onClose={() => setRightPanelOpen(false)}
         onAttach={addAttachment}

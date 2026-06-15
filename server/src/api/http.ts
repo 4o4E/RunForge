@@ -101,6 +101,13 @@ api.get('/threads/:id', async (req, res) => {
   res.json({ thread, runs: withEvents });
 });
 
+// thread 下的 subagent 子任务列表。右侧资源栏用它恢复和打开历史 subagent。
+api.get('/threads/:id/subagents', async (req, res) => {
+  const thread = await store.getThread(req.params.id);
+  if (!thread) return res.status(404).json({ error: 'thread 不存在' });
+  res.json({ subagents: await store.listSubagentRunsByThread(thread.id) });
+});
+
 // 删除 thread 及关联 run 数据，级联删除由 PostgreSQL 负责。
 api.delete('/threads/:id', async (req, res) => {
   const deleted = await store.deleteThread(req.params.id);

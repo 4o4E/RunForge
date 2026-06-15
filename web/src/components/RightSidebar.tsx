@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { WheelEvent as ReactWheelEvent } from 'react';
-import { FileText, FolderTree, Plus, Terminal, X } from 'lucide-react';
-import { listShellSessions, type ShellSession } from '@/api';
+import { Bot, FileText, FolderTree, Plus, Terminal, X } from 'lucide-react';
+import { listShellSessions, listSubagentRuns, type ShellSession, type SubagentRun } from '@/api';
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { RemoteFilesPanel } from './RemoteFilesPanel';
 import { ShellPanel } from './ShellPanel';
+import { SubagentPanel } from './SubagentPanel';
 import { cn } from '@/lib/utils';
 
-export type RightTabId = 'files' | `file:${string}` | `shell:${string}`;
+export type RightTabId = 'files' | `file:${string}` | `shell:${string}` | `subagent:${string}`;
 
 interface Props {
   open: boolean;
@@ -16,10 +17,12 @@ interface Props {
   tabs: RightTabId[];
   activeTab: RightTabId | null;
   threadId: string | null;
+  workspaceRoot: string | null;
   onTabChange: (tab: RightTabId | null) => void;
   onOpenFileBrowser: () => void;
   onOpenFileTab: (path: string) => void;
   onOpenShellTab: (sessionId: string) => void;
+  onOpenSubagentTab: (subagentId: string) => void;
   onCloseTab: (tab: RightTabId) => void;
   onClose: () => void;
   onAttach: (entry: { kind: 'remote'; path: string; name: string; size?: number } | { kind: 'shell'; path: string; name: string; size?: number; text: string }) => void;
@@ -39,6 +42,10 @@ function shortShellId(id: string): string {
   return id.length > 10 ? `${id.slice(0, 6)}…${id.slice(-3)}` : id;
 }
 
+function shortSubagentId(id: string): string {
+  return id.length > 10 ? `${id.slice(0, 6)}…${id.slice(-3)}` : id;
+}
+
 function fileName(path: string): string {
   const parts = path.split('/').filter(Boolean);
   return parts[parts.length - 1] ?? path;
@@ -50,7 +57,25 @@ function tabSpec(tab: RightTabId): TabSpec {
     const path = tab.slice('file:'.length);
     return { id: tab, label: fileName(path) || '文件', icon: <FileText className="size-3.5 shrink-0" /> };
   }
-  return { id: tab, label: shortShellId(tab.slice('shell:'.length)), icon: <Terminal className="size-3.5 shrink-0" /> };
+  if (tab.startsWith('shell:')) return { id: tab, label: shortShellId(tab.slice('shell:'.length)), icon: <Terminal className="size-3.5 shrink-0" /> };
+  return { id: tab, label: shortSubagentId(tab.slice('subagent:'.length)), icon: <Bot className="size-3.5 shrink-0" /> };
+}
+
+function subagentLabel(subagent: SubagentRun): string {
+  const task = typeof subagent.task_assignment.task === 'string' ? subagent.task_assignment.task.trim() : '';
+  return task || subagent.stage_id || subagent.id;
+}
+
+function MenuDivider({ label }: { label: string }) {
+  return (
+    <div className="px-2 py-1">
+      <div className="flex items-center gap-2">
+        <div className="h-px flex-1 bg-border" />
+        <span className="shrink-0 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{label}</span>
+        <div className="h-px flex-1 bg-border" />
+      </div>
+    </div>
+  );
 }
 
 function TabButton({
@@ -94,12 +119,16 @@ function TabButton({
 
 function AddTabMenu({
   sessions,
+  subagents,
   onOpenFileBrowser,
   onOpenShellTab,
+  onOpenSubagentTab,
 }: {
   sessions: ShellSession[];
+  subagents: SubagentRun[];
   onOpenFileBrowser: () => void;
   onOpenShellTab: (sessionId: string) => void;
+  onOpenSubagentTab: (subagentId: string) => void;
 }) {
   const liveSessions = sessions.filter(isLiveSession);
   return (
@@ -110,16 +139,27 @@ function AddTabMenu({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-48">
+        <MenuDivider label="文件" />
         <DropdownMenuItem onClick={onOpenFileBrowser}>
           <FolderTree className="mr-2 size-4" />
           文件浏览器
         </DropdownMenuItem>
+        <MenuDivider label="Shell" />
         {liveSessions.map((session) => (
           <DropdownMenuItem key={session.id} onClick={() => onOpenShellTab(session.id)}>
             <Terminal className="mr-2 size-4" />
             {session.name}
           </DropdownMenuItem>
         ))}
+        {liveSessions.length === 0 && <div className="px-2 py-1.5 text-xs text-muted-foreground">暂无 Shell</div>}
+        <MenuDivider label="Subagent" />
+        {subagents.map((subagent) => (
+          <DropdownMenuItem key={subagent.id} onClick={() => onOpenSubagentTab(subagent.id)}>
+            <Bot className="mr-2 size-4" />
+            <span className="max-w-44 truncate">{subagentLabel(subagent)}</span>
+          </DropdownMenuItem>
+        ))}
+        {subagents.length === 0 && <div className="px-2 py-1.5 text-xs text-muted-foreground">暂无 Subagent</div>}
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -131,15 +171,18 @@ export function RightSidebar({
   tabs,
   activeTab,
   threadId,
+  workspaceRoot,
   onTabChange,
   onOpenFileBrowser,
   onOpenFileTab,
   onOpenShellTab,
+  onOpenSubagentTab,
   onCloseTab,
   onClose,
   onAttach,
 }: Props) {
   const [sessions, setSessions] = useState<ShellSession[]>([]);
+  const [subagents, setSubagents] = useState<SubagentRun[]>([]);
   const tabsScrollRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef(new Map<RightTabId, HTMLDivElement>());
 
@@ -151,12 +194,24 @@ export function RightSidebar({
     listShellSessions(threadId).then((data) => setSessions(data.sessions)).catch(() => setSessions([]));
   }, [threadId]);
 
+  const refreshSubagents = useCallback(() => {
+    if (!threadId) {
+      setSubagents([]);
+      return;
+    }
+    listSubagentRuns(threadId).then((data) => setSubagents(data.subagents)).catch(() => setSubagents([]));
+  }, [threadId]);
+
   useEffect(refreshShells, [refreshShells]);
+  useEffect(refreshSubagents, [refreshSubagents]);
   useEffect(() => {
     if (!open || !threadId) return;
-    const timer = window.setInterval(refreshShells, 2500);
+    const timer = window.setInterval(() => {
+      refreshShells();
+      refreshSubagents();
+    }, 2500);
     return () => window.clearInterval(timer);
-  }, [open, refreshShells, threadId]);
+  }, [open, refreshShells, refreshSubagents, threadId]);
 
   const tabSpecs = useMemo(() => tabs.map(tabSpec), [tabs]);
 
@@ -179,6 +234,7 @@ export function RightSidebar({
   if (!open) return null;
 
   const activeShellSessionId = activeTab?.startsWith('shell:') ? activeTab.slice('shell:'.length) : null;
+  const activeSubagentId = activeTab?.startsWith('subagent:') ? activeTab.slice('subagent:'.length) : null;
   const activeFilePath = activeTab?.startsWith('file:') ? activeTab.slice('file:'.length) : null;
   const scrollTabsWithWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
     const element = tabsScrollRef.current;
@@ -214,7 +270,13 @@ export function RightSidebar({
           ))}
         </div>
         <div className="flex shrink-0 items-center gap-1 pr-1">
-          <AddTabMenu sessions={sessions} onOpenFileBrowser={onOpenFileBrowser} onOpenShellTab={onOpenShellTab} />
+          <AddTabMenu
+            sessions={sessions}
+            subagents={subagents}
+            onOpenFileBrowser={onOpenFileBrowser}
+            onOpenShellTab={onOpenShellTab}
+            onOpenSubagentTab={onOpenSubagentTab}
+          />
           <Button variant="ghost" size="icon" className="size-8 shrink-0" onClick={onClose} title="关闭右侧栏">
             <X className="size-4" />
           </Button>
@@ -255,10 +317,25 @@ export function RightSidebar({
             onAttach={onAttach}
           />
         )}
+        {activeSubagentId && (
+          <SubagentPanel
+            open
+            threadId={threadId}
+            subagentId={activeSubagentId}
+            workspaceRoot={workspaceRoot}
+            onOpenRemoteFile={onOpenFileTab}
+          />
+        )}
         {!activeTab && (
           <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-sm text-muted-foreground">
             <div>暂无打开的预览</div>
-            <AddTabMenu sessions={sessions} onOpenFileBrowser={onOpenFileBrowser} onOpenShellTab={onOpenShellTab} />
+            <AddTabMenu
+              sessions={sessions}
+              subagents={subagents}
+              onOpenFileBrowser={onOpenFileBrowser}
+              onOpenShellTab={onOpenShellTab}
+              onOpenSubagentTab={onOpenSubagentTab}
+            />
           </div>
         )}
       </div>

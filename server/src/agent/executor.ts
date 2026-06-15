@@ -19,9 +19,13 @@ import type { AskUserAnswer, AskUserMode, AskUserOption, AskUserSpec, StreamStag
 import { renderRuntimeContext } from './context.js';
 import { shellManager } from '../shell/manager.js';
 import { requiresDatabaseAccess } from '../tools/databaseAccessGuard.js';
+import type { SubagentRunRow } from '../store/types.js';
 
 const ASK_USER_TOOL_NAME = 'ask_user';
 const DATABASE_ACCESS_SKILL_NAME = 'database-access';
+const SUBAGENT_RUN_TOOL_NAME = 'subagent_run';
+const SUBAGENT_POLL_TOOL_NAME = 'subagent_poll';
+const SUBAGENT_LIST_TOOL_NAME = 'subagent_list';
 const STREAM_STATS_POINTS = 24;
 const STREAM_STATS_MIN_INTERVAL_MS = 250;
 const SECRET_KEY_RE = /(password|passwd|pwd|secret|token|key|credential|connectionurl)/i;
@@ -59,6 +63,17 @@ function durationMs(startedAt: string, endedAt: string): number {
 function charCount(value: unknown): number {
   if (value == null) return 0;
   return Array.from(typeof value === 'string' ? value : JSON.stringify(value)).length;
+}
+
+function optionalString(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => String(item).trim()).filter(Boolean).slice(0, 5);
 }
 
 class StreamStatsTracker {
@@ -191,6 +206,10 @@ function detectLoopGuard(signatures: string[], failures: string[]): LoopGuardHit
     return { reason, question: blockedQuestion(reason) };
   }
   return null;
+}
+
+function isPendingSubagentWait(name: string, result: string): boolean {
+  return (name === SUBAGENT_POLL_TOOL_NAME || name === SUBAGENT_LIST_TOOL_NAME) && /\bstatus: running\b/.test(result);
 }
 
 function commandFromToolCall(name: string, args: unknown): string | null {
@@ -413,6 +432,200 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         `allowedDatasourceIds=${allowedDatasourceIds.length ? allowedDatasourceIds.join(',') : '无'}`,
       ];
       return `数据库访问运行环境已注入：${visible.join('；')}。不要输出 token 或短期凭证。`;
+    };
+
+    const renderSubagentRow = (row: SubagentRunRow, includeTask: boolean): string => {
+      const task = optionalString(row.task_assignment?.task) ?? '未记录';
+      const lines = [
+        `subagentRunId: ${row.id}`,
+        `status: ${row.status}`,
+        `stageId: ${row.stage_id ?? '未指定'}`,
+        `runtimeProfileId: ${row.runtime_profile_id ?? 'default'}`,
+        `createdAt: ${row.created_at}`,
+      ];
+      if (row.finished_at) lines.push(`finishedAt: ${row.finished_at}`);
+      if (includeTask) lines.push(`task: ${task}`);
+      if (row.status === 'done') lines.push('', row.output ?? 'subagent 已完成，但没有返回文本结果。');
+      if (row.status === 'error') lines.push('', `subagent 执行失败：${row.error ?? '未知错误'}`);
+      if (row.status === 'running') {
+        lines.push('', 'subagent 仍在后台执行。可以稍后继续调用 subagent_poll，或用 subagent_list 查看当前 thread 的所有 subagent。');
+      }
+      return lines.join('\n');
+    };
+
+    const completeSubagent = async (
+      row: SubagentRunRow,
+      args: Record<string, unknown>,
+      stepId: string,
+      stepIdx: number,
+      startedAt: string,
+    ): Promise<void> => {
+      const task = optionalString(args.task) ?? '未记录';
+      const workflowId = optionalString(args.workflowId);
+      const stageId = optionalString(args.stageId);
+      const stageGoal = optionalString(args.stageGoal);
+      const runtimeProfileId = optionalString(args.runtimeProfileId);
+      const skillNames = stringList(args.skillNames);
+      const taskAssignment = row.task_assignment;
+
+      try {
+        const skillMessages: string[] = [];
+        for (const name of skillNames) {
+          try {
+            const activation = await activateSkill(toolSettings.workspaceRoot, name);
+            skillMessages.push(activation.systemMessage);
+          } catch (err) {
+            skillMessages.push(`Skill "${name}" 加载失败：${(err as Error).message}`);
+          }
+        }
+
+        const messages: LlmMessage[] = [
+          {
+            role: 'system',
+            content: [
+              '你是当前 thread 内部的异步只读推理型 subagent。',
+              'You are an asynchronous read-only reasoning subagent inside the current thread.',
+              '你不会直接修改文件、调用工具或写入长期 memory；你只基于输入材料、workflow stage 和 skill 给出结构化结论。',
+              'Do not claim that you changed files or ran tools. Return evidence, risks, and next-step recommendations.',
+            ].join('\n'),
+          },
+          {
+            role: 'user',
+            content: [
+              `workflowId: ${workflowId ?? '未指定'}`,
+              `stageId: ${stageId ?? '未指定'}`,
+              `stageGoal: ${stageGoal ?? '未指定'}`,
+              `runtimeProfileId: ${runtimeProfileId ?? 'default'}`,
+              '',
+              'Task assignment:',
+              JSON.stringify(taskAssignment, null, 2),
+              '',
+              skillMessages.length ? `Loaded skills:\n${skillMessages.join('\n\n---\n\n')}` : 'Loaded skills: none',
+              '',
+              '请输出：结论、关键证据、风险/不确定性、建议下一步。',
+            ].join('\n'),
+          },
+        ];
+
+        const result = await provider.complete(messages, []);
+        const output = result.content?.trim() || 'subagent 未返回文本结果。';
+        const endedAt = new Date().toISOString();
+        await store.finishSubagentRun(row.id, {
+          status: 'done',
+          output,
+          usage: result.usage ? { ...result.usage } : null,
+        });
+        await emit(stepId, {
+          type: 'subagent_finished',
+          step: stepIdx,
+          subagentRunId: row.id,
+          output,
+          inputTokens: result.usage?.inputTokens,
+          outputTokens: result.usage?.outputTokens,
+          startedAt,
+          endedAt,
+          durationMs: durationMs(startedAt, endedAt),
+        });
+      } catch (err) {
+        const error = (err as Error).message;
+        const endedAt = new Date().toISOString();
+        await store.finishSubagentRun(row.id, { status: 'error', error });
+        await emit(stepId, {
+          type: 'subagent_failed',
+          step: stepIdx,
+          subagentRunId: row.id,
+          error,
+          startedAt,
+          endedAt,
+          durationMs: durationMs(startedAt, endedAt),
+        });
+        console.warn(`subagent ${row.id} failed for task "${task}": ${error}`);
+      }
+    };
+
+    const startSubagent = async (
+      args: Record<string, unknown>,
+      stepId: string,
+      stepIdx: number,
+      toolStartedAt: string,
+    ): Promise<{ text: string }> => {
+      const task = optionalString(args.task);
+      if (!task) return { text: 'subagent_run 缺少必填 task。' };
+
+      const workflowId = optionalString(args.workflowId);
+      const stageId = optionalString(args.stageId);
+      const stageGoal = optionalString(args.stageGoal);
+      const runtimeProfileId = optionalString(args.runtimeProfileId);
+      const skillNames = stringList(args.skillNames);
+      const taskAssignment = {
+        task,
+        context: optionalString(args.context),
+        expectedOutput: optionalString(args.expectedOutput),
+        constraints: optionalString(args.constraints),
+        stageGoal,
+      };
+
+      const row = await store.createSubagentRun({
+        parentRunId: runId,
+        parentStepId: stepId,
+        workflowId,
+        stageId,
+        runtimeProfileId,
+        taskAssignment,
+        skillNames,
+      });
+      await emit(stepId, {
+        type: 'subagent_started',
+        step: stepIdx,
+        subagentRunId: row.id,
+        workflowId,
+        stageId,
+        runtimeProfileId,
+        skillNames,
+        task,
+        startedAt: toolStartedAt,
+      });
+
+      void completeSubagent(row, args, stepId, stepIdx, toolStartedAt);
+      return {
+        text: [
+          `subagentRunId: ${row.id}`,
+          'status: running',
+          `stageId: ${stageId ?? '未指定'}`,
+          `runtimeProfileId: ${runtimeProfileId ?? 'default'}`,
+          '',
+          'subagent 已在后台启动，本次工具调用不会等待它完成。',
+          '后续可以调用 subagent_poll 查询该子任务，或调用 subagent_list 查看当前 thread 的所有 subagent；这些查询可以跨 run 使用。',
+        ].join('\n'),
+      };
+    };
+
+    const pollSubagent = async (args: Record<string, unknown>): Promise<{ text: string }> => {
+      const subagentRunId = optionalString(args.subagentRunId);
+      if (!subagentRunId) return { text: 'subagent_poll 缺少必填 subagentRunId。' };
+      const row = await store.getSubagentRun(subagentRunId);
+      if (!row) return { text: `没有找到 subagentRunId: ${subagentRunId}` };
+      const visibleRows = await store.listSubagentRunsByThread(threadId);
+      if (!visibleRows.some((item) => item.id === row.id)) {
+        return { text: `当前 thread 无权读取 subagentRunId: ${subagentRunId}` };
+      }
+      return { text: renderSubagentRow(row, true) };
+    };
+
+    const listSubagents = async (args: Record<string, unknown>): Promise<{ text: string }> => {
+      const rawStatus = optionalString(args.status);
+      const status = rawStatus === 'running' || rawStatus === 'done' || rawStatus === 'error' ? rawStatus : null;
+      const rawLimit = typeof args.limit === 'number' && Number.isFinite(args.limit) ? Math.floor(args.limit) : 20;
+      const limit = Math.min(Math.max(rawLimit, 1), 50);
+      let rows = await store.listSubagentRunsByThread(threadId);
+      if (status) rows = rows.filter((row) => row.status === status);
+      rows = rows.slice(-limit);
+      if (!rows.length) return { text: status ? `当前 thread 没有 ${status} 状态的 subagent。` : '当前 thread 还没有 subagent。' };
+      return {
+        text: rows
+          .map((row) => renderSubagentRow(row, true))
+          .join('\n\n---\n\n'),
+      };
     };
 
     // 长任务由完成、取消、上下文预算决定结束；hardStepCap 只是防死循环兜底。
@@ -700,6 +913,21 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
                 span.setAttribute('tool.result.length', out.text.length);
                 return out;
               }
+              if (call.name === SUBAGENT_RUN_TOOL_NAME) {
+                const out = await startSubagent(args, step.id, stepIdx, startedAt);
+                span.setAttribute('tool.result.length', out.text.length);
+                return out;
+              }
+              if (call.name === SUBAGENT_POLL_TOOL_NAME) {
+                const out = await pollSubagent(args);
+                span.setAttribute('tool.result.length', out.text.length);
+                return out;
+              }
+              if (call.name === SUBAGENT_LIST_TOOL_NAME) {
+                const out = await listSubagents(args);
+                span.setAttribute('tool.result.length', out.text.length);
+                return out;
+              }
               const command = commandFromToolCall(call.name, args);
               if (command && requiresDatabaseAccess(command) && !toolEnv.DB_WORKLOAD_TOKEN) {
                 try {
@@ -751,8 +979,10 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         if (activation) await applySkillActivation(activation);
 
         const signature = toolSignature(call.name, args);
-        recentToolSignatures.push(signature);
-        if (recentToolSignatures.length > 6) recentToolSignatures.shift();
+        if (!isPendingSubagentWait(call.name, result.text)) {
+          recentToolSignatures.push(signature);
+          if (recentToolSignatures.length > 6) recentToolSignatures.shift();
+        }
         const failure = /^(工具 .* 抛出异常|工具策略已阻止|未知工具：)/.test(result.text)
           ? `${signature}:${result.text.slice(0, 240)}`
           : '';

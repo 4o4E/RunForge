@@ -15,6 +15,7 @@ import type {
   ShellCommandAttachment,
   ShellCommandLog,
   ShellSession,
+  SubagentRun,
   Thread,
   ThreadDetailResponse,
   ToolSettings,
@@ -166,6 +167,9 @@ export const answerRun = (runId: string, answer: AskUserAnswer) =>
 
 export const listShellSessions = (threadId: string) =>
   fetch(`/api/shell-sessions?threadId=${encodeURIComponent(threadId)}`).then(json<{ sessions: ShellSession[] }>);
+
+export const listSubagentRuns = (threadId: string) =>
+  fetch(`/api/threads/${threadId}/subagents`).then(json<{ subagents: SubagentRun[] }>);
 
 export const createShellSession = (threadId: string, name?: string) =>
   fetch('/api/shell-sessions', {

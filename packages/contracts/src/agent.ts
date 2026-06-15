@@ -104,6 +104,30 @@ export type AgentEvent =
       hash: string;
       allowedTools: string[];
     }
+  | ({
+      type: 'subagent_started';
+      step: number;
+      subagentRunId: string;
+      workflowId?: string | null;
+      stageId?: string | null;
+      runtimeProfileId?: string | null;
+      skillNames: string[];
+      task: string;
+    } & Pick<TimedEventFields, 'startedAt'>)
+  | ({
+      type: 'subagent_finished';
+      step: number;
+      subagentRunId: string;
+      output: string;
+      inputTokens?: number;
+      outputTokens?: number;
+    } & CompletedTimedEventFields)
+  | ({
+      type: 'subagent_failed';
+      step: number;
+      subagentRunId: string;
+      error: string;
+    } & CompletedTimedEventFields)
   | { type: 'plan_update'; step: number; goal: GoalState }
   | {
       type: 'compaction';

@@ -94,6 +94,26 @@ export interface ShellCommandLogRow {
   created_at: string;
 }
 
+export type SubagentRunStatus = 'running' | 'done' | 'error';
+
+export interface SubagentRunRow {
+  id: string;
+  parent_run_id: string;
+  parent_step_id: string | null;
+  workflow_id: string | null;
+  stage_id: string | null;
+  runtime_profile_id: string | null;
+  status: SubagentRunStatus;
+  task_assignment: Record<string, unknown>;
+  skill_names: string[];
+  output: string | null;
+  error: string | null;
+  usage: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}
+
 /** A thread message as stored, carrying its DB id so the executor can mark it
  *  collapsed during compaction. `content` is the LLM-facing view (already the
  *  placeholder for masked rows); the original is preserved in the DB. */
@@ -141,6 +161,22 @@ export interface Store {
 
   addEvent(runId: string, stepId: string | null, event: AgentEvent): Promise<void>;
   getEvents(runId: string): Promise<AgentEvent[]>;
+
+  createSubagentRun(input: {
+    parentRunId: string;
+    parentStepId?: string | null;
+    workflowId?: string | null;
+    stageId?: string | null;
+    runtimeProfileId?: string | null;
+    taskAssignment: Record<string, unknown>;
+    skillNames?: string[];
+  }): Promise<SubagentRunRow>;
+  finishSubagentRun(
+    id: string,
+    fields: { status: 'done' | 'error'; output?: string | null; error?: string | null; usage?: Record<string, unknown> | null },
+  ): Promise<void>;
+  getSubagentRun(id: string): Promise<SubagentRunRow | null>;
+  listSubagentRunsByThread(threadId: string): Promise<SubagentRunRow[]>;
 
   createShellSession(input: {
     threadId: string;

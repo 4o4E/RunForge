@@ -17,6 +17,7 @@ const ID_PREFIXES = {
   workloadToken: 'wt',
   shellSession: 'ss',
   shellCommand: 'sc',
+  subagentRun: 'sr',
 } as const;
 
 export type EntityIdKind = keyof typeof ID_PREFIXES;
@@ -121,4 +122,8 @@ export function newShellSessionId(): string {
 
 export function newShellCommandId(): string {
   return newEntityId('shellCommand');
+}
+
+export function newSubagentRunId(): string {
+  return newEntityId('subagentRun');
 }

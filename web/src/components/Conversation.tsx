@@ -816,6 +816,10 @@ export function Conversation({
   onAskUserSubmit,
   onAskUserCancel,
   contentRef,
+  embedded = false,
+  showToc = true,
+  emptyTitle = 'my-agent',
+  emptyDescription = '通用 AI Agent。描述一个任务，它会自主调用工具（shell、文件、glob/grep、web）逐步完成。',
 }: {
   messages: UIMessage[];
   busy: boolean;
@@ -827,6 +831,10 @@ export function Conversation({
   onAskUserDraftChange: (runId: string, draft: AskUserDraft) => void;
   onAskUserSubmit: (runId: string, answer: AskUserAnswer) => void;
   onAskUserCancel: (runId: string) => void;
+  embedded?: boolean;
+  showToc?: boolean;
+  emptyTitle?: string;
+  emptyDescription?: string;
 }) {
   // 记录整段对话里最后一个工具调用，只保持它展开，其余默认折叠。
   let lastToolKey: string | null = null;
@@ -844,15 +852,15 @@ export function Conversation({
   }
   return (
     <div className="relative flex h-full min-h-0 justify-center">
-      <div className={cn('flex h-full min-h-0 w-full min-w-0', wide ? 'max-w-[calc(64rem+1.75rem)]' : 'max-w-[calc(48rem+1.75rem)]')}>
+      <div className={cn('flex h-full min-h-0 w-full min-w-0', embedded ? 'max-w-none' : wide ? 'max-w-[calc(64rem+1.75rem)]' : 'max-w-[calc(48rem+1.75rem)]')}>
       <AIConversation className="min-h-0 min-w-0 flex-1">
         <ConversationContent>
-          <div ref={contentRef as RefObject<HTMLDivElement>} className="flex flex-col gap-8">
+          <div ref={contentRef as RefObject<HTMLDivElement>} className={cn('flex flex-col', embedded ? 'gap-4 px-3 py-4' : 'gap-8')}>
             {messages.length === 0 ? (
               <ConversationEmptyState
                 icon={<Bot className="size-6" />}
-                title="my-agent"
-                description="通用 AI Agent。描述一个任务，它会自主调用工具（shell、文件、glob/grep、web）逐步完成。"
+                title={emptyTitle}
+                description={emptyDescription}
               />
             ) : (
               messages.map((m, index) => (
@@ -901,7 +909,7 @@ export function Conversation({
         </ConversationContent>
         <ConversationScrollButton className="left-[calc(50%-0.875rem)]" />
       </AIConversation>
-      <TableOfContents contentRef={contentRef} />
+      {showToc && <TableOfContents contentRef={contentRef} />}
       </div>
     </div>
   );

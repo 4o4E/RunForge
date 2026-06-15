@@ -38,6 +38,15 @@ function testToolSettings(overrides: Partial<ToolSettings> = {}): ToolSettings {
   };
 }
 
+async function waitUntil(predicate: () => boolean | Promise<boolean>, timeoutMs = 1000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail('等待条件超时');
+}
+
 // 一个先调用工具、再直接输出最终汇报的 provider。
 function scriptedProvider(): Provider {
   let turn = 0;
@@ -244,6 +253,170 @@ test('executeRun: skill activation instructions do not leak into the next run hi
 
   assert.equal(secondRunSystemText.includes('已激活 Skill'), false);
   assert.equal(secondRunSystemText.includes('# Leaky Skill'), false);
+});
+
+test('executeRun: starts async subagents and allows cross-run polling', async () => {
+  const skillRoot = join(testWorkspace, '.skills', 'review-skill');
+  await mkdir(skillRoot, { recursive: true });
+  await writeFile(
+    join(skillRoot, 'SKILL.md'),
+    ['---', 'name: review-skill', 'description: Review a focused change.', '---', '', '# Review Skill', '', 'Only report concrete risks.'].join('\n'),
+    'utf8',
+  );
+
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run = await store.createRun(thread.id, 'delegate review');
+  const published: AgentEvent[] = [];
+  const subagentPrompts: string[] = [];
+  let parentTurn = 0;
+
+  await executeRun(run.id, {
+    store,
+    provider: {
+      name: 'subagent-aware',
+      async complete(messages) {
+        const prompt = messages.map((m) => m.content ?? '').join('\n');
+        if (prompt.includes('异步只读推理型 subagent')) {
+          subagentPrompts.push(prompt);
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          return { content: '没有发现阻塞风险。', toolCalls: [] };
+        }
+        parentTurn += 1;
+        if (parentTurn === 1) {
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: 'sub_1',
+                name: 'subagent_run',
+                arguments: JSON.stringify({
+                  stageId: 'review',
+                  stageGoal: '确认变更是否有阻塞问题。',
+                  runtimeProfileId: 'readonly',
+                  skillNames: ['review-skill'],
+                  task: '审查 executor 的 subagent 分支。',
+                  expectedOutput: '只输出风险和证据。',
+                }),
+              },
+              {
+                id: 'sub_2',
+                name: 'subagent_run',
+                arguments: JSON.stringify({
+                  stageId: 'test',
+                  stageGoal: '确认测试覆盖是否足够。',
+                  runtimeProfileId: 'readonly',
+                  task: '检查是否需要补充 subagent 异步测试。',
+                  expectedOutput: '列出测试建议。',
+                }),
+              },
+            ],
+          };
+        }
+        return { content: '已启动两个 subagent。', toolCalls: [] };
+      },
+    },
+    publish: (_id, e) => published.push(e),
+    hardStepCap: 4,
+    toolSettings: testToolSettings(),
+  });
+
+  const started = published.find((e) => e.type === 'subagent_started');
+  assert.equal(started?.type, 'subagent_started');
+  assert.equal(started?.type === 'subagent_started' ? started.stageId : '', 'review');
+  assert.deepEqual(started?.type === 'subagent_started' ? started.skillNames : [], ['review-skill']);
+  assert.equal((await store.getRun(run.id))?.status, 'done');
+
+  let msgs = await store.loadThreadMessages(thread.id);
+  const subagentStartResult = msgs.find((m) => m.role === 'tool' && m.toolCallId === 'sub_1')?.content ?? '';
+  assert.match(subagentStartResult, /subagentRunId: sr_/);
+  assert.match(subagentStartResult, /status: running/);
+  assert.doesNotMatch(subagentStartResult, /没有发现阻塞风险/);
+
+  await waitUntil(() => published.filter((e) => e.type === 'subagent_finished').length === 2);
+  assert.match(subagentPrompts.join('\n'), /# Review Skill/);
+  const rows = await store.listSubagentRunsByThread(thread.id);
+  assert.equal(rows.length, 2);
+  assert.equal(rows.every((row) => row.status === 'done'), true);
+  assert.match(rows[0].output ?? '', /没有发现阻塞风险/);
+
+  const run2 = await store.createRun(thread.id, 'poll previous subagent');
+  let pollTurn = 0;
+  await executeRun(run2.id, {
+    store,
+    provider: {
+      name: 'subagent-poller',
+      async complete(messages) {
+        pollTurn += 1;
+        if (pollTurn === 1) {
+          const history = messages.map((m) => m.content ?? '').join('\n');
+          const subagentRunId = history.match(/subagentRunId: (sr_[A-Za-z0-9]+)/)?.[1] ?? rows[0].id;
+          return {
+            content: null,
+            toolCalls: [{ id: 'poll_1', name: 'subagent_poll', arguments: JSON.stringify({ subagentRunId }) }],
+          };
+        }
+        return { content: '已读取上一个 run 的 subagent 结果。', toolCalls: [] };
+      },
+    },
+    publish: () => {},
+    hardStepCap: 4,
+    toolSettings: testToolSettings(),
+  });
+
+  assert.equal((await store.getRun(run2.id))?.status, 'done');
+  msgs = await store.loadThreadMessages(thread.id);
+  const pollResult = msgs.find((m) => m.role === 'tool' && m.toolCallId === 'poll_1')?.content ?? '';
+  assert.match(pollResult, /status: done/);
+  assert.match(pollResult, /没有发现阻塞风险/);
+});
+
+test('executeRun: repeated running subagent polls do not trigger loop guard', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run = await store.createRun(thread.id, 'wait for slow subagent');
+  const published: AgentEvent[] = [];
+  let parentTurn = 0;
+
+  await executeRun(run.id, {
+    store,
+    provider: {
+      name: 'slow-subagent',
+      async complete(messages) {
+        const prompt = messages.map((m) => m.content ?? '').join('\n');
+        if (prompt.includes('异步只读推理型 subagent')) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return { content: '慢速 subagent 已完成。', toolCalls: [] };
+        }
+        parentTurn += 1;
+        if (parentTurn === 1) {
+          return {
+            content: null,
+            toolCalls: [{ id: 'sub_1', name: 'subagent_run', arguments: JSON.stringify({ task: '慢速检查。' }) }],
+          };
+        }
+        const history = messages.map((m) => m.content ?? '').join('\n');
+        const subagentRunId = history.match(/subagentRunId: (sr_[A-Za-z0-9]+)/)?.[1];
+        if (subagentRunId && !history.includes('慢速 subagent 已完成。')) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          return {
+            content: null,
+            toolCalls: [{ id: `poll_${parentTurn}`, name: 'subagent_poll', arguments: JSON.stringify({ subagentRunId }) }],
+          };
+        }
+        return { content: '已汇总慢速 subagent 结果。', toolCalls: [] };
+      },
+    },
+    publish: (_id, e) => published.push(e),
+    hardStepCap: 10,
+    toolSettings: testToolSettings(),
+  });
+
+  assert.equal((await store.getRun(run.id))?.status, 'done');
+  assert.equal(published.some((event) => event.type === 'progress_stalled'), false);
+  const pollResults = (await store.loadThreadMessages(thread.id)).filter((msg) => msg.role === 'tool' && msg.toolCallId?.startsWith('poll_'));
+  assert.equal(pollResults.some((msg) => /\bstatus: running\b/.test(msg.content ?? '')), true);
+  assert.equal(pollResults.some((msg) => /\bstatus: done\b/.test(msg.content ?? '')), true);
 });
 
 test('executeRun: streams tool input stats without double counting final tool args', async () => {

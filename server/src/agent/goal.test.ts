@@ -65,11 +65,13 @@ test('canReportGoal: plan tasks must settle and enter reporting phase', () => {
   const open = { intent: 'x', phase: 'working' as const, plan: [{ text: 'a', status: 'doing' as const }], decisions: [], next: '' };
   const settledWorking = { intent: 'x', phase: 'working' as const, plan: [{ text: 'a', status: 'failed' as const }], decisions: [], next: '' };
   const settledReporting = { ...settledWorking, phase: 'reporting' as const };
+  const settledCompleted = { ...settledWorking, phase: 'completed' as const };
   assert.equal(canReportGoal(open), false);
   assert.match(reportBlockedMessage(open), /未收口/);
   assert.equal(canReportGoal(settledWorking), false);
   assert.match(reportBlockedMessage(settledWorking), /reporting/);
   assert.equal(canReportGoal(settledReporting), true);
+  assert.equal(canReportGoal(settledCompleted), true);
   assert.equal(canReportGoal({ intent: 'x', phase: 'working' as const, plan: [], decisions: [], next: '' }), true);
 });
 

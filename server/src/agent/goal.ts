@@ -56,21 +56,25 @@ export function unfinishedPlanItems(goal: GoalState): PlanItem[] {
   return goal.plan.filter((p) => p.status === 'todo' || p.status === 'doing');
 }
 
+function isReportablePhase(phase: GoalState['phase'] | undefined): boolean {
+  return phase === 'reporting' || phase === 'completed';
+}
+
 export function canReportGoal(goal: GoalState): boolean {
   if (unfinishedPlanItems(goal).length > 0) return false;
-  return goal.plan.length === 0 || (goal.phase ?? 'working') === 'reporting';
+  return goal.plan.length === 0 || isReportablePhase(goal.phase);
 }
 
 export function reportBlockedMessage(goal: GoalState): string {
   const unfinished = unfinishedPlanItems(goal);
-  if (goal.plan.length > 0 && !unfinished.length && (goal.phase ?? 'working') !== 'reporting') {
-    return '最终汇报已被暂缓：当前 goal 仍处于 working，请先调用 update_plan 把 phase 设置为 reporting，再输出最终汇报。';
+  if (goal.plan.length > 0 && !unfinished.length && !isReportablePhase(goal.phase)) {
+    return '最终汇报已被暂缓：当前 goal 仍处于 working，请先调用 update_plan 把 phase 设置为 reporting 或 completed，再输出最终汇报。';
   }
   if (!unfinished.length) return '';
   return [
     '最终汇报已被暂缓：当前计划仍有未收口条目。',
     ...unfinished.map((item) => `- [${BOX[item.status]}] ${item.text}`),
-    '请先继续执行，或调用 update_plan 把真实失败的条目标记为 failed、把已完成的条目标记为 done；计划没有 todo/doing 后，把 phase 设置为 reporting 并输出最终汇报。',
+    '请先继续执行，或调用 update_plan 把真实失败的条目标记为 failed、把已完成的条目标记为 done；计划没有 todo/doing 后，把 phase 设置为 reporting 或 completed 并输出最终汇报。',
   ].join('\n');
 }
 

@@ -25,3 +25,23 @@ export interface ThreadDetailResponse {
   thread: Thread;
   runs: RunWithEvents[];
 }
+
+export type SubagentRunStatus = 'running' | 'done' | 'error';
+
+export interface SubagentRun {
+  id: string;
+  parent_run_id: string;
+  parent_step_id: string | null;
+  workflow_id: string | null;
+  stage_id: string | null;
+  runtime_profile_id: string | null;
+  status: SubagentRunStatus;
+  task_assignment: Record<string, unknown>;
+  skill_names: string[];
+  output: string | null;
+  error: string | null;
+  usage: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}

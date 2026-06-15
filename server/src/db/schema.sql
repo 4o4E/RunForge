@@ -68,6 +68,29 @@ CREATE INDEX IF NOT EXISTS idx_messages_run ON messages(run_id, id);
 CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, id);
 CREATE INDEX IF NOT EXISTS idx_threads_created ON threads(created_at DESC);
 
+-- subagent run 是父 run 内部派发的独立子任务。v1 先记录 workflow stage、
+-- task assignment、runtime profile 和最终输出，后续再扩展为可用工具的子 agent loop。
+CREATE TABLE IF NOT EXISTS subagent_runs (
+  id                 TEXT PRIMARY KEY,
+  parent_run_id      TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  parent_step_id     TEXT REFERENCES steps(id) ON DELETE SET NULL,
+  workflow_id        TEXT,
+  stage_id           TEXT,
+  runtime_profile_id TEXT,
+  status             TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'done', 'error')),
+  task_assignment    JSONB NOT NULL DEFAULT '{}'::jsonb,
+  skill_names        TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+  output             TEXT,
+  error              TEXT,
+  usage              JSONB,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at        TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_subagent_runs_parent ON subagent_runs(parent_run_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_subagent_runs_stage ON subagent_runs(parent_run_id, stage_id);
+
 -- 应用配置表。env 只作为首次默认值/兜底,运行时配置从这里读取。
 CREATE TABLE IF NOT EXISTS app_settings (
   key         TEXT PRIMARY KEY,

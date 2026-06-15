@@ -537,6 +537,26 @@ Router 汇总时必须能看到：
 - 哪些结论冲突。
 - 哪些输出可提升为 candidate gene。
 
+### 执行语义
+
+subagent 应该是 thread 级异步资源，不应该阻塞入口 agent 的主循环。
+
+推荐语义：
+
+- `subagent_run` 只负责创建任务单并返回 `subagentRunId`，不等待子任务完成。
+- 后台执行完成后写回 `subagent_runs.output/error/usage`，并追加 `subagent_finished` 或
+  `subagent_failed` 事件。
+- 入口 agent 可以连续启动多个 subagent，再用 `subagent_poll` 查询单个结果，或用
+  `subagent_list` 查看当前 thread 的所有 subagent。
+- subagent 归属 thread，而不是只归属当前 run；后续 run 可以继续轮询和使用之前 run
+  创建的 subagent 结果。
+- 第一版后台任务依赖当前服务进程存活；如果服务重启，`running` 状态任务需要后续补
+  recovery worker 或超时标记机制。
+
+这样设计的原因是：workflow 协作模型里，入口 agent 的职责是分派、协调和综合，不应该
+被某一个子任务的 LLM 调用卡住；否则多个 subagent 只是同步工具调用，无法模拟真实多人
+并行协作。
+
 ## 数据模型建议
 
 第一版可以先用 PostgreSQL 表保存结构化元数据，同时保留可导出的 Markdown/YAML 形态。
@@ -565,9 +585,9 @@ memory_events
   id, memory_id, event_type, payload, created_at
 
 subagent_runs
-  id, parent_run_id, workflow_id, stage_id, runtime_profile_id,
-  status, task_assignment, output, error,
-  started_at, finished_at
+  id, parent_run_id, parent_step_id, workflow_id, stage_id, runtime_profile_id,
+  status, task_assignment, skill_names, output, error, usage,
+  created_at, updated_at, finished_at
 ```
 
 其中：
@@ -577,6 +597,8 @@ subagent_runs
 - `embedding_ref` 只引用向量索引，不让业务逻辑依赖具体向量库。
 - `memory_events` 记录 promote、absorb、stale、deprecated、rejected 等生命周期变化。
 - `subagent_runs.task_assignment` 保存一次性任务单，避免把本次任务误写进 skill。
+- `subagent_runs.parent_run_id` 只表示创建来源；查询授权和 UI 展示应按 thread 汇总，
+  支持跨 run 继续读取。
 
 ## 实施流程
 

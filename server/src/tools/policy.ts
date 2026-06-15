@@ -57,6 +57,9 @@ const META: Record<string, ToolMeta> = {
   write_html_artifact: { kind: 'safe' },
   update_plan: { kind: 'safe' },
   skill_activate: { kind: 'safe' },
+  subagent_run: { kind: 'safe' },
+  subagent_poll: { kind: 'safe' },
+  subagent_list: { kind: 'safe' },
   datasource_list: { kind: 'safe' },
 };
 

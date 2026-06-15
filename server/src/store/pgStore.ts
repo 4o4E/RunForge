@@ -11,11 +11,12 @@ import type {
   ShellLogStream,
   ShellSessionRow,
   Store,
+  SubagentRunRow,
   StepRow,
   ThreadMessage,
   ThreadRow,
 } from './types.js';
-import { newRunId, newShellCommandId, newShellSessionId, newStepId, newThreadId } from '../id.js';
+import { newRunId, newShellCommandId, newShellSessionId, newStepId, newSubagentRunId, newThreadId } from '../id.js';
 
 function isEphemeralSystemMessage(role: LlmMessage['role'], content: string | null): boolean {
   return role === 'system' && typeof content === 'string' && content.startsWith('已激活 Skill / Activated Skill:');
@@ -202,6 +203,72 @@ export class PgStore implements Store {
       [runId],
     );
     return rows.map((r) => r.data);
+  }
+
+  async createSubagentRun(input: {
+    parentRunId: string;
+    parentStepId?: string | null;
+    workflowId?: string | null;
+    stageId?: string | null;
+    runtimeProfileId?: string | null;
+    taskAssignment: Record<string, unknown>;
+    skillNames?: string[];
+  }): Promise<SubagentRunRow> {
+    const id = newSubagentRunId();
+    const { rows } = await query<SubagentRunRow>(
+      `INSERT INTO subagent_runs (
+         id, parent_run_id, parent_step_id, workflow_id, stage_id, runtime_profile_id,
+         status, task_assignment, skill_names
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, 'running', $7::jsonb, $8::text[])
+       RETURNING *`,
+      [
+        id,
+        input.parentRunId,
+        input.parentStepId ?? null,
+        input.workflowId ?? null,
+        input.stageId ?? null,
+        input.runtimeProfileId ?? null,
+        JSON.stringify(input.taskAssignment),
+        input.skillNames ?? [],
+      ],
+    );
+    return rows[0];
+  }
+
+  async finishSubagentRun(
+    id: string,
+    fields: { status: 'done' | 'error'; output?: string | null; error?: string | null; usage?: Record<string, unknown> | null },
+  ): Promise<void> {
+    await query(
+      `UPDATE subagent_runs
+       SET status = $2, output = $3, error = $4, usage = $5::jsonb, updated_at = now(), finished_at = now()
+       WHERE id = $1`,
+      [
+        id,
+        fields.status,
+        fields.output ?? null,
+        fields.error ?? null,
+        fields.usage ? JSON.stringify(fields.usage) : null,
+      ],
+    );
+  }
+
+  async getSubagentRun(id: string): Promise<SubagentRunRow | null> {
+    const { rows } = await query<SubagentRunRow>(`SELECT * FROM subagent_runs WHERE id = $1`, [id]);
+    return rows[0] ?? null;
+  }
+
+  async listSubagentRunsByThread(threadId: string): Promise<SubagentRunRow[]> {
+    const { rows } = await query<SubagentRunRow>(
+      `SELECT sr.*
+       FROM subagent_runs sr
+       JOIN runs r ON r.id = sr.parent_run_id
+       WHERE r.thread_id = $1
+       ORDER BY sr.created_at`,
+      [threadId],
+    );
+    return rows;
   }
 
   async createShellSession(input: {
