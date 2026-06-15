@@ -2,11 +2,11 @@ import { execFile, execFileSync } from 'node:child_process';
 import { accessSync, constants, existsSync, realpathSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import type { SandboxBackendName } from '@my-agent/contracts';
+export type { SandboxBackendName } from '@my-agent/contracts';
 
 const execFileAsync = promisify(execFile);
 const isWindows = process.platform === 'win32';
-
-export type SandboxBackendName = 'auto' | 'none' | 'bwrap';
 
 export interface ShellSandboxConfig {
   policyMode: 'off' | 'enforce';

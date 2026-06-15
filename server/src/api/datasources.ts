@@ -15,6 +15,7 @@ import {
 } from '../datasources/accountPool.js';
 import { testDatasourceById, testDatasourceDraft } from '../datasources/introspection.js';
 import type { DatasourceRow } from '../datasources/types.js';
+import type { Datasource } from '@my-agent/contracts';
 
 export const datasourcesApi = Router();
 
@@ -23,7 +24,7 @@ function handleError(res: import('express').Response, err: unknown) {
   return res.status(500).json({ error: (err as Error).message });
 }
 
-function publicDatasource(datasource: DatasourceRow) {
+function publicDatasource(datasource: DatasourceRow): Datasource {
   const { admin_config: adminConfig, ...safe } = datasource;
   return { ...safe, hasAdminConfig: Object.keys(adminConfig).length > 0 };
 }

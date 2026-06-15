@@ -1,14 +1,8 @@
 import { resolve } from 'node:path';
+import type { SandboxBackendName, ToolSettings } from '@my-agent/contracts';
+export type { ToolSettings } from '@my-agent/contracts';
 import { config } from './config.js';
 import { query } from './db/pool.js';
-import type { SandboxBackendName } from './tools/sandbox.js';
-import type { ToolPolicyConfig } from './tools/policy.js';
-
-export interface ToolSettings extends ToolPolicyConfig {
-  sandboxBackend: SandboxBackendName;
-  shellAllowCommands: string[];
-  shellUseHostPath: boolean;
-}
 
 type SettingRow = { key: string; value: unknown };
 const PAGE_STATE_KEY = 'ui.pageState';

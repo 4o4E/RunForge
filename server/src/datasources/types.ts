@@ -1,8 +1,26 @@
-export type DatasourceType = 'postgres' | 'mysql' | 'mongodb' | 'hive';
-export type DatasourceStatus = 'active' | 'disabled';
-export type PermissionMode = 'readonly' | 'limited_write' | 'custom';
-export type AccountStatus = 'idle' | 'leased' | 'cooling_down' | 'disabled';
-export type LeaseStatus = 'leased' | 'released' | 'expired' | 'failed';
+import type {
+  AccountStatus,
+  DatasourceColumnInfo,
+  DatasourceStatus,
+  DatasourceTableInfo,
+  DatasourceTestResult,
+  DatasourceType,
+  LeaseStatus,
+  PermissionMode,
+  PublicCredentialResponse,
+} from '@my-agent/contracts';
+
+export type {
+  AccountStatus,
+  DatasourceColumnInfo,
+  DatasourceStatus,
+  DatasourceTableInfo,
+  DatasourceTestResult,
+  DatasourceType,
+  LeaseStatus,
+  PermissionMode,
+  PublicCredentialResponse,
+} from '@my-agent/contracts';
 
 export interface DatasourceRow {
   id: string;
@@ -83,38 +101,4 @@ export interface CredentialLease {
   account: DatasourceAccountRow;
   password: string;
   expiresAt: string;
-}
-
-export interface PublicCredentialResponse {
-  leaseId: string;
-  type: DatasourceType;
-  host?: string;
-  port?: number;
-  database?: string;
-  username: string;
-  password: string;
-  expiresAt: string;
-  connection: Record<string, unknown>;
-}
-
-export interface DatasourceColumnInfo {
-  name: string;
-  type: string;
-  nullable: boolean;
-  position: number;
-}
-
-export interface DatasourceTableInfo {
-  schema: string;
-  name: string;
-  type: string;
-  columns: DatasourceColumnInfo[];
-}
-
-export interface DatasourceTestResult {
-  ok: true;
-  type: DatasourceType;
-  database?: string;
-  tableCount: number;
-  tables: DatasourceTableInfo[];
 }

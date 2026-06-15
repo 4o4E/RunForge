@@ -1,32 +1,9 @@
+import type { GoalPatch, GoalState, PlanItem } from '@my-agent/contracts';
+export type { GoalPatch, GoalState, PlanItem } from '@my-agent/contracts';
+
 // 目标锚点（长任务设计 §3.2、§9/G1）：用一段短小、结构化且始终存在的文本描述
 // 当前 run 要完成什么。每一步都会重新渲染为 system message，使其在上下文压缩后仍保留，
 // 避免长任务多步骤执行时目标漂移。
-
-export interface PlanItem {
-  text: string;
-  status: 'todo' | 'doing' | 'done' | 'failed';
-}
-
-export interface GoalState {
-  /** 原始目标：run 开始时设置一次，agent 不应修改。 */
-  intent: string;
-  /** 当前 run 阶段：执行中、汇报中或已完成。 */
-  phase: 'working' | 'reporting' | 'completed';
-  /** 当前工作计划：agent 通过 update_plan 整体替换。 */
-  plan: PlanItem[];
-  /** 需要长期记住的关键决策：只追加，避免压缩后丢失。 */
-  decisions: string[];
-  /** 马上要执行的下一步。 */
-  next: string;
-}
-
-/** agent 通过 update_plan 工具提交的目标补丁。 */
-export interface GoalPatch {
-  phase?: GoalState['phase'];
-  plan?: PlanItem[];
-  decisions?: string[];
-  next?: string;
-}
 
 export function initGoal(intent: string): GoalState {
   return { intent, phase: 'working', plan: [], decisions: [], next: '' };

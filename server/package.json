@@ -13,6 +13,7 @@
     "db:migrate": "tsx src/db/migrate.ts"
   },
   "dependencies": {
+    "@my-agent/contracts": "workspace:*",
     "@ai-sdk/anthropic": "^3.0.82",
     "@ai-sdk/openai": "^3.0.69",
     "@ai-sdk/openai-compatible": "^2.0.48",
