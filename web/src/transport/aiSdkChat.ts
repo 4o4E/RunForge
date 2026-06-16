@@ -53,18 +53,64 @@ export function uiEventStreamToChunks(
       let closed = false;
       let openText: string | null = null;
       let openReason: string | null = null;
+      let deltaFrame: number | null = null;
+      let deltaTimer: ReturnType<typeof setTimeout> | null = null;
+      const pendingTextDeltas = new Map<string, string>();
+      const pendingReasonDeltas = new Map<string, string>();
 
       const safe = (chunk: UIMessageChunk) => {
         if (!closed) controller.enqueue(chunk);
       };
+      const flushBufferedDeltas = () => {
+        deltaFrame = null;
+        deltaTimer = null;
+        for (const [id, delta] of pendingTextDeltas) {
+          safe({ type: 'text-delta', id, delta });
+        }
+        pendingTextDeltas.clear();
+        for (const [id, delta] of pendingReasonDeltas) {
+          safe({ type: 'reasoning-delta', id, delta });
+        }
+        pendingReasonDeltas.clear();
+      };
+      const scheduleBufferedDeltas = () => {
+        if (deltaFrame !== null || deltaTimer !== null) return;
+        if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+          deltaFrame = window.requestAnimationFrame(flushBufferedDeltas);
+        } else {
+          deltaTimer = setTimeout(flushBufferedDeltas, 16);
+        }
+      };
+      const flushBufferedDeltasNow = () => {
+        if (deltaFrame !== null && typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
+          window.cancelAnimationFrame(deltaFrame);
+        }
+        if (deltaTimer !== null) clearTimeout(deltaTimer);
+        if (pendingTextDeltas.size > 0 || pendingReasonDeltas.size > 0) {
+          flushBufferedDeltas();
+        } else {
+          deltaFrame = null;
+          deltaTimer = null;
+        }
+      };
+      const safeTextDelta = (id: string, delta: string) => {
+        pendingTextDeltas.set(id, `${pendingTextDeltas.get(id) ?? ''}${delta}`);
+        scheduleBufferedDeltas();
+      };
+      const safeReasoningDelta = (id: string, delta: string) => {
+        pendingReasonDeltas.set(id, `${pendingReasonDeltas.get(id) ?? ''}${delta}`);
+        scheduleBufferedDeltas();
+      };
       const closeText = () => {
         if (openText) {
+          flushBufferedDeltasNow();
           safe({ type: 'text-end', id: openText });
           openText = null;
         }
       };
       const closeReason = () => {
         if (openReason) {
+          flushBufferedDeltasNow();
           safe({ type: 'reasoning-end', id: openReason });
           openReason = null;
         }
@@ -91,7 +137,7 @@ export function uiEventStreamToChunks(
               safe({ type: 'text-start', id });
               openText = id;
             }
-            safe({ type: 'text-delta', id, delta: e.message });
+            safeTextDelta(id, e.message);
             break;
           }
           case 'ask_user_question':
@@ -117,8 +163,9 @@ export function uiEventStreamToChunks(
               safe({ type: 'reasoning-start', id });
               openReason = id;
             }
-            safe({ type: 'reasoning-delta', id, delta: e.delta });
+            safeReasoningDelta(id, e.delta);
             if (e.startedAt && e.endedAt) {
+              flushBufferedDeltasNow();
               safe({
                 type: 'data-reasoning-timing',
                 id,
@@ -145,7 +192,7 @@ export function uiEventStreamToChunks(
               safe({ type: 'text-start', id });
               openText = id;
             }
-            safe({ type: 'text-delta', id, delta: e.delta });
+            safeTextDelta(id, e.delta);
             break;
           }
           case 'tool': {
@@ -177,7 +224,7 @@ export function uiEventStreamToChunks(
             if (!openText && e.output) {
               const id = `t-${e.step}`;
               safe({ type: 'text-start', id });
-              safe({ type: 'text-delta', id, delta: e.output });
+              safeTextDelta(id, e.output);
               openText = id;
             }
             closeText();
@@ -196,6 +243,7 @@ export function uiEventStreamToChunks(
 
       const finish = () => {
         if (closed) return;
+        flushBufferedDeltasNow();
         closeText();
         closeReason();
         safe({ type: 'finish' });

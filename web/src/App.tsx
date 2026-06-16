@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
+import { flushSync } from 'react-dom';
 import { useChat } from '@ai-sdk/react';
 import type { UIMessage } from 'ai';
 import {
@@ -48,6 +49,11 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+const SIDEBAR_COLLAPSED_WIDTH = 56;
+const SIDEBAR_MIN_WIDTH = 200;
+const SIDEBAR_MAX_WIDTH = 420;
+const SIDEBAR_SNAP_WIDTH = 104;
+
 function beginHorizontalResize(
   event: ReactPointerEvent,
   options: { width: number; min: number; max: number; direction: 1 | -1; onChange: (width: number) => void },
@@ -67,6 +73,80 @@ function beginHorizontalResize(
   const onUp = () => {
     document.body.style.cursor = previousCursor;
     document.body.style.userSelect = previousUserSelect;
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+  };
+
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp, { once: true });
+}
+
+function beginSidebarResize(
+  event: ReactPointerEvent,
+  options: {
+    width: number;
+    collapsed: boolean;
+    previewElement: HTMLElement | null;
+    onWidthChange: (width: number) => void;
+    onCollapsedChange: (collapsed: boolean) => void;
+  },
+) {
+  event.preventDefault();
+  const startX = event.clientX;
+  const startWidth = options.collapsed ? SIDEBAR_COLLAPSED_WIDTH : options.width;
+  const previousCursor = document.body.style.cursor;
+  const previousUserSelect = document.body.style.userSelect;
+  let latestWidth = startWidth;
+  let latestCollapsed = options.collapsed;
+  let pendingWidth = startWidth;
+  let resizeFrame = 0;
+  document.body.style.cursor = 'col-resize';
+  document.body.style.userSelect = 'none';
+
+  const applyWidth = (rawWidth: number) => {
+    latestWidth = rawWidth;
+    const shouldCollapse = rawWidth < SIDEBAR_SNAP_WIDTH;
+    const previewWidth = shouldCollapse ? SIDEBAR_COLLAPSED_WIDTH : clamp(rawWidth, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+    if (shouldCollapse !== latestCollapsed) {
+      latestCollapsed = shouldCollapse;
+      if (!shouldCollapse) {
+        flushSync(() => {
+          options.onWidthChange(previewWidth);
+          options.onCollapsedChange(false);
+        });
+      } else {
+        flushSync(() => {
+          options.onCollapsedChange(true);
+        });
+      }
+    }
+    if (options.previewElement) {
+      options.previewElement.style.width = `${previewWidth}px`;
+    }
+  };
+
+  const onMove = (moveEvent: PointerEvent) => {
+    pendingWidth = startWidth + moveEvent.clientX - startX;
+    if (resizeFrame) return;
+    resizeFrame = window.requestAnimationFrame(() => {
+      resizeFrame = 0;
+      applyWidth(pendingWidth);
+    });
+  };
+  const onUp = () => {
+    if (resizeFrame) {
+      window.cancelAnimationFrame(resizeFrame);
+      resizeFrame = 0;
+      applyWidth(pendingWidth);
+    }
+    document.body.style.cursor = previousCursor;
+    document.body.style.userSelect = previousUserSelect;
+    if (latestWidth < SIDEBAR_SNAP_WIDTH) {
+      options.onCollapsedChange(true);
+    } else {
+      options.onCollapsedChange(false);
+      options.onWidthChange(clamp(latestWidth, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH));
+    }
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
   };
@@ -190,6 +270,7 @@ export function App() {
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
   const [statusCardOpen, setStatusCardOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(256);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [filesPanelWidth, setFilesPanelWidth] = useState(720);
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
@@ -200,6 +281,7 @@ export function App() {
   const [pageStateLoaded, setPageStateLoaded] = useState(false);
   const { theme, toggle: toggleTheme } = useThemeCtx();
   const activeThreadId = route.threadId;
+  const sidebarFrameRef = useRef<HTMLDivElement>(null);
   const conversationContentRef = useRef<HTMLDivElement>(null);
   const previousPanelThreadIdRef = useRef(activeThreadId);
   const threadPanelStatesRef = useRef<Record<string, ThreadPanelState>>({});
@@ -312,7 +394,8 @@ export function App() {
           savedDrafts[activeThreadId] = draftRef.current;
         }
 
-        setSidebarWidth((current) => numberInRange(layout.sidebarWidth, current, 200, 420));
+        setSidebarWidth((current) => numberInRange(layout.sidebarWidth, current, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH));
+        setSidebarCollapsed(typeof layout.sidebarCollapsed === 'boolean' ? layout.sidebarCollapsed : false);
         setFilesPanelWidth((current) => numberInRange(layout.rightPanelWidth, current, 360, 1200));
         setWide(typeof chat.wide === 'boolean' ? chat.wide : false);
         setThreadPanelStates(savedThreadStates);
@@ -363,6 +446,7 @@ export function App() {
       view: activeView,
       layout: {
         sidebarWidth,
+        sidebarCollapsed,
         rightPanelWidth: filesPanelWidth,
       },
       chat: {
@@ -381,7 +465,7 @@ export function App() {
       void updatePageState(state).catch((err) => console.error('save page state failed', err));
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [activeThreadId, activeView, currentThreadPanelState, filesPanelWidth, pageStateLoaded, sidebarWidth, threadDrafts, threadPanelStates, wide]);
+  }, [activeThreadId, activeView, currentThreadPanelState, filesPanelWidth, pageStateLoaded, sidebarCollapsed, sidebarWidth, threadDrafts, threadPanelStates, wide]);
 
   const navigateChatRoute = useCallback((next: ChatRoute, mode: 'push' | 'replace' = 'push') => {
     flushPendingDraftSync();
@@ -570,13 +654,23 @@ export function App() {
       .then(() => {
         let unsubscribe = () => {};
         const events: AgentEvent[] = [];
+        let renderFrame = 0;
+        const flushEvents = () => {
+          renderFrame = 0;
+          setMessages((current) => replaceAssistantMessage(current, runId, events));
+        };
         unsubscribe = subscribeRun(
           runId,
           (event) => {
             events.push(event);
-            setMessages((current) => replaceAssistantMessage(current, runId, events));
+            if (renderFrame) return;
+            renderFrame = window.requestAnimationFrame(flushEvents);
           },
           () => {
+            if (renderFrame) {
+              window.cancelAnimationFrame(renderFrame);
+              flushEvents();
+            }
             unsubscribe();
             refreshActiveThread();
             setResumingRunId(null);
@@ -687,29 +781,37 @@ export function App() {
 
   return (
     <div className="flex h-full min-h-0 min-w-0 overflow-hidden">
-      <Sidebar
-        threads={threads}
-        activeId={activeThreadId}
-        activeView={activeView}
-        width={sidebarWidth}
-        theme={theme}
-        onToggleTheme={toggleTheme}
-        onNew={newChat}
-        onSettings={openSettings}
-        onSelect={selectThread}
-        onDelete={(id) => void removeThread(id)}
-      />
+      <div
+        ref={sidebarFrameRef}
+        className="h-full shrink-0 overflow-hidden"
+        style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth }}
+      >
+        <Sidebar
+          threads={threads}
+          activeId={activeThreadId}
+          activeView={activeView}
+          width="100%"
+          collapsed={sidebarCollapsed}
+          theme={theme}
+          onToggleTheme={toggleTheme}
+          onToggleCollapsed={() => setSidebarCollapsed((collapsed) => !collapsed)}
+          onNew={newChat}
+          onSettings={openSettings}
+          onSelect={selectThread}
+          onDelete={(id) => void removeThread(id)}
+        />
+      </div>
       <div
         role="separator"
-        aria-label="调整会话列表宽度"
+        aria-label="拖拽调整或收起会话列表"
         className="h-full w-1 shrink-0 cursor-col-resize bg-border/40 transition-colors hover:bg-primary/60"
         onPointerDown={(event) =>
-          beginHorizontalResize(event, {
+          beginSidebarResize(event, {
             width: sidebarWidth,
-            min: 200,
-            max: 420,
-            direction: 1,
-            onChange: setSidebarWidth,
+            collapsed: sidebarCollapsed,
+            previewElement: sidebarFrameRef.current,
+            onWidthChange: setSidebarWidth,
+            onCollapsedChange: setSidebarCollapsed,
           })
         }
       />
@@ -756,7 +858,7 @@ export function App() {
             beginHorizontalResize(event, {
               width: filesPanelWidth,
               min: 460,
-              max: Math.max(520, window.innerWidth - sidebarWidth - 360),
+              max: Math.max(520, window.innerWidth - (sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth) - 360),
               direction: -1,
               onChange: setFilesPanelWidth,
             })

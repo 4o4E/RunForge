@@ -173,13 +173,18 @@ export function TableOfContents({
   return (
     <nav
       className={cn(
-        'group pointer-events-auto w-72',
+        'group pointer-events-auto min-h-0 w-72',
         floating && 'absolute right-6 top-64 z-20 hidden 2xl:block',
       )}
       aria-label="对话大纲"
     >
       <div className="flex w-full flex-col items-end gap-2 rounded-md py-2 transition-opacity group-hover:pointer-events-none group-hover:hidden">
-        <div className="scrollbar-thin flex max-h-44 flex-col items-end gap-2 overflow-hidden">
+        <div
+          className={cn(
+            'scrollbar-thin flex flex-col items-end gap-2 overflow-hidden',
+            floating ? 'max-h-[min(11rem,calc(100vh-18rem))]' : 'max-h-[min(11rem,calc(100vh-22rem))]',
+          )}
+        >
           {items.map((item) => (
             <button
               key={item.index}
@@ -195,9 +200,14 @@ export function TableOfContents({
           ))}
         </div>
       </div>
-      <div className="pointer-events-none hidden w-72 max-w-[calc(100vw-3rem)] rounded-md border bg-card p-2.5 text-card-foreground shadow-lg group-hover:block group-hover:pointer-events-auto">
+      <div className="pointer-events-none hidden w-72 max-w-[calc(100vw-3rem)] overflow-hidden rounded-md border bg-card p-2.5 text-card-foreground shadow-lg group-hover:block group-hover:pointer-events-auto">
         <div className="mb-1 px-2 text-[10px] text-muted-foreground">用户消息</div>
-        <div className="scrollbar-thin max-h-[50vh] overflow-auto">
+        <div
+          className={cn(
+            'scrollbar-thin overflow-auto',
+            floating ? 'max-h-[min(22rem,calc(100vh-20rem))]' : 'max-h-[min(22rem,calc(100vh-24rem))]',
+          )}
+        >
           {items.map((item) => (
             <button
               key={item.index}

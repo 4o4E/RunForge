@@ -137,6 +137,7 @@ export function Composer({
   function handleSubmit(message: PromptInputMessage) {
     const text = message.text?.trim();
     if (!text || disabled || waitingForAskUser) return;
+    setLocalDraft('');
     onSend(text);
   }
 

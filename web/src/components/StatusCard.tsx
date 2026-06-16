@@ -135,7 +135,6 @@ export function AgentStatusCard({ messages, busy, threadId, className, onOpenShe
     return `${userCount} 轮提问 · ${assistantCount} 条回复`;
   }, [messages]);
   const openShells = sessions.filter((session) => session.status !== 'closed');
-  const runningShells = openShells.filter((session) => session.status === 'busy' || session.commands?.some((cmd) => cmd.status === 'queued' || cmd.status === 'running'));
   const visibleSubagents = subagents.slice(-6);
 
   const refreshShells = useCallback(() => {
@@ -209,12 +208,6 @@ export function AgentStatusCard({ messages, busy, threadId, className, onOpenShe
           </>
         )}
         {show('plan') && <PlanList messages={messages} />}
-        {show('shell') && (
-          <StatusRow
-            label="资源"
-            value={`Shell ${openShells.length} · Subagent ${subagents.length} · ${runningShells.length} 运行`}
-          />
-        )}
         {show('tokens') && (
           <StatusRow
             label="token"
