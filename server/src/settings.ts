@@ -1,11 +1,12 @@
 import { resolve } from 'node:path';
-import type { SandboxBackendName, ToolSettings } from '@my-agent/contracts';
-export type { ToolSettings } from '@my-agent/contracts';
+import type { LlmAiSdkFlavor, LlmModelOption, LlmProviderName, LlmProviderSettings, LlmSettings, SandboxBackendName, ToolSettings } from '@my-agent/contracts';
+export type { LlmModelOption, LlmProviderSettings, LlmSettings, ToolSettings } from '@my-agent/contracts';
 import { config } from './config.js';
 import { query } from './db/pool.js';
 
 type SettingRow = { key: string; value: unknown };
 const PAGE_STATE_KEY = 'ui.pageState';
+const LLM_SETTINGS_KEY = 'llm.settings';
 const MAX_PAGE_STATE_BYTES = 200_000;
 
 const TOOL_SETTING_KEYS = [
@@ -77,6 +78,31 @@ function shellPathModeValue(value: unknown, fallback: ToolSettings['shellPathMod
   return value === 'system' || value === 'custom' ? value : fallback;
 }
 
+function llmProviderNameValue(value: unknown, fallback: LlmProviderName): LlmProviderName {
+  return value === 'aisdk' || value === 'openai-responses' || value === 'openai-chat' || value === 'anthropic' || value === 'mock'
+    ? value
+    : fallback;
+}
+
+function llmAiSdkFlavorValue(value: unknown, fallback: LlmAiSdkFlavor): LlmAiSdkFlavor {
+  return value === 'openai-compatible' || value === 'openai' || value === 'anthropic' ? value : fallback;
+}
+
+function providerIdValue(value: unknown, fallback: string): string {
+  const id = stringValue(value, fallback);
+  if (id.includes(':')) return fallback;
+  return id;
+}
+
+function positiveIntValue(value: unknown, fallback: number, min: number, max: number): number {
+  const raw = Math.floor(numberValue(value, fallback));
+  return Math.min(max, Math.max(min, raw));
+}
+
+function uniqStrings(items: string[]): string[] {
+  return [...new Set(items.map((item) => item.trim()).filter(Boolean))];
+}
+
 function defaultToolSettings(): ToolSettings {
   return {
     sandbox: config.tools.sandbox,
@@ -93,6 +119,39 @@ function defaultToolSettings(): ToolSettings {
     network: config.tools.network,
     shellDeny: config.tools.shellDeny,
     maxOutput: config.tools.maxOutput,
+  };
+}
+
+function modelRef(providerId: string, model: string): string {
+  return `${providerId}:${model}`;
+}
+
+function defaultLlmProviderSettings(): LlmProviderSettings {
+  const provider = llmProviderNameValue(config.llm.provider, 'aisdk');
+  const defaultModel = stringValue(config.llm.model, 'gpt-4o-mini');
+  return {
+    id: 'default',
+    label: '默认供应商',
+    provider,
+    baseUrl: config.llm.baseUrl,
+    apiKey: config.llm.apiKey,
+    discoveredModels: [defaultModel],
+    models: [defaultModel],
+    defaultModel,
+    maxTokens: positiveIntValue(config.llm.maxTokens, 4096, 1, 200_000),
+    timeoutMs: positiveIntValue(config.llm.timeoutMs, 120_000, 1000, 600_000),
+    retries: positiveIntValue(config.llm.retries, 2, 0, 10),
+    stream: config.llm.stream,
+    aisdkFlavor: llmAiSdkFlavorValue(config.llm.aisdkFlavor, 'openai-compatible'),
+    reasoningTag: typeof config.llm.reasoningTag === 'string' ? config.llm.reasoningTag : 'think',
+  };
+}
+
+function defaultLlmSettings(): LlmSettings {
+  const provider = defaultLlmProviderSettings();
+  return {
+    defaultModelRef: modelRef(provider.id, provider.defaultModel),
+    providers: [provider],
   };
 }
 
@@ -194,6 +253,96 @@ export async function saveToolSettings(input: unknown): Promise<ToolSettings> {
       [key, JSON.stringify(value)],
     );
   }
+  return settings;
+}
+
+function normalizeLlmProvider(input: unknown, fallback: LlmProviderSettings, usedIds: Set<string>): LlmProviderSettings {
+  const body = input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
+  const rawId = providerIdValue(body.id, fallback.id);
+  let id = rawId;
+  for (let i = 2; usedIds.has(id); i += 1) id = `${rawId}-${i}`;
+  usedIds.add(id);
+
+  const fallbackModels = fallback.models.length ? fallback.models : [];
+  const models = uniqStrings(stringList(body.models, fallbackModels));
+  const discoveredModels = uniqStrings(stringList(body.discoveredModels, [...fallback.discoveredModels, ...models]));
+  const requestedDefaultModel = typeof body.defaultModel === 'string' && body.defaultModel.trim() ? body.defaultModel.trim() : fallback.defaultModel;
+  const defaultModel = models.includes(requestedDefaultModel) ? requestedDefaultModel : models[0] ?? '';
+
+  return {
+    id,
+    label: stringValue(body.label, fallback.label || id),
+    provider: llmProviderNameValue(body.provider, fallback.provider),
+    baseUrl: stringValue(body.baseUrl, fallback.baseUrl),
+    apiKey: typeof body.apiKey === 'string' ? body.apiKey : fallback.apiKey,
+    discoveredModels: uniqStrings([...discoveredModels, ...models]),
+    models,
+    defaultModel,
+    maxTokens: positiveIntValue(body.maxTokens, fallback.maxTokens, 1, 200_000),
+    timeoutMs: positiveIntValue(body.timeoutMs, fallback.timeoutMs, 1000, 600_000),
+    retries: positiveIntValue(body.retries, fallback.retries, 0, 10),
+    stream: boolValue(body.stream, fallback.stream),
+    aisdkFlavor: llmAiSdkFlavorValue(body.aisdkFlavor, fallback.aisdkFlavor),
+    reasoningTag: typeof body.reasoningTag === 'string' ? body.reasoningTag : fallback.reasoningTag,
+  };
+}
+
+export function llmModelOptions(settings: LlmSettings): LlmModelOption[] {
+  return settings.providers.flatMap((provider) =>
+    provider.models.map((model) => ({
+      ref: modelRef(provider.id, model),
+      providerId: provider.id,
+      providerLabel: provider.label || provider.id,
+      provider: provider.provider,
+      model,
+      label: `${provider.label || provider.id} · ${model}`,
+    })),
+  );
+}
+
+export function normalizeLlmSettings(input: unknown): LlmSettings {
+  const defaults = defaultLlmSettings();
+  const body = input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
+  const rawProviders = Array.isArray(body.providers) ? body.providers : defaults.providers;
+  const usedIds = new Set<string>();
+  const providers = rawProviders
+    .map((item, index) => normalizeLlmProvider(item, defaults.providers[index] ?? defaultLlmProviderSettings(), usedIds))
+    .filter((provider) => provider.id);
+  const safeProviders = providers.length ? providers : defaults.providers;
+  const options = llmModelOptions({ providers: safeProviders, defaultModelRef: defaults.defaultModelRef });
+  const requestedDefault = typeof body.defaultModelRef === 'string' ? body.defaultModelRef.trim() : defaults.defaultModelRef;
+  const defaultModelRef = options.some((option) => option.ref === requestedDefault) ? requestedDefault : options[0]?.ref ?? '';
+  return { defaultModelRef, providers: safeProviders };
+}
+
+export async function getLlmSettings(): Promise<LlmSettings> {
+  try {
+    const { rows } = await query<SettingRow>(`SELECT value FROM app_settings WHERE key = $1`, [LLM_SETTINGS_KEY]);
+    if (!rows[0]) {
+      const defaults = defaultLlmSettings();
+      await query(
+        `INSERT INTO app_settings (key, value, updated_at)
+         VALUES ($1, $2::jsonb, now())
+         ON CONFLICT (key) DO NOTHING`,
+        [LLM_SETTINGS_KEY, JSON.stringify(defaults)],
+      );
+      return defaults;
+    }
+    return normalizeLlmSettings(rows[0].value);
+  } catch (err) {
+    warnOnce('llm-settings-fallback', `LLM settings fallback to env defaults: ${(err as Error).message}`);
+    return defaultLlmSettings();
+  }
+}
+
+export async function saveLlmSettings(input: unknown): Promise<LlmSettings> {
+  const settings = normalizeLlmSettings(input);
+  await query(
+    `INSERT INTO app_settings (key, value, updated_at)
+     VALUES ($1, $2::jsonb, now())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+    [LLM_SETTINGS_KEY, JSON.stringify(settings)],
+  );
   return settings;
 }
 

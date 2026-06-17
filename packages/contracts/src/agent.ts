@@ -111,6 +111,7 @@ export type AgentEvent =
       workflowId?: string | null;
       stageId?: string | null;
       runtimeProfileId?: string | null;
+      modelRef?: string | null;
       skillNames: string[];
       task: string;
     } & Pick<TimedEventFields, 'startedAt'>)

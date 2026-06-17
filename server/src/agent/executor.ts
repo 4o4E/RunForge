@@ -1,5 +1,5 @@
 import { config } from '../config.js';
-import { getProvider } from '../llm/index.js';
+import { getConfiguredProvider } from '../llm/index.js';
 import type { LlmMessage, LlmUsage, Provider } from '../llm/types.js';
 import { parseToolArguments } from '../llm/toolArgs.js';
 import { runTool, toolSchemas } from '../tools/registry.js';
@@ -145,14 +145,17 @@ class StreamStatsTracker {
   }
 }
 
-function defaultDeps(): ExecutorDeps {
+async function defaultDeps(overrides: Partial<ExecutorDeps>): Promise<ExecutorDeps> {
+  const configured = overrides.provider ? null : await getConfiguredProvider();
   return {
-    provider: getProvider(),
-    store: defaultStore,
-    publish: (runId, event) => runBus.publish(runId, event),
-    hardStepCap: config.agent.hardStepCap,
-    stream: config.llm.stream,
-    resume: false,
+    provider: overrides.provider ?? configured!.provider,
+    store: overrides.store ?? defaultStore,
+    publish: overrides.publish ?? ((runId, event) => runBus.publish(runId, event)),
+    hardStepCap: overrides.hardStepCap ?? config.agent.hardStepCap,
+    stream: overrides.stream ?? configured?.stream ?? config.llm.stream,
+    resume: overrides.resume ?? false,
+    toolSettings: overrides.toolSettings,
+    databaseRuntimeEnv: overrides.databaseRuntimeEnv,
   };
 }
 
@@ -345,7 +348,7 @@ function runtimeApiBase(): string {
  * 所有依赖都可注入，便于在没有 PG/网络的情况下做单元测试。
  */
 export async function executeRun(runId: string, overrides: Partial<ExecutorDeps> = {}): Promise<void> {
-  const deps = { ...defaultDeps(), ...overrides };
+  const deps = await defaultDeps(overrides);
   const { provider, store, publish, hardStepCap, stream, resume } = deps;
 
   const run = await store.getRun(runId);
@@ -514,11 +517,13 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
 
     const renderSubagentRow = (row: SubagentRunRow, includeTask: boolean): string => {
       const task = optionalString(row.task_assignment?.task) ?? '未记录';
+      const modelRef = optionalString(row.task_assignment?.modelRef);
       const lines = [
         `subagentRunId: ${row.id}`,
         `status: ${row.status}`,
         `stageId: ${row.stage_id ?? '未指定'}`,
         `runtimeProfileId: ${row.runtime_profile_id ?? 'default'}`,
+        `modelRef: ${modelRef ?? '主 agent 默认模型'}`,
         `createdAt: ${row.created_at}`,
       ];
       if (row.finished_at) lines.push(`finishedAt: ${row.finished_at}`);
@@ -543,6 +548,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       const stageId = optionalString(args.stageId);
       const stageGoal = optionalString(args.stageGoal);
       const runtimeProfileId = optionalString(args.runtimeProfileId);
+      const modelRef = optionalString(args.modelRef);
       const skillNames = stringList(args.skillNames);
       const taskAssignment = row.task_assignment;
 
@@ -574,6 +580,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
               `stageId: ${stageId ?? '未指定'}`,
               `stageGoal: ${stageGoal ?? '未指定'}`,
               `runtimeProfileId: ${runtimeProfileId ?? 'default'}`,
+              `modelRef: ${modelRef ?? '主 agent 默认模型'}`,
               '',
               'Task assignment:',
               JSON.stringify(taskAssignment, null, 2),
@@ -585,7 +592,8 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           },
         ];
 
-        const result = await provider.complete(messages, []);
+        const subagentProvider = modelRef ? (await getConfiguredProvider(modelRef)).provider : provider;
+        const result = await subagentProvider.complete(messages, []);
         const output = result.content?.trim() || 'subagent 未返回文本结果。';
         const endedAt = new Date().toISOString();
         await store.finishSubagentRun(row.id, {
@@ -634,6 +642,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       const stageId = optionalString(args.stageId);
       const stageGoal = optionalString(args.stageGoal);
       const runtimeProfileId = optionalString(args.runtimeProfileId);
+      const modelRef = optionalString(args.modelRef);
       const skillNames = stringList(args.skillNames);
       const taskAssignment = {
         task,
@@ -641,6 +650,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         expectedOutput: optionalString(args.expectedOutput),
         constraints: optionalString(args.constraints),
         stageGoal,
+        modelRef,
       };
 
       const row = await store.createSubagentRun({
@@ -659,6 +669,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         workflowId,
         stageId,
         runtimeProfileId,
+        modelRef,
         skillNames,
         task,
         startedAt: toolStartedAt,
@@ -671,6 +682,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           'status: running',
           `stageId: ${stageId ?? '未指定'}`,
           `runtimeProfileId: ${runtimeProfileId ?? 'default'}`,
+          `modelRef: ${modelRef ?? '主 agent 默认模型'}`,
           '',
           'subagent 已在后台启动，本次工具调用不会等待它完成。',
           '后续可以调用 subagent_poll 查询该子任务，或调用 subagent_list 查看当前 thread 的所有 subagent；这些查询可以跨 run 使用。',

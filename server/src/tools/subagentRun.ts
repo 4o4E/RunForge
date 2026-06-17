@@ -11,6 +11,10 @@ export const subagentRunTool: Tool = {
       stageId: { type: 'string', description: 'workflow stage id，例如 design、implement、review、test。' },
       stageGoal: { type: 'string', description: '当前阶段目标。' },
       runtimeProfileId: { type: 'string', description: '运行时配置 id，例如 readonly、default、writer。' },
+      modelRef: {
+        type: 'string',
+        description: '可选 subagent 模型引用，格式为 provider:model，例如 deepseek:deepseek-v4。供应商和模型必须已在设置页配置。',
+      },
       skillNames: {
         type: 'array',
         items: { type: 'string' },

@@ -6,6 +6,12 @@ import type {
   DatasourceInput,
   DatasourceTestResult,
   FilePreview,
+  LlmProviderChatTestResult,
+  LlmProviderPingResult,
+  LlmProviderProbeResult,
+  LlmProviderSettings,
+  LlmSettings,
+  LlmSettingsOptions,
   PageState,
   PermissionProfile,
   PermissionProfileInput,
@@ -102,6 +108,38 @@ export const updateToolSettings = (settings: ToolSettings) =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(settings),
   }).then(json<ToolSettings>);
+
+export const getLlmSettings = () => fetch('/api/settings/llm').then(json<LlmSettings>);
+
+export const getLlmSettingsOptions = () => fetch('/api/settings/llm/options').then(json<LlmSettingsOptions>);
+
+export const updateLlmSettings = (settings: LlmSettings) =>
+  fetch('/api/settings/llm', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings),
+  }).then(json<LlmSettings>);
+
+export const probeLlmProviderModels = (provider: LlmProviderSettings) =>
+  fetch('/api/settings/llm/provider/models', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider }),
+  }).then(json<LlmProviderProbeResult>);
+
+export const pingLlmProvider = (provider: LlmProviderSettings) =>
+  fetch('/api/settings/llm/provider/ping', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider }),
+  }).then(json<LlmProviderPingResult>);
+
+export const testLlmProviderChat = (provider: LlmProviderSettings, model: string, input: string) =>
+  fetch('/api/settings/llm/provider/chat-test', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider, model, input }),
+  }).then(json<LlmProviderChatTestResult>);
 
 export const getPageState = () => fetch('/api/settings/page-state').then(json<PageState>);
 

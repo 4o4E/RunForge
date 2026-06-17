@@ -1,19 +1,25 @@
 import { Fragment, useEffect, useId, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Activity, Database, Gauge, Moon, Palette, Plus, RefreshCw, Save, Shield, Sun, Trash2, Wrench } from 'lucide-react';
+import { Activity, Bot, Check, ChevronRight, ChevronsUpDown, Database, Gauge, MessageSquare, Moon, Palette, Plus, RefreshCw, Save, Shield, Sun, Trash2, Wifi, Wrench } from 'lucide-react';
 import {
   createDatasource,
   createPermissionProfile,
   getDatasourceDetail,
+  getLlmSettings,
+  getLlmSettingsOptions,
   getThread,
   getToolSettings,
   getToolSettingsOptions,
   listDatasources,
   listThreads,
+  pingLlmProvider,
+  probeLlmProviderModels,
   scanShellCommandOptions,
   testDatasource,
   testDatasourceDraft,
+  testLlmProviderChat,
   updateDatasource,
+  updateLlmSettings,
   updatePermissionProfile,
   updateToolSettings,
   type AgentEvent,
@@ -24,6 +30,11 @@ import {
   type DatasourceStatus,
   type DatasourceTestResult,
   type DatasourceType,
+  type LlmProviderChatTestResult,
+  type LlmModelOption,
+  type LlmProviderSettings,
+  type LlmSettings,
+  type LlmSettingsOptions,
   type PermissionMode,
   type PermissionProfile,
   type PermissionProfileInput,
@@ -35,13 +46,18 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Spinner } from '@/components/ui/spinner';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
 import { useThemeCtx } from '@/theme';
+import { useNotifications } from './GlobalNotifications';
 import {
   DEFAULT_STATUS_FIELDS,
   STATUS_FIELD_LABELS,
@@ -54,6 +70,7 @@ type SettingsPanel =
   | 'appearance'
   | 'status-card'
   | 'usage-stats'
+  | 'llm-models'
   | 'tools-sandbox'
   | 'tools-access'
   | 'datasource-connection'
@@ -117,6 +134,13 @@ interface ProfileForm {
   templateRole: string;
   maxPoolSize: string;
   leaseTtlSeconds: string;
+}
+
+interface LlmChatDialogState {
+  providerIndex: number;
+  model: string;
+  input: string;
+  result?: LlmProviderChatTestResult;
 }
 
 function listToText(items: string[]): string {
@@ -340,6 +364,136 @@ function OptionList({
         })}
       </div>
     </ScrollArea>
+  );
+}
+
+const LLM_PROVIDER_OPTIONS: Array<{ value: LlmProviderSettings['provider']; label: string }> = [
+  { value: 'aisdk', label: 'AI SDK' },
+  { value: 'openai-responses', label: 'OpenAI Responses' },
+  { value: 'openai-chat', label: 'OpenAI Chat' },
+  { value: 'anthropic', label: 'Anthropic' },
+  { value: 'mock', label: 'Mock' },
+];
+
+const AI_SDK_FLAVOR_OPTIONS: Array<{ value: LlmProviderSettings['aisdkFlavor']; label: string }> = [
+  { value: 'openai-compatible', label: 'OpenAI Compatible' },
+  { value: 'openai', label: 'OpenAI' },
+  { value: 'anthropic', label: 'Anthropic' },
+];
+
+function llmModelRef(providerId: string, model: string): string {
+  return `${providerId}:${model}`;
+}
+
+function llmModelPrefix(model: string): string {
+  const separators = ['-', ':', '/', '_', '.'];
+  const indexes = separators.map((item) => model.indexOf(item)).filter((index) => index > 0);
+  const end = indexes.length ? Math.min(...indexes) : model.length;
+  return model.slice(0, end) || '其他';
+}
+
+function llmProviderCandidates(provider: LlmProviderSettings): string[] {
+  return [...new Set([...provider.discoveredModels, ...provider.models, provider.defaultModel].map((item) => item.trim()).filter(Boolean))].sort();
+}
+
+function groupLlmModels(models: string[]): Array<{ prefix: string; models: string[] }> {
+  const groups = new Map<string, string[]>();
+  for (const model of models) {
+    const prefix = llmModelPrefix(model);
+    groups.set(prefix, [...(groups.get(prefix) ?? []), model]);
+  }
+  return [...groups.entries()]
+    .map(([prefix, rows]) => ({ prefix, models: rows.sort() }))
+    .sort((a, b) => a.prefix.localeCompare(b.prefix));
+}
+
+function llmOptionsFromSettings(settings: LlmSettings): LlmModelOption[] {
+  return settings.providers.flatMap((provider) =>
+    provider.models.map((model) => ({
+      ref: llmModelRef(provider.id, model),
+      providerId: provider.id,
+      providerLabel: provider.label || provider.id,
+      provider: provider.provider,
+      model,
+      label: `${provider.label || provider.id} · ${model}`,
+    })),
+  );
+}
+
+function defaultLlmProvider(index: number): LlmProviderSettings {
+  return {
+    id: `provider-${index + 1}`,
+    label: `供应商 ${index + 1}`,
+    provider: 'aisdk',
+    baseUrl: 'https://api.openai.com/v1',
+    apiKey: '',
+    discoveredModels: ['gpt-4o-mini'],
+    models: ['gpt-4o-mini'],
+    defaultModel: 'gpt-4o-mini',
+    maxTokens: 4096,
+    timeoutMs: 120000,
+    retries: 2,
+    stream: true,
+    aisdkFlavor: 'openai-compatible',
+    reasoningTag: 'think',
+  };
+}
+
+function ModelSearchSelect({
+  value,
+  options,
+  onChange,
+  placeholder = '选择模型',
+}: {
+  value: string;
+  options: LlmModelOption[];
+  onChange: (value: string) => void;
+  placeholder?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const selected = options.find((option) => option.ref === value);
+
+  return (
+    <div className="relative min-w-0">
+      <Button
+        type="button"
+        variant="outline"
+        className="h-10 w-full justify-between gap-2"
+        aria-expanded={open}
+        onClick={() => setOpen((next) => !next)}
+      >
+        <span className="min-w-0 truncate text-left">{selected ? selected.label : value || placeholder}</span>
+        <ChevronsUpDown className="h-4 w-4 shrink-0 opacity-50" />
+      </Button>
+      {open && (
+        <div className="absolute left-0 right-0 top-11 z-50 rounded-md border bg-popover text-popover-foreground shadow-md">
+          <Command>
+            <CommandInput placeholder="搜索供应商或模型" />
+            <CommandList>
+              <CommandEmpty>没有匹配的模型</CommandEmpty>
+              <CommandGroup>
+                {options.map((option) => (
+                  <CommandItem
+                    key={option.ref}
+                    value={`${option.providerLabel} ${option.providerId} ${option.provider} ${option.model} ${option.ref}`}
+                    onSelect={() => {
+                      onChange(option.ref);
+                      setOpen(false);
+                    }}
+                  >
+                    <Check className={cn('h-4 w-4', option.ref === value ? 'opacity-100' : 'opacity-0')} />
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium">{option.model}</div>
+                      <div className="truncate text-xs text-muted-foreground">{option.providerLabel} · {option.ref}</div>
+                    </div>
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            </CommandList>
+          </Command>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1043,6 +1197,534 @@ function ToolsSettingsPanel({
   );
 }
 
+function LlmSettingsPanel() {
+  const { notify } = useNotifications();
+  const [settings, setSettings] = useState<LlmSettings | null>(null);
+  const [options, setOptions] = useState<LlmSettingsOptions | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const [providerBusy, setProviderBusy] = useState<Record<string, string>>({});
+  const [customModelDrafts, setCustomModelDrafts] = useState<Record<string, string>>({});
+  const [chatDialog, setChatDialog] = useState<LlmChatDialogState | null>(null);
+  const [chatTesting, setChatTesting] = useState(false);
+  const [modelGroupOpen, setModelGroupOpen] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    let canceled = false;
+    Promise.all([getLlmSettings(), getLlmSettingsOptions()])
+      .then(([data, nextOptions]) => {
+        if (canceled) return;
+        setSettings(data);
+        setOptions(nextOptions);
+      })
+      .catch((err) => {
+        if (!canceled) setMessage(`读取配置失败：${(err as Error).message}`);
+      });
+    return () => {
+      canceled = true;
+    };
+  }, []);
+
+  const modelOptions = useMemo(() => {
+    if (settings) return llmOptionsFromSettings(settings);
+    return options?.models ?? [];
+  }, [options?.models, settings]);
+
+  function updateProvider(index: number, patch: Partial<LlmProviderSettings>) {
+    if (!settings) return;
+    const providers = settings.providers.map((provider, providerIndex) => {
+      if (providerIndex !== index) return provider;
+      const next = { ...provider, ...patch };
+      if (patch.models && !next.models.includes(next.defaultModel)) next.defaultModel = next.models[0] ?? '';
+      return next;
+    });
+    const nextOptions = llmOptionsFromSettings({ ...settings, providers });
+    const defaultModelRef = nextOptions.some((option) => option.ref === settings.defaultModelRef)
+      ? settings.defaultModelRef
+      : nextOptions[0]?.ref ?? '';
+    setSettings({ ...settings, providers, defaultModelRef });
+  }
+
+  function providerKey(provider: LlmProviderSettings, index: number): string {
+    return `${index}:${provider.id}`;
+  }
+
+  function modelGroupKey(provider: LlmProviderSettings, index: number, prefix: string): string {
+    return `${providerKey(provider, index)}:${prefix}`;
+  }
+
+  function isModelGroupOpen(provider: LlmProviderSettings, index: number, prefix: string): boolean {
+    return modelGroupOpen[modelGroupKey(provider, index, prefix)] ?? true;
+  }
+
+  function setModelGroupsOpen(provider: LlmProviderSettings, index: number, prefixes: string[], open: boolean) {
+    setModelGroupOpen((current) => {
+      const next = { ...current };
+      for (const prefix of prefixes) next[modelGroupKey(provider, index, prefix)] = open;
+      return next;
+    });
+  }
+
+  function setProviderBusyLabel(provider: LlmProviderSettings, index: number, label: string | null) {
+    const key = providerKey(provider, index);
+    setProviderBusy((current) => {
+      const next = { ...current };
+      if (label) next[key] = label;
+      else delete next[key];
+      return next;
+    });
+  }
+
+  function setModelEnabled(index: number, model: string, checked: boolean) {
+    if (!settings) return;
+    const provider = settings.providers[index];
+    const models = toggleListValue(provider.models, model, checked);
+    updateProvider(index, {
+      models,
+      defaultModel: models.includes(provider.defaultModel) ? provider.defaultModel : models[0] ?? '',
+      discoveredModels: [...new Set([...provider.discoveredModels, model])].sort(),
+    });
+  }
+
+  function setPrefixEnabled(index: number, modelsInPrefix: string[], checked: boolean) {
+    if (!settings) return;
+    const provider = settings.providers[index];
+    const next = new Set(provider.models);
+    for (const model of modelsInPrefix) {
+      if (checked) next.add(model);
+      else next.delete(model);
+    }
+    const models = [...next].sort();
+    updateProvider(index, {
+      models,
+      defaultModel: models.includes(provider.defaultModel) ? provider.defaultModel : models[0] ?? '',
+      discoveredModels: [...new Set([...provider.discoveredModels, ...modelsInPrefix])].sort(),
+    });
+  }
+
+  function addCustomModel(index: number) {
+    if (!settings) return;
+    const provider = settings.providers[index];
+    const key = providerKey(provider, index);
+    const model = (customModelDrafts[key] ?? '').trim();
+    if (!model) return;
+    updateProvider(index, { discoveredModels: [...new Set([...provider.discoveredModels, model])].sort() });
+    setCustomModelDrafts((current) => ({ ...current, [key]: '' }));
+  }
+
+  async function probeProvider(index: number) {
+    if (!settings) return;
+    const provider = settings.providers[index];
+    setProviderBusyLabel(provider, index, '拉取中');
+    try {
+      const result = await probeLlmProviderModels(provider);
+      updateProvider(index, {
+        discoveredModels: [...new Set([...provider.discoveredModels, ...result.models])].sort(),
+      });
+      notify({
+        title: `模型列表拉取成功：${provider.label || provider.id}`,
+        description: `拉取到 ${result.models.length} 个候选模型 · ${result.source}`,
+        variant: 'success',
+      });
+    } catch (err) {
+      notify({
+        title: `模型列表拉取失败：${provider.label || provider.id}`,
+        description: (err as Error).message,
+        variant: 'error',
+      });
+    } finally {
+      setProviderBusyLabel(provider, index, null);
+    }
+  }
+
+  async function pingProvider(index: number) {
+    if (!settings) return;
+    const provider = settings.providers[index];
+    setProviderBusyLabel(provider, index, 'Ping');
+    try {
+      const ping = await pingLlmProvider(provider);
+      const providerName = provider.label || provider.id;
+      notify({
+        title: `Ping ${ping.ok ? '成功' : '失败'}：${providerName}`,
+        description: `${ping.latencyMs}ms · ${ping.message}${ping.modelCount ? ` · ${ping.modelCount} 个模型` : ''}`,
+        variant: ping.ok ? 'success' : 'error',
+      });
+    } catch (err) {
+      notify({
+        title: `Ping 失败：${provider.label || provider.id}`,
+        description: (err as Error).message,
+        variant: 'error',
+      });
+    } finally {
+      setProviderBusyLabel(provider, index, null);
+    }
+  }
+
+  function openChatTest(index: number) {
+    if (!settings) return;
+    const provider = settings.providers[index];
+    const candidates = llmProviderCandidates(provider);
+    setChatDialog({
+      providerIndex: index,
+      model: provider.defaultModel || provider.models[0] || candidates[0] || '',
+      input: '请用一句中文回复：模型可用。',
+    });
+  }
+
+  async function chatTestProvider() {
+    if (!settings || !chatDialog || chatTesting) return;
+    const provider = settings.providers[chatDialog.providerIndex];
+    if (!provider) {
+      setChatDialog(null);
+      return;
+    }
+    setProviderBusyLabel(provider, chatDialog.providerIndex, '对话检查');
+    setChatTesting(true);
+    setChatDialog({ ...chatDialog, result: undefined });
+    try {
+      const chat = await testLlmProviderChat(provider, chatDialog.model, chatDialog.input);
+      setChatDialog((current) => current ? { ...current, result: chat } : current);
+    } catch (err) {
+      setChatDialog((current) => current ? {
+        ...current,
+        result: {
+          ok: false,
+          latencyMs: 0,
+          model: chatDialog.model,
+          input: chatDialog.input,
+          output: (err as Error).message,
+        },
+      } : current);
+    } finally {
+      setChatTesting(false);
+      setProviderBusyLabel(provider, chatDialog.providerIndex, null);
+    }
+  }
+
+  function addProvider() {
+    if (!settings) return;
+    const provider = defaultLlmProvider(settings.providers.length);
+    setSettings({
+      ...settings,
+      providers: [...settings.providers, provider],
+      defaultModelRef: settings.defaultModelRef || llmModelRef(provider.id, provider.defaultModel),
+    });
+  }
+
+  function removeProvider(index: number) {
+    if (!settings) return;
+    const providers = settings.providers.filter((_, providerIndex) => providerIndex !== index);
+    const safeProviders = providers.length ? providers : [defaultLlmProvider(0)];
+    const nextOptions = llmOptionsFromSettings({ ...settings, providers: safeProviders });
+    setSettings({ ...settings, providers: safeProviders, defaultModelRef: nextOptions[0]?.ref ?? '' });
+  }
+
+  async function save() {
+    if (!settings) return;
+    setSaving(true);
+    setMessage('');
+    try {
+      const next = await updateLlmSettings(settings);
+      setSettings(next);
+      setOptions(await getLlmSettingsOptions());
+      setMessage('已保存，新 run 会使用最新模型配置');
+    } catch (err) {
+      setMessage(`保存失败：${(err as Error).message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!settings) {
+    return <div className="flex min-h-64 items-center justify-center text-sm text-muted-foreground">正在读取配置...</div>;
+  }
+  const chatProvider = chatDialog ? settings.providers[chatDialog.providerIndex] : null;
+  const chatCandidates = chatProvider ? llmProviderCandidates(chatProvider) : [];
+
+  return (
+    <SettingsPanelShell
+      title="模型"
+      description="主 agent 默认模型和 subagent 可用的 provider:model 候选"
+      contentClassName="grid content-start gap-4"
+      actions={
+        <>
+          {message && <span className="text-sm text-muted-foreground">{message}</span>}
+          <Button onClick={() => void save()} disabled={saving}>
+            <Save className="h-4 w-4" />
+            {saving ? '保存中' : '保存'}
+          </Button>
+        </>
+      }
+    >
+
+      <Card className="rounded-lg shadow-sm">
+        <CardHeader>
+          <CardTitle>默认模型</CardTitle>
+          <CardDescription>主 agent 新 run 默认使用这里选择的模型；subagent 可在工具调用里指定同格式模型引用</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3">
+          <ModelSearchSelect
+            value={settings.defaultModelRef}
+            options={modelOptions}
+            onChange={(defaultModelRef) => setSettings({ ...settings, defaultModelRef })}
+          />
+          <div className="text-xs text-muted-foreground">subagent_run 的 modelRef 示例：{settings.defaultModelRef || 'provider:model'}</div>
+        </CardContent>
+      </Card>
+
+      <div className="grid gap-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-sm font-medium">供应商</div>
+          <Button variant="outline" size="sm" onClick={addProvider}>
+            <Plus className="h-4 w-4" />
+            新增供应商
+          </Button>
+        </div>
+        {settings.providers.map((provider, index) => {
+          const candidates = llmProviderCandidates(provider);
+          const groupedModels = groupLlmModels(candidates);
+          const enabledModelSet = new Set(provider.models);
+          const busyLabel = providerBusy[providerKey(provider, index)];
+          const customKey = providerKey(provider, index);
+          const providerModelOptions = provider.models.map((model) => ({
+            ref: llmModelRef(provider.id, model),
+            providerId: provider.id,
+            providerLabel: provider.label || provider.id,
+            provider: provider.provider,
+            model,
+            label: `${provider.label || provider.id} · ${model}`,
+          }));
+          return (
+            <section key={`${provider.id}-${index}`} className="grid gap-4 rounded-lg border bg-card p-4 shadow-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-semibold">{provider.label || provider.id}</div>
+                  <div className="truncate text-xs text-muted-foreground">{provider.defaultModel ? `${provider.id}:${provider.defaultModel}` : '未选择默认模型'}</div>
+                </div>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button variant="outline" size="sm" onClick={() => void probeProvider(index)} disabled={Boolean(busyLabel)}>
+                    <RefreshCw className={cn('h-4 w-4', busyLabel === '拉取中' && 'animate-spin')} />
+                    拉取模型列表
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => void pingProvider(index)} disabled={Boolean(busyLabel)}>
+                    <Wifi className={cn('h-4 w-4', busyLabel === 'Ping' && 'animate-pulse')} />
+                    Ping
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => openChatTest(index)} disabled={Boolean(busyLabel) || candidates.length === 0}>
+                    <MessageSquare className="h-4 w-4" />
+                    模拟对话
+                  </Button>
+                  <Button variant="ghost" size="icon" className="size-8" onClick={() => removeProvider(index)} aria-label="删除供应商">
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+              <div className="grid gap-4 md:grid-cols-3">
+                <Field label="供应商 ID">
+                  <Input value={provider.id} onChange={(event) => updateProvider(index, { id: event.target.value })} />
+                </Field>
+                <Field label="显示名称">
+                  <Input value={provider.label} onChange={(event) => updateProvider(index, { label: event.target.value })} />
+                </Field>
+                <Field label="适配器">
+                  <Select value={provider.provider} onValueChange={(value) => updateProvider(index, { provider: value as LlmProviderSettings['provider'] })}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {LLM_PROVIDER_OPTIONS.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Base URL">
+                  <Input value={provider.baseUrl} onChange={(event) => updateProvider(index, { baseUrl: event.target.value })} />
+                </Field>
+                <Field label="API Key">
+                  <Input type="password" value={provider.apiKey} onChange={(event) => updateProvider(index, { apiKey: event.target.value })} />
+                </Field>
+                <Field label="AI SDK Flavor">
+                  <Select value={provider.aisdkFlavor} onValueChange={(value) => updateProvider(index, { aisdkFlavor: value as LlmProviderSettings['aisdkFlavor'] })}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {AI_SDK_FLAVOR_OPTIONS.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="默认模型">
+                  <ModelSearchSelect
+                    value={provider.defaultModel ? llmModelRef(provider.id, provider.defaultModel) : ''}
+                    options={providerModelOptions}
+                    onChange={(ref) => updateProvider(index, { defaultModel: ref.slice(ref.indexOf(':') + 1) })}
+                    placeholder={provider.models.length ? '选择默认模型' : '先启用模型'}
+                  />
+                </Field>
+                <Field label="输出 token 上限">
+                  <Input type="number" min={1} value={provider.maxTokens} onChange={(event) => updateProvider(index, { maxTokens: Number(event.target.value) })} />
+                </Field>
+                <Field label="超时毫秒">
+                  <Input type="number" min={1000} value={provider.timeoutMs} onChange={(event) => updateProvider(index, { timeoutMs: Number(event.target.value) })} />
+                </Field>
+                <Field label="重试次数">
+                  <Input type="number" min={0} value={provider.retries} onChange={(event) => updateProvider(index, { retries: Number(event.target.value) })} />
+                </Field>
+                <Field label="Reasoning Tag">
+                  <Input value={provider.reasoningTag} onChange={(event) => updateProvider(index, { reasoningTag: event.target.value })} />
+                </Field>
+                <div className="grid gap-2 text-sm font-medium">
+                  <span>流式输出</span>
+                  <div className="inline-flex h-10 w-fit items-center gap-2 rounded-md border border-input bg-background px-3 text-xs font-medium shadow-sm">
+                    <span className={cn(provider.stream ? 'text-foreground' : 'text-muted-foreground')}>开启</span>
+                    <Switch checked={provider.stream} onCheckedChange={(stream) => updateProvider(index, { stream })} />
+                  </div>
+                </div>
+                <div className="grid gap-2 md:col-span-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="text-sm font-medium">模型启用</div>
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      <div className="text-xs text-muted-foreground">已启用 {provider.models.length} / 候选 {candidates.length}</div>
+                      {groupedModels.length > 0 && (
+                        <>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 px-2"
+                            onClick={() => setModelGroupsOpen(provider, index, groupedModels.map((group) => group.prefix), true)}
+                          >
+                            展开全部
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 px-2"
+                            onClick={() => setModelGroupsOpen(provider, index, groupedModels.map((group) => group.prefix), false)}
+                          >
+                            收起全部
+                          </Button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <ScrollArea className="min-w-0 rounded-md border" viewportClassName="max-h-72 !h-auto">
+                    <div className="grid divide-y">
+                      {groupedModels.length === 0 && <div className="p-3 text-sm text-muted-foreground">暂无模型候选，可以先点击拉取模型列表，或添加自定义模型</div>}
+                      {groupedModels.map((group) => {
+                        const allChecked = group.models.every((model) => enabledModelSet.has(model));
+                        const someChecked = group.models.some((model) => enabledModelSet.has(model));
+                        const groupOpen = isModelGroupOpen(provider, index, group.prefix);
+                        return (
+                          <Collapsible
+                            key={group.prefix}
+                            open={groupOpen}
+                            onOpenChange={(open) => setModelGroupOpen((current) => ({ ...current, [modelGroupKey(provider, index, group.prefix)]: open }))}
+                            className="grid gap-2 p-3"
+                          >
+                            <div className="flex min-w-0 items-center justify-between gap-3">
+                              <label className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+                                <Checkbox checked={allChecked} onCheckedChange={(checked) => setPrefixEnabled(index, group.models, checked === true)} />
+                                <span className="truncate">{group.prefix}</span>
+                                <Badge variant="outline">{someChecked && !allChecked ? `${provider.models.filter((model) => group.models.includes(model)).length}/${group.models.length}` : group.models.length}</Badge>
+                              </label>
+                              <CollapsibleTrigger asChild>
+                                <Button type="button" variant="ghost" size="icon-sm" className="shrink-0" aria-label={`${groupOpen ? '收起' : '展开'} ${group.prefix} 模型`}>
+                                  <ChevronRight className={cn('h-4 w-4 transition-transform', groupOpen && 'rotate-90')} />
+                                </Button>
+                              </CollapsibleTrigger>
+                            </div>
+                            <CollapsibleContent>
+                              <div className="grid gap-1 md:grid-cols-2">
+                                {group.models.map((model) => (
+                                  <label key={model} className="flex min-w-0 items-center gap-2 rounded-md px-2 py-1 text-sm hover:bg-accent/60">
+                                    <Checkbox checked={enabledModelSet.has(model)} onCheckedChange={(checked) => setModelEnabled(index, model, checked === true)} />
+                                    <span className="min-w-0 truncate">{model}</span>
+                                  </label>
+                                ))}
+                              </div>
+                            </CollapsibleContent>
+                          </Collapsible>
+                        );
+                      })}
+                    </div>
+                  </ScrollArea>
+                  <Field label="添加自定义模型">
+                    <div className="flex min-w-0 gap-2">
+                      <Input
+                        value={customModelDrafts[customKey] ?? ''}
+                        placeholder="例如 vendor-model-name"
+                        onChange={(event) => setCustomModelDrafts((current) => ({ ...current, [customKey]: event.target.value }))}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault();
+                            addCustomModel(index);
+                          }
+                        }}
+                      />
+                      <Button type="button" variant="outline" onClick={() => addCustomModel(index)}>
+                        <Plus className="h-4 w-4" />
+                        添加
+                      </Button>
+                    </div>
+                  </Field>
+                  <div className="text-xs text-muted-foreground">
+                    自定义模型只会进入候选列表，勾选后才启用。
+                  </div>
+                </div>
+              </div>
+            </section>
+          );
+        })}
+      </div>
+      <Dialog open={Boolean(chatDialog)} onOpenChange={(open) => !open && setChatDialog(null)}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>模拟对话</DialogTitle>
+            <DialogDescription>选择一个候选模型并输入测试内容，后端会发起一次真实模型调用。</DialogDescription>
+          </DialogHeader>
+          {chatDialog && chatProvider && (
+            <div className="grid gap-4">
+              <Field label="测试模型">
+                <Select value={chatDialog.model} onValueChange={(model) => setChatDialog({ ...chatDialog, model })} disabled={chatTesting}>
+                  <SelectTrigger><SelectValue placeholder="选择模型" /></SelectTrigger>
+                  <SelectContent>
+                    {chatCandidates.map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label="输入内容">
+                <Textarea
+                  rows={6}
+                  value={chatDialog.input}
+                  disabled={chatTesting}
+                  onChange={(event) => setChatDialog({ ...chatDialog, input: event.target.value })}
+                />
+              </Field>
+              {chatDialog.result && (
+                <div
+                  className={cn(
+                    'grid gap-2 rounded-md border bg-muted/30 p-3 text-sm',
+                    chatDialog.result.ok ? 'border-emerald-500/40' : 'border-destructive/50',
+                  )}
+                >
+                  <div className={cn('font-medium', chatDialog.result.ok ? 'text-emerald-700 dark:text-emerald-300' : 'text-destructive')}>
+                    模拟对话{chatDialog.result.ok ? '成功' : '失败'} · {chatDialog.result.model} · {chatDialog.result.latencyMs}ms
+                  </div>
+                  <div className="whitespace-pre-wrap break-words text-muted-foreground">{chatDialog.result.output}</div>
+                </div>
+              )}
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setChatDialog(null)} disabled={chatTesting}>取消</Button>
+            <Button onClick={() => void chatTestProvider()} disabled={chatTesting || !chatDialog?.model || !chatDialog?.input.trim()}>
+              {chatTesting ? <Spinner className="h-4 w-4" /> : <MessageSquare className="h-4 w-4" />}
+              {chatTesting ? '发送中' : '发送测试'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </SettingsPanelShell>
+  );
+}
+
 function DatasourceSettingsPanel({ page }: { page: DatasourceSettingsPage }) {
   const [datasources, setDatasources] = useState<Datasource[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -1628,6 +2310,11 @@ export function SettingsView({ embedded = false, onWorkspaceChanged }: { embedde
                   用量统计
                 </SectionButton>
               </NavGroup>
+              <NavGroup label="模型">
+                <SectionButton active={panel === 'llm-models'} icon={<Bot className="h-4 w-4" />} onClick={() => setPanel('llm-models')}>
+                  模型
+                </SectionButton>
+              </NavGroup>
               <NavGroup label="工具">
                 <SectionButton active={panel === 'tools-access'} icon={<Shield className="h-4 w-4" />} onClick={() => setPanel('tools-access')}>
                   工具准入
@@ -1657,6 +2344,7 @@ export function SettingsView({ embedded = false, onWorkspaceChanged }: { embedde
             {panel === 'appearance' && <AppearanceSettingsPanel />}
             {panel === 'status-card' && <StatusCardSettingsPanel />}
             {panel === 'usage-stats' && <UsageStatsSettingsPanel />}
+            {panel === 'llm-models' && <LlmSettingsPanel />}
             {panel === 'tools-access' && <ToolsSettingsPanel onWorkspaceChanged={onWorkspaceChanged} section="access" />}
             {panel === 'tools-sandbox' && <ToolsSettingsPanel onWorkspaceChanged={onWorkspaceChanged} section="sandbox-shell" />}
             {datasourcePanel && <DatasourceSettingsPanel page={panel} />}
