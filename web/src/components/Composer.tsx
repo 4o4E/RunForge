@@ -230,7 +230,7 @@ export function Composer({
                 <div className="mt-1 whitespace-pre-wrap text-muted-foreground">{waitingQuestion}</div>
               </div>
             )}
-            <PromptInput className={cn(!multilineDraft && 'composer-single-line')} onSubmit={handleSubmit}>
+            <PromptInput className={cn('composer-input', !multilineDraft && 'composer-single-line')} onSubmit={handleSubmit}>
               {multilineDraft ? (
                 <>
                   <PromptInputBody>
@@ -291,7 +291,7 @@ export function Composer({
                         size="icon-sm"
                         disabled={disabled}
                         title="添加附件"
-                        className="ml-1 size-8 shrink-0 text-muted-foreground hover:text-foreground"
+                        className="size-8 shrink-0 text-muted-foreground hover:text-foreground"
                       >
                         <Paperclip className="size-4" />
                       </Button>
@@ -315,7 +315,7 @@ export function Composer({
                     wrap="off"
                     className="h-8 min-h-8 max-h-8 min-w-0 whitespace-pre overflow-x-auto overflow-y-hidden px-2 py-1.5 leading-5"
                   />
-                  <div className="ml-auto mr-1 flex shrink-0 items-center gap-1">
+                  <div className="ml-auto flex shrink-0 items-center gap-1">
                     <ContextUsageMeter usage={usage} />
                     <PromptInputSubmit
                       size="icon-sm"
