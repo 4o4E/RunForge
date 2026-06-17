@@ -478,7 +478,6 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     const recentToolSignatures: string[] = [];
     const recentFailures: string[] = [];
     let noActionTurns = 0;
-    let deferredFinalText = '';
 
     const ensureDatabaseToolEnv = async (activation: SkillActivation): Promise<string> => {
       if (toolEnv.DB_WORKLOAD_TOKEN) return '数据库访问运行环境已在 run 初始化时注入；database-access skill 只提供脚本和操作规范。';
@@ -865,7 +864,6 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         }
 
         noActionTurns += 1;
-        if (finalText) deferredFinalText = finalText;
         if (noActionTurns >= 3) {
           const reason = finalText
             ? `连续 ${noActionTurns} 个 step 输出了最终文本，但计划没有进入可汇报状态。`
@@ -883,7 +881,6 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         continue;
       }
       noActionTurns = 0;
-      if (toolCalls.some((call) => call.name !== 'update_plan')) deferredFinalText = '';
 
       const toolTraces: ToolTrace[] = [];
       const pendingSkillSystemMessages: LlmMessage[] = [];
@@ -1099,25 +1096,6 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       // tool_result 连续出现，所以 skill 的 system 注入必须等本轮工具结果全部回填后再追加。
       for (const msg of pendingSkillSystemMessages) {
         ctx.add(msg);
-      }
-
-      const sameTurnFinalText = content?.trim() ?? '';
-      const deferredToolFinalText =
-        !sameTurnFinalText && goal.phase === 'completed' && toolCalls.every((call) => call.name === 'update_plan')
-          ? deferredFinalText
-          : '';
-      const finalTextFromToolTurn = sameTurnFinalText || deferredToolFinalText;
-      if (finalTextFromToolTurn && toolCalls.every((call) => call.name === 'update_plan') && canReportGoal(goal)) {
-        goal = finishGoal(goal);
-        await store.setGoalState(runId, goal);
-        ctx.setGoal(renderGoal(goal));
-        if (goal.plan.length) await emit(step.id, { type: 'plan_update', step: stepIdx, goal });
-        await persistCompaction(step.id, ctx.compactForHistory());
-        streamStats.mark(stepIdx, 'done', undefined, true);
-        await livePersistQueue;
-        await emit(step.id, { type: 'final', step: stepIdx, output: finalTextFromToolTurn });
-        await store.setRunStatus(runId, 'done', { output: finalTextFromToolTurn });
-        return;
       }
 
       const guardHit = detectLoopGuard(recentToolSignatures, recentFailures);

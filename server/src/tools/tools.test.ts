@@ -7,7 +7,6 @@ import { shellTool } from './shell.js';
 import { fileReadTool } from './fileRead.js';
 import { fileWriteTool } from './fileWrite.js';
 import { fileEditTool } from './fileEdit.js';
-import { htmlArtifactTool } from './htmlArtifact.js';
 import { globTool } from './glob.js';
 import { grepTool } from './grep.js';
 import { truncateFetchText } from './webFetch.js';
@@ -39,7 +38,7 @@ test('registry exposes neutral tool schemas and dispatches by name', async () =>
   const schemas = toolSchemas();
   assert.ok(schemas.find((s) => s.name === 'shell'));
   assert.equal(schemas.some((s) => s.name === 'finish_conversation'), false);
-  assert.ok(schemas.find((s) => s.name === 'write_html_artifact'));
+  assert.equal(schemas.some((s) => s.name.includes('artifact')), false);
   assert.ok(schemas.find((s) => s.name === 'skill_activate'));
   assert.ok(schemas.find((s) => s.name === 'workflow_list'));
   assert.ok(schemas.find((s) => s.name === 'workflow_read'));
@@ -200,25 +199,6 @@ test('file_write creates file and parent dirs', async () => {
   const target = join(dir, 'nested', 'deep', 'c.txt');
   await fileWriteTool.run({ path: target, content: 'hi there' });
   assert.equal(await readFile(target, 'utf8'), 'hi there');
-});
-
-test('write_html_artifact creates a confined HTML file', async () => {
-  const res = text(await htmlArtifactTool.run(
-    { path: 'artifacts/demo.html', html: '<main>hello</main>' },
-    { settings: normalizeToolSettings({ workspaceRoot: dir }) },
-  ));
-  assert.match(res, /HTML artifact 已写入：artifacts\/demo\.html/);
-  const content = await readFile(join(dir, 'artifacts', 'demo.html'), 'utf8');
-  assert.match(content, /<!doctype html>/i);
-  assert.match(content, /<main>hello<\/main>/);
-});
-
-test('write_html_artifact rejects paths outside workspace', async () => {
-  const res = text(await htmlArtifactTool.run(
-    { path: '../escape.html', html: 'bad' },
-    { settings: normalizeToolSettings({ workspaceRoot: dir }) },
-  ));
-  assert.match(res, /超出 workspace/);
 });
 
 test('file_edit replaces a unique string', async () => {

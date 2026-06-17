@@ -548,10 +548,11 @@ test('executeRun: streams tool input stats without double counting final tool ar
   assert.equal(maxToolInputChars, Array.from(args).length);
 });
 
-test('executeRun: finalizes when the same turn writes the full answer and closes the plan', async () => {
+test('executeRun: update_plan turn does not finalize until a no-tool final answer', async () => {
   const store = new MemoryStore();
   const thread = await store.createThread();
   const run = await store.createRun(thread.id, 'write a final report and close the plan');
+  const sameTurnText = '计划已收口，下一轮输出最终报告。';
   const finalText = '完整分析报告\n\n结论：所有步骤已经完成。';
   const published: AgentEvent[] = [];
   let turns = 0;
@@ -562,8 +563,9 @@ test('executeRun: finalizes when the same turn writes the full answer and closes
       name: 'answer-then-plan',
       async complete() {
         turns += 1;
+        if (turns > 1) return { content: finalText, toolCalls: [] };
         return {
-          content: finalText,
+          content: sameTurnText,
           toolCalls: [
             {
               id: 'plan_done',
@@ -584,16 +586,18 @@ test('executeRun: finalizes when the same turn writes the full answer and closes
   });
 
   const finished = await store.getRun(run.id);
-  assert.equal(turns, 1);
+  assert.equal(turns, 2);
   assert.equal(finished?.status, 'done');
   assert.equal(finished?.output, finalText);
   assert.equal(finished?.goal_state?.phase, 'completed');
   assert.equal(published.some((event) => event.type === 'final' && event.output === finalText), true);
+  assert.equal(published.some((event) => event.type === 'final' && event.output === sameTurnText), false);
 
   const msgs = await store.loadThreadMessages(thread.id);
-  assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'tool']);
-  assert.equal(msgs[1]?.content, finalText);
+  assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'tool', 'assistant']);
+  assert.equal(msgs[1]?.content, sameTurnText);
   assert.equal(msgs[2]?.toolCallId, 'plan_done');
+  assert.equal(msgs[3]?.content, finalText);
 });
 
 test('executeRun: auto-completes the final report plan item without a second summary turn', async () => {
@@ -645,7 +649,7 @@ test('executeRun: auto-completes the final report plan item without a second sum
   assert.equal(published.some((event) => event.type === 'final' && event.output === finalText), true);
 });
 
-test('executeRun: a completion-only update_plan finalizes the previously blocked final answer', async () => {
+test('executeRun: completion-only update_plan requires a fresh no-tool final answer', async () => {
   const store = new MemoryStore();
   const thread = await store.createThread();
   const run = await store.createRun(thread.id, 'produce then close plan');
@@ -696,7 +700,7 @@ test('executeRun: a completion-only update_plan finalizes the previously blocked
             ],
           };
         }
-        return { content: '任务完成，所有计划步骤均已执行并汇报完毕。', toolCalls: [] };
+        return { content: finalText, toolCalls: [] };
       },
     },
     publish: (_id, e) => published.push(e),
@@ -705,11 +709,11 @@ test('executeRun: a completion-only update_plan finalizes the previously blocked
   });
 
   const finished = await store.getRun(run.id);
-  assert.equal(turns, 3);
+  assert.equal(turns, 4);
   assert.equal(finished?.status, 'done');
   assert.equal(finished?.output, finalText);
   assert.equal(published.some((event) => event.type === 'final' && event.output === finalText), true);
-  assert.equal(published.some((event) => event.type === 'final' && event.output.startsWith('任务完成')), false);
+  assert.equal(published.filter((event) => event.type === 'final').length, 1);
 });
 
 test('executeRun: keeps multi-turn memory within a thread', async () => {
@@ -753,13 +757,13 @@ test('executeRun: compacts bulky old history when finishing a run', async () => 
     const store = new MemoryStore();
     const thread = await store.createThread();
     const oldRun = await store.createRun(thread.id, 'old');
-    const bigArgs = JSON.stringify({ path: 'artifacts/old.html', html: 'r'.repeat(3000) });
+    const bigArgs = JSON.stringify({ path: 'generated/old.txt', content: 'r'.repeat(3000) });
     await store.addMessage(thread.id, oldRun.id, null, {
       role: 'assistant',
       content: null,
-      toolCalls: [{ id: 'html-old', name: 'write_html_artifact', arguments: bigArgs }],
+      toolCalls: [{ id: 'file-old', name: 'file_write', arguments: bigArgs }],
     });
-    await store.addMessage(thread.id, oldRun.id, null, { role: 'tool', content: 'x'.repeat(4000), toolCallId: 'html-old' });
+    await store.addMessage(thread.id, oldRun.id, null, { role: 'tool', content: 'x'.repeat(4000), toolCallId: 'file-old' });
 
     const run = await store.createRun(thread.id, 'new');
     const published: AgentEvent[] = [];
@@ -772,13 +776,13 @@ test('executeRun: compacts bulky old history when finishing a run', async () => 
     });
 
     const msgs = await store.loadThreadMessages(thread.id);
-    const oldAssistant = msgs.find((m) => m.toolCalls?.[0]?.id === 'html-old');
-    const oldTool = msgs.find((m) => m.toolCallId === 'html-old');
+    const oldAssistant = msgs.find((m) => m.toolCalls?.[0]?.id === 'file-old');
+    const oldTool = msgs.find((m) => m.toolCallId === 'file-old');
     assert.equal(oldAssistant?.collapsed, 'masked');
     const placeholder = JSON.parse(oldAssistant?.toolCalls?.[0]?.arguments ?? '{}');
     assert.equal(placeholder.context_elided, true);
     assert.equal(placeholder.not_executable, true);
-    assert.equal(placeholder.tool_name, 'write_html_artifact');
+    assert.equal(placeholder.tool_name, 'file_write');
     assert.equal(oldTool?.content, maskPlaceholder('x'.repeat(4000)));
     assert.ok(published.some((e) => e.type === 'compaction' && e.reason === 'post-run-history'));
   } finally {

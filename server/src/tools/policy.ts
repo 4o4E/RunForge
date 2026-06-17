@@ -54,7 +54,6 @@ const META: Record<string, ToolMeta> = {
   web_fetch: { kind: 'net' },
   web_search: { kind: 'net' },
   ask_user: { kind: 'safe' },
-  write_html_artifact: { kind: 'safe' },
   update_plan: { kind: 'safe' },
   skill_activate: { kind: 'safe' },
   subagent_run: { kind: 'safe' },

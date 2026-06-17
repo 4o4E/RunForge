@@ -16,6 +16,13 @@
 - 用户明确要求独立报告、dashboard、数据大屏或可分享页面。
 - 需要图表库能力，否则会让 Mermaid 图变得难读或误导。
 
+HTML artifact 生成规则：
+
+- 通过 shell 或文件写入工具生成完整 `.html` / `.htm` 文件。
+- 文件放在 workspace 内，优先使用 `artifacts/<描述性名称>.html`。
+- 不要把完整 HTML 文档作为工具调用参数传递，避免大正文绕过工具输出截断监控。
+- 最终回答必须使用 Markdown 链接语法，例如 `[artifacts/report.html](artifacts/report.html)`。
+
 不用图的场景：
 
 - 内容只有 3-5 个要点，列表更清楚。

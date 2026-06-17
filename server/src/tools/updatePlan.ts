@@ -9,7 +9,7 @@ import type { Tool } from './types.js';
 export const updatePlanTool: Tool = {
   name: 'update_plan',
   description:
-    '记录或刷新当前任务的工作计划：包含 run 阶段、步骤及状态、需要记住的关键决策、马上要做的下一步。多步骤任务开始时调用；计划变化时也要调用。decisions 会追加，plan 和 next 会替换旧值。执行失败的步骤必须保留并标记为 failed，不要删除。收口时应先输出完整最终回答，再调用本工具把 phase 设为 reporting 或 completed；工具完成后不要再追加摘要。',
+    '记录或刷新当前任务的工作计划：包含 run 阶段、步骤及状态、需要记住的关键决策、马上要做的下一步。多步骤任务开始时调用；计划变化时也要调用。decisions 会追加，plan 和 next 会替换旧值。执行失败的步骤必须保留并标记为 failed，不要删除。本工具只更新计划，不会结束 run；收口时先调用本工具把 phase 设为 reporting 或 completed，随后下一轮输出无工具调用的完整最终回答。',
   parameters: {
     type: 'object',
     properties: {

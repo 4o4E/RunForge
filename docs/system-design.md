@@ -18,7 +18,7 @@
 
 - 通过 Agent 执行循环完成多步任务：计划、调用工具、观察结果、继续推进。
 - 支持多 LLM provider：`aisdk`、`openai-responses`、`openai-chat`、`anthropic`、`mock`。
-- 内置通用工具：shell、托管 shell、文件读写/编辑、glob、grep、web fetch、web search、ask user、HTML artifact、update plan、skill、workflow、subagent 和数据源访问。
+- 内置通用工具：shell、托管 shell、文件读写/编辑、glob、grep、web fetch、web search、ask user、update plan、skill、workflow、subagent 和数据源访问。
 - LLM 请求支持超时、瞬态错误重试和流式输出。
 - 暴露 REST API 和 WebSocket 事件流。
 - 对话按 `thread -> run -> step` 组织并持久化到 PostgreSQL。
@@ -134,7 +134,7 @@ Web 创建 thread
 - `sandbox.ts`：shell 子进程执行后端，支持宿主执行和 bwrap。
 - `managedShell.ts`：托管 shell 工具，提供 session 复用、前台/后台命令、轮询和终止。
 - `skillActivate.ts`、`workflow.ts`、`subagentRun.ts`、`datasourceList.ts`：skill、workflow、subagent 和数据源访问入口。
-- 具体工具：`shell`、`shell_session_open`、`shell_session_reuse`、`shell_session_list`、`shell_exec`、`shell_poll`、`shell_kill`、`shell_session_close`、`file_read`、`file_write`、`file_edit`、`glob`、`grep`、`web_fetch`、`web_search`、`ask_user`、`write_html_artifact`、`update_plan`、`skill_activate`、`workflow_list`、`workflow_read`、`subagent_run`、`subagent_poll`、`subagent_list`、`datasource_list`。
+- 具体工具：`shell`、`shell_session_open`、`shell_session_reuse`、`shell_session_list`、`shell_exec`、`shell_poll`、`shell_kill`、`shell_session_close`、`file_read`、`file_write`、`file_edit`、`glob`、`grep`、`web_fetch`、`web_search`、`ask_user`、`update_plan`、`skill_activate`、`workflow_list`、`workflow_read`、`subagent_run`、`subagent_poll`、`subagent_list`、`datasource_list`。
 
 `server/src/shell/`
 

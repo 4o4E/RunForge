@@ -12,7 +12,6 @@ import { grepTool } from './grep.js';
 import { webFetchTool } from './webFetch.js';
 import { webSearchTool } from './webSearch.js';
 import { askUserTool } from './askUser.js';
-import { htmlArtifactTool } from './htmlArtifact.js';
 import { updatePlanTool } from './updatePlan.js';
 import { skillActivateTool } from './skillActivate.js';
 import { subagentListTool, subagentPollTool, subagentRunTool } from './subagentRun.js';
@@ -30,7 +29,6 @@ const TOOLS: Tool[] = [
   webFetchTool,
   webSearchTool,
   askUserTool,
-  htmlArtifactTool,
   updatePlanTool,
   skillActivateTool,
   workflowListTool,

@@ -32,7 +32,7 @@
 
 - 默认 provider 是 `aisdk`，复用 Vercel AI SDK 处理协议、流式、重试和工具拼装。
 - 旧的 `openai-responses`、`openai-chat`、`anthropic` 保留为兼容和回滚路径。
-- 工具通过统一 registry 执行，内置 shell、托管 shell、文件读写/编辑、glob、grep、web fetch、web search、ask user、HTML artifact、update plan、skill、workflow、subagent 和数据源访问。
+- 工具通过统一 registry 执行，内置 shell、托管 shell、文件读写/编辑、glob、grep、web fetch、web search、ask user、update plan、skill、workflow、subagent 和数据源访问。
 - 工具结果以 tool message 回填，并保留 `toolCallId`，满足主流模型协议对工具调用配对的要求。
 - reasoning（推理信息）只用于前端展示，不回填上下文。
 
@@ -72,7 +72,7 @@
 ### 前端与用户体验
 
 - 前端通过 REST + WebSocket 展示 step、reasoning、tool call、tool result、final、error 等事件。
-- 支持 Markdown/Mermaid/LaTeX 输出；复杂报告可用 `write_html_artifact` 生成 HTML artifact 并在文件面板预览。
+- 支持 Markdown/Mermaid/LaTeX 输出；复杂报告可通过 shell 或文件写入工具生成 HTML artifact 并在文件面板预览。
 - 支持用户在 run 中途回答 `ask_user` 问题。
 - 支持右侧资源栏查看文件、托管 shell 和 subagent；shell 事件使用 thread 级 WebSocket 单独刷新。
 

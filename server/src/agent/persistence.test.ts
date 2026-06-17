@@ -36,10 +36,10 @@ test('compactForHistory masks old bulky payloads even below live threshold', () 
   const { keepRecentMessages } = config.agent;
   config.agent.keepRecentMessages = 2;
   try {
-    const bigArgs = JSON.stringify({ path: 'artifacts/report.html', html: 'z'.repeat(3000) });
+    const bigArgs = JSON.stringify({ path: 'generated/report.txt', content: 'z'.repeat(3000) });
     const prior: ThreadMessage[] = [
-      { id: 20, role: 'assistant', content: null, toolCalls: [{ id: 'html1', name: 'write_html_artifact', arguments: bigArgs }] },
-      { id: 21, role: 'tool', content: 'x'.repeat(4000), toolCallId: 'html1' },
+      { id: 20, role: 'assistant', content: null, toolCalls: [{ id: 'file1', name: 'file_write', arguments: bigArgs }] },
+      { id: 21, role: 'tool', content: 'x'.repeat(4000), toolCallId: 'file1' },
       { id: 22, role: 'assistant', content: null, toolCalls: [{ id: 'p1', name: 'update_plan', arguments: '{}' }] },
     ];
     const ctx = new ContextManager(prior, 'continue');
@@ -103,27 +103,27 @@ test('store returns masked assistant tool-call args on reload', async () => {
   const store = new MemoryStore();
   const thread = await store.createThread();
   const run = await store.createRun(thread.id, 'task');
-  const args = JSON.stringify({ path: 'artifacts/report.html', html: 'u'.repeat(3000) });
+  const args = JSON.stringify({ path: 'generated/report.txt', content: 'u'.repeat(3000) });
 
   const assistantId = await store.addMessage(thread.id, run.id, null, {
     role: 'assistant',
     content: null,
-    toolCalls: [{ id: 'html1', name: 'write_html_artifact', arguments: args }],
+    toolCalls: [{ id: 'file1', name: 'file_write', arguments: args }],
   });
-  await store.addMessage(thread.id, run.id, null, { role: 'tool', content: 'HTML artifact 已写入。', toolCallId: 'html1' });
+  await store.addMessage(thread.id, run.id, null, { role: 'tool', content: '文件已写入。', toolCallId: 'file1' });
   await store.markMessagesCollapsed([assistantId], 'masked');
 
   const reloaded = await store.loadThreadMessages(thread.id);
   const call = reloaded[0].toolCalls?.[0];
   assert.equal(reloaded[0].collapsed, 'masked');
-  assert.equal(call?.id, 'html1');
-  assert.equal(call?.name, 'write_html_artifact');
+  assert.equal(call?.id, 'file1');
+  assert.equal(call?.name, 'file_write');
   assert.ok((call?.arguments.length ?? 0) < args.length);
   const placeholder = JSON.parse(call?.arguments ?? '{}');
   assert.equal(placeholder.context_elided, true);
   assert.equal(placeholder.not_executable, true);
-  assert.equal(placeholder.tool_name, 'write_html_artifact');
-  assert.equal('html' in placeholder, false);
+  assert.equal(placeholder.tool_name, 'file_write');
+  assert.equal('content' in placeholder, false);
 });
 
 test('summarized rows are omitted from the reloaded view', async () => {

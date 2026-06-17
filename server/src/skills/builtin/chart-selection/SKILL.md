@@ -1,7 +1,7 @@
 ---
 name: chart-selection
 description: 为回答或报告选择合适展示方式：默认优先 Markdown/Mermaid，仅在 Mermaid 不支持、用户明确需要交互或独立页面时使用 HTML artifact。Use when choosing between Markdown/Mermaid by default and HTML artifacts only for unsupported chart types or clearly interactive/standalone pages.
-allowed-tools: file_read grep write_html_artifact
+allowed-tools: file_read grep shell file_write
 metadata:
   my-agent.tool-scope: markdown
 ---
@@ -27,6 +27,7 @@ metadata:
 ## Output Rules
 
 - Mermaid 用 Markdown fenced code block。
-- HTML artifact 用 `write_html_artifact`，最终回答说明生成路径。
+- HTML artifact 通过 shell 或文件写入工具生成到 workspace 下，优先放在 `artifacts/<描述性名称>.html`。
+- HTML artifact 完成后，最终回答必须使用 Markdown 链接语法说明，例如 `[artifacts/report.html](artifacts/report.html)`。
 - 图前说明图要表达的结论，不写空泛标题。
 - 图后补充口径限制，例如“只展示主路径，异常路径已省略”。

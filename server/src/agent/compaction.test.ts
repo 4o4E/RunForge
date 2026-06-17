@@ -51,11 +51,11 @@ test('maskOldToolResults leaves small tool outputs alone', () => {
 });
 
 test('maskOldAssistantToolCalls elides old large tool arguments but keeps ids', () => {
-  const hugeArgs = JSON.stringify({ path: 'artifacts/report.html', html: big(3000) });
+  const hugeArgs = JSON.stringify({ path: 'generated/report.txt', content: big(3000) });
   const msgs: LlmMessage[] = [
-    { role: 'user', content: 'write report' },
-    { role: 'assistant', content: null, toolCalls: [{ id: 'html1', name: 'write_html_artifact', arguments: hugeArgs }] },
-    { role: 'tool', content: 'HTML artifact 已写入。', toolCallId: 'html1' },
+    { role: 'user', content: 'write report file' },
+    { role: 'assistant', content: null, toolCalls: [{ id: 'file1', name: 'file_write', arguments: hugeArgs }] },
+    { role: 'tool', content: '文件已写入。', toolCallId: 'file1' },
     { role: 'assistant', content: null, toolCalls: [{ id: 'p1', name: 'update_plan', arguments: '{}' }] },
   ];
 
@@ -64,32 +64,32 @@ test('maskOldAssistantToolCalls elides old large tool arguments but keeps ids', 
   assert.equal(masked, 1);
   const call = messages[1].toolCalls?.[0];
   assert.equal(messages[1].collapsed, 'masked');
-  assert.equal(call?.id, 'html1');
-  assert.equal(call?.name, 'write_html_artifact');
+  assert.equal(call?.id, 'file1');
+  assert.equal(call?.name, 'file_write');
   assert.ok((call?.arguments.length ?? 0) < hugeArgs.length);
   const placeholder = JSON.parse(call?.arguments ?? '{}');
   assert.equal(placeholder.context_elided, true);
   assert.equal(placeholder.not_executable, true);
-  assert.equal(placeholder.tool_name, 'write_html_artifact');
-  assert.equal('html' in placeholder, false);
+  assert.equal(placeholder.tool_name, 'file_write');
+  assert.equal('content' in placeholder, false);
   assert.ok(messages.some((m) => m.role === 'tool' && m.toolCallId === call?.id));
 });
 
 test('maskOldAssistantToolCalls masks forced tools even when recent', () => {
-  const hugeArgs = JSON.stringify({ path: 'artifacts/report.html', html: big(3000) });
+  const hugeArgs = JSON.stringify({ payload: big(3000) });
   const msgs: LlmMessage[] = [
-    { role: 'user', content: 'write report' },
-    { role: 'assistant', content: null, toolCalls: [{ id: 'html1', name: 'write_html_artifact', arguments: hugeArgs }] },
+    { role: 'user', content: 'render report' },
+    { role: 'assistant', content: null, toolCalls: [{ id: 'render1', name: 'render_page', arguments: hugeArgs }] },
   ];
 
-  const { messages, masked } = maskOldAssistantToolCalls(msgs, { keepRecent: 10, forceToolNames: ['write_html_artifact'] });
+  const { messages, masked } = maskOldAssistantToolCalls(msgs, { keepRecent: 10, forceToolNames: ['render_page'] });
 
   assert.equal(masked, 1);
   assert.equal(messages[1].collapsed, 'masked');
   const placeholder = JSON.parse(messages[1].toolCalls?.[0]?.arguments ?? '{}');
   assert.equal(placeholder.context_elided, true);
   assert.equal(placeholder.not_executable, true);
-  assert.equal('html' in placeholder, false);
+  assert.equal('payload' in placeholder, false);
 });
 
 test('maskOldAssistantToolCalls keeps non-forced recent tool args', () => {
@@ -99,7 +99,7 @@ test('maskOldAssistantToolCalls keeps non-forced recent tool args', () => {
     { role: 'assistant', content: null, toolCalls: [{ id: 'sh1', name: 'shell', arguments: hugeArgs }] },
   ];
 
-  const { messages, masked } = maskOldAssistantToolCalls(msgs, { keepRecent: 10, forceToolNames: ['write_html_artifact'] });
+  const { messages, masked } = maskOldAssistantToolCalls(msgs, { keepRecent: 10, forceToolNames: ['render_page'] });
 
   assert.equal(masked, 0);
   assert.equal(messages[1].collapsed, undefined);
