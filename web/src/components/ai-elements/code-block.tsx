@@ -138,6 +138,13 @@ interface GlanceRow {
   tokens: KeyedToken[];
 }
 
+interface GlanceSegment {
+  key: string;
+  token: ThemedToken;
+  left: number;
+  width: number;
+}
+
 interface TokenizedCode {
   tokens: ThemedToken[][];
   fg: string;
@@ -589,6 +596,37 @@ function sampleGlanceRows(rows: GlanceRow[], limit: number): GlanceRow[] {
 
 const GLANCE_ROW_HEIGHT = 3;
 const GLANCE_MAX_ROWS = 1600;
+const GLANCE_MIN_COLUMNS = 80;
+const GLANCE_MAX_COLUMNS = 180;
+
+function glanceLineLength(row: GlanceRow): number {
+  return row.tokens.reduce((length, { token }) => length + token.content.length, 0);
+}
+
+function glanceSegments(row: GlanceRow, columns: number): GlanceSegment[] {
+  const segments: GlanceSegment[] = [];
+  let offset = 0;
+
+  for (const { token, key } of row.tokens) {
+    const content = token.content;
+    const pattern = /\S+/g;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(content))) {
+      const start = offset + match.index;
+      if (start >= columns) continue;
+      const width = Math.min(match[0].length, columns - start);
+      segments.push({
+        key: `${key}-${match.index}`,
+        token,
+        left: start / columns,
+        width: Math.max(1 / columns, width / columns),
+      });
+    }
+    offset += content.length;
+  }
+
+  return segments;
+}
 
 function CodeBlockGlance({
   contentWidth,
@@ -606,14 +644,29 @@ function CodeBlockGlance({
   const trackRef = useRef<HTMLDivElement | null>(null);
   const [trackHeight, setTrackHeight] = useState(0);
   const keyedLines = useMemo(() => addKeysToTokens(tokenized.tokens), [tokenized.tokens]);
-  const visibleLines = useMemo(
-    () => sampleGlanceRows(splitWrappedGlanceRows(keyedLines, wrap, contentWidth), GLANCE_MAX_ROWS),
+  const glanceRows = useMemo(
+    () => splitWrappedGlanceRows(keyedLines, wrap, contentWidth),
     [contentWidth, keyedLines, wrap]
   );
-  const sliderHeight = Math.max(0.08, Math.min(1, viewport.height));
-  const sliderTop = Math.max(0, Math.min(1 - sliderHeight, viewport.top * (1 - sliderHeight)));
+  const visibleLines = useMemo(
+    () => sampleGlanceRows(glanceRows, GLANCE_MAX_ROWS),
+    [glanceRows]
+  );
+  const columns = useMemo(() => {
+    const longestLine = glanceRows.reduce((max, row) => Math.max(max, glanceLineLength(row)), 0);
+    return Math.max(GLANCE_MIN_COLUMNS, Math.min(GLANCE_MAX_COLUMNS, longestLine || GLANCE_MIN_COLUMNS));
+  }, [glanceRows]);
   const mapHeight = visibleLines.length * GLANCE_ROW_HEIGHT + 8;
-  const mapOffset = -Math.max(0, mapHeight - trackHeight) * viewport.top;
+  // 缩略图比容器高时移动预览内容；否则滑块只在真实预览高度内移动。
+  const mapScrollable = Math.max(0, mapHeight - trackHeight);
+  const mapScrollTop = mapScrollable > 0 ? viewport.top * mapScrollable : 0;
+  const sliderTrackHeight = trackHeight <= 0 ? 0 : mapScrollable > 0 ? trackHeight : Math.min(trackHeight, mapHeight);
+  const sliderHeightPx = trackHeight <= 0
+    ? 0
+    : mapScrollable > 0
+      ? Math.max(8, Math.min(trackHeight, viewport.height * mapHeight))
+      : Math.max(8, Math.min(sliderTrackHeight, viewport.height * sliderTrackHeight));
+  const sliderTopPx = sliderTrackHeight <= sliderHeightPx ? 0 : viewport.top * (sliderTrackHeight - sliderHeightPx);
 
   useLayoutEffect(() => {
     const node = trackRef.current;
@@ -631,10 +684,16 @@ function CodeBlockGlance({
     const scrollable = Math.max(0, node.scrollHeight - node.clientHeight);
     if (scrollable <= 0) return;
     const rect = target.getBoundingClientRect();
-    const relative = Math.max(0, Math.min(1, (clientY - rect.top) / Math.max(1, rect.height)));
-    const targetTop = Math.max(0, Math.min(1, relative - sliderHeight / 2));
-    node.scrollTop = targetTop / Math.max(0.001, 1 - sliderHeight) * scrollable;
-  }, [scrollRef, sliderHeight]);
+    const y = Math.max(0, Math.min(sliderTrackHeight, clientY - rect.top));
+    if (mapScrollable > 0) {
+      const mapY = mapScrollTop + y;
+      const targetTop = Math.max(0, Math.min(1, (mapY - sliderHeightPx / 2) / Math.max(1, mapHeight - sliderHeightPx)));
+      node.scrollTop = targetTop * scrollable;
+      return;
+    }
+    const targetTop = Math.max(0, Math.min(1, (y - sliderHeightPx / 2) / Math.max(1, sliderTrackHeight - sliderHeightPx)));
+    node.scrollTop = targetTop * scrollable;
+  }, [mapHeight, mapScrollTop, mapScrollable, scrollRef, sliderHeightPx, sliderTrackHeight]);
 
   const startDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -650,6 +709,30 @@ function CodeBlockGlance({
     window.addEventListener("pointerup", onUp, { once: true });
   }, [scrollToPointer]);
 
+  const startThumbDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const node = scrollRef.current;
+    const track = trackRef.current;
+    if (!node || !track) return;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    const scrollable = Math.max(0, node.scrollHeight - node.clientHeight);
+    const startY = event.clientY;
+    const startScrollTop = node.scrollTop;
+    const dragRange = Math.max(1, sliderTrackHeight - sliderHeightPx);
+
+    const onMove = (moveEvent: PointerEvent) => {
+      const delta = moveEvent.clientY - startY;
+      node.scrollTop = Math.max(0, Math.min(scrollable, startScrollTop + delta / dragRange * scrollable));
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+  }, [scrollRef, sliderHeightPx, sliderTrackHeight]);
+
   return (
     <div className="hidden max-h-full w-14 shrink-0 overflow-hidden border-l bg-background/95 px-1.5 py-2 sm:block">
       <div
@@ -659,40 +742,36 @@ function CodeBlockGlance({
         role="scrollbar"
         aria-label="代码缩略图滚动条"
         aria-orientation="vertical"
+        aria-valuemax={100}
+        aria-valuemin={0}
+        aria-valuenow={Math.round(viewport.top * 100)}
       >
-        <div
-          className="absolute left-0 right-0 space-y-px"
-          style={{ transform: `translateY(${mapOffset}px)` }}
-        >
+        <div className="absolute inset-x-0 top-1 space-y-px" style={{ transform: `translateY(${-mapScrollTop}px)` }}>
           {visibleLines.map((line) => {
-            const visibleTokens = line.tokens
-              .filter(({ token }) => token.content.trim().length > 0)
-              .slice(0, 6);
+            const segments = glanceSegments(line, columns);
             return (
-              <div key={line.key} className="flex h-[2px] gap-px px-1">
-                {visibleTokens.length === 0 ? (
-                  <span className="h-full w-1/3 rounded-full bg-muted-foreground/20" />
-                ) : (
-                  visibleTokens.map(({ token, key }) => (
-                    <span
-                      key={key}
-                      className="dark:!bg-[var(--shiki-dark)] h-full min-w-1 rounded-full"
-                      style={{
-                        backgroundColor: token.color ?? "currentColor",
-                        flexGrow: Math.max(1, Math.min(10, token.content.length)),
-                        opacity: token.color ? 0.9 : 0.25,
-                        ...token.htmlStyle,
-                      } as CSSProperties}
-                    />
-                  ))
-                )}
+              <div key={line.key} className="relative mx-1 h-[2px]">
+                {segments.map(({ token, key, left, width }) => (
+                  <span
+                    key={key}
+                    className="dark:!bg-[var(--shiki-dark)] absolute h-full rounded-full"
+                    style={{
+                      backgroundColor: token.color ?? "currentColor",
+                      left: `${left * 100}%`,
+                      opacity: token.color ? 0.9 : 0.25,
+                      width: `max(1px, ${width * 100}%)`,
+                      ...token.htmlStyle,
+                    } as CSSProperties}
+                  />
+                ))}
               </div>
             );
           })}
         </div>
         <div
-          className="pointer-events-none absolute left-0 right-0 rounded-sm border border-primary/60 bg-primary/10 shadow-[inset_0_0_0_1px_hsl(var(--background)/0.55)]"
-          style={{ top: `${sliderTop * 100}%`, height: `${sliderHeight * 100}%` }}
+          className="absolute left-0 right-0 cursor-grab rounded-sm border border-primary/70 bg-primary/15 shadow-[inset_0_0_0_1px_hsl(var(--background)/0.65)] active:cursor-grabbing"
+          onPointerDown={startThumbDrag}
+          style={{ top: sliderTopPx, height: sliderHeightPx }}
         />
       </div>
     </div>
