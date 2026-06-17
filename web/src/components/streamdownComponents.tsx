@@ -1,5 +1,5 @@
 import rawMermaid, { type MermaidConfig } from 'mermaid';
-import { CopyIcon, DownloadIcon, Maximize2Icon, RotateCcwIcon, XIcon, ZoomInIcon, ZoomOutIcon } from 'lucide-react';
+import { CopyIcon, DownloadIcon, Maximize2Icon, RotateCcwIcon, ZoomInIcon, ZoomOutIcon } from 'lucide-react';
 import {
   type ComponentProps,
   type PointerEvent as ReactPointerEvent,
@@ -15,7 +15,6 @@ import {
   useRef,
   useState,
 } from 'react';
-import { createPortal } from 'react-dom';
 import {
   CodeBlock as StreamdownCodeBlock,
   CodeBlockCopyButton,
@@ -25,6 +24,7 @@ import {
   type StreamdownProps,
   useIsCodeFenceIncomplete,
 } from 'streamdown';
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
 
 interface MarkdownRenderOptions {
@@ -369,55 +369,17 @@ function MermaidFullscreen({
   svg: string;
   width: number;
 }) {
-  useEffect(() => {
-    if (!open) return;
-
-    const previousOverflow = document.body.style.overflow;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onOpenChange(false);
-    };
-
-    document.body.style.overflow = 'hidden';
-    document.addEventListener('keydown', onKeyDown);
-
-    return () => {
-      document.removeEventListener('keydown', onKeyDown);
-      document.body.style.overflow = previousOverflow;
-    };
-  }, [onOpenChange, open]);
-
-  if (!open) return null;
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-background/95 backdrop-blur-sm"
-      onClick={() => onOpenChange(false)}
-      onKeyDown={(event) => {
-        if (event.key === 'Escape') onOpenChange(false);
-      }}
-      role="button"
-      tabIndex={0}
-    >
-      <button
-        type="button"
-        className="absolute right-4 top-4 z-10 rounded-md p-2 text-muted-foreground transition-all hover:bg-muted hover:text-foreground"
-        onClick={() => onOpenChange(false)}
-        title="退出 Mermaid 全屏"
-      >
-        <XIcon className="size-5" />
-      </button>
-      <div
-        className="flex size-full items-center justify-center p-4"
-        onClick={(event) => event.stopPropagation()}
-        onKeyDown={(event) => event.stopPropagation()}
-        role="presentation"
-      >
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="flex h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-none flex-col gap-0 overflow-hidden bg-background/95 p-4 sm:rounded-lg">
+        <DialogTitle className="sr-only">Mermaid 全屏预览</DialogTitle>
+        <div className="flex min-h-0 flex-1 items-center justify-center">
         <div data-streamdown="mermaid" className="mermaid-fullscreen size-full">
           <MermaidViewport height={height} svg={svg} fullscreen width={width} />
         </div>
       </div>
-    </div>,
-    document.body,
+      </DialogContent>
+    </Dialog>
   );
 }
 

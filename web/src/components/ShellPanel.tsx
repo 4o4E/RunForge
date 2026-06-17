@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Circle, Paperclip, Pencil, Play, Plug, Power, RefreshCw, Square, Terminal, X } from 'lucide-react';
+import { Circle, Paperclip, Pencil, Plug, Power, RefreshCw, Square, Terminal, X } from 'lucide-react';
 import {
   closeShellSession,
   createShellSession,
@@ -14,10 +14,11 @@ import {
   type ShellCommandLog,
   type ShellSession,
 } from '@/api';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -45,10 +46,47 @@ function sessionTone(status: ShellSession['status']): string {
   return 'text-foreground';
 }
 
-function commandTone(status: ShellCommand['status']): string {
-  if (status === 'failed' || status === 'timed_out') return 'text-destructive';
-  if (status === 'running' || status === 'queued') return 'text-foreground';
-  return 'text-muted-foreground';
+function sessionStatusLabel(status: ShellSession['status']): string {
+  if (status === 'opening') return '启动中';
+  if (status === 'idle') return '空闲';
+  if (status === 'busy') return '运行中';
+  if (status === 'closing') return '关闭中';
+  if (status === 'closed') return '已关闭';
+  if (status === 'orphaned') return '失联';
+  return status;
+}
+
+function commandStatusLabel(status: ShellCommand['status']): string {
+  if (status === 'queued') return '排队中';
+  if (status === 'running') return '运行中';
+  if (status === 'succeeded') return '成功';
+  if (status === 'failed') return '失败';
+  if (status === 'killed') return '已终止';
+  if (status === 'timed_out') return '超时';
+  if (status === 'orphaned') return '失联';
+  return status;
+}
+
+function actorLabel(actor: ShellCommand['actor']): string {
+  if (actor === 'agent') return 'Agent';
+  if (actor === 'user') return '用户';
+  if (actor === 'system') return '系统';
+  return actor;
+}
+
+function commandBadgeVariant(status: ShellCommand['status']): 'default' | 'secondary' | 'destructive' | 'outline' {
+  if (status === 'failed' || status === 'timed_out' || status === 'orphaned') return 'destructive';
+  if (status === 'running' || status === 'queued') return 'default';
+  if (status === 'succeeded') return 'secondary';
+  return 'outline';
+}
+
+function formatBytes(value: string | number): string {
+  const bytes = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(bytes) || bytes <= 0) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function formatTime(value: string | null): string {
@@ -350,7 +388,6 @@ export function ShellPanel({ open, width, threadId, embedded = false, previewSes
 
   if (!open) return null;
 
-  const canRun = !!selectedSession && !runningCommand && commandText.trim().length > 0;
   const canDeleteSelected = !!selectedSession && selectedSession.name !== 'Default' && selectedSession.owner === 'user';
   const canRenameSelected = canDeleteSelected;
 
@@ -384,18 +421,21 @@ export function ShellPanel({ open, width, threadId, embedded = false, previewSes
             {!previewSessionId && (
               <div className="scrollbar-thin flex min-w-0 flex-1 gap-1 overflow-x-auto">
                 {liveSessions.map((session) => (
-                  <button
+                  <Button
                     key={session.id}
+                    type="button"
+                    variant={session.id === selectedSession?.id ? 'secondary' : 'ghost'}
+                    size="sm"
                     className={cn(
-                      'flex h-8 min-w-28 max-w-48 items-center gap-1.5 rounded-md border px-2 text-left text-xs hover:bg-accent',
-                      session.id === selectedSession?.id ? 'border-foreground bg-background text-foreground' : 'border-transparent text-muted-foreground',
+                      'h-8 min-w-28 max-w-48 justify-start px-2 text-xs',
+                      session.id !== selectedSession?.id && 'text-muted-foreground',
                     )}
                     onClick={() => setSelectedSessionId(session.id)}
                     title={`${session.name} (${session.id})`}
                   >
                     <Circle className={cn('size-2.5 shrink-0 fill-current', sessionTone(session.status))} />
                     <span className="min-w-0 flex-1 truncate">{session.name}</span>
-                  </button>
+                  </Button>
                 ))}
               </div>
             )}
@@ -434,78 +474,89 @@ export function ShellPanel({ open, width, threadId, embedded = false, previewSes
 
           {selectedSession ? (
             <>
-              <div
-                ref={terminalRef}
-                className="scrollbar-thin min-h-0 flex-1 overflow-auto bg-background px-3 py-2 font-mono text-xs leading-5 text-foreground"
-              >
-                {commands.length ? (
-                  commands.map((command) => {
-                    const logs = logsByCommand[command.id] ?? [];
-                    const output = applyTerminalControls(logs.map((log) => log.chunk).join(''));
-                    return (
-                      <div key={command.id} className="py-1">
-                        <div className="whitespace-pre-wrap break-words text-foreground">
-                          <span className="text-muted-foreground">{shortCwd(command.cwd)}</span>
-                          <span className="text-muted-foreground"> $ </span>
-                          <span>{command.command}</span>
-                        </div>
-                        {output && <pre className="whitespace-pre-wrap break-words text-foreground">{output}</pre>}
-                        {!isRunning(command) && (
-                          <div className="flex items-center gap-2">
-                            <div className={cn('min-w-0 flex-1 text-[11px]', commandTone(command.status))}>
-                              [{formatTime(command.ended_at ?? command.updated_at)}] {commandSummary(command)}
-                            </div>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon-sm"
-                              className="size-6 text-muted-foreground hover:bg-accent hover:text-foreground"
-                              onClick={() => void attachCommand(command)}
-                              disabled={acting}
-                              title="添加这次 shell 交互到输入框"
-                            >
-                              <Paperclip className="size-3.5" />
-                            </Button>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })
-                ) : (
-                  <div className="py-8 text-center text-muted-foreground">暂无命令。</div>
-                )}
-              </div>
-
-              <div className="shrink-0 border-t p-3">
-                <div className="mb-2 flex min-h-8 items-center gap-2">
-                  <div className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground">
-                    {selectedSession.cwd}
+              <ScrollArea className="min-h-0 flex-1 bg-background" viewportClassName="h-full" viewportRef={terminalRef}>
+                <div className="min-h-full px-4 py-3 font-mono text-[12px] leading-5 text-foreground">
+                  <div className="mb-3 flex flex-wrap items-center gap-2 border-b pb-3 font-sans text-xs text-muted-foreground">
+                    <Badge variant="outline" className="bg-background">
+                      {sessionStatusLabel(selectedSession.status)}
+                    </Badge>
+                    <span className="min-w-0 truncate">{selectedSession.cwd}</span>
+                    <span>backend: {selectedSession.backend}</span>
+                    {runningCommand && (
+                      <Button variant="destructive" size="sm" className="ml-auto h-7" onClick={() => void killRunningCommand()} disabled={acting} title="发送 Ctrl+C 终止命令">
+                        <Square className="size-3.5" />
+                        终止
+                      </Button>
+                    )}
                   </div>
-                  {runningCommand && (
-                    <Button variant="destructive" size="sm" onClick={() => void killRunningCommand()} disabled={acting} title="发送 Ctrl+C 终止命令">
-                      <Square className="size-3.5" />
-                      终止
-                    </Button>
+                  {commands.length ? (
+                    commands.map((command) => {
+                      const logs = logsByCommand[command.id] ?? [];
+                      const output = applyTerminalControls(logs.map((log) => log.chunk).join(''));
+                      const bytes = formatBytes(command.output_bytes);
+                      return (
+                        <div key={command.id} className="border-b py-3 last:border-0">
+                          <div className="whitespace-pre-wrap break-words">
+                            <span className="text-muted-foreground">{shortCwd(command.cwd)}</span>
+                            <span className="text-primary"> $ </span>
+                            <span>{command.command}</span>
+                          </div>
+                          {output ? (
+                            <pre className={cn('mt-2 whitespace-pre-wrap break-words', command.status === 'failed' ? 'text-destructive' : 'text-foreground')}>
+                              {output}
+                            </pre>
+                          ) : (
+                            isRunning(command) && <div className="mt-2 text-muted-foreground">等待输出...</div>
+                          )}
+                          <div className="mt-2 flex flex-wrap items-center gap-2 font-sans text-[11px] text-muted-foreground">
+                            <Badge variant={commandBadgeVariant(command.status)} className="h-5 px-1.5 py-0 text-[10px]">
+                              {commandStatusLabel(command.status)}
+                            </Badge>
+                            <span>{actorLabel(command.actor)}</span>
+                            <span>{formatTime(command.ended_at ?? command.updated_at)}</span>
+                            <span>{commandSummary(command)}</span>
+                            {bytes && <span>{bytes}</span>}
+                            {!isRunning(command) && (
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon-sm"
+                                className="ml-auto size-6 text-muted-foreground"
+                                onClick={() => void attachCommand(command)}
+                                disabled={acting}
+                                title="添加这次 shell 交互到输入框"
+                              >
+                                <Paperclip className="size-3.5" />
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div className="flex min-h-64 items-center justify-center text-center text-muted-foreground">
+                      暂无命令。
+                    </div>
                   )}
+                  <div className="flex min-w-0 items-center gap-1 py-3">
+                    <span className="shrink-0 text-muted-foreground">{shortCwd(selectedSession.cwd)}</span>
+                    <span className="shrink-0 text-primary">$</span>
+                    <Input
+                      value={commandText}
+                      onChange={(event) => setCommandText(event.target.value)}
+                      placeholder={runningCommand ? '命令运行中' : '输入命令'}
+                      disabled={!!runningCommand || acting}
+                      className="h-6 min-w-0 border-0 bg-transparent px-1 py-0 font-mono text-xs text-foreground shadow-none placeholder:text-muted-foreground focus-visible:ring-0"
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' && !event.shiftKey) {
+                          event.preventDefault();
+                          void sendCommand();
+                        }
+                      }}
+                    />
+                  </div>
                 </div>
-                <div className="flex gap-2">
-                  <Textarea
-                    value={commandText}
-                    onChange={(event) => setCommandText(event.target.value)}
-                    placeholder="输入命令，按 Ctrl+Enter 执行"
-                    className="max-h-28 min-h-16 font-mono text-xs"
-                    onKeyDown={(event) => {
-                      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
-                        event.preventDefault();
-                        void sendCommand();
-                      }
-                    }}
-                  />
-                  <Button className="h-16 w-16 shrink-0" onClick={() => void sendCommand()} disabled={!canRun || acting} title="执行命令">
-                    <Play className="size-4" />
-                  </Button>
-                </div>
-              </div>
+              </ScrollArea>
             </>
           ) : (
             <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground">

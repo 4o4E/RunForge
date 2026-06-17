@@ -50,6 +50,7 @@ import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, Command
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Spinner } from '@/components/ui/spinner';
@@ -454,46 +455,45 @@ function ModelSearchSelect({
   const selected = options.find((option) => option.ref === value);
 
   return (
-    <div className="relative min-w-0">
-      <Button
-        type="button"
-        variant="outline"
-        className="h-10 w-full justify-between gap-2"
-        aria-expanded={open}
-        onClick={() => setOpen((next) => !next)}
-      >
-        <span className="min-w-0 truncate text-left">{selected ? selected.label : value || placeholder}</span>
-        <ChevronsUpDown className="h-4 w-4 shrink-0 opacity-50" />
-      </Button>
-      {open && (
-        <div className="absolute left-0 right-0 top-11 z-50 rounded-md border bg-popover text-popover-foreground shadow-md">
-          <Command>
-            <CommandInput placeholder="搜索供应商或模型" />
-            <CommandList>
-              <CommandEmpty>没有匹配的模型</CommandEmpty>
-              <CommandGroup>
-                {options.map((option) => (
-                  <CommandItem
-                    key={option.ref}
-                    value={`${option.providerLabel} ${option.providerId} ${option.provider} ${option.model} ${option.ref}`}
-                    onSelect={() => {
-                      onChange(option.ref);
-                      setOpen(false);
-                    }}
-                  >
-                    <Check className={cn('h-4 w-4', option.ref === value ? 'opacity-100' : 'opacity-0')} />
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">{option.model}</div>
-                      <div className="truncate text-xs text-muted-foreground">{option.providerLabel} · {option.ref}</div>
-                    </div>
-                  </CommandItem>
-                ))}
-              </CommandGroup>
-            </CommandList>
-          </Command>
-        </div>
-      )}
-    </div>
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          className="h-10 w-full justify-between gap-2"
+          aria-expanded={open}
+        >
+          <span className="min-w-0 truncate text-left">{selected ? selected.label : value || placeholder}</span>
+          <ChevronsUpDown className="h-4 w-4 shrink-0 opacity-50" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-[--radix-popover-trigger-width] p-0">
+        <Command>
+          <CommandInput placeholder="搜索供应商或模型" />
+          <CommandList>
+            <CommandEmpty>没有匹配的模型</CommandEmpty>
+            <CommandGroup>
+              {options.map((option) => (
+                <CommandItem
+                  key={option.ref}
+                  value={`${option.providerLabel} ${option.providerId} ${option.provider} ${option.model} ${option.ref}`}
+                  onSelect={() => {
+                    onChange(option.ref);
+                    setOpen(false);
+                  }}
+                >
+                  <Check className={cn('h-4 w-4', option.ref === value ? 'opacity-100' : 'opacity-0')} />
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">{option.model}</div>
+                    <div className="truncate text-xs text-muted-foreground">{option.providerLabel} · {option.ref}</div>
+                  </div>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
   );
 }
 
