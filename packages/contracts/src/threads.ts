@@ -13,6 +13,7 @@ export interface RunWithEvents {
   thread_id: string;
   status: RunStatus;
   input: string;
+  model_ref?: string | null;
   output: string | null;
   error: string | null;
   goal_state?: GoalState | null;

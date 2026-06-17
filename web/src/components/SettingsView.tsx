@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useId, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Activity, Bot, Check, ChevronRight, ChevronsUpDown, Database, Gauge, MessageSquare, Moon, Palette, Plus, RefreshCw, Save, Shield, Sun, Trash2, Wifi, Wrench } from 'lucide-react';
+import { Activity, Bot, ChevronRight, Database, Gauge, MessageSquare, Moon, Palette, Plus, RefreshCw, Save, Shield, Sun, Trash2, Wifi, Wrench } from 'lucide-react';
 import {
   createDatasource,
   createPermissionProfile,
@@ -31,7 +31,6 @@ import {
   type DatasourceTestResult,
   type DatasourceType,
   type LlmProviderChatTestResult,
-  type LlmModelOption,
   type LlmProviderSettings,
   type LlmSettings,
   type LlmSettingsOptions,
@@ -46,17 +45,16 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Spinner } from '@/components/ui/spinner';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
+import { ModelSearchSelect, llmModelRef, llmOptionsFromSettings } from './ModelSearchSelect';
 import { useThemeCtx } from '@/theme';
 import { useNotifications } from './GlobalNotifications';
 import {
@@ -382,10 +380,6 @@ const AI_SDK_FLAVOR_OPTIONS: Array<{ value: LlmProviderSettings['aisdkFlavor']; 
   { value: 'anthropic', label: 'Anthropic' },
 ];
 
-function llmModelRef(providerId: string, model: string): string {
-  return `${providerId}:${model}`;
-}
-
 function llmModelPrefix(model: string): string {
   const separators = ['-', ':', '/', '_', '.'];
   const indexes = separators.map((item) => model.indexOf(item)).filter((index) => index > 0);
@@ -408,19 +402,6 @@ function groupLlmModels(models: string[]): Array<{ prefix: string; models: strin
     .sort((a, b) => a.prefix.localeCompare(b.prefix));
 }
 
-function llmOptionsFromSettings(settings: LlmSettings): LlmModelOption[] {
-  return settings.providers.flatMap((provider) =>
-    provider.models.map((model) => ({
-      ref: llmModelRef(provider.id, model),
-      providerId: provider.id,
-      providerLabel: provider.label || provider.id,
-      provider: provider.provider,
-      model,
-      label: `${provider.label || provider.id} · ${model}`,
-    })),
-  );
-}
-
 function defaultLlmProvider(index: number): LlmProviderSettings {
   return {
     id: `provider-${index + 1}`,
@@ -438,63 +419,6 @@ function defaultLlmProvider(index: number): LlmProviderSettings {
     aisdkFlavor: 'openai-compatible',
     reasoningTag: 'think',
   };
-}
-
-function ModelSearchSelect({
-  value,
-  options,
-  onChange,
-  placeholder = '选择模型',
-}: {
-  value: string;
-  options: LlmModelOption[];
-  onChange: (value: string) => void;
-  placeholder?: string;
-}) {
-  const [open, setOpen] = useState(false);
-  const selected = options.find((option) => option.ref === value);
-
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <Button
-          type="button"
-          variant="outline"
-          className="h-10 w-full justify-between gap-2"
-          aria-expanded={open}
-        >
-          <span className="min-w-0 truncate text-left">{selected ? selected.label : value || placeholder}</span>
-          <ChevronsUpDown className="h-4 w-4 shrink-0 opacity-50" />
-        </Button>
-      </PopoverTrigger>
-      <PopoverContent align="start" className="w-[--radix-popover-trigger-width] p-0">
-        <Command>
-          <CommandInput placeholder="搜索供应商或模型" />
-          <CommandList>
-            <CommandEmpty>没有匹配的模型</CommandEmpty>
-            <CommandGroup>
-              {options.map((option) => (
-                <CommandItem
-                  key={option.ref}
-                  value={`${option.providerLabel} ${option.providerId} ${option.provider} ${option.model} ${option.ref}`}
-                  onSelect={() => {
-                    onChange(option.ref);
-                    setOpen(false);
-                  }}
-                >
-                  <Check className={cn('h-4 w-4', option.ref === value ? 'opacity-100' : 'opacity-0')} />
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-medium">{option.model}</div>
-                    <div className="truncate text-xs text-muted-foreground">{option.providerLabel} · {option.ref}</div>
-                  </div>
-                </CommandItem>
-              ))}
-            </CommandGroup>
-          </CommandList>
-        </Command>
-      </PopoverContent>
-    </Popover>
-  );
 }
 
 function statusVariant(status: string): 'default' | 'secondary' | 'destructive' | 'outline' {

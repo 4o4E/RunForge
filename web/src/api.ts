@@ -204,11 +204,11 @@ export const updatePermissionProfile = (datasourceId: string, profileId: string,
     body: JSON.stringify(input),
   }).then(json<{ profile: PermissionProfile }>);
 
-export const startRun = (threadId: string, input: string) =>
+export const startRun = (threadId: string, input: string, modelRef?: string) =>
   fetch(`/api/threads/${threadId}/runs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ input }),
+    body: JSON.stringify({ input, modelRef }),
   }).then(json<{ id: string }>);
 
 export const cancelRun = (runId: string) =>

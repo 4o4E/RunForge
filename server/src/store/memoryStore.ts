@@ -106,12 +106,13 @@ export class MemoryStore implements Store {
       }));
   }
 
-  async createRun(threadId: string, input: string): Promise<RunRow> {
+  async createRun(threadId: string, input: string, options: { modelRef?: string | null } = {}): Promise<RunRow> {
     const row: RunRow = {
       id: newRunId(),
       thread_id: threadId,
       status: 'pending',
       input,
+      model_ref: options.modelRef ?? null,
       output: null,
       error: null,
       goal_state: null,

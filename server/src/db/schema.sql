@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS runs (
   thread_id   TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
   status      TEXT NOT NULL DEFAULT 'pending',   -- pending | running | waiting_for_user | done | error | canceling | canceled
   input       TEXT NOT NULL,
+  model_ref   TEXT,                              -- 本次 run 固定使用的 provider:model；为空时使用运行时默认模型
   output      TEXT,
   error       TEXT,
   goal_state  JSONB,                             -- structured goal anchor (intent/plan/decisions/next)
@@ -23,6 +24,7 @@ CREATE TABLE IF NOT EXISTS runs (
 
 -- Goal anchor (long-task design §3.2). Idempotent for existing DBs.
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS goal_state JSONB;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS model_ref TEXT;
 
 -- One step = one iteration of the agent loop (one LLM turn + its tool calls)
 CREATE TABLE IF NOT EXISTS steps (

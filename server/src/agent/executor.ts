@@ -145,8 +145,8 @@ class StreamStatsTracker {
   }
 }
 
-async function defaultDeps(overrides: Partial<ExecutorDeps>): Promise<ExecutorDeps> {
-  const configured = overrides.provider ? null : await getConfiguredProvider();
+async function defaultDeps(overrides: Partial<ExecutorDeps>, modelRef?: string | null): Promise<ExecutorDeps> {
+  const configured = overrides.provider ? null : await getConfiguredProvider(modelRef ?? undefined);
   return {
     provider: overrides.provider ?? configured!.provider,
     store: overrides.store ?? defaultStore,
@@ -348,11 +348,22 @@ function runtimeApiBase(): string {
  * 所有依赖都可注入，便于在没有 PG/网络的情况下做单元测试。
  */
 export async function executeRun(runId: string, overrides: Partial<ExecutorDeps> = {}): Promise<void> {
-  const deps = await defaultDeps(overrides);
-  const { provider, store, publish, hardStepCap, stream, resume } = deps;
-
+  const store = overrides.store ?? defaultStore;
   const run = await store.getRun(runId);
   if (!run) throw new Error(`run 不存在：${runId}`);
+  let deps: ExecutorDeps;
+  try {
+    deps = await defaultDeps({ ...overrides, store }, run.model_ref);
+  } catch (err) {
+    const message = (err as Error).message;
+    const publish = overrides.publish ?? ((targetRunId, event) => runBus.publish(targetRunId, event));
+    const event: AgentEvent = { type: 'error', step: 0, message };
+    publish(runId, event);
+    await store.addEvent(runId, null, event);
+    await store.setRunStatus(runId, 'error', { error: message });
+    return;
+  }
+  const { provider, publish, hardStepCap, stream, resume } = deps;
   const initialRun = run;
   const threadId = initialRun.thread_id;
   const userInput = initialRun.input;

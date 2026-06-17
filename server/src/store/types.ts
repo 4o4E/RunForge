@@ -14,6 +14,7 @@ export interface RunRow {
   thread_id: string;
   status: RunStatus;
   input: string;
+  model_ref: string | null;
   output: string | null;
   error: string | null;
   goal_state: GoalState | null;
@@ -142,7 +143,7 @@ export interface Store {
   deleteThread(id: string): Promise<boolean>;
   searchThreadMessages(query: string, limit?: number): Promise<ThreadSearchResultRow[]>;
 
-  createRun(threadId: string, input: string): Promise<RunRow>;
+  createRun(threadId: string, input: string, options?: { modelRef?: string | null }): Promise<RunRow>;
   getRun(id: string): Promise<RunRow | null>;
   listRuns(threadId: string): Promise<RunRow[]>;
   listRunsByStatus(statuses: RunStatus[]): Promise<RunRow[]>;

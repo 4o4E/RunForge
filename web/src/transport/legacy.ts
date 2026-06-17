@@ -96,7 +96,7 @@ export function toUiEvent(e: AgentEvent): UiEvent | null {
 
 export const legacyTransport: UiTransport = {
   async send(threadId, input: UserInput) {
-    const { id } = await startRun(threadId, input.text);
+    const { id } = await startRun(threadId, input.text, input.modelRef);
     return { runId: id };
   },
   subscribe(runId, onEvent, onClose) {

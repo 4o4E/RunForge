@@ -20,7 +20,9 @@ import {
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { listRemoteFiles, type RemoteFileEntry } from '@/api';
+import type { LlmModelOption } from '@/api';
 import type { UsageSnapshot } from './Conversation';
+import { ModelSearchSelect } from './ModelSearchSelect';
 
 export interface ComposerAttachment {
   kind: 'remote' | 'local' | 'shell';
@@ -37,8 +39,11 @@ interface Props {
   wide: boolean;
   attachments: ComposerAttachment[];
   usage: UsageSnapshot | null;
+  modelOptions: LlmModelOption[];
+  selectedModelRef: string;
   onDraftChange: (text: string) => void;
-  onSend: (text: string) => void;
+  onModelChange: (modelRef: string) => void;
+  onSend: (text: string, modelRef: string) => void;
   onCancel: () => void;
   onRemoveAttachment: (path: string) => void;
   onOpenRemoteFiles: () => void;
@@ -50,6 +55,10 @@ function formatSize(size?: number): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function textareaOverflowsInline(textarea: HTMLTextAreaElement): boolean {
+  return textarea.value.length > 0 && textarea.scrollWidth > textarea.clientWidth + 1;
 }
 
 function ContextUsageMeter({ usage }: { usage: UsageSnapshot | null }) {
@@ -104,7 +113,10 @@ export function Composer({
   wide,
   attachments,
   usage,
+  modelOptions,
+  selectedModelRef,
   onDraftChange,
+  onModelChange,
   onSend,
   onCancel,
   onRemoveAttachment,
@@ -125,7 +137,9 @@ export function Composer({
   const [dirParent, setDirParent] = useState<string | null>(null);
   const [dirLoading, setDirLoading] = useState(false);
   const [dirError, setDirError] = useState<string | null>(null);
-  const multilineDraft = localDraft.includes('\n');
+  const localDraftRef = useRef(draft);
+  const [autoMultiline, setAutoMultiline] = useState(false);
+  const multilineDraft = localDraft.includes('\n') || autoMultiline;
 
   useLayoutEffect(() => {
     const previousMultiline = previousMultilineRef.current;
@@ -140,13 +154,42 @@ export function Composer({
   }, [multilineDraft]);
 
   useEffect(() => {
+    if (draft === localDraftRef.current) return;
+    localDraftRef.current = draft;
     setLocalDraft(draft);
+    setAutoMultiline(false);
   }, [draft]);
 
-  function handleDraftChange(text: string) {
-    if (text.includes('\n') !== multilineDraft && promptFrameRef.current?.contains(document.activeElement)) {
+  useLayoutEffect(() => {
+    if (multilineDraft) return undefined;
+    const textarea = promptFrameRef.current?.querySelector('textarea');
+    if (!textarea) return undefined;
+    const updateOverflow = () => {
+      if (textareaOverflowsInline(textarea)) {
+        restorePromptFocusRef.current = promptFrameRef.current?.contains(document.activeElement) ?? false;
+        setAutoMultiline(true);
+      }
+    };
+    updateOverflow();
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(updateOverflow) : null;
+    observer?.observe(textarea);
+    if (promptFrameRef.current) observer?.observe(promptFrameRef.current);
+    window.addEventListener('resize', updateOverflow);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', updateOverflow);
+    };
+  }, [localDraft, multilineDraft, selectedModelRef, modelOptions.length]);
+
+  function handleDraftChange(text: string, textarea: HTMLTextAreaElement) {
+    const hasNewline = text.includes('\n');
+    const nextAutoMultiline = !hasNewline && (autoMultiline ? text.length > 0 : textareaOverflowsInline(textarea));
+    const nextMultiline = hasNewline || nextAutoMultiline;
+    if (nextMultiline !== multilineDraft && promptFrameRef.current?.contains(document.activeElement)) {
       restorePromptFocusRef.current = true;
     }
+    setAutoMultiline(nextAutoMultiline);
+    localDraftRef.current = text;
     setLocalDraft(text);
     onDraftChange(text);
   }
@@ -157,8 +200,10 @@ export function Composer({
     if (multilineDraft && promptFrameRef.current?.contains(document.activeElement)) {
       restorePromptFocusRef.current = true;
     }
+    setAutoMultiline(false);
+    localDraftRef.current = '';
     setLocalDraft('');
-    onSend(text);
+    onSend(text, selectedModelRef);
   }
 
   function chooseLocal(file: File | null | undefined) {
@@ -202,6 +247,18 @@ export function Composer({
     if (localFile) void loadUploadDirs(uploadDir || '.');
   }, [localFile]);
 
+  const modelSelect = (
+    <ModelSearchSelect
+      value={selectedModelRef}
+      options={modelOptions}
+      onChange={onModelChange}
+      placeholder="选择模型"
+      disabled={disabled || waitingForAskUser}
+      variant="ghost"
+      className="h-8 w-auto min-w-0 px-2 text-xs text-muted-foreground hover:text-foreground"
+    />
+  );
+
   return (
     <div className="px-6 py-3">
       <div className="flex min-w-0">
@@ -235,7 +292,7 @@ export function Composer({
                 <>
                   <PromptInputBody>
                     <PromptInputTextarea
-                      onChange={(event) => handleDraftChange(event.currentTarget.value)}
+                      onChange={(event) => handleDraftChange(event.currentTarget.value, event.currentTarget)}
                       disabled={disabled || waitingForAskUser}
                       placeholder={waitingForAskUser ? '请在上方 ask_user 表单中回答' : '描述一个任务…（Enter 发送，Shift+Enter 换行）'}
                       value={localDraft}
@@ -270,6 +327,7 @@ export function Composer({
                       </DropdownMenu>
                     </PromptInputTools>
                     <div className="ml-auto flex shrink-0 items-center gap-1">
+                      {modelSelect}
                       <ContextUsageMeter usage={usage} />
                       <PromptInputSubmit
                         size="icon-sm"
@@ -308,7 +366,7 @@ export function Composer({
                     </DropdownMenuContent>
                   </DropdownMenu>
                   <PromptInputTextarea
-                    onChange={(event) => handleDraftChange(event.currentTarget.value)}
+                    onChange={(event) => handleDraftChange(event.currentTarget.value, event.currentTarget)}
                     disabled={disabled || waitingForAskUser}
                     placeholder={waitingForAskUser ? '请在上方 ask_user 表单中回答' : '描述一个任务…（Enter 发送，Shift+Enter 换行）'}
                     value={localDraft}
@@ -316,6 +374,7 @@ export function Composer({
                     className="h-8 min-h-8 max-h-8 min-w-0 whitespace-pre overflow-x-auto overflow-y-hidden px-2 py-1.5 leading-5"
                   />
                   <div className="ml-auto flex shrink-0 items-center gap-1">
+                    {modelSelect}
                     <ContextUsageMeter usage={usage} />
                     <PromptInputSubmit
                       size="icon-sm"

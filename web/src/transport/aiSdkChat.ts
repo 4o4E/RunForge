@@ -16,6 +16,7 @@ import type { UiEvent } from './types';
  *  may be created lazily on the first send. */
 export interface ChatThreadHandle {
   getThreadId(): string | null;
+  getSelectedModelRef(): string;
   setThreadId(id: string): void;
   onThreadCreated(thread: Thread): void;
   setActiveRunId(id: string | null): void;
@@ -277,7 +278,7 @@ export function createAiSdkChatTransport(handle: ChatThreadHandle): ChatTranspor
         handle.onThreadCreated(thread);
       }
 
-      const { runId } = await legacyTransport.send(threadId, { text });
+      const { runId } = await legacyTransport.send(threadId, { text, modelRef: handle.getSelectedModelRef() });
       handle.setActiveRunId(runId);
       return uiEventStreamToChunks(runId, abortSignal);
     },

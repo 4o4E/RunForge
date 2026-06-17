@@ -4,6 +4,7 @@
 /** 用户提交的一轮输入；保留对象形态，便于后续增加附件等字段。 */
 export interface UserInput {
   text: string;
+  modelRef?: string;
 }
 
 /**

@@ -11,7 +11,7 @@ import { releaseRunLeases } from '../datasources/accountPool.js';
 import type { AskUserAnswer, AskUserOption, AskUserSpec } from '../agent/types.js';
 import { shellManager } from '../shell/manager.js';
 import { shellBus } from '../shell/bus.js';
-import { getToolSettings } from '../settings.js';
+import { getLlmSettings, getToolSettings, llmModelOptions } from '../settings.js';
 import { createPolicy } from '../tools/policy.js';
 import { isWithin } from '../tools/policy.js';
 
@@ -76,6 +76,20 @@ function headTail(text: string, maxChars: number): string {
   return `${text.slice(0, head)}${marker}${text.slice(text.length - tail)}`;
 }
 
+function optionalText(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+async function validateRunModelRef(modelRef: string | null): Promise<string | null> {
+  if (!modelRef) return null;
+  const settings = await getLlmSettings();
+  const options = llmModelOptions(settings);
+  if (!options.some((option) => option.ref === modelRef)) {
+    throw new Error(`模型未启用：${modelRef}`);
+  }
+  return modelRef;
+}
+
 // --- Threads ---
 
 api.get('/search', async (req, res) => {
@@ -127,8 +141,14 @@ api.post('/threads/:id/runs', async (req, res) => {
   if (!thread) return res.status(404).json({ error: 'thread 不存在' });
   const input = String(req.body?.input ?? '').trim();
   if (!input) return res.status(400).json({ error: 'input 为必填' });
+  let modelRef: string | null = null;
+  try {
+    modelRef = await validateRunModelRef(optionalText(req.body?.modelRef));
+  } catch (err) {
+    return res.status(400).json({ error: (err as Error).message });
+  }
 
-  const run = await store.createRun(thread.id, input);
+  const run = await store.createRun(thread.id, input, { modelRef });
   // 后台执行：agent 循环在当前进程内运行，并通过 WebSocket 推送事件。
   void executeRun(run.id);
   res.status(201).json({ id: run.id, threadId: thread.id, status: run.status });

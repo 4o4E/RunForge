@@ -83,11 +83,11 @@ export class PgStore implements Store {
     return rows.map((row) => ({ ...row, message_id: Number(row.message_id) }));
   }
 
-  async createRun(threadId: string, input: string): Promise<RunRow> {
+  async createRun(threadId: string, input: string, options: { modelRef?: string | null } = {}): Promise<RunRow> {
     const id = newRunId();
     const { rows } = await query<RunRow>(
-      `INSERT INTO runs (id, thread_id, status, input) VALUES ($1, $2, 'pending', $3) RETURNING *`,
-      [id, threadId, input],
+      `INSERT INTO runs (id, thread_id, status, input, model_ref) VALUES ($1, $2, 'pending', $3, $4) RETURNING *`,
+      [id, threadId, input, options.modelRef ?? null],
     );
     await query(`UPDATE threads SET updated_at = now() WHERE id = $1`, [threadId]);
     return rows[0];

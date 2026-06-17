@@ -10,6 +10,7 @@ import type { AskUserDraft } from './AskUserCard';
 import { AgentStatusCard } from './StatusCard';
 import { TableOfContents } from './TableOfContents';
 import { cn } from '@/lib/utils';
+import type { LlmModelOption } from '@/api';
 
 function latestUsageFromMessages(messages: UIMessage[]) {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -31,8 +32,11 @@ interface Props {
   contentRef: RefObject<HTMLDivElement | null>;
   askUserDrafts: Record<string, AskUserDraft>;
   attachments: ComposerAttachment[];
+  modelOptions: LlmModelOption[];
+  selectedModelRef: string;
   onDraftChange: (text: string) => void;
-  onSend: (text: string) => void;
+  onModelChange: (modelRef: string) => void;
+  onSend: (text: string, modelRef: string) => void;
   onCancel: () => void;
   onToggleWide: () => void;
   onRemoveAttachment: (path: string) => void;
@@ -62,7 +66,10 @@ export function ChatView({
   contentRef,
   askUserDrafts,
   attachments,
+  modelOptions,
+  selectedModelRef,
   onDraftChange,
+  onModelChange,
   onSend,
   onCancel,
   onToggleWide,
@@ -169,7 +176,10 @@ export function ChatView({
         wide={wide}
         attachments={attachments}
         usage={usage}
+        modelOptions={modelOptions}
+        selectedModelRef={selectedModelRef}
         onDraftChange={onDraftChange}
+        onModelChange={onModelChange}
         onSend={onSend}
         onCancel={onCancel}
         onRemoveAttachment={onRemoveAttachment}

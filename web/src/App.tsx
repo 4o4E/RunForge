@@ -7,6 +7,7 @@ import {
   answerRun,
   cancelRun,
   deleteThread,
+  getLlmSettings,
   getPageState,
   getRemoteFileInfo,
   getThread,
@@ -17,6 +18,7 @@ import {
   type AskUserAnswer,
   type AskUserSpec,
   type AgentEvent,
+  type LlmModelOption,
   type PageState,
   type RunWithEvents,
   type Thread,
@@ -33,6 +35,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import type { ComposerAttachment } from './components/Composer';
 import type { AskUserDraft } from './components/AskUserCard';
 import { buildChatPath, currentBrowserPath, readChatRoute, type ChatRoute } from './router';
+import { llmOptionsFromSettings } from './components/ModelSearchSelect';
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -55,6 +58,7 @@ const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 420;
 const SIDEBAR_SNAP_WIDTH = 104;
 const RIGHT_PANEL_SNAP_WIDTH = 360;
+const MODEL_SELECTION_STORAGE_KEY = 'my-agent:selected-model-ref';
 
 type ActiveView = 'chat' | 'search';
 
@@ -65,6 +69,22 @@ function activeViewFromPath(pathname = window.location.pathname): ActiveView {
 
 function isSettingsPath(pathname = window.location.pathname): boolean {
   return pathname === '/settings';
+}
+
+function readStoredModelRef(): string {
+  try {
+    return window.localStorage.getItem(MODEL_SELECTION_STORAGE_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+function writeStoredModelRef(modelRef: string) {
+  try {
+    window.localStorage.setItem(MODEL_SELECTION_STORAGE_KEY, modelRef);
+  } catch {
+    // 本地存储不可用时只影响“记住模型”，不影响本次发送。
+  }
 }
 
 function beginRightPanelResize(
@@ -353,6 +373,8 @@ export function App() {
   const [filesPanelWidth, setFilesPanelWidth] = useState(720);
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [modelOptions, setModelOptions] = useState<LlmModelOption[]>([]);
+  const [selectedModelRef, setSelectedModelRef] = useState(() => readStoredModelRef());
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [reattachedRunId, setReattachedRunId] = useState<string | null>(null);
   const [waitingRun, setWaitingRun] = useState<{ id: string; spec: AskUserSpec } | null>(null);
@@ -366,6 +388,8 @@ export function App() {
   const threadPanelStatesRef = useRef<Record<string, ThreadPanelState>>({});
   const threadDraftsRef = useRef<Record<string, string>>({});
   const draftRef = useRef(route.draft);
+  const modelOptionsRef = useRef<LlmModelOption[]>([]);
+  const selectedModelRefRef = useRef(selectedModelRef);
   const reattachedEventsRef = useRef<AgentEvent[]>([]);
   const draftSyncTimerRef = useRef<number | null>(null);
   const draftRouteTimerRef = useRef<number | null>(null);
@@ -375,6 +399,8 @@ export function App() {
   const threadIdRef = useRef<string | null>(null);
   const skipNextHistoryLoadRef = useRef<string | null>(null);
   threadIdRef.current = activeThreadId;
+  modelOptionsRef.current = modelOptions;
+  selectedModelRefRef.current = selectedModelRef;
 
   const currentThreadPanelState = useCallback((): ThreadPanelState => ({
     rightPanelOpen: rightPanelOpen && rightPanelTabs.length > 0,
@@ -423,6 +449,12 @@ export function App() {
     }, 250);
   }, []);
 
+  const rememberSelectedModelRef = useCallback((modelRef: string) => {
+    selectedModelRefRef.current = modelRef;
+    setSelectedModelRef(modelRef);
+    if (modelRef) writeStoredModelRef(modelRef);
+  }, []);
+
   const replaceDraftRouteLater = useCallback((threadId: string | null, draftText: string) => {
     if (draftRouteTimerRef.current) window.clearTimeout(draftRouteTimerRef.current);
     draftRouteTimerRef.current = window.setTimeout(() => {
@@ -453,6 +485,33 @@ export function App() {
     getRemoteFileInfo().then((info) => setWorkspaceRoot(info.workspaceRoot)).catch(() => setWorkspaceRoot(null));
   }, []);
   useEffect(refreshWorkspaceRoot, [refreshWorkspaceRoot]);
+
+  useEffect(() => {
+    let canceled = false;
+    getLlmSettings()
+      .then((settings) => {
+        if (canceled) return;
+        const options = llmOptionsFromSettings(settings);
+        modelOptionsRef.current = options;
+        setModelOptions(options);
+        setSelectedModelRef((current) => {
+          const stored = readStoredModelRef();
+          const next =
+            options.find((option) => option.ref === current)?.ref ??
+            options.find((option) => option.ref === stored)?.ref ??
+            options.find((option) => option.ref === settings.defaultModelRef)?.ref ??
+            options[0]?.ref ??
+            '';
+          selectedModelRefRef.current = next;
+          if (next) writeStoredModelRef(next);
+          return next;
+        });
+      })
+      .catch((err) => console.error('load llm settings failed', err));
+    return () => {
+      canceled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let canceled = false;
@@ -574,6 +633,10 @@ export function App() {
   const handle = useMemo<ChatThreadHandle>(
     () => ({
       getThreadId: () => threadIdRef.current,
+      getSelectedModelRef: () =>
+        modelOptionsRef.current.some((option) => option.ref === selectedModelRefRef.current)
+          ? selectedModelRefRef.current
+          : '',
       setThreadId: (id) => {
         skipNextHistoryLoadRef.current = id;
         navigateChatRoute({ draft: '', threadId: id }, 'replace');
@@ -870,11 +933,12 @@ export function App() {
       });
   }, [refreshActiveThread, refreshThreads]);
 
-  function send(text: string) {
+  function send(text: string, modelRef: string) {
     if (waitingRun) return;
     const finalText = attachments.length
       ? `${text}\n\n${attachments.map(attachmentToken).join('\n')}`
       : text;
+    rememberSelectedModelRef(modelRef);
     if (activeThreadId) rememberThreadDraft(activeThreadId, '');
     draftRef.current = '';
     setComposerDraft('');
@@ -998,7 +1062,10 @@ export function App() {
           contentRef={conversationContentRef}
           askUserDrafts={askUserDrafts}
           attachments={attachments}
+          modelOptions={modelOptions}
+          selectedModelRef={selectedModelRef}
           onDraftChange={changeDraft}
+          onModelChange={rememberSelectedModelRef}
           onSend={send}
           onCancel={cancelActiveRun}
           onToggleWide={() => setWide((v) => !v)}
