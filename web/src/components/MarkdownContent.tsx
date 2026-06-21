@@ -1,7 +1,7 @@
 import { Streamdown } from 'streamdown';
 import type { StreamdownProps } from 'streamdown';
 import { cn } from '@/lib/utils';
-import { MarkdownRenderOptionsProvider, useStreamdownComponents } from './streamdownComponents';
+import { MarkdownRenderOptionsProvider, markdownRemarkPlugins, markdownUrlTransform, useStreamdownComponents } from './streamdownComponents';
 import { streamdownPlugins, useThemedMermaid } from './streamdownConfig';
 
 // Streamdown 统一负责流式 Markdown、代码高亮、表格、数学公式和 Mermaid 渲染。
@@ -32,7 +32,9 @@ export function MarkdownContent({
         mermaid={mermaid}
         parseIncompleteMarkdown
         plugins={plugins}
+        remarkPlugins={markdownRemarkPlugins}
         shikiTheme={['github-light', 'github-dark']}
+        urlTransform={markdownUrlTransform}
       >
         {text}
       </Streamdown>

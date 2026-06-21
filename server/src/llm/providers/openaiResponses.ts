@@ -14,6 +14,19 @@ interface ResponsesRequest {
   max_output_tokens?: number;
 }
 
+function imageDataUrl(data: string, mimeType: string): string {
+  return `data:${mimeType};base64,${data}`;
+}
+
+function responsesUserContent(m: LlmMessage): string | unknown[] {
+  if (!m.contentParts?.length) return m.content ?? '';
+  return m.contentParts.map((part) => (
+    part.type === 'text'
+      ? { type: 'input_text', text: part.text }
+      : { type: 'input_image', image_url: imageDataUrl(part.data, part.mimeType) }
+  ));
+}
+
 /** Pure: translate neutral messages + tools into a Responses API request body. */
 export function buildResponsesRequest(
   messages: LlmMessage[],
@@ -29,7 +42,7 @@ export function buildResponsesRequest(
   for (const m of messages) {
     if (m.role === 'system') continue;
     if (m.role === 'user') {
-      input.push({ role: 'user', content: m.content ?? '' });
+      input.push({ role: 'user', content: responsesUserContent(m) });
     } else if (m.role === 'assistant') {
       if (m.content) input.push({ role: 'assistant', content: m.content });
       for (const tc of m.toolCalls ?? []) {

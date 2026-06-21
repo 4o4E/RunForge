@@ -961,7 +961,7 @@ export function App() {
   function send(text: string, modelRef: string) {
     if (waitingRun) return;
     const finalText = attachments.length
-      ? `${text}\n\n${attachments.map(attachmentToken).join('\n')}`
+      ? [text.trim(), attachments.map(attachmentToken).join('\n')].filter(Boolean).join('\n\n')
       : text;
     rememberSelectedModelRef(modelRef);
     if (activeThreadId) rememberThreadDraft(activeThreadId, '');

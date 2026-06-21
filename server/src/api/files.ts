@@ -1,10 +1,10 @@
 import { Router } from 'express';
 import { createReadStream } from 'node:fs';
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { getToolSettings } from '../settings.js';
-import { isWithin } from '../tools/policy.js';
+import { mediaTypeFromPath, normalizeRemotePath, streamWorkspaceFile, toRemotePath, workspaceRoot } from '../files/workspace.js';
 
 const SMALL_FILE_BYTES = 200 * 1024;
 const MAX_RENDER_FILE_BYTES = 2 * 1024 * 1024;
@@ -13,25 +13,6 @@ const MAX_LINE_LIMIT = 1000;
 const MAX_PREVIEW_LINE_CHARS = 12_000;
 
 export const filesApi = Router();
-
-function workspaceRoot(root: string): string {
-  return resolve(root);
-}
-
-function normalizeRemotePath(raw: unknown, configuredRoot: string): string {
-  const input = String(raw ?? '.').trim() || '.';
-  const root = workspaceRoot(configuredRoot);
-  const absolute = isAbsolute(input) ? resolve(input) : resolve(root, input);
-  if (!isWithin(root, absolute)) {
-    throw new Error(`路径超出 workspace：${input}`);
-  }
-  return absolute;
-}
-
-function toRemotePath(abs: string, configuredRoot: string): string {
-  const rel = relative(workspaceRoot(configuredRoot), abs);
-  return rel ? rel.split('\\').join('/') : '.';
-}
 
 function parentRemotePath(abs: string, configuredRoot: string): string | null {
   const root = workspaceRoot(configuredRoot);
@@ -152,6 +133,22 @@ filesApi.get('/preview', async (req, res) => {
       nextLine: hasMore ? nextLine : null,
       hasMore,
     });
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+filesApi.get('/raw', async (req, res) => {
+  try {
+    const settings = await getToolSettings();
+    const file = normalizeRemotePath(req.query.path, settings.workspaceRoot);
+    const info = await stat(file);
+    if (!info.isFile()) return res.status(400).json({ error: 'path 不是文件' });
+
+    res.setHeader('Content-Type', mediaTypeFromPath(file));
+    res.setHeader('Content-Length', String(info.size));
+    res.setHeader('Cache-Control', 'private, max-age=60');
+    streamWorkspaceFile(file).pipe(res);
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }

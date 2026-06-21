@@ -10,9 +10,15 @@ export interface LlmToolCall {
   arguments: string;
 }
 
+export type LlmContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data: string; mimeType: string; path: string; name?: string };
+
 export interface LlmMessage {
   role: LlmRole;
   content: string | null;
+  /** 用户消息的派生多模态内容；只在调模型前生成，不落库。 */
+  contentParts?: LlmContentPart[];
   /** assistant turns only */
   toolCalls?: LlmToolCall[];
   /** tool turns only — links the result to a prior tool call */

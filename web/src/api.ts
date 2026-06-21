@@ -101,6 +101,8 @@ export const previewRemoteFile = (path: string, startLine = 1, limit = 200, opti
   return fetch(`/api/files/preview?${params.toString()}`).then(json<FilePreview>);
 };
 
+export const remoteFileRawUrl = (path: string) => `/api/files/raw?path=${encodeURIComponent(path)}`;
+
 export const uploadLocalFile = (path: string, contentBase64: string) =>
   fetch('/api/files/upload', {
     method: 'POST',

@@ -2,6 +2,7 @@ import { config } from '../config.js';
 import { getConfiguredProvider } from '../llm/index.js';
 import type { LlmMessage, LlmUsage, Provider } from '../llm/types.js';
 import { parseToolArguments } from '../llm/toolArgs.js';
+import { hydrateImageAttachments } from '../llm/attachments.js';
 import { runTool, toolSchemas } from '../tools/registry.js';
 import { ContextManager } from './context.js';
 import { activateSkill, activeAllowedTools, loadSkillIndex, renderSkillCatalog, renderSkillSystemRules } from '../skills/registry.js';
@@ -776,9 +777,10 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       const stopLlmHeartbeat = streamStats.startHeartbeat(stepIdx, () => llmStage, () => llmActiveTool);
       try {
         const tools = await toolSchemas(activeAllowedTools(activeSkills), mcpSettings);
+        const modelMessages = await hydrateImageAttachments(ctx.all(), toolSettings.workspaceRoot);
         if (stream && provider.completeStream) {
           try {
-            result = await provider.completeStream(ctx.all(), tools, (d) => {
+            result = await provider.completeStream(modelMessages, tools, (d) => {
               publishedDelta = true;
               if (d.toolInputStart) {
                 llmStage = 'tool_call';
@@ -831,7 +833,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
             // 还没输出时走非流式路径，由 provider 自己处理重试。
           }
         }
-        if (!result) result = await provider.complete(ctx.all(), tools);
+        if (!result) result = await provider.complete(modelMessages, tools);
       } finally {
         stopLlmHeartbeat();
       }

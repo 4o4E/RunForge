@@ -19,13 +19,16 @@ import {
   CodeBlock as StreamdownCodeBlock,
   CodeBlockCopyButton,
   CodeBlockDownloadButton,
+  defaultRemarkPlugins,
   StreamdownContext,
   type ControlsConfig,
   type StreamdownProps,
+  type UrlTransform,
   useIsCodeFenceIncomplete,
 } from 'streamdown';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
+import { remoteFileRawUrl } from '@/api';
 
 interface MarkdownRenderOptions {
   streaming?: boolean;
@@ -47,8 +50,11 @@ type MarkdownCodeProps = ComponentProps<'code'> & {
   'data-block'?: string | boolean;
 };
 
+type MarkdownImageProps = ComponentProps<'img'>;
+
 const LANGUAGE_CLASS_RE = /language-([^\s]+)/;
 const START_LINE_RE = /showLineNumbers\{(\d+)\}/;
+const IMAGE_PATH_RE = /\.(?:png|jpe?g|gif|webp|svg|bmp|avif)(?:[?#].*)?$/i;
 
 function getControl(controls: ControlsConfig, scope: 'code' | 'mermaid', action?: string): boolean {
   if (controls === false) return false;
@@ -632,6 +638,88 @@ function StreamdownCode({ className, children, node, ...props }: MarkdownCodePro
   );
 }
 
+function hasUrlScheme(value: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:/i.test(value);
+}
+
+function isWorkspaceFileUrl(value: string): boolean {
+  const normalized = value.trim();
+  if (!normalized || normalized.startsWith('#')) return false;
+  if (isInlineOrRemoteImage(normalized) || normalized.startsWith('/api/files/raw')) return false;
+  if (/^(?:blob:|file:|javascript:|vbscript:)/i.test(normalized)) return false;
+  return !(normalized.startsWith('//') || hasUrlScheme(normalized));
+}
+
+function isInlineOrRemoteImage(src: string): boolean {
+  return /^(?:https?:|data:|\/api\/files\/raw\b)/i.test(src);
+}
+
+function resolveMarkdownImageSource(src: string): string | undefined {
+  const normalized = src.trim();
+  if (!normalized) return src;
+  if (isInlineOrRemoteImage(normalized)) return normalized;
+
+  // blob/file/javascript 这类地址不能作为持久化 Markdown 图片源，避免浏览器显示 blocked。
+  if (/^(?:blob:|file:|javascript:|vbscript:)/i.test(normalized)) return undefined;
+
+  if (normalized.startsWith('//') || hasUrlScheme(normalized)) return normalized;
+  return remoteFileRawUrl(normalized);
+}
+
+type MarkdownAstNode = {
+  children?: MarkdownAstNode[];
+  type?: string;
+  url?: unknown;
+};
+
+function visitMarkdownAst(node: MarkdownAstNode, visitor: (node: MarkdownAstNode) => void): void {
+  visitor(node);
+  for (const child of node.children ?? []) visitMarkdownAst(child, visitor);
+}
+
+function remarkWorkspaceFileUrls() {
+  return (tree: MarkdownAstNode) => {
+    visitMarkdownAst(tree, (node) => {
+      if (typeof node.url !== 'string' || !isWorkspaceFileUrl(node.url)) return;
+      if (node.type === 'image') {
+        node.url = remoteFileRawUrl(node.url);
+        return;
+      }
+      if ((node.type === 'link' || node.type === 'definition') && IMAGE_PATH_RE.test(node.url)) {
+        node.url = remoteFileRawUrl(node.url);
+      }
+    });
+  };
+}
+
+export const markdownRemarkPlugins: NonNullable<StreamdownProps['remarkPlugins']> = [
+  ...Object.values(defaultRemarkPlugins),
+  remarkWorkspaceFileUrls,
+];
+
+export const markdownUrlTransform: UrlTransform = (url, key, node) => {
+  if (key === 'src' && node.tagName === 'img') return resolveMarkdownImageSource(url);
+  return url;
+};
+
+function normalizeImageSrc(src: string): string | undefined {
+  return resolveMarkdownImageSource(src);
+}
+
+function StreamdownImage({ className, src, alt = '', ...props }: MarkdownImageProps) {
+  const resolvedSrc = src ? normalizeImageSrc(src) : src;
+  return (
+    <img
+      {...props}
+      alt={alt}
+      className={cn('my-3 max-h-[70vh] max-w-full rounded-md border border-border object-contain', className)}
+      decoding="async"
+      loading="lazy"
+      src={resolvedSrc}
+    />
+  );
+}
+
 export function useStreamdownComponents(components?: StreamdownProps['components']): StreamdownProps['components'] {
-  return useMemo(() => ({ ...components, code: StreamdownCode }), [components]);
+  return useMemo(() => ({ ...components, code: StreamdownCode, img: StreamdownImage }), [components]);
 }

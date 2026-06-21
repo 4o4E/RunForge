@@ -95,7 +95,10 @@ export async function runTool(
   if (!decision.ok) return { text: `工具策略已阻止：${decision.reason}` };
   try {
     if (mcpTool) {
-      const result = await callMcpTool(name, args, ctx.mcpSettings);
+      const result = await callMcpTool(name, args, ctx.mcpSettings, {
+        workspaceRoot: settings.workspaceRoot,
+        runId: ctx.runId,
+      });
       return { text: policy.capOutput(result.text) };
     }
     if (!tool) return { text: `未知工具：${name}` };

@@ -17,6 +17,15 @@ const CONVO: LlmMessage[] = [
   { role: 'tool', content: 'hi', toolCallId: 'call_1' },
 ];
 
+const IMAGE_MESSAGE: LlmMessage = {
+  role: 'user',
+  content: 'look',
+  contentParts: [
+    { type: 'text', text: 'look' },
+    { type: 'image', data: 'aW1n', mimeType: 'image/png', path: 'photo.png', name: 'photo.png' },
+  ],
+};
+
 test('openai-responses: builds request with instructions + function_call items', () => {
   const req = buildResponsesRequest(CONVO, TOOLS, { model: 'gpt-x', maxTokens: 100 });
   assert.equal(req.model, 'gpt-x');
@@ -26,6 +35,14 @@ test('openai-responses: builds request with instructions + function_call items',
   // input should contain the user msg, the function_call, and the function_call_output
   const types = req.input.map((i) => (i as { type?: string; role?: string }).type ?? (i as { role?: string }).role);
   assert.deepEqual(types, ['user', 'function_call', 'function_call_output']);
+});
+
+test('openai-responses: maps image parts to input_image content', () => {
+  const req = buildResponsesRequest([IMAGE_MESSAGE], [], { model: 'gpt-x', maxTokens: 100 });
+  const user = req.input[0] as { role: string; content: Array<{ type: string; image_url?: string }> };
+  assert.equal(user.role, 'user');
+  assert.deepEqual(user.content.map((part) => part.type), ['input_text', 'input_image']);
+  assert.equal(user.content[1].image_url, 'data:image/png;base64,aW1n');
 });
 
 test('openai-responses: parses message text and function_call output', () => {
@@ -47,6 +64,14 @@ test('openai-chat: builds nested function tool defs and tool messages', () => {
   assert.equal(req.tools?.[0].function.name, 'echo'); // nested under "function"
   const toolMsg = req.messages.find((m) => m.role === 'tool') as { tool_call_id?: string };
   assert.equal(toolMsg.tool_call_id, 'call_1');
+});
+
+test('openai-chat: maps image parts to image_url content', () => {
+  const req = buildChatRequest([IMAGE_MESSAGE], [], 'gpt-x');
+  const user = req.messages[0] as { role: string; content: Array<{ type: string; image_url?: { url: string } }> };
+  assert.equal(user.role, 'user');
+  assert.deepEqual(user.content.map((part) => part.type), ['text', 'image_url']);
+  assert.equal(user.content[1].image_url?.url, 'data:image/png;base64,aW1n');
 });
 
 test('openai-chat: parses tool_calls', () => {
@@ -96,6 +121,15 @@ test('anthropic: system field + tool_use / tool_result blocks', () => {
   // tool result merged into a trailing user message
   const lastUser = req.messages[req.messages.length - 1];
   assert.equal(lastUser.content[0].type, 'tool_result');
+});
+
+test('anthropic: maps image parts to base64 image blocks', () => {
+  const req = buildAnthropicRequest([IMAGE_MESSAGE], [], { model: 'claude-x', maxTokens: 100 });
+  const user = req.messages[0];
+  assert.deepEqual(user.content.map((part) => part.type), ['text', 'image']);
+  const image = user.content[1] as { type: 'image'; source: { media_type: string; data: string } };
+  assert.equal(image.source.media_type, 'image/png');
+  assert.equal(image.source.data, 'aW1n');
 });
 
 test('anthropic: parses text + tool_use', () => {

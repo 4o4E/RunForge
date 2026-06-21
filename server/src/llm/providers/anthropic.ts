@@ -7,8 +7,18 @@ import { postJson } from '../http.js';
 
 type Block =
   | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
   | { type: 'tool_result'; tool_use_id: string; content: string };
+
+function userBlocks(m: LlmMessage): Block[] {
+  if (!m.contentParts?.length) return [{ type: 'text', text: m.content ?? '' }];
+  return m.contentParts.map((part) => (
+    part.type === 'text'
+      ? { type: 'text', text: part.text }
+      : { type: 'image', source: { type: 'base64', media_type: part.mimeType, data: part.data } }
+  ));
+}
 
 export function buildAnthropicRequest(
   messages: LlmMessage[],
@@ -24,7 +34,7 @@ export function buildAnthropicRequest(
   for (const m of messages) {
     if (m.role === 'system') continue;
     if (m.role === 'user') {
-      apiMessages.push({ role: 'user', content: [{ type: 'text', text: m.content ?? '' }] });
+      apiMessages.push({ role: 'user', content: userBlocks(m) });
     } else if (m.role === 'assistant') {
       const blocks: Block[] = [];
       if (m.content) blocks.push({ type: 'text', text: m.content });

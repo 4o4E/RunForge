@@ -43,6 +43,23 @@ test('toModelMessages: assistant without tool calls is a plain string', () => {
   assert.equal(out[0].content, 'plain');
 });
 
+test('toModelMessages: maps user image parts', () => {
+  const out = toModelMessages([
+    {
+      role: 'user',
+      content: 'look',
+      contentParts: [
+        { type: 'text', text: 'look' },
+        { type: 'image', data: 'aW1n', mimeType: 'image/png', path: 'photo.png' },
+      ],
+    },
+  ]);
+  const parts = out[0].content as Array<{ type: string; image?: string; mediaType?: string }>;
+  assert.deepEqual(parts.map((p) => p.type), ['text', 'image']);
+  assert.equal(parts[1].image, 'aW1n');
+  assert.equal(parts[1].mediaType, 'image/png');
+});
+
 test('toModelMessages: decodes string-wrapped tool-call object args', () => {
   const out = toModelMessages([
     { role: 'assistant', content: null, toolCalls: [{ id: 'x', name: 'shell', arguments: JSON.stringify('{"command":"ls"}') }] },

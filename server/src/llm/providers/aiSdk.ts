@@ -17,6 +17,7 @@ import {
   extractReasoningMiddleware,
   type ModelMessage,
   type TextPart,
+  type ImagePart,
   type ToolCallPart,
   type LanguageModel,
 } from 'ai';
@@ -86,7 +87,16 @@ export function toModelMessages(msgs: LlmMessage[]): ModelMessage[] {
         out.push({ role: 'system', content: m.content ?? '' });
         break;
       case 'user':
-        out.push({ role: 'user', content: m.content ?? '' });
+        if (m.contentParts?.length) {
+          const parts: Array<TextPart | ImagePart> = m.contentParts.map((part) => (
+            part.type === 'text'
+              ? { type: 'text', text: part.text }
+              : { type: 'image', image: part.data, mediaType: part.mimeType }
+          ));
+          out.push({ role: 'user', content: parts });
+        } else {
+          out.push({ role: 'user', content: m.content ?? '' });
+        }
         break;
       case 'assistant': {
         if (m.toolCalls && m.toolCalls.length) {

@@ -5,6 +5,19 @@ import { postJson, streamPost } from '../http.js';
 // For OpenAI-compatible vendors that don't speak the Responses API
 // (DeepSeek, Moonshot, vLLM, Ollama, ...).
 
+function imageDataUrl(data: string, mimeType: string): string {
+  return `data:${mimeType};base64,${data}`;
+}
+
+function chatUserContent(m: LlmMessage) {
+  if (!m.contentParts?.length) return m.content;
+  return m.contentParts.map((part) => (
+    part.type === 'text'
+      ? { type: 'text', text: part.text }
+      : { type: 'image_url', image_url: { url: imageDataUrl(part.data, part.mimeType) } }
+  ));
+}
+
 export function buildChatRequest(messages: LlmMessage[], tools: LlmTool[], model: string) {
   return {
     model,
@@ -22,6 +35,9 @@ export function buildChatRequest(messages: LlmMessage[], tools: LlmTool[], model
       }
       if (m.role === 'tool') {
         return { role: 'tool', tool_call_id: m.toolCallId, content: m.content };
+      }
+      if (m.role === 'user') {
+        return { role: 'user', content: chatUserContent(m) };
       }
       return { role: m.role, content: m.content };
     }),

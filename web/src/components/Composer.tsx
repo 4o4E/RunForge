@@ -195,8 +195,8 @@ export function Composer({
   }
 
   function handleSubmit(message: PromptInputMessage) {
-    const text = message.text?.trim();
-    if (!text || disabled || waitingForAskUser) return;
+    const text = message.text?.trim() ?? '';
+    if ((!text && !attachments.length) || disabled || waitingForAskUser) return;
     if (multilineDraft && promptFrameRef.current?.contains(document.activeElement)) {
       restorePromptFocusRef.current = true;
     }
@@ -333,7 +333,7 @@ export function Composer({
                         size="icon-sm"
                         className="!size-8 !p-0 shrink-0"
                         status={disabled && !waitingForAskUser ? 'streaming' : undefined}
-                        disabled={waitingForAskUser || (!disabled && !localDraft.trim())}
+                        disabled={waitingForAskUser || (!disabled && !localDraft.trim() && !attachments.length)}
                         onStop={onCancel}
                       />
                     </div>
@@ -380,7 +380,7 @@ export function Composer({
                       size="icon-sm"
                       className="!size-8 !p-0 shrink-0"
                       status={disabled && !waitingForAskUser ? 'streaming' : undefined}
-                      disabled={waitingForAskUser || (!disabled && !localDraft.trim())}
+                      disabled={waitingForAskUser || (!disabled && !localDraft.trim() && !attachments.length)}
                       onStop={onCancel}
                     />
                   </div>
