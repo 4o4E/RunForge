@@ -1,6 +1,6 @@
-# my-agent
+# RunForge
 
-`my-agent` 是一个通用 AI Agent 平台原型：用户提交自然语言任务后，后端启动一个自主 agent，在受控工作区中调用 LLM 和工具，循环执行直到完成，并把过程和结果实时展示在 Web 控制台。
+`RunForge` 是一个通用 AI Agent 平台原型：用户提交自然语言任务后，后端启动一个自主 agent，在受控工作区中调用 LLM 和工具，循环执行直到完成，并把过程和结果实时展示在 Web 控制台。
 
 项目目标不是做某个垂直领域助手，而是验证一套可扩展的 Cloud Agent Platform（云端 Agent 运行平台）基础能力：
 
@@ -83,7 +83,7 @@ AGENT_HARD_STEP_CAP=1000
 
 TOOL_SANDBOX=enforce
 TOOL_SANDBOX_BACKEND=bwrap
-TOOL_WORKSPACE_ROOT=/absolute/path/to/my-agent/workspace
+TOOL_WORKSPACE_ROOT=/absolute/path/to/RunForge/workspace
 TOOL_NETWORK=disabled
 TOOL_MAX_OUTPUT=40000
 ```
@@ -179,7 +179,7 @@ pnpm --filter server typecheck
 ## 项目结构
 
 ```text
-my-agent/
+RunForge/
 ├── server/              # Node.js / TypeScript 后端
 ├── web/                 # React / Vite 前端控制台
 ├── docs/                # 设计文档与实施日志
