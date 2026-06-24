@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { estimateTokens, maskOldAssistantToolCalls, maskOldToolResults, slidingWindow, totalChars } from './compaction.js';
+import { estimateTokens, maskOldAssistantToolCalls, maskOldToolResults, slidingWindow, summaryCandidate, totalChars } from './compaction.js';
 import type { LlmMessage } from '../llm/types.js';
 
 const big = (n: number) => 'x'.repeat(n);
@@ -126,6 +126,25 @@ test('slidingWindow keeps system + first user anchor and cuts on a safe boundary
   }
   // Result is smaller than the input.
   assert.ok(totalChars(messages) < totalChars(msgs));
+});
+
+test('summaryCandidate does not split assistant tool calls from later results', () => {
+  const msgs: LlmMessage[] = [
+    { role: 'system', content: 'sys' },
+    { role: 'user', content: 'original request' },
+    ...round('c1', 100),
+    ...round('c2', 100),
+    ...round('c3', 100),
+  ];
+
+  const candidate = summaryCandidate(msgs, { keepRecent: 1 });
+  assert.ok(candidate);
+  const summarized = new Set(candidate.messages);
+  for (const message of msgs) {
+    if (message.role !== 'tool') continue;
+    const parent = msgs.find((item) => item.toolCalls?.some((call) => call.id === message.toolCallId));
+    assert.equal(summarized.has(message), summarized.has(parent!));
+  }
 });
 
 test('slidingWindow never starts a window on an orphan tool message', () => {

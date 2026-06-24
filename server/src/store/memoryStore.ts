@@ -2,6 +2,7 @@ import type { AgentEvent, RunStatus } from '../agent/types.js';
 import type { LlmMessage } from '../llm/types.js';
 import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
+import { sanitizeThreadMessagesForModel } from './messageView.js';
 import type {
   RunRow,
   ShellActor,
@@ -190,7 +191,7 @@ export class MemoryStore implements Store {
   }
 
   async loadThreadMessages(threadId: string): Promise<ThreadMessage[]> {
-    return this.messages
+    const messages = this.messages
       .filter((m) => m.thread_id === threadId && m.collapsed !== 'summarized' && !isEphemeralSystemMessage(m.role, m.content))
       .sort((a, b) => (a.summaryOf?.[0] ?? a.seq) - (b.summaryOf?.[0] ?? b.seq))
       .map((m) => ({
@@ -204,6 +205,7 @@ export class MemoryStore implements Store {
         toolCallId: m.toolCallId,
         collapsed: m.collapsed,
       }));
+    return sanitizeThreadMessagesForModel(messages);
   }
   async countRunMessages(runId: string): Promise<number> {
     return this.messages.filter((m) => m.run_id === runId).length;

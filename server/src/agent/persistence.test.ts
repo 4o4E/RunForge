@@ -152,3 +152,39 @@ test('summary messages reload at the position of the folded rows', async () => {
   const reloaded = await store.loadThreadMessages(thread.id);
   assert.deepEqual(reloaded.map((m) => m.content), ['summary of old detail', 'recent detail']);
 });
+
+test('L3 summaries are promoted and orphan tool results are removed from model view', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run = await store.createRun(thread.id, 'task');
+
+  await store.addMessage(thread.id, run.id, null, { role: 'user', content: '继续' });
+  const assistant = await store.addMessage(thread.id, run.id, null, {
+    role: 'assistant',
+    content: null,
+    toolCalls: [{ id: 'search_1', name: 'web_search', arguments: '{}' }],
+  });
+  await store.addMessage(thread.id, run.id, null, { role: 'tool', content: '搜索结果', toolCallId: 'search_1' });
+  await store.addSummaryMessage(thread.id, run.id, null, { role: 'system', content: 'L3 锚定摘要：\n旧上下文摘要' }, [assistant]);
+  await store.markMessagesCollapsed([assistant], 'summarized');
+
+  const reloaded = await store.loadThreadMessages(thread.id);
+  assert.deepEqual(reloaded.map((m) => m.role), ['system', 'user']);
+  assert.match(reloaded[0].content ?? '', /^L3 锚定摘要/);
+});
+
+test('incomplete assistant tool calls stay visible for recovery', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run = await store.createRun(thread.id, 'task');
+
+  await store.addMessage(thread.id, run.id, null, {
+    role: 'assistant',
+    content: null,
+    toolCalls: [{ id: 'interrupted_1', name: 'shell_exec', arguments: '{}' }],
+  });
+
+  const reloaded = await store.loadThreadMessages(thread.id);
+  assert.equal(reloaded.length, 1);
+  assert.equal(reloaded[0].toolCalls?.[0]?.id, 'interrupted_1');
+});

@@ -3,6 +3,7 @@ import type { AgentEvent, RunStatus } from '../agent/types.js';
 import type { LlmMessage } from '../llm/types.js';
 import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
+import { sanitizeThreadMessagesForModel } from './messageView.js';
 import type {
   RunRow,
   ShellActor,
@@ -172,7 +173,7 @@ export class PgStore implements Store {
     );
     // Build the compacted LLM-facing view. The original content/tool args stay in
     // the DB; masked rows render placeholders, summarized rows are folded out.
-    return rows
+    const messages = rows
       .filter((r) => r.collapsed !== 'summarized' && !isEphemeralSystemMessage(r.role, r.content))
       .sort((a, b) => Number(a.summary_of?.[0] ?? a.id) - Number(b.summary_of?.[0] ?? b.id))
       .map((r) => ({
@@ -186,6 +187,7 @@ export class PgStore implements Store {
         toolCallId: r.tool_call_id ?? undefined,
         collapsed: r.collapsed ?? undefined,
       }));
+    return sanitizeThreadMessagesForModel(messages);
   }
 
   async addMessage(threadId: string, runId: string, stepId: string | null, msg: LlmMessage): Promise<number> {

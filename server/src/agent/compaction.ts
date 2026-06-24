@@ -136,6 +136,31 @@ function leadingSystem(messages: LlmMessage[]): number {
   return i;
 }
 
+function toolCallIds(message: LlmMessage): string[] {
+  return message.role === 'assistant' ? (message.toolCalls ?? []).map((call) => call.id) : [];
+}
+
+function summaryEndBeforeSplitToolRound(messages: LlmMessage[], protectedEnd: number, initialEnd: number): number {
+  let end = initialEnd;
+  while (end > protectedEnd) {
+    const parentIndexByCallId = new Map<string, number>();
+    for (let i = protectedEnd; i < end; i += 1) {
+      for (const id of toolCallIds(messages[i])) parentIndexByCallId.set(id, i);
+    }
+
+    let nextEnd = end;
+    for (let i = end; i < messages.length; i += 1) {
+      const message = messages[i];
+      if (message.role !== 'tool' || !message.toolCallId) continue;
+      const parentIndex = parentIndexByCallId.get(message.toolCallId);
+      if (parentIndex != null) nextEnd = Math.min(nextEnd, parentIndex);
+    }
+    if (nextEnd === end) return end;
+    end = nextEnd;
+  }
+  return end;
+}
+
 export interface WindowOptions {
   /** Minimum number of most-recent messages to keep. */
   keepRecent: number;
@@ -154,9 +179,10 @@ export function summaryCandidate(messages: LlmMessage[], opts: WindowOptions): S
   const protectedEnd = firstUserIdx >= 0 ? firstUserIdx + 1 : sysEnd;
   let end = Math.max(protectedEnd, messages.length - Math.max(0, opts.keepRecent));
 
-  // 摘要边界不能落在 tool 结果上，避免破坏 assistant tool_call 与 tool_result 的配对。
-  while (end > protectedEnd && messages[end - 1]?.role === 'assistant' && messages[end - 1]?.toolCalls?.length) end -= 1;
+  // 摘要边界不能拆开 assistant tool_call 与后续 tool_result 的配对。
+  end = summaryEndBeforeSplitToolRound(messages, protectedEnd, end);
   while (end > protectedEnd && messages[end - 1]?.role === 'tool') end -= 1;
+  while (end > protectedEnd && messages[end - 1]?.role === 'assistant' && messages[end - 1]?.toolCalls?.length) end -= 1;
 
   if (end <= protectedEnd) return null;
   const slice = messages.slice(protectedEnd, end);

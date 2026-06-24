@@ -178,6 +178,26 @@
     min-height: 2rem;
   }
 
+  .composer-multiline [data-slot='input-group'] {
+    align-items: flex-end;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    min-height: 6.25rem;
+    padding: 0.5rem;
+  }
+
+  .composer-multiline textarea[data-slot='input-group-control'] {
+    order: 0;
+  }
+
+  .composer-multiline .composer-attachment-control {
+    order: 1;
+  }
+
+  .composer-multiline .composer-actions {
+    order: 2;
+  }
+
   .right-panel-resize-preview {
     background-color: hsl(var(--foreground) / 0.75);
     bottom: 0;

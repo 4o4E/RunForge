@@ -1,9 +1,42 @@
-import { test } from 'node:test';
+import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { canReportGoal, finishGoal, initGoal, mergeGoal, parseGoalPatch, renderGoal, reportBlockedMessage } from './goal.js';
 import { executeRun } from './executor.js';
 import { MemoryStore } from '../store/memoryStore.js';
 import type { Provider } from '../llm/types.js';
+import type { ToolSettings } from '../settings.js';
+
+let testWorkspace = '';
+
+before(async () => {
+  testWorkspace = await mkdtemp(join(tmpdir(), 'my-agent-goal-'));
+});
+
+after(async () => {
+  await rm(testWorkspace, { recursive: true, force: true });
+});
+
+function testToolSettings(): ToolSettings {
+  return {
+    sandbox: 'enforce',
+    sandboxBackend: 'bwrap',
+    workspaceRoot: testWorkspace,
+    toolAccessMode: 'deny',
+    allow: [],
+    deny: [],
+    shellEnabled: true,
+    shellUseHostPath: true,
+    shellPathMode: 'system',
+    shellPath: process.env.PATH ?? '',
+    shellAllowCommands: ['git', 'ls', 'sed', 'python', 'node'],
+    network: 'enabled',
+    shellDeny: [],
+    maxOutput: 40000,
+  };
+}
 
 test('mergeGoal: plan/next replace, decisions append, missing unfinished items become failed', () => {
   const g0 = initGoal('build the thing');
@@ -127,7 +160,7 @@ test('executeRun: update_plan persists the goal anchor on the run', async () => 
     },
   };
 
-  await executeRun(run.id, { store, provider, publish: () => {}, hardStepCap: 5 });
+  await executeRun(run.id, { store, provider, publish: () => {}, hardStepCap: 5, toolSettings: testToolSettings() });
 
   const finished = await store.getRun(run.id);
   assert.equal(finished?.status, 'done');
@@ -182,7 +215,7 @@ test('executeRun: final report is blocked until plan items are settled', async (
     },
   };
 
-  await executeRun(run.id, { store, provider, publish: () => {}, hardStepCap: 5 });
+  await executeRun(run.id, { store, provider, publish: () => {}, hardStepCap: 5, toolSettings: testToolSettings() });
 
   const finished = await store.getRun(run.id);
   assert.equal(finished?.status, 'done');
