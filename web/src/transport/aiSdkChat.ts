@@ -236,7 +236,29 @@ export function uiEventStreamToChunks(
           case 'error': {
             closeText();
             closeReason();
-            safe({ type: 'error', errorText: e.message });
+            const id = `err-${e.step}`;
+            const errorText = `⚠️ 运行出错：${e.message}`;
+            // 这是后端 run 的业务失败，不是前端传输失败；用文本展示，避免 useChat 只进入 error 状态而不写入消息。
+            safe({ type: 'text-start', id });
+            openText = id;
+            safeTextDelta(id, errorText);
+            closeText();
+            safe({
+              type: 'data-stream-stats',
+              id: `stats-${runId}`,
+              data: {
+                stage: 'error',
+                updatedAt: new Date().toISOString(),
+                totals: {
+                  outputChars: errorText.length,
+                  reasoningChars: 0,
+                  toolInputChars: 0,
+                  toolOutputChars: 0,
+                  totalChars: errorText.length,
+                },
+                rate: { charsPerSecond: 0, history: [] },
+              },
+            } as unknown as UIMessageChunk);
             break;
           }
         }
