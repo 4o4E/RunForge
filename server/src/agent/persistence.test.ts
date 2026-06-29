@@ -188,3 +188,59 @@ test('incomplete assistant tool calls stay visible for recovery', async () => {
   assert.equal(reloaded.length, 1);
   assert.equal(reloaded[0].toolCalls?.[0]?.id, 'interrupted_1');
 });
+
+test('thread message view follows the active run branch only', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run1 = await store.createRun(thread.id, 'first');
+  await store.addMessage(thread.id, run1.id, null, { role: 'user', content: 'first' });
+  await store.addMessage(thread.id, run1.id, null, { role: 'assistant', content: 'answer first' });
+
+  const oldRun = await store.createRun(thread.id, 'second old');
+  await store.addMessage(thread.id, oldRun.id, null, { role: 'user', content: 'second old' });
+  await store.addMessage(thread.id, oldRun.id, null, { role: 'assistant', content: 'answer old' });
+  const oldLeaf = await store.createRun(thread.id, 'third old');
+  await store.addMessage(thread.id, oldLeaf.id, null, { role: 'user', content: 'third old' });
+
+  const editedRun = await store.createRun(thread.id, 'second edited', { parentRunId: run1.id });
+  await store.addMessage(thread.id, editedRun.id, null, { role: 'user', content: 'second edited' });
+
+  const activeView = await store.loadThreadMessages(thread.id);
+  assert.deepEqual(activeView.map((m) => m.content), ['first', 'answer first', 'second edited']);
+  assert.deepEqual((await store.listRuns(thread.id)).map((run) => run.id), [run1.id, oldRun.id, oldLeaf.id, editedRun.id]);
+
+  await store.updateThread(thread.id, { activeRunId: oldRun.id });
+  assert.equal((await store.getThread(thread.id))?.active_run_id, oldLeaf.id);
+  const oldView = await store.loadThreadMessages(thread.id);
+  assert.deepEqual(oldView.map((m) => m.content), ['first', 'answer first', 'second old', 'answer old', 'third old']);
+});
+
+test('forkThreadAtRun copies history up to the selected user message and records linked notices', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread('原对话');
+  const run1 = await store.createRun(thread.id, 'first');
+  await store.addMessage(thread.id, run1.id, null, { role: 'user', content: 'first' });
+  await store.addMessage(thread.id, run1.id, null, { role: 'assistant', content: 'answer first' });
+
+  const run2 = await store.createRun(thread.id, 'second');
+  await store.addMessage(thread.id, run2.id, null, { role: 'user', content: 'second' });
+  await store.addMessage(thread.id, run2.id, null, { role: 'assistant', content: 'answer second should not copy' });
+
+  const fork = await store.forkThreadAtRun(run2.id);
+  assert.ok(fork);
+  assert.notEqual(fork.thread.id, thread.id);
+
+  const forkView = await store.loadThreadMessages(fork.thread.id);
+  assert.deepEqual(forkView.map((m) => m.content), ['first', 'answer first', 'second']);
+  assert.ok(!forkView.some((m) => m.content?.includes('fork')));
+
+  const originalNotices = await store.listThreadNotices(thread.id);
+  const forkNotices = await store.listThreadNotices(fork.thread.id);
+  assert.equal(originalNotices.length, 1);
+  assert.equal(forkNotices.length, 1);
+  assert.equal(originalNotices[0].linked_thread_id, fork.thread.id);
+  assert.equal(forkNotices[0].linked_thread_id, thread.id);
+  assert.equal(forkNotices[0].title, '原对话');
+  assert.match(originalNotices[0].message, /fork 到新对话/);
+  assert.match(forkNotices[0].message, /fork 自/);
+});

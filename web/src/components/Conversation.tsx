@@ -1,5 +1,5 @@
 import type { UIMessage } from 'ai';
-import { Activity, Bot, Check, ChevronDown, Copy, Fingerprint, FileText, Workflow } from 'lucide-react';
+import { Activity, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Fingerprint, FileText, GitBranch, Pencil, Workflow } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import {
@@ -19,6 +19,7 @@ import { MarkdownContent } from './MarkdownContent';
 import type { StreamdownProps } from 'streamdown';
 import { AskUserQuestionCard, emptyAskUserDraft, type AskUserDraft } from './AskUserCard';
 import type { AskUserAnswer, AskUserSpec, GoalState, StreamStats } from '@/api';
+import type { RunBranchInfo, ThreadNoticeData } from '../history';
 
 type Part = UIMessage['parts'][number];
 type Timing = { startedAt?: string; endedAt?: string; durationMs?: number };
@@ -73,6 +74,7 @@ function isActivityPart(p: Part): boolean {
 
 function isHiddenDataPart(p: Part): boolean {
   return p.type === 'data-run-id'
+    || p.type === 'data-branch-info'
     || p.type === 'data-message-time'
     || p.type === 'data-tool-timing'
     || p.type === 'data-reasoning-timing'
@@ -80,6 +82,11 @@ function isHiddenDataPart(p: Part): boolean {
     || p.type === 'data-usage-update'
     || p.type === 'data-final-output'
     || p.type === 'data-plan-state';
+}
+
+function threadNoticeData(part: Part): ThreadNoticeData | null {
+  if (part.type !== 'data-thread-notice') return null;
+  return (part as { data?: ThreadNoticeData }).data ?? null;
 }
 
 function messageTime(message: UIMessage): string | null {
@@ -437,6 +444,38 @@ function PathAwareResponse({
   return <MarkdownContent text={linkedText} components={components} streaming={streaming} />;
 }
 
+function ThreadNotice({
+  notice,
+  onOpenThread,
+}: {
+  notice: ThreadNoticeData;
+  onOpenThread: (threadId: string) => void;
+}) {
+  const link = notice.linkedThreadId && notice.href ? (
+    <a
+      href={notice.href}
+      onClick={(event) => {
+        event.preventDefault();
+        if (notice.linkedThreadId) onOpenThread(notice.linkedThreadId);
+      }}
+      className="font-medium text-primary underline-offset-4 hover:underline"
+    >
+      {notice.threadTitle}
+    </a>
+  ) : (
+    <span className="font-medium">{notice.threadTitle}</span>
+  );
+
+  return (
+    <div className="inline-flex max-w-full items-center gap-1.5 rounded-md border bg-muted/60 px-2.5 py-1.5 text-sm text-muted-foreground">
+      <GitBranch className="size-3.5 shrink-0" />
+      <span className="min-w-0">
+        {notice.prefix} {link}{notice.suffix}
+      </span>
+    </div>
+  );
+}
+
 // `active` 标记最新工具调用；新工具出现时旧块自动折叠，用户手动切换会临时覆盖。
 function ToolBlock({
   part,
@@ -492,6 +531,7 @@ function AssistantPart({
   timingMaps,
   workspaceRoot,
   onOpenRemoteFile,
+  onOpenThread,
   runId,
   askUserDrafts,
   onAskUserDraftChange,
@@ -506,12 +546,16 @@ function AssistantPart({
   timingMaps: ReturnType<typeof buildTimingMaps>;
   workspaceRoot: string | null;
   onOpenRemoteFile: (path: string) => void;
+  onOpenThread: (threadId: string) => void;
   runId: string | null;
   askUserDrafts: Record<string, AskUserDraft>;
   onAskUserDraftChange: (runId: string, draft: AskUserDraft) => void;
   onAskUserSubmit: (runId: string, answer: AskUserAnswer) => void;
   onAskUserCancel: (runId: string) => void;
 }) {
+  const notice = threadNoticeData(part);
+  if (notice) return <ThreadNotice notice={notice} onOpenThread={onOpenThread} />;
+
   if (part.type === 'text') {
     const streaming = messageActive || (part as { state?: string }).state === 'streaming';
     return part.text ? (
@@ -582,6 +626,7 @@ function ActivityGroup({
   timingMaps,
   workspaceRoot,
   onOpenRemoteFile,
+  onOpenThread,
   runId,
   askUserDrafts,
   onAskUserDraftChange,
@@ -596,6 +641,7 @@ function ActivityGroup({
   timingMaps: ReturnType<typeof buildTimingMaps>;
   workspaceRoot: string | null;
   onOpenRemoteFile: (path: string) => void;
+  onOpenThread: (threadId: string) => void;
   runId: string | null;
   askUserDrafts: Record<string, AskUserDraft>;
   onAskUserDraftChange: (runId: string, draft: AskUserDraft) => void;
@@ -634,6 +680,7 @@ function ActivityGroup({
               timingMaps={timingMaps}
               workspaceRoot={workspaceRoot}
               onOpenRemoteFile={onOpenRemoteFile}
+              onOpenThread={onOpenThread}
               runId={runId}
               askUserDrafts={askUserDrafts}
               onAskUserDraftChange={onAskUserDraftChange}
@@ -663,6 +710,11 @@ function runIdFromAssistant(message: UIMessage | undefined): string | null {
 function runIdForUser(messages: UIMessage[], index: number): string | null {
   const fromId = messages[index]?.id?.endsWith(':u') ? messages[index].id.slice(0, -2) : null;
   return fromId || runIdFromAssistant(messages[index + 1]);
+}
+
+function branchInfoFromUser(message: UIMessage): RunBranchInfo | null {
+  const part = message.parts.find((p) => p.type === 'data-branch-info') as { data?: RunBranchInfo } | undefined;
+  return part?.data ?? null;
 }
 
 async function copyToClipboard(value: string): Promise<boolean> {
@@ -739,14 +791,72 @@ function UserMessageText({ message, onOpenRemoteFile }: { message: UIMessage; on
   );
 }
 
-function UserMessageFooter({ message, runId }: { message: UIMessage; runId: string | null }) {
+function UserMessageFooter({
+  message,
+  runId,
+  disabled,
+  onSwitchRunBranch,
+  onEditRunInput,
+  onForkFromRun,
+}: {
+  message: UIMessage;
+  runId: string | null;
+  disabled: boolean;
+  onSwitchRunBranch: (runId: string) => void;
+  onEditRunInput: (runId: string, currentText: string) => void;
+  onForkFromRun: (runId: string) => void;
+}) {
   const text = userText(message);
   const time = messageTime(message);
+  const branch = branchInfoFromUser(message);
+  const previousBranchId = branch && branch.activeIndex > 0 ? branch.siblingRunIds[branch.activeIndex - 1] : null;
+  const nextBranchId = branch && branch.activeIndex < branch.count - 1 ? branch.siblingRunIds[branch.activeIndex + 1] : null;
   const [copiedText, markCopiedText] = useCopyFeedback();
   return (
     <div className="ml-auto flex min-h-6 items-center justify-end gap-2 pr-1">
       {time && <span className="text-[11px] tabular-nums text-muted-foreground">{time}</span>}
       <MessageActions className="justify-end opacity-70 transition-opacity group-hover:opacity-100">
+        {branch && branch.count > 1 && (
+          <>
+            <MessageAction
+              tooltip="查看上一个分支"
+              label="查看上一个分支"
+              disabled={disabled || !previousBranchId}
+              onClick={() => previousBranchId && onSwitchRunBranch(previousBranchId)}
+            >
+              <ChevronLeft className="size-3.5" />
+            </MessageAction>
+            <span className="self-center text-[11px] tabular-nums text-muted-foreground">
+              {branch.activeIndex + 1}/{branch.count}
+            </span>
+            <MessageAction
+              tooltip="查看下一个分支"
+              label="查看下一个分支"
+              disabled={disabled || !nextBranchId}
+              onClick={() => nextBranchId && onSwitchRunBranch(nextBranchId)}
+            >
+              <ChevronRight className="size-3.5" />
+            </MessageAction>
+          </>
+        )}
+        {branch?.canEdit && (
+          <MessageAction
+            tooltip="修改后重新生成"
+            label="修改后重新生成"
+            disabled={disabled || !runId}
+            onClick={() => runId && onEditRunInput(runId, text)}
+          >
+            <Pencil className="size-3.5" />
+          </MessageAction>
+        )}
+        <MessageAction
+          tooltip="从此处继续"
+          label="从此处继续"
+          disabled={disabled || !runId}
+          onClick={() => runId && onForkFromRun(runId)}
+        >
+          <GitBranch className="size-3.5" />
+        </MessageAction>
         <MessageAction
           tooltip={copiedText ? '已复制' : '复制消息文本'}
           label="复制消息文本"
@@ -769,6 +879,7 @@ function AssistantMessage({
   lastActivityKey,
   workspaceRoot,
   onOpenRemoteFile,
+  onOpenThread,
   askUserDrafts,
   onAskUserDraftChange,
   onAskUserSubmit,
@@ -780,6 +891,7 @@ function AssistantMessage({
   lastActivityKey: string | null;
   workspaceRoot: string | null;
   onOpenRemoteFile: (path: string) => void;
+  onOpenThread: (threadId: string) => void;
   askUserDrafts: Record<string, AskUserDraft>;
   onAskUserDraftChange: (runId: string, draft: AskUserDraft) => void;
   onAskUserSubmit: (runId: string, answer: AskUserAnswer) => void;
@@ -804,6 +916,7 @@ function AssistantMessage({
         timingMaps={timingMaps}
         workspaceRoot={workspaceRoot}
         onOpenRemoteFile={onOpenRemoteFile}
+        onOpenThread={onOpenThread}
         runId={runId}
         askUserDrafts={askUserDrafts}
         onAskUserDraftChange={onAskUserDraftChange}
@@ -841,6 +954,7 @@ function AssistantMessage({
         timingMaps={timingMaps}
         workspaceRoot={workspaceRoot}
         onOpenRemoteFile={onOpenRemoteFile}
+        onOpenThread={onOpenThread}
         runId={runId}
         askUserDrafts={askUserDrafts}
         onAskUserDraftChange={onAskUserDraftChange}
@@ -864,10 +978,14 @@ export function Conversation({
   wide,
   workspaceRoot,
   onOpenRemoteFile,
+  onOpenThread,
   askUserDrafts,
   onAskUserDraftChange,
   onAskUserSubmit,
   onAskUserCancel,
+  onSwitchRunBranch,
+  onEditRunInput,
+  onForkFromRun,
   contentRef,
   embedded = false,
   showToc = true,
@@ -880,10 +998,14 @@ export function Conversation({
   workspaceRoot: string | null;
   contentRef: RefObject<HTMLDivElement | null>;
   onOpenRemoteFile: (path: string) => void;
+  onOpenThread: (threadId: string) => void;
   askUserDrafts: Record<string, AskUserDraft>;
   onAskUserDraftChange: (runId: string, draft: AskUserDraft) => void;
   onAskUserSubmit: (runId: string, answer: AskUserAnswer) => void;
   onAskUserCancel: (runId: string) => void;
+  onSwitchRunBranch: (runId: string) => void;
+  onEditRunInput: (runId: string, currentText: string) => void;
+  onForkFromRun: (runId: string) => void;
   embedded?: boolean;
   showToc?: boolean;
   emptyTitle?: string;
@@ -935,7 +1057,14 @@ export function Conversation({
                       <MessageContent>
                         <UserMessageText message={m} onOpenRemoteFile={onOpenRemoteFile} />
                       </MessageContent>
-                      <UserMessageFooter message={m} runId={runIdForUser(messages, index)} />
+                      <UserMessageFooter
+                        message={m}
+                        runId={runIdForUser(messages, index)}
+                        disabled={busy}
+                        onSwitchRunBranch={onSwitchRunBranch}
+                        onEditRunInput={onEditRunInput}
+                        onForkFromRun={onForkFromRun}
+                      />
                     </>
                   ) : (
                     <>
@@ -947,6 +1076,7 @@ export function Conversation({
                           lastActivityKey={lastActivityKey}
                           workspaceRoot={workspaceRoot}
                           onOpenRemoteFile={onOpenRemoteFile}
+                          onOpenThread={onOpenThread}
                           askUserDrafts={askUserDrafts}
                           onAskUserDraftChange={onAskUserDraftChange}
                           onAskUserSubmit={onAskUserSubmit}

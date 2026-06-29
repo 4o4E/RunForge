@@ -123,12 +123,12 @@ api.get('/threads/:id', async (req, res) => {
   const withEvents = await Promise.all(
     runs.map(async (run) => ({ ...run, events: await store.getEvents(run.id) })),
   );
-  res.json({ thread, runs: withEvents });
+  res.json({ thread, runs: withEvents, notices: await store.listThreadNotices(thread.id) });
 });
 
 // 更新 thread 元信息：重命名、置顶/取消置顶、归档/取消归档。
 api.patch('/threads/:id', async (req, res) => {
-  const fields: { title?: string | null; pinned?: boolean; archived?: boolean } = {};
+  const fields: { title?: string | null; pinned?: boolean; archived?: boolean; activeRunId?: string | null } = {};
   if (Object.prototype.hasOwnProperty.call(req.body ?? {}, 'title')) {
     const title = typeof req.body.title === 'string' ? req.body.title.trim() : '';
     fields.title = title || null;
@@ -137,6 +137,9 @@ api.patch('/threads/:id', async (req, res) => {
   if (pinned !== undefined) fields.pinned = pinned;
   const archived = optionalBoolean(req.body?.archived);
   if (archived !== undefined) fields.archived = archived;
+  if (Object.prototype.hasOwnProperty.call(req.body ?? {}, 'activeRunId')) {
+    fields.activeRunId = optionalText(req.body.activeRunId);
+  }
   if (!Object.keys(fields).length) return res.status(400).json({ error: '缺少可更新字段' });
   const thread = await store.updateThread(req.params.id, fields);
   if (!thread) return res.status(404).json({ error: 'thread 不存在' });
@@ -170,7 +173,12 @@ api.post('/threads/:id/runs', async (req, res) => {
     return res.status(400).json({ error: (err as Error).message });
   }
 
-  const run = await store.createRun(thread.id, input, { modelRef });
+  let run;
+  try {
+    run = await store.createRun(thread.id, input, { modelRef, parentRunId: optionalText(req.body?.parentRunId) ?? undefined });
+  } catch (err) {
+    return res.status(400).json({ error: (err as Error).message });
+  }
   // 后台执行：agent 循环在当前进程内运行，并通过 WebSocket 推送事件。
   void executeRun(run.id);
   res.status(201).json({ id: run.id, threadId: thread.id, status: run.status });
@@ -184,6 +192,45 @@ api.get('/runs/:id', async (req, res) => {
   if (!run) return res.status(404).json({ error: 'run 不存在' });
   const events = await store.getEvents(run.id);
   res.json({ run, events });
+});
+
+// 从某条历史 run 的父节点创建新分支。旧 run 和其后续分支都保留，但不会进入新 run 上下文。
+api.post('/runs/:id/branch', async (req, res) => {
+  const source = await store.getRun(req.params.id);
+  if (!source) return res.status(404).json({ error: 'run 不存在' });
+  const thread = await store.getThread(source.thread_id);
+  if (!thread) return res.status(404).json({ error: 'thread 不存在' });
+  if (thread.active_run_id !== source.id) {
+    return res.status(409).json({ error: '只能修改当前分支最后一条用户消息' });
+  }
+  if (source.status === 'pending' || source.status === 'running' || source.status === 'canceling') {
+    return res.status(409).json({ error: `run 当前状态为 ${source.status}，暂不能分支重跑` });
+  }
+  const input = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'input')
+    ? String(req.body?.input ?? '').trim()
+    : source.input;
+  if (!input) return res.status(400).json({ error: 'input 为必填' });
+  let modelRef: string | null = source.model_ref;
+  try {
+    if (Object.prototype.hasOwnProperty.call(req.body ?? {}, 'modelRef')) {
+      modelRef = await validateRunModelRef(optionalText(req.body?.modelRef));
+    }
+  } catch (err) {
+    return res.status(400).json({ error: (err as Error).message });
+  }
+  const run = await store.createRun(source.thread_id, input, { modelRef, parentRunId: source.parent_run_id });
+  void executeRun(run.id);
+  res.status(201).json({ id: run.id, threadId: source.thread_id, status: run.status });
+});
+
+// 从指定用户消息 fork 出新对话：复制当前分支从开头到该用户消息，关联提示只用于 UI 展示。
+api.post('/runs/:id/fork', async (req, res) => {
+  const fork = await store.forkThreadAtRun(req.params.id);
+  if (!fork) return res.status(404).json({ error: 'run 不存在' });
+  res.status(201).json({
+    thread: fork.thread,
+    activeRun: { ...fork.activeRun, events: await store.getEvents(fork.activeRun.id) },
+  });
 });
 
 // 取消 run。运行中的 run 走协作式取消；等待用户回答时 executor 已暂停，

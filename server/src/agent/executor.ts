@@ -429,7 +429,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
   async function runLoop(): Promise<void> {
     const existingMessageCount = await store.countRunMessages(runId);
     const isResume = resume || existingMessageCount > 0;
-    let prior = await store.loadThreadMessages(threadId);
+    let prior = await store.loadThreadMessages(threadId, { runId });
     let nextStepIdx = (await store.getLastStepIndex(runId)) + 1;
 
     // 恢复时如果进程死在工具执行中间，库里可能只有 assistant tool_call，
@@ -443,7 +443,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         await store.addMessage(threadId, runId, null, { role: 'tool', content, toolCallId: call.id });
         await emit(null, { type: 'recovery', step: Math.max(1, nextStepIdx), message: content });
       }
-      if (missing.length) prior = await store.loadThreadMessages(threadId);
+      if (missing.length) prior = await store.loadThreadMessages(threadId, { runId });
     }
 
     // Goal 锚点每步重新注入；恢复时优先使用已落库状态，避免目标回退。

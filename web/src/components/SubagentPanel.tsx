@@ -125,6 +125,8 @@ export function SubagentPanel({ open, threadId, subagentId, workspaceRoot, onOpe
   const noopDraft = useCallback(() => {}, []);
   const noopSubmit = useCallback((_runId: string, _answer: AskUserAnswer) => {}, []);
   const noopCancel = useCallback(() => {}, []);
+  const noopRun = useCallback((_runId: string) => {}, []);
+  const noopEdit = useCallback((_runId: string, _currentText: string) => {}, []);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
@@ -161,9 +163,13 @@ export function SubagentPanel({ open, threadId, subagentId, workspaceRoot, onOpe
           contentRef={contentRef}
           askUserDrafts={askUserDrafts}
           onOpenRemoteFile={onOpenRemoteFile}
+          onOpenThread={noopRun}
           onAskUserDraftChange={noopDraft}
           onAskUserSubmit={noopSubmit}
           onAskUserCancel={noopCancel}
+          onSwitchRunBranch={noopRun}
+          onEditRunInput={noopEdit}
+          onForkFromRun={noopRun}
         />
       </div>
     </div>

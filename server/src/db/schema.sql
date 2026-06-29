@@ -4,6 +4,7 @@
 CREATE TABLE IF NOT EXISTS threads (
   id          TEXT PRIMARY KEY,
   title       TEXT,
+  active_run_id TEXT,
   pinned_at   TIMESTAMPTZ,
   archived_at TIMESTAMPTZ,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -11,6 +12,8 @@ CREATE TABLE IF NOT EXISTS threads (
 );
 
 -- 会话列表状态：置顶只影响排序，归档只从默认列表隐藏，不删除历史数据。
+-- active_run_id 指向当前查看/继续的分支叶子；旧分支保留但不进入后续上下文。
+ALTER TABLE threads ADD COLUMN IF NOT EXISTS active_run_id TEXT;
 ALTER TABLE threads ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ;
 ALTER TABLE threads ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 
@@ -18,6 +21,7 @@ ALTER TABLE threads ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 CREATE TABLE IF NOT EXISTS runs (
   id          TEXT PRIMARY KEY,
   thread_id   TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+  parent_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
   status      TEXT NOT NULL DEFAULT 'pending',   -- pending | running | waiting_for_user | done | error | canceling | canceled
   input       TEXT NOT NULL,
   model_ref   TEXT,                              -- 本次 run 固定使用的 provider:model；为空时使用运行时默认模型
@@ -31,6 +35,46 @@ CREATE TABLE IF NOT EXISTS runs (
 -- Goal anchor (long-task design §3.2). Idempotent for existing DBs.
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS goal_state JSONB;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS model_ref TEXT;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS parent_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL;
+
+-- 旧库上线分支前是线性 run 列表；首次迁移时按时间顺序补父子关系。
+WITH legacy_edges AS (
+  SELECT
+    r.id,
+    lag(r.id) OVER (PARTITION BY r.thread_id ORDER BY r.created_at, r.id) AS previous_id
+  FROM runs r
+  JOIN threads t ON t.id = r.thread_id
+  WHERE t.active_run_id IS NULL
+)
+UPDATE runs r
+SET parent_run_id = e.previous_id
+FROM legacy_edges e
+WHERE r.id = e.id
+  AND r.parent_run_id IS NULL
+  AND e.previous_id IS NOT NULL;
+
+-- 旧库没有分支指针时，把当前分支初始化为该 thread 最新 run，保持历史视图兼容。
+UPDATE threads t
+SET active_run_id = (
+  SELECT r.id
+  FROM runs r
+  WHERE r.thread_id = t.id
+  ORDER BY r.created_at DESC, r.id DESC
+  LIMIT 1
+)
+WHERE t.active_run_id IS NULL
+  AND EXISTS (SELECT 1 FROM runs r WHERE r.thread_id = t.id);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'threads_active_run_id_fkey'
+  ) THEN
+    ALTER TABLE threads
+      ADD CONSTRAINT threads_active_run_id_fkey
+      FOREIGN KEY (active_run_id) REFERENCES runs(id) ON DELETE SET NULL;
+  END IF;
+END $$;
 
 -- One step = one iteration of the agent loop (one LLM turn + its tool calls)
 CREATE TABLE IF NOT EXISTS steps (
@@ -70,12 +114,28 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_thread ON runs(thread_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_runs_thread_parent ON runs(thread_id, parent_run_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_steps_run ON steps(run_id, idx);
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, id);
 CREATE INDEX IF NOT EXISTS idx_messages_run ON messages(run_id, id);
 CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, id);
 CREATE INDEX IF NOT EXISTS idx_threads_created ON threads(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_threads_sidebar ON threads(archived_at, pinned_at DESC, updated_at DESC, created_at DESC);
+
+-- 只用于 UI 展示的会话提示，不进入 messages，也不会进入模型上下文。
+CREATE TABLE IF NOT EXISTS thread_notices (
+  id               BIGSERIAL PRIMARY KEY,
+  thread_id        TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+  kind             TEXT NOT NULL DEFAULT 'info',
+  message          TEXT NOT NULL,
+  title            TEXT,
+  linked_thread_id TEXT REFERENCES threads(id) ON DELETE SET NULL,
+  linked_run_id    TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE thread_notices ADD COLUMN IF NOT EXISTS title TEXT;
+CREATE INDEX IF NOT EXISTS idx_thread_notices_thread ON thread_notices(thread_id, created_at, id);
 
 -- subagent run 是父 run 内部派发的独立子任务。v1 先记录 workflow stage、
 -- task assignment、runtime profile 和最终输出，后续再扩展为可用工具的子 agent loop。

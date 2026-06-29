@@ -5,15 +5,28 @@ import type { LlmMessage } from '../llm/types.js';
 export interface ThreadRow {
   id: string;
   title: string | null;
+  active_run_id: string | null;
   pinned_at: string | null;
   archived_at: string | null;
   created_at: string;
   updated_at: string;
 }
 
+export interface ThreadNoticeRow {
+  id: number;
+  thread_id: string;
+  kind: string;
+  message: string;
+  title: string | null;
+  linked_thread_id: string | null;
+  linked_run_id: string | null;
+  created_at: string;
+}
+
 export interface RunRow {
   id: string;
   thread_id: string;
+  parent_run_id: string | null;
   status: RunStatus;
   input: string;
   model_ref: string | null;
@@ -144,12 +157,22 @@ export interface Store {
   listThreads(limit?: number, options?: { archived?: boolean }): Promise<ThreadRow[]>;
   updateThread(
     id: string,
-    fields: { title?: string | null; pinned?: boolean; archived?: boolean },
+    fields: { title?: string | null; pinned?: boolean; archived?: boolean; activeRunId?: string | null },
   ): Promise<ThreadRow | null>;
   deleteThread(id: string): Promise<boolean>;
   searchThreadMessages(query: string, limit?: number): Promise<ThreadSearchResultRow[]>;
+  listThreadNotices(threadId: string): Promise<ThreadNoticeRow[]>;
+  addThreadNotice(input: {
+    threadId: string;
+    kind?: string;
+    message: string;
+    title?: string | null;
+    linkedThreadId?: string | null;
+    linkedRunId?: string | null;
+  }): Promise<ThreadNoticeRow>;
+  forkThreadAtRun(sourceRunId: string): Promise<{ thread: ThreadRow; activeRun: RunRow } | null>;
 
-  createRun(threadId: string, input: string, options?: { modelRef?: string | null }): Promise<RunRow>;
+  createRun(threadId: string, input: string, options?: { modelRef?: string | null; parentRunId?: string | null }): Promise<RunRow>;
   getRun(id: string): Promise<RunRow | null>;
   listRuns(threadId: string): Promise<RunRow[]>;
   listRunsByStatus(statuses: RunStatus[]): Promise<RunRow[]>;
@@ -162,7 +185,7 @@ export interface Store {
 
   /** Conversation history for a thread, in order, as the compacted LLM-facing view:
    *  masked tool results return their placeholder, 'summarized' rows are omitted. */
-  loadThreadMessages(threadId: string): Promise<ThreadMessage[]>;
+  loadThreadMessages(threadId: string, options?: { runId?: string | null }): Promise<ThreadMessage[]>;
   countRunMessages(runId: string): Promise<number>;
   /** Append a message; returns its DB id so compaction can reference it later. */
   addMessage(threadId: string, runId: string, stepId: string | null, msg: LlmMessage): Promise<number>;

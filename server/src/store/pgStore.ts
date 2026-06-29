@@ -1,4 +1,4 @@
-import { query } from '../db/pool.js';
+import { pool, query } from '../db/pool.js';
 import type { AgentEvent, RunStatus } from '../agent/types.js';
 import type { LlmMessage } from '../llm/types.js';
 import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
@@ -14,6 +14,7 @@ import type {
   Store,
   SubagentRunRow,
   StepRow,
+  ThreadNoticeRow,
   ThreadMessage,
   ThreadSearchResultRow,
   ThreadRow,
@@ -50,16 +51,53 @@ export class PgStore implements Store {
     return rows;
   }
 
-  async updateThread(id: string, fields: { title?: string | null; pinned?: boolean; archived?: boolean }): Promise<ThreadRow | null> {
+  async updateThread(id: string, fields: { title?: string | null; pinned?: boolean; archived?: boolean; activeRunId?: string | null }): Promise<ThreadRow | null> {
+    let activeRunId = fields.activeRunId ?? null;
+    if (fields.activeRunId) {
+      const { rows: runRows } = await query<{ id: string }>(
+        `WITH RECURSIVE subtree AS (
+           SELECT id, parent_run_id, created_at
+           FROM runs
+           WHERE id = $1 AND thread_id = $2
+
+           UNION ALL
+
+           SELECT child.id, child.parent_run_id, child.created_at
+           FROM runs child
+           JOIN subtree parent ON child.parent_run_id = parent.id
+           WHERE child.thread_id = $2
+         ),
+         leaf_runs AS (
+           SELECT run.id, run.created_at
+           FROM subtree run
+           WHERE NOT EXISTS (
+             SELECT 1 FROM subtree child WHERE child.parent_run_id = run.id
+           )
+         )
+         SELECT id FROM leaf_runs ORDER BY created_at DESC, id DESC LIMIT 1`,
+        [fields.activeRunId, id],
+      );
+      if (!runRows.length) return null;
+      activeRunId = runRows[0].id;
+    }
     const { rows } = await query<ThreadRow>(
       `UPDATE threads
        SET title = CASE WHEN $2 THEN $3 ELSE title END,
            pinned_at = CASE WHEN $4::boolean IS NULL THEN pinned_at WHEN $4 THEN COALESCE(pinned_at, now()) ELSE NULL END,
            archived_at = CASE WHEN $5::boolean IS NULL THEN archived_at WHEN $5 THEN COALESCE(archived_at, now()) ELSE NULL END,
+           active_run_id = CASE WHEN $6 THEN $7 ELSE active_run_id END,
            updated_at = now()
        WHERE id = $1
        RETURNING *`,
-      [id, Object.prototype.hasOwnProperty.call(fields, 'title'), fields.title ?? null, fields.pinned ?? null, fields.archived ?? null],
+      [
+        id,
+        Object.prototype.hasOwnProperty.call(fields, 'title'),
+        fields.title ?? null,
+        fields.pinned ?? null,
+        fields.archived ?? null,
+        Object.prototype.hasOwnProperty.call(fields, 'activeRunId'),
+        activeRunId,
+      ],
     );
     return rows[0] ?? null;
   }
@@ -101,13 +139,253 @@ export class PgStore implements Store {
     return rows.map((row) => ({ ...row, message_id: Number(row.message_id) }));
   }
 
-  async createRun(threadId: string, input: string, options: { modelRef?: string | null } = {}): Promise<RunRow> {
-    const id = newRunId();
-    const { rows } = await query<RunRow>(
-      `INSERT INTO runs (id, thread_id, status, input, model_ref) VALUES ($1, $2, 'pending', $3, $4) RETURNING *`,
-      [id, threadId, input, options.modelRef ?? null],
+  async listThreadNotices(threadId: string): Promise<ThreadNoticeRow[]> {
+    const { rows } = await query<ThreadNoticeRow>(
+      `SELECT * FROM thread_notices WHERE thread_id = $1 ORDER BY created_at, id`,
+      [threadId],
     );
-    await query(`UPDATE threads SET updated_at = now() WHERE id = $1`, [threadId]);
+    return rows;
+  }
+
+  async addThreadNotice(input: {
+    threadId: string;
+    kind?: string;
+    message: string;
+    title?: string | null;
+    linkedThreadId?: string | null;
+    linkedRunId?: string | null;
+  }): Promise<ThreadNoticeRow> {
+    const { rows } = await query<ThreadNoticeRow>(
+      `INSERT INTO thread_notices (thread_id, kind, message, title, linked_thread_id, linked_run_id)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING *`,
+      [input.threadId, input.kind ?? 'info', input.message, input.title ?? null, input.linkedThreadId ?? null, input.linkedRunId ?? null],
+    );
+    return rows[0];
+  }
+
+  async forkThreadAtRun(sourceRunId: string): Promise<{ thread: ThreadRow; activeRun: RunRow } | null> {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows: sourceRows } = await client.query<RunRow>(
+        `SELECT * FROM runs WHERE id = $1`,
+        [sourceRunId],
+      );
+      const source = sourceRows[0];
+      if (!source) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const { rows: sourceThreadRows } = await client.query<ThreadRow>(
+        `SELECT * FROM threads WHERE id = $1`,
+        [source.thread_id],
+      );
+      const sourceThread = sourceThreadRows[0];
+      if (!sourceThread) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+
+      const { rows: pathRows } = await client.query<RunRow & { depth: number }>(
+        `WITH RECURSIVE branch AS (
+           SELECT r.*, 1 AS depth
+           FROM runs r
+           WHERE r.id = $1
+
+           UNION ALL
+
+           SELECT parent.*, child.depth + 1 AS depth
+           FROM runs parent
+           JOIN branch child ON child.parent_run_id = parent.id
+           WHERE parent.thread_id = child.thread_id
+         )
+         SELECT * FROM branch ORDER BY depth DESC`,
+        [sourceRunId],
+      );
+
+      const forkThreadId = newThreadId();
+      const forkTitle = sourceThread.title ? `${sourceThread.title} 的 fork` : 'Fork 对话';
+      const { rows: newThreadRows } = await client.query<ThreadRow>(
+        `INSERT INTO threads (id, title) VALUES ($1, $2) RETURNING *`,
+        [forkThreadId, forkTitle],
+      );
+      const newThread = newThreadRows[0];
+      const runIdMap = new Map<string, string>();
+      const stepIdMap = new Map<string, string>();
+      const messageIdMap = new Map<number, number>();
+      let activeRun: RunRow | null = null;
+
+      for (const oldRun of pathRows) {
+        const newRunIdValue = newRunId();
+        runIdMap.set(oldRun.id, newRunIdValue);
+        const parentRunId = oldRun.parent_run_id ? runIdMap.get(oldRun.parent_run_id) ?? null : null;
+        const isSourceRun = oldRun.id === sourceRunId;
+        const { rows: runRows } = await client.query<RunRow>(
+          `INSERT INTO runs (
+             id, thread_id, parent_run_id, status, input, model_ref, output, error, goal_state, created_at, updated_at
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
+           RETURNING *`,
+          [
+            newRunIdValue,
+            forkThreadId,
+            parentRunId,
+            isSourceRun ? 'done' : oldRun.status,
+            oldRun.input,
+            oldRun.model_ref,
+            isSourceRun ? null : oldRun.output,
+            isSourceRun ? null : oldRun.error,
+            oldRun.goal_state ? JSON.stringify(oldRun.goal_state) : null,
+            oldRun.created_at,
+            oldRun.updated_at,
+          ],
+        );
+        const newRun = runRows[0];
+        activeRun = newRun;
+
+        if (!isSourceRun) {
+          const { rows: oldSteps } = await client.query<StepRow>(
+            `SELECT * FROM steps WHERE run_id = $1 ORDER BY idx`,
+            [oldRun.id],
+          );
+          for (const oldStep of oldSteps) {
+            const newStepIdValue = newStepId();
+            stepIdMap.set(oldStep.id, newStepIdValue);
+            await client.query(
+              `INSERT INTO steps (id, run_id, idx, created_at) VALUES ($1, $2, $3, $4)`,
+              [newStepIdValue, newRunIdValue, oldStep.idx, oldStep.created_at],
+            );
+          }
+        }
+
+        const { rows: oldMessages } = await client.query<{
+          id: string;
+          step_id: string | null;
+          role: LlmMessage['role'];
+          content: string | null;
+          tool_calls: LlmMessage['toolCalls'] | null;
+          tool_call_id: string | null;
+          collapsed: string | null;
+          summary_of: string[] | null;
+          created_at: string;
+        }>(
+          isSourceRun
+            ? `SELECT * FROM messages WHERE run_id = $1 AND step_id IS NULL AND role = 'user' ORDER BY id LIMIT 1`
+            : `SELECT * FROM messages WHERE run_id = $1 ORDER BY id`,
+          [oldRun.id],
+        );
+        for (const oldMessage of oldMessages) {
+          const mappedSummaryOf = oldMessage.summary_of
+            ?.map((id) => messageIdMap.get(Number(id)))
+            .filter((id): id is number => id != null);
+          const { rows: inserted } = await client.query<{ id: string }>(
+            `INSERT INTO messages (
+               thread_id, run_id, step_id, role, content, tool_calls, tool_call_id, collapsed, summary_of, created_at
+             )
+             VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9::bigint[], $10)
+             RETURNING id`,
+            [
+              forkThreadId,
+              newRunIdValue,
+              oldMessage.step_id ? stepIdMap.get(oldMessage.step_id) ?? null : null,
+              oldMessage.role,
+              oldMessage.content,
+              oldMessage.tool_calls ? JSON.stringify(oldMessage.tool_calls) : null,
+              oldMessage.tool_call_id,
+              oldMessage.collapsed,
+              mappedSummaryOf?.length ? mappedSummaryOf : null,
+              oldMessage.created_at,
+            ],
+          );
+          messageIdMap.set(Number(oldMessage.id), Number(inserted[0].id));
+        }
+
+        if (!isSourceRun) {
+          const { rows: oldEvents } = await client.query<{
+            step_id: string | null;
+            idx: number;
+            type: string;
+            data: AgentEvent;
+            created_at: string;
+          }>(
+            `SELECT step_id, idx, type, data, created_at FROM events WHERE run_id = $1 ORDER BY id`,
+            [oldRun.id],
+          );
+          for (const oldEvent of oldEvents) {
+            await client.query(
+              `INSERT INTO events (run_id, step_id, idx, type, data, created_at)
+               VALUES ($1, $2, $3, $4, $5::jsonb, $6)`,
+              [
+                newRunIdValue,
+                oldEvent.step_id ? stepIdMap.get(oldEvent.step_id) ?? null : null,
+                oldEvent.idx,
+                oldEvent.type,
+                JSON.stringify(oldEvent.data),
+                oldEvent.created_at,
+              ],
+            );
+          }
+        }
+      }
+
+      if (!activeRun) throw new Error('fork 未生成 active run');
+      await client.query(`UPDATE threads SET active_run_id = $2, updated_at = now() WHERE id = $1`, [forkThreadId, activeRun.id]);
+      const originalMessage = '已从本消息 fork 到新对话。';
+      const forkMessage = '此对话 fork 自原对话。';
+      const sourceTitle = sourceThread.title ?? '未命名对话';
+      await client.query(
+        `INSERT INTO thread_notices (thread_id, kind, message, title, linked_thread_id, linked_run_id)
+         VALUES ($1, 'fork_to', $2, $3, $4, $5), ($6, 'fork_from', $7, $8, $9, $10)`,
+        [
+          source.thread_id,
+          originalMessage,
+          forkTitle,
+          forkThreadId,
+          sourceRunId,
+          forkThreadId,
+          forkMessage,
+          sourceTitle,
+          source.thread_id,
+          activeRun.id,
+        ],
+      );
+      await client.query('COMMIT');
+      const refreshedThread = await this.getThread(forkThreadId);
+      return refreshedThread ? { thread: refreshedThread, activeRun } : { thread: newThread, activeRun };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async createRun(threadId: string, input: string, options: { modelRef?: string | null; parentRunId?: string | null } = {}): Promise<RunRow> {
+    const id = newRunId();
+    let parentRunId = options.parentRunId;
+    if (parentRunId === undefined) {
+      const { rows } = await query<{ active_run_id: string | null }>(`SELECT active_run_id FROM threads WHERE id = $1`, [threadId]);
+      parentRunId = rows[0]?.active_run_id ?? null;
+      if (!parentRunId) {
+        const legacy = await query<{ id: string }>(
+          `SELECT id FROM runs WHERE thread_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`,
+          [threadId],
+        );
+        parentRunId = legacy.rows[0]?.id ?? null;
+      }
+    }
+    if (parentRunId) {
+      const { rows } = await query<{ id: string }>(`SELECT id FROM runs WHERE id = $1 AND thread_id = $2`, [parentRunId, threadId]);
+      if (!rows.length) throw new Error('parentRunId 不属于当前 thread');
+    }
+    const { rows } = await query<RunRow>(
+      `INSERT INTO runs (id, thread_id, parent_run_id, status, input, model_ref)
+       VALUES ($1, $2, $3, 'pending', $4, $5)
+       RETURNING *`,
+      [id, threadId, parentRunId ?? null, input, options.modelRef ?? null],
+    );
+    await query(`UPDATE threads SET active_run_id = $2, updated_at = now() WHERE id = $1`, [threadId, id]);
     return rows[0];
   }
 
@@ -158,7 +436,8 @@ export class PgStore implements Store {
     return rows[0]?.idx ?? 0;
   }
 
-  async loadThreadMessages(threadId: string): Promise<ThreadMessage[]> {
+  async loadThreadMessages(threadId: string, options: { runId?: string | null } = {}): Promise<ThreadMessage[]> {
+    const targetRunId = options.runId ?? null;
     const { rows } = await query<{
       id: string;
       role: LlmMessage['role'];
@@ -168,8 +447,41 @@ export class PgStore implements Store {
       collapsed: 'masked' | 'summarized' | null;
       summary_of: string[] | null;
     }>(
-      `SELECT id, role, content, tool_calls, tool_call_id, collapsed, summary_of FROM messages WHERE thread_id = $1 ORDER BY id`,
-      [threadId],
+      `WITH RECURSIVE selected_run AS (
+         SELECT COALESCE($2::text, active_run_id) AS id
+         FROM threads
+         WHERE id = $1
+       ),
+       branch_runs AS (
+         SELECT r.id, r.parent_run_id, 1 AS depth
+         FROM runs r
+         JOIN selected_run s ON s.id = r.id
+         WHERE r.thread_id = $1
+
+         UNION ALL
+
+         SELECT parent.id, parent.parent_run_id, child.depth + 1
+         FROM runs parent
+         JOIN branch_runs child ON child.parent_run_id = parent.id
+         WHERE parent.thread_id = $1
+       ),
+       fallback_runs AS (
+         SELECT id, NULL::text AS parent_run_id, 0 AS depth
+         FROM runs
+         WHERE thread_id = $1
+           AND NOT EXISTS (SELECT 1 FROM selected_run WHERE id IS NOT NULL)
+       ),
+       visible_runs AS (
+         SELECT id FROM branch_runs
+         UNION
+         SELECT id FROM fallback_runs
+       )
+       SELECT m.id, m.role, m.content, m.tool_calls, m.tool_call_id, m.collapsed, m.summary_of
+       FROM messages m
+       JOIN visible_runs vr ON vr.id = m.run_id
+       WHERE m.thread_id = $1
+       ORDER BY m.id`,
+      [threadId, targetRunId],
     );
     // Build the compacted LLM-facing view. The original content/tool args stay in
     // the DB; masked rows render placeholders, summarized rows are folded out.

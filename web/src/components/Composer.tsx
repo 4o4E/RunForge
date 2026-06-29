@@ -5,7 +5,7 @@ import {
   type PromptInputMessage,
 } from '@/components/ai-elements/prompt-input';
 import { Button } from '@/components/ui/button';
-import { FileUp, Folder, FolderUp, Paperclip, RefreshCw, Terminal } from 'lucide-react';
+import { FileUp, Folder, FolderUp, Paperclip, RefreshCw, Terminal, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ClipboardEvent as ReactClipboardEvent, DragEvent as ReactDragEvent } from 'react';
@@ -40,10 +40,12 @@ interface Props {
   usage: UsageSnapshot | null;
   modelOptions: LlmModelOption[];
   selectedModelRef: string;
+  editingRunId: string | null;
   onDraftChange: (text: string) => void;
   onModelChange: (modelRef: string) => void;
   onSend: (text: string, modelRef: string) => void;
   onCancel: () => void;
+  onCancelEdit: () => void;
   onRemoveAttachment: (path: string) => void;
   onOpenRemoteFiles: () => void;
   onUploadLocal: (file: File, path: string) => Promise<void>;
@@ -155,10 +157,12 @@ export function Composer({
   usage,
   modelOptions,
   selectedModelRef,
+  editingRunId,
   onDraftChange,
   onModelChange,
   onSend,
   onCancel,
+  onCancelEdit,
   onRemoveAttachment,
   onOpenRemoteFiles,
   onUploadLocal,
@@ -366,6 +370,17 @@ export function Composer({
                     {att.size != null ? ` · ${formatSize(att.size)}` : ''}
                   </button>
                 ))}
+              </div>
+            )}
+            {editingRunId && !waitingQuestion && (
+              <div className="mb-2 flex min-w-0 items-center gap-2 rounded-md border border-foreground/20 bg-muted px-3 py-2 text-sm">
+                <div className="min-w-0 flex-1">
+                  <div className="font-medium">正在修改上一条消息</div>
+                  <div className="mt-0.5 truncate text-muted-foreground">发送后会基于修改后的内容重新生成当前回复。</div>
+                </div>
+                <Button type="button" variant="ghost" size="icon-sm" onClick={onCancelEdit} title="取消修改">
+                  <X className="size-4" />
+                </Button>
               </div>
             )}
             {waitingQuestion && (

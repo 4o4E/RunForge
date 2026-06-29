@@ -34,10 +34,12 @@ interface Props {
   attachments: ComposerAttachment[];
   modelOptions: LlmModelOption[];
   selectedModelRef: string;
+  editingRunId: string | null;
   onDraftChange: (text: string) => void;
   onModelChange: (modelRef: string) => void;
   onSend: (text: string, modelRef: string) => void;
   onCancel: () => void;
+  onCancelEdit: () => void;
   onToggleWide: () => void;
   onRemoveAttachment: (path: string) => void;
   rightPanelOpen: boolean;
@@ -49,9 +51,13 @@ interface Props {
   onOpenRemoteFiles: () => void;
   onUploadLocal: (file: File, path: string) => Promise<void>;
   onOpenRemoteFile: (path: string) => void;
+  onOpenThread: (threadId: string) => void;
   onAskUserDraftChange: (runId: string, draft: AskUserDraft) => void;
   onAskUserSubmit: (runId: string, answer: AskUserAnswer) => void;
   onAskUserCancel: (runId: string) => void;
+  onSwitchRunBranch: (runId: string) => void;
+  onEditRunInput: (runId: string, currentText: string) => void;
+  onForkFromRun: (runId: string) => void;
 }
 
 export function ChatView({
@@ -68,10 +74,12 @@ export function ChatView({
   attachments,
   modelOptions,
   selectedModelRef,
+  editingRunId,
   onDraftChange,
   onModelChange,
   onSend,
   onCancel,
+  onCancelEdit,
   onToggleWide,
   onRemoveAttachment,
   rightPanelOpen,
@@ -83,9 +91,13 @@ export function ChatView({
   onOpenRemoteFiles,
   onUploadLocal,
   onOpenRemoteFile,
+  onOpenThread,
   onAskUserDraftChange,
   onAskUserSubmit,
   onAskUserCancel,
+  onSwitchRunBranch,
+  onEditRunInput,
+  onForkFromRun,
 }: Props) {
   const showStatusCard = rightPanelOpen ? statusCardOpen : !statusCardOpen;
   const usage = latestUsageFromMessages(messages);
@@ -162,9 +174,13 @@ export function ChatView({
           contentRef={contentRef}
           askUserDrafts={askUserDrafts}
           onOpenRemoteFile={onOpenRemoteFile}
+          onOpenThread={onOpenThread}
           onAskUserDraftChange={onAskUserDraftChange}
           onAskUserSubmit={onAskUserSubmit}
           onAskUserCancel={onAskUserCancel}
+          onSwitchRunBranch={onSwitchRunBranch}
+          onEditRunInput={onEditRunInput}
+          onForkFromRun={onForkFromRun}
           showToc={false}
         />
       </div>
@@ -178,10 +194,12 @@ export function ChatView({
         usage={usage}
         modelOptions={modelOptions}
         selectedModelRef={selectedModelRef}
+        editingRunId={editingRunId}
         onDraftChange={onDraftChange}
         onModelChange={onModelChange}
         onSend={onSend}
         onCancel={onCancel}
+        onCancelEdit={onCancelEdit}
         onRemoveAttachment={onRemoveAttachment}
         onOpenRemoteFiles={onOpenRemoteFiles}
         onUploadLocal={onUploadLocal}

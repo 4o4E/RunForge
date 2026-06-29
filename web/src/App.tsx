@@ -5,8 +5,10 @@ import { useChat } from '@ai-sdk/react';
 import type { UIMessage } from 'ai';
 import {
   answerRun,
+  branchRun,
   cancelRun,
   deleteThread,
+  forkThreadFromRun,
   getLlmSettings,
   getPageState,
   getRemoteFileInfo,
@@ -281,6 +283,23 @@ function liveRunFrom(runs: RunWithEvents[]): RunWithEvents | null {
   return [...runs].reverse().find((r) => r.status === 'pending' || r.status === 'running' || r.status === 'canceling') ?? null;
 }
 
+function activeBranchRuns(runs: RunWithEvents[], activeRunId: string | null): RunWithEvents[] {
+  if (!activeRunId) return runs;
+  const byId = new Map(runs.map((run) => [run.id, run]));
+  const path: RunWithEvents[] = [];
+  const seen = new Set<string>();
+  let cursor: string | null = activeRunId;
+  while (cursor) {
+    if (seen.has(cursor)) break;
+    seen.add(cursor);
+    const run = byId.get(cursor);
+    if (!run) return runs;
+    path.push(run);
+    cursor = run.parent_run_id;
+  }
+  return path.reverse();
+}
+
 function isRightTabId(value: unknown): value is RightTabId {
   return value === 'files'
     || (typeof value === 'string' && (value.startsWith('file:') || value.startsWith('shell:') || value.startsWith('subagent:')));
@@ -380,6 +399,7 @@ export function App() {
   const [reattachedRunId, setReattachedRunId] = useState<string | null>(null);
   const [waitingRun, setWaitingRun] = useState<{ id: string; spec: AskUserSpec } | null>(null);
   const [resumingRunId, setResumingRunId] = useState<string | null>(null);
+  const [editingRunId, setEditingRunId] = useState<string | null>(null);
   const [askUserDrafts, setAskUserDrafts] = useState<Record<string, AskUserDraft>>({});
   const [pageStateLoaded, setPageStateLoaded] = useState(false);
   const activeThreadId = route.threadId;
@@ -661,9 +681,9 @@ export function App() {
     if (busy || !activeThreadId) return;
     let canceled = false;
     getThread(activeThreadId)
-      .then(({ runs }) => {
+      .then(({ thread, runs }) => {
         if (canceled) return;
-        setWaitingRun(waitingRunFrom(runs));
+        setWaitingRun(waitingRunFrom(activeBranchRuns(runs, thread.active_run_id)));
       })
       .catch(() => {});
     return () => {
@@ -734,11 +754,12 @@ export function App() {
     }
 
     getThread(activeThreadId)
-      .then(({ runs }) => {
+      .then(({ thread, runs, notices }) => {
         if (!canceled) {
-          setMessages(runsToUiMessages(runs));
-          setWaitingRun(waitingRunFrom(runs));
-          const liveRun = liveRunFrom(runs);
+          const branchRuns = activeBranchRuns(runs, thread.active_run_id);
+          setMessages(runsToUiMessages(runs, thread.active_run_id, notices));
+          setWaitingRun(waitingRunFrom(branchRuns));
+          const liveRun = liveRunFrom(branchRuns);
           reattachedEventsRef.current = liveRun?.events ?? [];
           setReattachedRunId(liveRun?.id ?? null);
           if (liveRun) setActiveRunId(liveRun.id);
@@ -768,11 +789,12 @@ export function App() {
     };
     const refreshLiveRun = () => {
       void getThread(activeThreadId)
-        .then(({ runs }) => {
+        .then(({ thread, runs, notices }) => {
           if (canceled) return;
-          setMessages(runsToUiMessages(runs));
-          setWaitingRun(waitingRunFrom(runs));
-          const liveRun = liveRunFrom(runs);
+          const branchRuns = activeBranchRuns(runs, thread.active_run_id);
+          setMessages(runsToUiMessages(runs, thread.active_run_id, notices));
+          setWaitingRun(waitingRunFrom(branchRuns));
+          const liveRun = liveRunFrom(branchRuns);
           reattachedEventsRef.current = liveRun?.events ?? [];
           setReattachedRunId(liveRun?.id ?? null);
           setActiveRunId(liveRun?.id ?? null);
@@ -803,6 +825,7 @@ export function App() {
 
   function newChat() {
     stop();
+    setEditingRunId(null);
     if (activeThreadId) rememberThreadDraft(activeThreadId, draftRef.current);
     navigateChatRoute({ draft: '', threadId: null });
     setMessages([]);
@@ -810,6 +833,7 @@ export function App() {
 
   function selectThread(id: string) {
     stop();
+    setEditingRunId(null);
     if (activeThreadId) rememberThreadDraft(activeThreadId, draftRef.current);
     navigateChatRoute({ draft: threadDraftsRef.current[id] ?? '', threadId: id });
   }
@@ -884,10 +908,11 @@ export function App() {
 
   const refreshActiveThread = useCallback(() => {
     if (!activeThreadId) return;
-    void getThread(activeThreadId).then(({ runs }) => {
-      setMessages(runsToUiMessages(runs));
-      setWaitingRun(waitingRunFrom(runs));
-      const liveRun = liveRunFrom(runs);
+    void getThread(activeThreadId).then(({ thread, runs, notices }) => {
+      const branchRuns = activeBranchRuns(runs, thread.active_run_id);
+      setMessages(runsToUiMessages(runs, thread.active_run_id, notices));
+      setWaitingRun(waitingRunFrom(branchRuns));
+      const liveRun = liveRunFrom(branchRuns);
       reattachedEventsRef.current = liveRun?.events ?? [];
       setReattachedRunId(liveRun?.id ?? null);
       setActiveRunId(liveRun?.id ?? null);
@@ -958,6 +983,111 @@ export function App() {
       });
   }, [refreshActiveThread, refreshThreads]);
 
+  const subscribeBranchedRun = useCallback((runId: string) => {
+    setWaitingRun(null);
+    setReattachedRunId(null);
+    setResumingRunId(runId);
+    setActiveRunId(runId);
+    let unsubscribe = () => {};
+    const events: AgentEvent[] = [];
+    let renderFrame = 0;
+    const flushEvents = () => {
+      renderFrame = 0;
+      setMessages((current) => replaceAssistantMessage(current, runId, events));
+    };
+    unsubscribe = subscribeRun(
+      runId,
+      (event) => {
+        events.push(event);
+        if (renderFrame) return;
+        renderFrame = window.requestAnimationFrame(flushEvents);
+      },
+      () => {
+        if (renderFrame) {
+          window.cancelAnimationFrame(renderFrame);
+          flushEvents();
+        }
+        unsubscribe();
+        refreshActiveThread();
+        setResumingRunId(null);
+        setActiveRunId(null);
+        refreshThreads();
+      },
+    );
+  }, [refreshActiveThread, refreshThreads, setMessages]);
+
+  const switchRunBranch = useCallback((runId: string) => {
+    if (!activeThreadId || busy) return;
+    setEditingRunId(null);
+    draftRef.current = '';
+    setComposerDraft('');
+    rememberThreadDraftRef(activeThreadId, '');
+    replaceDraftRouteLater(activeThreadId, '');
+    void updateThread(activeThreadId, { activeRunId: runId })
+      .then(() => {
+        refreshActiveThread();
+        refreshThreads();
+      })
+      .catch((err) => console.error('switch branch failed', err));
+  }, [activeThreadId, busy, rememberThreadDraftRef, refreshActiveThread, refreshThreads, replaceDraftRouteLater]);
+
+  const regenerateRun = useCallback((runId: string, input?: string) => {
+    if (busy) return;
+    void branchRun(runId, input)
+      .then(({ id }) => {
+        refreshActiveThread();
+        subscribeBranchedRun(id);
+      })
+      .catch((err) => {
+        console.error('branch run failed', err);
+        refreshActiveThread();
+      });
+  }, [busy, refreshActiveThread, subscribeBranchedRun]);
+
+  const forkFromRun = useCallback((runId: string) => {
+    if (busy) return;
+    setEditingRunId(null);
+    draftRef.current = '';
+    setComposerDraft('');
+    if (activeThreadId) {
+      rememberThreadDraftRef(activeThreadId, '');
+      replaceDraftRouteLater(activeThreadId, '');
+    }
+    void forkThreadFromRun(runId)
+      .then(({ thread }) => {
+        refreshThreads();
+        navigateChatRoute({ draft: '', threadId: thread.id });
+      })
+      .catch((err) => {
+        console.error('fork thread failed', err);
+        refreshActiveThread();
+      });
+  }, [activeThreadId, busy, navigateChatRoute, rememberThreadDraftRef, refreshActiveThread, refreshThreads, replaceDraftRouteLater]);
+
+  const editRunInput = useCallback((runId: string, currentText: string) => {
+    if (busy) return;
+    setAttachments([]);
+    setEditingRunId(runId);
+    draftRef.current = currentText;
+    setComposerDraft(currentText);
+    if (activeThreadId) {
+      rememberThreadDraftRef(activeThreadId, currentText);
+      scheduleThreadDraftSync();
+    }
+    replaceDraftRouteLater(activeThreadId, currentText);
+  }, [activeThreadId, busy, rememberThreadDraftRef, replaceDraftRouteLater, scheduleThreadDraftSync]);
+
+  const cancelEditRunInput = useCallback(() => {
+    setEditingRunId(null);
+    draftRef.current = '';
+    setComposerDraft('');
+    if (activeThreadId) {
+      rememberThreadDraftRef(activeThreadId, '');
+      scheduleThreadDraftSync();
+    }
+    replaceDraftRouteLater(activeThreadId, '');
+  }, [activeThreadId, rememberThreadDraftRef, replaceDraftRouteLater, scheduleThreadDraftSync]);
+
   function send(text: string, modelRef: string) {
     if (waitingRun) return;
     const finalText = attachments.length
@@ -969,6 +1099,12 @@ export function App() {
     setComposerDraft('');
     navigateChatRoute({ draft: '', threadId: activeThreadId }, 'replace');
     setAttachments([]);
+    if (editingRunId) {
+      const runId = editingRunId;
+      setEditingRunId(null);
+      regenerateRun(runId, finalText);
+      return;
+    }
     void sendMessage({ text: finalText });
   }
 
@@ -1092,10 +1228,12 @@ export function App() {
           attachments={attachments}
           modelOptions={modelOptions}
           selectedModelRef={selectedModelRef}
+          editingRunId={editingRunId}
           onDraftChange={changeDraft}
           onModelChange={rememberSelectedModelRef}
           onSend={send}
           onCancel={cancelActiveRun}
+          onCancelEdit={cancelEditRunInput}
           onToggleWide={() => setWide((v) => !v)}
           onRemoveAttachment={(path) => setAttachments((current) => current.filter((a) => a.path !== path))}
           rightPanelOpen={rightPanelVisible}
@@ -1107,9 +1245,13 @@ export function App() {
           onOpenRemoteFiles={() => openRightTab('files')}
           onUploadLocal={uploadLocalAttachment}
           onOpenRemoteFile={openRemoteFile}
+          onOpenThread={selectThread}
           onAskUserDraftChange={(runId, next) => setAskUserDrafts((current) => ({ ...current, [runId]: next }))}
           onAskUserSubmit={resumeWithAnswer}
           onAskUserCancel={cancelAskUser}
+          onSwitchRunBranch={switchRunBranch}
+          onEditRunInput={editRunInput}
+          onForkFromRun={forkFromRun}
         />
       )}
       {activeView === 'chat' && (

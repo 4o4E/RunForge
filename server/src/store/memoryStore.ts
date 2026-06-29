@@ -13,6 +13,7 @@ import type {
   Store,
   SubagentRunRow,
   StepRow,
+  ThreadNoticeRow,
   ThreadMessage,
   ThreadSearchResultRow,
   ThreadRow,
@@ -47,6 +48,7 @@ export class MemoryStore implements Store {
   private shellCommands = new Map<string, ShellCommandRow>();
   private shellLogs = new Map<string, ShellCommandLogRow[]>();
   private subagentRuns = new Map<string, SubagentRunRow>();
+  private threadNotices = new Map<string, ThreadNoticeRow[]>();
   private seq = 0;
   private shellLogSeq = 0;
   private now = () => new Date().toISOString();
@@ -55,6 +57,7 @@ export class MemoryStore implements Store {
     const row: ThreadRow = {
       id: newThreadId(),
       title: title ?? null,
+      active_run_id: null,
       pinned_at: null,
       archived_at: null,
       created_at: this.now(),
@@ -80,15 +83,21 @@ export class MemoryStore implements Store {
       })
       .slice(0, limit);
   }
-  async updateThread(id: string, fields: { title?: string | null; pinned?: boolean; archived?: boolean }) {
+  async updateThread(id: string, fields: { title?: string | null; pinned?: boolean; archived?: boolean; activeRunId?: string | null }) {
     const thread = this.threads.get(id);
     if (!thread) return null;
+    let activeRunId = fields.activeRunId ?? null;
+    if (fields.activeRunId) {
+      activeRunId = this.resolveBranchLeafRunId(id, fields.activeRunId);
+      if (!activeRunId) return null;
+    }
     const now = this.now();
     const next: ThreadRow = {
       ...thread,
       title: Object.prototype.hasOwnProperty.call(fields, 'title') ? fields.title ?? null : thread.title,
       pinned_at: fields.pinned === undefined ? thread.pinned_at : fields.pinned ? thread.pinned_at ?? now : null,
       archived_at: fields.archived === undefined ? thread.archived_at : fields.archived ? thread.archived_at ?? now : null,
+      active_run_id: Object.prototype.hasOwnProperty.call(fields, 'activeRunId') ? activeRunId : thread.active_run_id,
       updated_at: now,
     };
     this.threads.set(id, next);
@@ -114,6 +123,7 @@ export class MemoryStore implements Store {
     }
     this.steps = this.steps.filter((s) => !runIds.has(s.run_id));
     this.messages = this.messages.filter((m) => m.thread_id !== id);
+    this.threadNotices.delete(id);
     return true;
   }
 
@@ -139,10 +149,137 @@ export class MemoryStore implements Store {
       }));
   }
 
-  async createRun(threadId: string, input: string, options: { modelRef?: string | null } = {}): Promise<RunRow> {
+  async listThreadNotices(threadId: string): Promise<ThreadNoticeRow[]> {
+    return [...(this.threadNotices.get(threadId) ?? [])];
+  }
+
+  async addThreadNotice(input: {
+    threadId: string;
+    kind?: string;
+    message: string;
+    title?: string | null;
+    linkedThreadId?: string | null;
+    linkedRunId?: string | null;
+  }): Promise<ThreadNoticeRow> {
+    const row: ThreadNoticeRow = {
+      id: this.seq++,
+      thread_id: input.threadId,
+      kind: input.kind ?? 'info',
+      message: input.message,
+      title: input.title ?? null,
+      linked_thread_id: input.linkedThreadId ?? null,
+      linked_run_id: input.linkedRunId ?? null,
+      created_at: this.now(),
+    };
+    this.threadNotices.set(input.threadId, [...(this.threadNotices.get(input.threadId) ?? []), row]);
+    return row;
+  }
+
+  async forkThreadAtRun(sourceRunId: string): Promise<{ thread: ThreadRow; activeRun: RunRow } | null> {
+    const source = this.runs.get(sourceRunId);
+    if (!source) return null;
+    const sourceThread = this.threads.get(source.thread_id);
+    if (!sourceThread) return null;
+
+    const path: RunRow[] = [];
+    const seen = new Set<string>();
+    let cursor: string | null = source.id;
+    while (cursor) {
+      if (seen.has(cursor)) break;
+      seen.add(cursor);
+      const run = this.runs.get(cursor);
+      if (!run || run.thread_id !== source.thread_id) break;
+      path.push(run);
+      cursor = run.parent_run_id;
+    }
+    path.reverse();
+
+    const newThread = await this.createThread(sourceThread.title ? `${sourceThread.title} 的 fork` : 'Fork 对话');
+    const runIdMap = new Map<string, string>();
+    const stepIdMap = new Map<string, string>();
+    const messageIdMap = new Map<number, number>();
+    let activeRun: RunRow | null = null;
+
+    for (const oldRun of path) {
+      const parentRunId = oldRun.parent_run_id ? runIdMap.get(oldRun.parent_run_id) ?? null : null;
+      const isSourceRun = oldRun.id === source.id;
+      const newRun = await this.createRun(newThread.id, oldRun.input, { modelRef: oldRun.model_ref, parentRunId });
+      newRun.status = isSourceRun ? 'done' : oldRun.status;
+      newRun.output = isSourceRun ? null : oldRun.output;
+      newRun.error = isSourceRun ? null : oldRun.error;
+      newRun.goal_state = oldRun.goal_state;
+      newRun.created_at = oldRun.created_at;
+      newRun.updated_at = oldRun.updated_at;
+      runIdMap.set(oldRun.id, newRun.id);
+      activeRun = newRun;
+
+      if (!isSourceRun) {
+        for (const oldStep of this.steps.filter((step) => step.run_id === oldRun.id).sort((a, b) => a.idx - b.idx)) {
+          const newStep: StepRow = { ...oldStep, id: newStepId(), run_id: newRun.id };
+          this.steps.push(newStep);
+          stepIdMap.set(oldStep.id, newStep.id);
+        }
+      }
+
+      const oldMessages = this.messages
+        .filter((message) => (
+          message.run_id === oldRun.id
+          && (!isSourceRun || (message.step_id === null && message.role === 'user'))
+        ))
+        .sort((a, b) => a.seq - b.seq);
+      for (const oldMessage of oldMessages) {
+        const seq = this.seq++;
+        const copied: StoredMsg = {
+          ...oldMessage,
+          thread_id: newThread.id,
+          run_id: newRun.id,
+          step_id: oldMessage.step_id ? stepIdMap.get(oldMessage.step_id) ?? null : null,
+          summaryOf: oldMessage.summaryOf?.map((id) => messageIdMap.get(id)).filter((id): id is number => id != null),
+          seq,
+        };
+        this.messages.push(copied);
+        messageIdMap.set(oldMessage.seq, seq);
+      }
+
+      if (!isSourceRun) {
+        const oldEvents = this.events.get(oldRun.id) ?? [];
+        this.events.set(newRun.id, [...oldEvents]);
+      }
+    }
+
+    if (!activeRun) return null;
+    newThread.active_run_id = activeRun.id;
+    newThread.updated_at = this.now();
+    await this.addThreadNotice({
+      threadId: source.thread_id,
+      kind: 'fork_to',
+      message: '已从本消息 fork 到新对话。',
+      title: newThread.title ?? '新对话',
+      linkedThreadId: newThread.id,
+      linkedRunId: source.id,
+    });
+    await this.addThreadNotice({
+      threadId: newThread.id,
+      kind: 'fork_from',
+      message: '此对话 fork 自原对话。',
+      title: sourceThread.title ?? '未命名对话',
+      linkedThreadId: source.thread_id,
+      linkedRunId: activeRun.id,
+    });
+    return { thread: newThread, activeRun };
+  }
+
+  async createRun(threadId: string, input: string, options: { modelRef?: string | null; parentRunId?: string | null } = {}): Promise<RunRow> {
+    const thread = this.threads.get(threadId);
+    const threadRuns = [...this.runs.values()].filter((r) => r.thread_id === threadId);
+    const parentRunId = options.parentRunId === undefined
+      ? thread?.active_run_id ?? threadRuns[threadRuns.length - 1]?.id ?? null
+      : options.parentRunId;
+    if (parentRunId && this.runs.get(parentRunId)?.thread_id !== threadId) throw new Error('parentRunId 不属于当前 thread');
     const row: RunRow = {
       id: newRunId(),
       thread_id: threadId,
+      parent_run_id: parentRunId ?? null,
       status: 'pending',
       input,
       model_ref: options.modelRef ?? null,
@@ -153,13 +290,42 @@ export class MemoryStore implements Store {
       updated_at: this.now(),
     };
     this.runs.set(row.id, row);
+    if (thread) {
+      thread.active_run_id = row.id;
+      thread.updated_at = this.now();
+    }
     return row;
   }
+
+  private resolveBranchLeafRunId(threadId: string, selectedRunId: string): string | null {
+    const selected = this.runs.get(selectedRunId);
+    if (!selected || selected.thread_id !== threadId) return null;
+    const runs = [...this.runs.values()].filter((run) => run.thread_id === threadId);
+    const childrenByParent = new Map<string | null, RunRow[]>();
+    for (const run of runs) {
+      childrenByParent.set(run.parent_run_id, [...(childrenByParent.get(run.parent_run_id) ?? []), run]);
+    }
+    const subtree: RunRow[] = [];
+    const stack = [selected];
+    const seen = new Set<string>();
+    while (stack.length) {
+      const run = stack.pop()!;
+      if (seen.has(run.id)) continue;
+      seen.add(run.id);
+      subtree.push(run);
+      stack.push(...(childrenByParent.get(run.id) ?? []));
+    }
+    const subtreeIds = new Set(subtree.map((run) => run.id));
+    return subtree
+      .filter((run) => !(childrenByParent.get(run.id) ?? []).some((child) => subtreeIds.has(child.id)))
+      .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.id.localeCompare(a.id))[0]?.id ?? selectedRunId;
+  }
+
   async getRun(id: string) {
     return this.runs.get(id) ?? null;
   }
   async listRuns(threadId: string) {
-    return [...this.runs.values()].filter((r) => r.thread_id === threadId);
+    return [...this.runs.values()].filter((r) => r.thread_id === threadId).sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
   }
   async listRunsByStatus(statuses: RunStatus[]) {
     const set = new Set(statuses);
@@ -190,9 +356,26 @@ export class MemoryStore implements Store {
     return this.steps.filter((s) => s.run_id === runId).reduce((max, s) => Math.max(max, s.idx), 0);
   }
 
-  async loadThreadMessages(threadId: string): Promise<ThreadMessage[]> {
+  private branchRunIds(threadId: string, runId?: string | null): Set<string> {
+    const thread = this.threads.get(threadId);
+    let cursor = runId ?? thread?.active_run_id ?? null;
+    if (!cursor) {
+      return new Set([...this.runs.values()].filter((run) => run.thread_id === threadId).map((run) => run.id));
+    }
+    const ids = new Set<string>();
+    while (cursor) {
+      const run = this.runs.get(cursor);
+      if (!run || run.thread_id !== threadId || ids.has(run.id)) break;
+      ids.add(run.id);
+      cursor = run.parent_run_id;
+    }
+    return ids;
+  }
+
+  async loadThreadMessages(threadId: string, options: { runId?: string | null } = {}): Promise<ThreadMessage[]> {
+    const branchRunIds = this.branchRunIds(threadId, options.runId);
     const messages = this.messages
-      .filter((m) => m.thread_id === threadId && m.collapsed !== 'summarized' && !isEphemeralSystemMessage(m.role, m.content))
+      .filter((m) => branchRunIds.has(m.run_id) && m.thread_id === threadId && m.collapsed !== 'summarized' && !isEphemeralSystemMessage(m.role, m.content))
       .sort((a, b) => (a.summaryOf?.[0] ?? a.seq) - (b.summaryOf?.[0] ?? b.seq))
       .map((m) => ({
         id: m.seq,

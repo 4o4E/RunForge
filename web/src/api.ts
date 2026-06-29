@@ -31,6 +31,7 @@ import type {
   SubagentRun,
   Thread,
   ThreadDetailResponse,
+  ThreadForkResponse,
   ThreadSearchResponse,
   ThreadUpdateInput,
   ToolSettings,
@@ -257,6 +258,16 @@ export const startRun = (threadId: string, input: string, modelRef?: string) =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ input, modelRef }),
   }).then(json<{ id: string }>);
+
+export const branchRun = (runId: string, input?: string, modelRef?: string | null) =>
+  fetch(`/api/runs/${runId}/branch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ input, modelRef }),
+  }).then(json<{ id: string; threadId: string; status: string }>);
+
+export const forkThreadFromRun = (runId: string) =>
+  fetch(`/api/runs/${runId}/fork`, { method: 'POST' }).then(json<ThreadForkResponse>);
 
 export const cancelRun = (runId: string) =>
   fetch(`/api/runs/${runId}/cancel`, { method: 'POST' }).then(json<{ id: string; status: 'canceling' | 'canceled' }>);
