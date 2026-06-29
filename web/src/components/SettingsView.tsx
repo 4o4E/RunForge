@@ -464,6 +464,19 @@ function defaultLlmProvider(index: number): LlmProviderSettings {
   };
 }
 
+let llmProviderUiKeySeq = 0;
+
+function createLlmProviderUiKey(): string {
+  llmProviderUiKeySeq += 1;
+  return `llm-provider-${llmProviderUiKeySeq}`;
+}
+
+function reconcileLlmProviderUiKeys(keys: string[], count: number): string[] {
+  if (keys.length === count) return keys;
+  if (keys.length > count) return keys.slice(0, count);
+  return [...keys, ...Array.from({ length: count - keys.length }, () => createLlmProviderUiKey())];
+}
+
 function statusVariant(status: string): 'default' | 'secondary' | 'destructive' | 'outline' {
   if (status === 'active' || status === 'idle' || status === 'released') return 'secondary';
   if (status === 'leased') return 'default';
@@ -1451,12 +1464,15 @@ function LlmSettingsPanel() {
   const [chatDialog, setChatDialog] = useState<LlmChatDialogState | null>(null);
   const [chatTesting, setChatTesting] = useState(false);
   const [modelGroupOpen, setModelGroupOpen] = useState<Record<string, boolean>>({});
+  const [providerOpen, setProviderOpen] = useState<Record<string, boolean>>({});
+  const [providerUiKeys, setProviderUiKeys] = useState<string[]>([]);
 
   useEffect(() => {
     let canceled = false;
     Promise.all([getLlmSettings(), getLlmSettingsOptions()])
       .then(([data, nextOptions]) => {
         if (canceled) return;
+        setProviderUiKeys(reconcileLlmProviderUiKeys([], data.providers.length));
         setSettings(data);
         setOptions(nextOptions);
       })
@@ -1467,6 +1483,11 @@ function LlmSettingsPanel() {
       canceled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!settings) return;
+    setProviderUiKeys((current) => reconcileLlmProviderUiKeys(current, settings.providers.length));
+  }, [settings?.providers.length]);
 
   const modelOptions = useMemo(() => {
     if (settings) return llmOptionsFromSettings(settings);
@@ -1488,28 +1509,28 @@ function LlmSettingsPanel() {
     setSettings({ ...settings, providers, defaultModelRef });
   }
 
-  function providerKey(provider: LlmProviderSettings, index: number): string {
-    return `${index}:${provider.id}`;
+  function providerKey(index: number): string {
+    return providerUiKeys[index] ?? `llm-provider-pending-${index}`;
   }
 
-  function modelGroupKey(provider: LlmProviderSettings, index: number, prefix: string): string {
-    return `${providerKey(provider, index)}:${prefix}`;
+  function modelGroupKey(index: number, prefix: string): string {
+    return `${providerKey(index)}:${prefix}`;
   }
 
-  function isModelGroupOpen(provider: LlmProviderSettings, index: number, prefix: string): boolean {
-    return modelGroupOpen[modelGroupKey(provider, index, prefix)] ?? true;
+  function isModelGroupOpen(index: number, prefix: string): boolean {
+    return modelGroupOpen[modelGroupKey(index, prefix)] ?? true;
   }
 
-  function setModelGroupsOpen(provider: LlmProviderSettings, index: number, prefixes: string[], open: boolean) {
+  function setModelGroupsOpen(index: number, prefixes: string[], open: boolean) {
     setModelGroupOpen((current) => {
       const next = { ...current };
-      for (const prefix of prefixes) next[modelGroupKey(provider, index, prefix)] = open;
+      for (const prefix of prefixes) next[modelGroupKey(index, prefix)] = open;
       return next;
     });
   }
 
-  function setProviderBusyLabel(provider: LlmProviderSettings, index: number, label: string | null) {
-    const key = providerKey(provider, index);
+  function setProviderBusyLabel(index: number, label: string | null) {
+    const key = providerKey(index);
     setProviderBusy((current) => {
       const next = { ...current };
       if (label) next[key] = label;
@@ -1548,7 +1569,7 @@ function LlmSettingsPanel() {
   function addCustomModel(index: number) {
     if (!settings) return;
     const provider = settings.providers[index];
-    const key = providerKey(provider, index);
+    const key = providerKey(index);
     const model = (customModelDrafts[key] ?? '').trim();
     if (!model) return;
     updateProvider(index, { discoveredModels: [...new Set([...provider.discoveredModels, model])].sort() });
@@ -1558,7 +1579,7 @@ function LlmSettingsPanel() {
   async function probeProvider(index: number) {
     if (!settings) return;
     const provider = settings.providers[index];
-    setProviderBusyLabel(provider, index, '拉取中');
+    setProviderBusyLabel(index, '拉取中');
     try {
       const result = await probeLlmProviderModels(provider);
       updateProvider(index, {
@@ -1576,14 +1597,14 @@ function LlmSettingsPanel() {
         variant: 'error',
       });
     } finally {
-      setProviderBusyLabel(provider, index, null);
+      setProviderBusyLabel(index, null);
     }
   }
 
   async function pingProvider(index: number) {
     if (!settings) return;
     const provider = settings.providers[index];
-    setProviderBusyLabel(provider, index, 'Ping');
+    setProviderBusyLabel(index, 'Ping');
     try {
       const ping = await pingLlmProvider(provider);
       const providerName = provider.label || provider.id;
@@ -1599,7 +1620,7 @@ function LlmSettingsPanel() {
         variant: 'error',
       });
     } finally {
-      setProviderBusyLabel(provider, index, null);
+      setProviderBusyLabel(index, null);
     }
   }
 
@@ -1621,7 +1642,7 @@ function LlmSettingsPanel() {
       setChatDialog(null);
       return;
     }
-    setProviderBusyLabel(provider, chatDialog.providerIndex, '对话检查');
+    setProviderBusyLabel(chatDialog.providerIndex, '对话检查');
     setChatTesting(true);
     setChatDialog({ ...chatDialog, result: undefined });
     try {
@@ -1640,13 +1661,14 @@ function LlmSettingsPanel() {
       } : current);
     } finally {
       setChatTesting(false);
-      setProviderBusyLabel(provider, chatDialog.providerIndex, null);
+      setProviderBusyLabel(chatDialog.providerIndex, null);
     }
   }
 
   function addProvider() {
     if (!settings) return;
     const provider = defaultLlmProvider(settings.providers.length);
+    setProviderUiKeys((current) => [...current, createLlmProviderUiKey()]);
     setSettings({
       ...settings,
       providers: [...settings.providers, provider],
@@ -1659,6 +1681,10 @@ function LlmSettingsPanel() {
     const providers = settings.providers.filter((_, providerIndex) => providerIndex !== index);
     const safeProviders = providers.length ? providers : [defaultLlmProvider(0)];
     const nextOptions = llmOptionsFromSettings({ ...settings, providers: safeProviders });
+    setProviderUiKeys((current) => {
+      const next = current.filter((_, providerIndex) => providerIndex !== index);
+      return providers.length ? next : [createLlmProviderUiKey()];
+    });
     setSettings({ ...settings, providers: safeProviders, defaultModelRef: nextOptions[0]?.ref ?? '' });
   }
 
@@ -1727,8 +1753,10 @@ function LlmSettingsPanel() {
           const candidates = llmProviderCandidates(provider);
           const groupedModels = groupLlmModels(candidates);
           const enabledModelSet = new Set(provider.models);
-          const busyLabel = providerBusy[providerKey(provider, index)];
-          const customKey = providerKey(provider, index);
+          const providerUiKey = providerKey(index);
+          const busyLabel = providerBusy[providerUiKey];
+          const customKey = providerUiKey;
+          const isProviderOpen = providerOpen[providerUiKey] ?? true;
           const providerModelOptions = provider.models.map((model) => ({
             ref: llmModelRef(provider.id, model),
             providerId: provider.id,
@@ -1738,11 +1766,33 @@ function LlmSettingsPanel() {
             label: `${provider.label || provider.id} · ${model}`,
           }));
           return (
-            <section key={`${provider.id}-${index}`} className="grid gap-4 rounded-lg border bg-card p-4 shadow-sm">
+            <Collapsible
+              key={providerUiKey}
+              open={isProviderOpen}
+              onOpenChange={(open) => setProviderOpen((current) => ({ ...current, [providerUiKey]: open }))}
+              className="grid gap-4 rounded-lg border bg-card p-4 shadow-sm"
+            >
               <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-semibold">{provider.label || provider.id}</div>
-                  <div className="truncate text-xs text-muted-foreground">{provider.defaultModel ? `${provider.id}:${provider.defaultModel}` : '未选择默认模型'}</div>
+                <div className="flex min-w-0 items-start gap-2">
+                  <CollapsibleTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      className="-ml-2 shrink-0"
+                      aria-label={`${isProviderOpen ? '收起' : '展开'}供应商 ${provider.label || provider.id}`}
+                    >
+                      <ChevronRight className={cn('h-4 w-4 transition-transform', isProviderOpen && 'rotate-90')} />
+                    </Button>
+                  </CollapsibleTrigger>
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-semibold">{provider.label || provider.id}</div>
+                    <div className="truncate text-xs text-muted-foreground">{provider.defaultModel ? `${provider.id}:${provider.defaultModel}` : '未选择默认模型'}</div>
+                    <div className="mt-1 flex flex-wrap gap-1.5">
+                      <Badge variant="outline">已启用 {provider.models.length}</Badge>
+                      <Badge variant="outline">候选 {candidates.length}</Badge>
+                    </div>
+                  </div>
                 </div>
                 <div className="flex flex-wrap justify-end gap-2">
                   <Button variant="outline" size="sm" onClick={() => void probeProvider(index)} disabled={Boolean(busyLabel)}>
@@ -1762,7 +1812,7 @@ function LlmSettingsPanel() {
                   </Button>
                 </div>
               </div>
-              <div className="grid gap-4 md:grid-cols-3">
+              <CollapsibleContent className="grid gap-4 md:grid-cols-3">
                 <Field label="供应商 ID">
                   <Input value={provider.id} onChange={(event) => updateProvider(index, { id: event.target.value })} />
                 </Field>
@@ -1830,7 +1880,7 @@ function LlmSettingsPanel() {
                             variant="ghost"
                             size="sm"
                             className="h-7 px-2"
-                            onClick={() => setModelGroupsOpen(provider, index, groupedModels.map((group) => group.prefix), true)}
+                            onClick={() => setModelGroupsOpen(index, groupedModels.map((group) => group.prefix), true)}
                           >
                             展开全部
                           </Button>
@@ -1839,7 +1889,7 @@ function LlmSettingsPanel() {
                             variant="ghost"
                             size="sm"
                             className="h-7 px-2"
-                            onClick={() => setModelGroupsOpen(provider, index, groupedModels.map((group) => group.prefix), false)}
+                            onClick={() => setModelGroupsOpen(index, groupedModels.map((group) => group.prefix), false)}
                           >
                             收起全部
                           </Button>
@@ -1853,12 +1903,12 @@ function LlmSettingsPanel() {
                       {groupedModels.map((group) => {
                         const allChecked = group.models.every((model) => enabledModelSet.has(model));
                         const someChecked = group.models.some((model) => enabledModelSet.has(model));
-                        const groupOpen = isModelGroupOpen(provider, index, group.prefix);
+                        const groupOpen = isModelGroupOpen(index, group.prefix);
                         return (
                           <Collapsible
                             key={group.prefix}
                             open={groupOpen}
-                            onOpenChange={(open) => setModelGroupOpen((current) => ({ ...current, [modelGroupKey(provider, index, group.prefix)]: open }))}
+                            onOpenChange={(open) => setModelGroupOpen((current) => ({ ...current, [modelGroupKey(index, group.prefix)]: open }))}
                             className="grid gap-2 p-3"
                           >
                             <div className="flex min-w-0 items-center justify-between gap-3">
@@ -1911,8 +1961,8 @@ function LlmSettingsPanel() {
                     自定义模型只会进入候选列表，勾选后才启用。
                   </div>
                 </div>
-              </div>
-            </section>
+              </CollapsibleContent>
+            </Collapsible>
           );
         })}
       </div>
