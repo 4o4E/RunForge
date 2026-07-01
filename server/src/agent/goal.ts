@@ -64,12 +64,13 @@ export function mergeGoal(goal: GoalState, patch: GoalPatch): GoalState {
 export function finishGoal(goal: GoalState): GoalState {
   const plan = autoCompletePlanItems(goal);
   const hasFailed = plan.some((p) => p.status === 'failed');
+  const hasUnfinished = plan.some(isUnfinished);
   return {
     intent: goal.intent,
     phase: 'completed',
     plan,
     decisions: goal.decisions,
-    next: hasFailed ? '已结束（存在失败项）' : '已完成',
+    next: hasFailed ? '已结束（存在失败项）' : hasUnfinished ? '已结束（存在未完成项）' : '已完成',
   };
 }
 

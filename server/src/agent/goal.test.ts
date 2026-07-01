@@ -173,7 +173,7 @@ test('executeRun: update_plan persists the goal anchor on the run', async () => 
   assert.equal(goal!.next, '已完成');
 });
 
-test('executeRun: final report is blocked until plan items are settled', async () => {
+test('executeRun: final report wins over an unsettled plan', async () => {
   const store = new MemoryStore();
   const thread = await store.createThread();
   const run = await store.createRun(thread.id, 'build safely');
@@ -196,22 +196,7 @@ test('executeRun: final report is blocked until plan items are settled', async (
       if (turn === 2) {
         return { content: 'premature', toolCalls: [] };
       }
-      if (turn === 3) {
-        return {
-          content: null,
-          toolCalls: [
-            {
-              id: 'p2',
-              name: 'update_plan',
-              arguments: JSON.stringify({ phase: 'reporting', plan: [{ text: 'build', status: 'done' }], next: '汇报结果' }),
-            },
-          ],
-        };
-      }
-      return {
-        content: 'done',
-        toolCalls: [],
-      };
+      assert.fail('最终正文输出后不应该为了计划收口继续调用模型');
     },
   };
 
@@ -219,8 +204,11 @@ test('executeRun: final report is blocked until plan items are settled', async (
 
   const finished = await store.getRun(run.id);
   assert.equal(finished?.status, 'done');
-  assert.equal(finished?.goal_state?.plan[0]?.status, 'done');
+  assert.equal(finished?.output, 'premature');
+  assert.equal(finished?.goal_state?.phase, 'completed');
+  assert.equal(finished?.goal_state?.plan[0]?.status, 'doing');
+  assert.equal(finished?.goal_state?.next, '已结束（存在未完成项）');
   const events = await store.getEvents(run.id);
-  assert.ok(events.some((event) => event.type === 'final' && event.output === 'done'));
+  assert.ok(events.some((event) => event.type === 'final' && event.output === 'premature'));
   assert.ok(events.some((event) => event.type === 'plan_update'));
 });

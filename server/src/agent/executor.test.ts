@@ -734,7 +734,7 @@ test('executeRun: auto-completes the final report plan item without a second sum
   assert.equal(published.some((event) => event.type === 'final' && event.output === finalText), true);
 });
 
-test('executeRun: completion-only update_plan requires a fresh no-tool final answer', async () => {
+test('executeRun: final text closes the run even when plan is still open', async () => {
   const store = new MemoryStore();
   const thread = await store.createThread();
   const run = await store.createRun(thread.id, 'produce then close plan');
@@ -767,25 +767,7 @@ test('executeRun: completion-only update_plan requires a fresh no-tool final ans
           };
         }
         if (turns === 2) return { content: finalText, toolCalls: [] };
-        if (turns === 3) {
-          return {
-            content: null,
-            toolCalls: [
-              {
-                id: 'plan_2',
-                name: 'update_plan',
-                arguments: JSON.stringify({
-                  phase: 'completed',
-                  plan: [
-                    { text: '完成分析', status: 'done' },
-                    { text: '收尾', status: 'done' },
-                  ],
-                }),
-              },
-            ],
-          };
-        }
-        return { content: finalText, toolCalls: [] };
+        assert.fail('最终正文输出后不应该为了关闭计划继续调用模型');
       },
     },
     publish: (_id, e) => published.push(e),
@@ -794,9 +776,12 @@ test('executeRun: completion-only update_plan requires a fresh no-tool final ans
   });
 
   const finished = await store.getRun(run.id);
-  assert.equal(turns, 4);
+  assert.equal(turns, 2);
   assert.equal(finished?.status, 'done');
   assert.equal(finished?.output, finalText);
+  assert.equal(finished?.goal_state?.phase, 'completed');
+  assert.deepEqual(finished?.goal_state?.plan.map((item) => item.status), ['done', 'doing']);
+  assert.equal(finished?.goal_state?.next, '已结束（存在未完成项）');
   assert.equal(published.some((event) => event.type === 'final' && event.output === finalText), true);
   assert.equal(published.filter((event) => event.type === 'final').length, 1);
 });

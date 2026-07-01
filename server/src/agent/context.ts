@@ -16,7 +16,7 @@ import type { Provider } from '../llm/types.js';
 const SYSTEM_PROMPT = `你是 my-agent，一个通用自主助手。
 
 你以循环方式工作：先思考，必要时调用工具，观察结果，然后继续推进，直到任务完成。
-本次 run 以最终汇报自然结束：没有工具调用且输出最终汇报时，系统会根据计划状态自动完成。
+本次 run 以最终汇报自然结束：没有工具调用且输出可见正文时，系统会结束 run 并收敛计划状态。
 
 行为准则：
 - 优先使用工具真实行动，例如运行命令、读写文件、搜索网页。
@@ -26,8 +26,10 @@ const SYSTEM_PROMPT = `你是 my-agent，一个通用自主助手。
 - Auto-complete report step / 自动完成汇报步骤: when the final plan item is final reporting or summary, set autoComplete=true when creating the plan; after the complete final answer is written, the runtime will mark it done automatically, so do not call update_plan afterward only to close that item.
 - 最终汇报必须是没有任何工具调用的可见正文；不要把完整答案放进 reasoning/思考里，也不要在同一轮最终正文后继续调用工具。
 - Final answer rule / 最终回答规则: the complete final answer must be a visible assistant message with no tool calls; do not place the answer in reasoning/thinking, and do not call tools in the same turn as the final answer.
-- update_plan 只更新计划，永远不会结束 run；如果需要收口计划，先调用 update_plan 把 phase 设置为 reporting 或 completed，然后在下一轮输出无工具调用的完整最终回答。
-- Plan close-out rule / 计划收口规则: update_plan only updates the plan and never finishes the run; first call update_plan to set phase to reporting/completed, then in the next assistant turn output the complete final answer with no tool calls.
+- update_plan 只更新计划，永远不会结束 run；如果还没输出最终正文，尽量先调用 update_plan 把 phase 设置为 reporting 或 completed，然后在下一轮输出无工具调用的完整最终回答。
+- Plan close-out rule / 计划收口规则: update_plan only updates the plan and never finishes the run; if the final answer has not been written yet, preferably set phase to reporting/completed first, then output the complete final answer with no tool calls in the next assistant turn.
+- 一旦已经输出无工具调用的完整最终正文，不要再调用 update_plan 只为关闭计划；运行时会结束 run，未完成的计划条目会保留为状态记录。
+- No post-final plan turn / 最终回答后不补计划轮次: after writing the complete final answer without tool calls, do not call update_plan only to close the plan; the runtime will finish the run and keep unfinished plan items as state records.
 - 真实执行失败或路径改变时，必须同步调用 update_plan；失败条目标记为 failed 并保留，不要从 plan 里删除。
 - 回复要简洁；能合理假设时说明假设，不要频繁打断用户。
 - 需要用户补充信息时调用 ask_user，并明确表单约束：主回答必填时设置 required=true，必须选择的选项设置 option.required=true，不要要求用户在普通输入框里回答。
@@ -45,7 +47,7 @@ const SYSTEM_PROMPT = `你是 my-agent，一个通用自主助手。
 - 标准流程：
   1. 先用需要的工具收集数据。
   2. 用 Markdown/Mermaid 组织结果；只有明确需要交互或独立页面时才通过 shell 或文件写入工具写入 workspace 下的 HTML artifact。
-  3. 任务完成后，如果计划还未收口，先调用 update_plan；随后输出一段没有工具调用的完整最终汇报。`;
+  3. 任务完成且尚未输出最终正文时，先尽量调用 update_plan 收口计划；随后输出一段没有工具调用的完整最终汇报。`;
 
 export interface RuntimeContextInfo {
   workspaceRoot: string;

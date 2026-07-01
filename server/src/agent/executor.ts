@@ -8,7 +8,7 @@ import { ContextManager } from './context.js';
 import { activateSkill, activeAllowedTools, loadSkillIndex, renderSkillCatalog, renderSkillSystemRules } from '../skills/registry.js';
 import type { SkillIndexItem, SkillActivation } from '../skills/registry.js';
 import { createWorkloadToken, listDatasources, listPermissionProfiles } from '../datasources/accountPool.js';
-import { canReportGoal, finishGoal, initGoal, mergeGoal, parseGoalPatch, renderGoal, reportBlockedMessage } from './goal.js';
+import { finishGoal, initGoal, mergeGoal, parseGoalPatch, renderGoal } from './goal.js';
 import { runBus } from './bus.js';
 import type { AgentEvent } from './types.js';
 import { store as defaultStore } from '../store/index.js';
@@ -885,7 +885,9 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
 
       if (!toolCalls.length) {
         const finalText = content?.trim() ?? '';
-        if (finalText && canReportGoal(goal)) {
+        if (finalText) {
+          // 无工具的可见正文就是本轮对话的终点。计划状态只做收敛记录，
+          // 不能再反向驱动模型补跑一轮，否则会用后续短摘要覆盖真实最终输出。
           goal = finishGoal(goal);
           await store.setGoalState(runId, goal);
           ctx.setGoal(renderGoal(goal));
@@ -901,9 +903,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
 
         noActionTurns += 1;
         if (noActionTurns >= 3) {
-          const reason = finalText
-            ? `连续 ${noActionTurns} 个 step 输出了最终文本，但计划没有进入可汇报状态。`
-            : `连续 ${noActionTurns} 个 step 没有工具调用，也没有有效最终汇报。`;
+          const reason = `连续 ${noActionTurns} 个 step 没有工具调用，也没有有效最终汇报。`;
           const question = blockedQuestion(reason);
           await emit(step.id, { type: 'progress_stalled', step: stepIdx, reason, question });
           await emit(step.id, { type: 'user_question', step: stepIdx, question });
@@ -912,7 +912,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         }
         ctx.add({
           role: 'system',
-          content: reportBlockedMessage(goal),
+          content: '上一轮没有工具调用，也没有输出可见正文。请继续执行需要的工具，或直接输出完整最终回答。不要只为了关闭计划而空转。',
         });
         continue;
       }
