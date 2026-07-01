@@ -53,6 +53,13 @@ export class MemoryStore implements Store {
   private shellLogSeq = 0;
   private now = () => new Date().toISOString();
 
+  private threadWithFallbackTitle(thread: ThreadRow): ThreadRow {
+    const firstRun = [...this.runs.values()]
+      .filter((run) => run.thread_id === thread.id)
+      .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at) || a.id.localeCompare(b.id))[0];
+    return { ...thread, fallback_title: firstRun?.input ?? null };
+  }
+
   async createThread(title?: string): Promise<ThreadRow> {
     const row: ThreadRow = {
       id: newThreadId(),
@@ -67,7 +74,8 @@ export class MemoryStore implements Store {
     return row;
   }
   async getThread(id: string) {
-    return this.threads.get(id) ?? null;
+    const thread = this.threads.get(id);
+    return thread ? this.threadWithFallbackTitle(thread) : null;
   }
   async listThreads(limit = 50, options: { archived?: boolean } = {}) {
     const archived = options.archived === true;
@@ -81,6 +89,7 @@ export class MemoryStore implements Store {
         const updateDiff = Date.parse(b.updated_at) - Date.parse(a.updated_at);
         return updateDiff || Date.parse(b.created_at) - Date.parse(a.created_at);
       })
+      .map((thread) => this.threadWithFallbackTitle(thread))
       .slice(0, limit);
   }
   async updateThread(id: string, fields: { title?: string | null; pinned?: boolean; archived?: boolean; activeRunId?: string | null }) {
@@ -100,6 +109,13 @@ export class MemoryStore implements Store {
       active_run_id: Object.prototype.hasOwnProperty.call(fields, 'activeRunId') ? activeRunId : thread.active_run_id,
       updated_at: now,
     };
+    this.threads.set(id, next);
+    return next;
+  }
+  async setThreadTitleIfEmpty(id: string, title: string) {
+    const thread = this.threads.get(id);
+    if (!thread || thread.title?.trim()) return null;
+    const next: ThreadRow = { ...thread, title, updated_at: this.now() };
     this.threads.set(id, next);
     return next;
   }

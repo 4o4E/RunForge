@@ -4,6 +4,7 @@ import type { GoalState } from './goal.js';
 export interface Thread {
   id: string;
   title: string | null;
+  fallback_title?: string | null;
   active_run_id: string | null;
   pinned_at: string | null;
   archived_at: string | null;

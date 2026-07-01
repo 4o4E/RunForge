@@ -36,15 +36,35 @@ export class PgStore implements Store {
   }
 
   async getThread(id: string): Promise<ThreadRow | null> {
-    const { rows } = await query<ThreadRow>(`SELECT * FROM threads WHERE id = $1`, [id]);
+    const { rows } = await query<ThreadRow>(
+      `SELECT t.*, fallback.input AS fallback_title
+       FROM threads t
+       LEFT JOIN LATERAL (
+         SELECT input
+         FROM runs
+         WHERE thread_id = t.id
+         ORDER BY created_at, id
+         LIMIT 1
+       ) fallback ON true
+       WHERE t.id = $1`,
+      [id],
+    );
     return rows[0] ?? null;
   }
 
   async listThreads(limit = 50, options: { archived?: boolean } = {}): Promise<ThreadRow[]> {
     const { rows } = await query<ThreadRow>(
-      `SELECT * FROM threads
-       WHERE (($2::boolean AND archived_at IS NOT NULL) OR (NOT $2::boolean AND archived_at IS NULL))
-       ORDER BY pinned_at DESC NULLS LAST, updated_at DESC, created_at DESC
+      `SELECT t.*, fallback.input AS fallback_title
+       FROM threads t
+       LEFT JOIN LATERAL (
+         SELECT input
+         FROM runs
+         WHERE thread_id = t.id
+         ORDER BY created_at, id
+         LIMIT 1
+       ) fallback ON true
+       WHERE (($2::boolean AND t.archived_at IS NOT NULL) OR (NOT $2::boolean AND t.archived_at IS NULL))
+       ORDER BY t.pinned_at DESC NULLS LAST, t.updated_at DESC, t.created_at DESC
        LIMIT $1`,
       [limit, options.archived === true],
     );
@@ -98,6 +118,17 @@ export class PgStore implements Store {
         Object.prototype.hasOwnProperty.call(fields, 'activeRunId'),
         activeRunId,
       ],
+    );
+    return rows[0] ?? null;
+  }
+
+  async setThreadTitleIfEmpty(id: string, title: string): Promise<ThreadRow | null> {
+    const { rows } = await query<ThreadRow>(
+      `UPDATE threads
+       SET title = $2, updated_at = now()
+       WHERE id = $1 AND (title IS NULL OR btrim(title) = '')
+       RETURNING *`,
+      [id, title],
     );
     return rows[0] ?? null;
   }

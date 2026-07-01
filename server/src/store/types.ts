@@ -5,6 +5,7 @@ import type { LlmMessage } from '../llm/types.js';
 export interface ThreadRow {
   id: string;
   title: string | null;
+  fallback_title?: string | null;
   active_run_id: string | null;
   pinned_at: string | null;
   archived_at: string | null;
@@ -159,6 +160,7 @@ export interface Store {
     id: string,
     fields: { title?: string | null; pinned?: boolean; archived?: boolean; activeRunId?: string | null },
   ): Promise<ThreadRow | null>;
+  setThreadTitleIfEmpty(id: string, title: string): Promise<ThreadRow | null>;
   deleteThread(id: string): Promise<boolean>;
   searchThreadMessages(query: string, limit?: number): Promise<ThreadSearchResultRow[]>;
   listThreadNotices(threadId: string): Promise<ThreadNoticeRow[]>;

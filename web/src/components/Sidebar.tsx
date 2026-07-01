@@ -34,7 +34,8 @@ interface Props {
 }
 
 function threadLabel(t: Thread): string {
-  if (t.title) return t.title;
+  if (t.title?.trim()) return t.title;
+  if (t.fallback_title?.trim()) return t.fallback_title;
   return `会话 ${t.id.slice(0, 8)}`;
 }
 

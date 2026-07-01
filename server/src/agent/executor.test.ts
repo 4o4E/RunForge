@@ -10,6 +10,7 @@ import type { AgentEvent } from './types.js';
 import { config } from '../config.js';
 import { maskPlaceholder } from './compaction.js';
 import type { ToolSettings } from '../settings.js';
+import { maybeGenerateThreadTitleAfterFirstRun } from './threadTitle.js';
 
 let testWorkspace = '';
 
@@ -105,6 +106,87 @@ test('executeRun: runs the loop across steps and finalizes', async () => {
   // 对话会持久化为：用户消息、glob 的 assistant/tool 消息、最终 assistant 消息。
   const msgs = await store.loadThreadMessages(thread.id);
   assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'tool', 'assistant']);
+});
+
+test('thread title: uses first input as fallback and generates for an empty-title branch', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run = await store.createRun(thread.id, '修复登录页提交后没有响应的问题');
+  assert.equal((await store.listThreads())[0]?.fallback_title, '修复登录页提交后没有响应的问题');
+  await store.setRunStatus(run.id, 'done', { output: '已经从表单提交链路修复根因。' });
+
+  const updated = await maybeGenerateThreadTitleAfterFirstRun(run.id, {
+    store,
+    provider: {
+      name: 'title-provider',
+      async complete() {
+        return { content: '登录提交无响应修复', toolCalls: [] };
+      },
+    },
+  });
+
+  assert.equal(updated?.title, '登录提交无响应修复');
+
+  const titledRun = await store.createRun(thread.id, '继续优化样式');
+  await store.setRunStatus(titledRun.id, 'done', { output: 'done' });
+  const skipped = await maybeGenerateThreadTitleAfterFirstRun(titledRun.id, {
+    store,
+    provider: {
+      name: 'unused-title-provider',
+      async complete() {
+        throw new Error('第二轮不应该生成标题');
+      },
+    },
+  });
+  assert.equal(skipped, null);
+  assert.equal((await store.getThread(thread.id))?.title, '登录提交无响应修复');
+
+  const untitledThread = await store.createThread();
+  const firstRun = await store.createRun(untitledThread.id, '杭州到余姚这一块，夏天玩水或者漂流都有哪些地方可以玩');
+  await store.setRunStatus(firstRun.id, 'done', { output: '沿线有多个玩水点。' });
+  const secondRun = await store.createRun(untitledThread.id, '我的意思是这一块找一个地方玩，而不是一路玩过去');
+  assert.equal((await store.getThread(untitledThread.id))?.fallback_title, '杭州到余姚这一块，夏天玩水或者漂流都有哪些地方可以玩');
+  await store.setRunStatus(secondRun.id, 'done', { output: '更适合选余姚四明山一带。' });
+  const backfilled = await maybeGenerateThreadTitleAfterFirstRun(secondRun.id, {
+    store,
+    provider: {
+      name: 'branch-title-provider',
+      async complete(messages) {
+        assert.match(messages[1]?.content ?? '', /我的意思是这一块找一个地方玩/);
+        return { content: '余姚玩水地点选择', toolCalls: [] };
+      },
+    },
+  });
+  assert.equal(backfilled?.title, '余姚玩水地点选择');
+});
+
+test('executeRun: generates a thread title after completion when enabled', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run = await store.createRun(thread.id, '规划一次杭州周边漂流');
+  let calls = 0;
+
+  await executeRun(run.id, {
+    store,
+    provider: {
+      name: 'final-and-title',
+      async complete(messages) {
+        calls += 1;
+        const titlePrompt = messages.some((message) => message.content?.includes('thread 标题生成器'));
+        return titlePrompt
+          ? { content: '杭州周边漂流规划', toolCalls: [] }
+          : { content: '推荐去安吉漂流。', toolCalls: [] };
+      },
+    },
+    publish: () => {},
+    hardStepCap: 3,
+    toolSettings: testToolSettings(),
+    generateThreadTitle: true,
+  });
+
+  await waitUntil(async () => (await store.getThread(thread.id))?.title === '杭州周边漂流规划');
+  assert.equal((await store.getThread(thread.id))?.title, '杭州周边漂流规划');
+  assert.equal(calls, 2);
 });
 
 test('executeRun: persists streamed text and terminal stream status for replay', async () => {

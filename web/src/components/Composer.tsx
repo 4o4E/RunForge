@@ -172,6 +172,7 @@ export function Composer({
   const promptFrameRef = useRef<HTMLDivElement>(null);
   const dragDepthRef = useRef(0);
   const waitingForAskUser = !!waitingQuestion;
+  const sendingBlocked = disabled || waitingForAskUser;
   const [localDraft, setLocalDraft] = useState(draft);
   const [localFile, setLocalFile] = useState<File | null>(null);
   const [uploadDir, setUploadDir] = useState('uploads');
@@ -225,7 +226,7 @@ export function Composer({
 
   function handleSubmit(message: PromptInputMessage) {
     const text = message.text?.trim() ?? '';
-    if ((!text && !attachments.length) || disabled || waitingForAskUser) return;
+    if ((!text && !attachments.length) || sendingBlocked) return;
     setAutoMultiline(false);
     localDraftRef.current = '';
     setLocalDraft('');
@@ -254,8 +255,8 @@ export function Composer({
 
   async function uploadInlineFiles(files: File[], source: 'paste' | 'drop') {
     if (!files.length) return;
-    if (disabled || waitingForAskUser) {
-      notify({ variant: 'error', title: '现在不能添加附件', description: waitingForAskUser ? '请先回答上方问题。' : '当前对话正在运行。' });
+    if (waitingForAskUser) {
+      notify({ variant: 'error', title: '现在不能添加附件', description: '请先回答上方问题。' });
       return;
     }
 
@@ -295,7 +296,7 @@ export function Composer({
     if (!hasFileTransfer(event.dataTransfer)) return;
     event.preventDefault();
     event.stopPropagation();
-    event.dataTransfer.dropEffect = disabled || waitingForAskUser ? 'none' : 'copy';
+    event.dataTransfer.dropEffect = waitingForAskUser ? 'none' : 'copy';
     setDraggingFiles(true);
   }
 
@@ -344,7 +345,7 @@ export function Composer({
       options={modelOptions}
       onChange={onModelChange}
       placeholder="选择模型"
-      disabled={disabled || waitingForAskUser}
+      disabled={waitingForAskUser}
       variant="ghost"
       className="h-8 w-auto min-w-0 px-2 text-xs text-muted-foreground hover:text-foreground"
     />
@@ -414,7 +415,7 @@ export function Composer({
                     type="button"
                     variant="ghost"
                     size="icon-sm"
-                    disabled={disabled}
+                    disabled={waitingForAskUser}
                     title="添加附件"
                     className="composer-attachment-control size-8 shrink-0 text-muted-foreground hover:text-foreground"
                   >
@@ -435,7 +436,7 @@ export function Composer({
               <PromptInputTextarea
                 onChange={(event) => handleDraftChange(event.currentTarget.value, event.currentTarget)}
                 onPaste={handlePasteFiles}
-                disabled={disabled || waitingForAskUser}
+                disabled={waitingForAskUser}
                 placeholder={waitingForAskUser ? '请在上方 ask_user 表单中回答' : '描述一个任务…（Enter 发送，Shift+Enter 换行）'}
                 value={localDraft}
                 wrap={multilineDraft ? 'soft' : 'off'}

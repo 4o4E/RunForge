@@ -853,7 +853,7 @@ function UsageStatsSettingsPanel() {
 }
 
 function threadTitle(thread: Thread): string {
-  return thread.title || `会话 ${thread.id.slice(0, 8)}`;
+  return thread.title?.trim() || thread.fallback_title?.trim() || `会话 ${thread.id.slice(0, 8)}`;
 }
 
 function ArchivedThreadsSettingsPanel({ onThreadsChanged }: { onThreadsChanged?: () => void }) {

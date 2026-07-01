@@ -19,6 +19,7 @@ export interface ChatThreadHandle {
   getSelectedModelRef(): string;
   setThreadId(id: string): void;
   onThreadCreated(thread: Thread): void;
+  onRunFinished(threadId: string): void;
   setActiveRunId(id: string | null): void;
 }
 
@@ -48,6 +49,7 @@ export function uiEventStreamToChunks(
   runId: string,
   abortSignal?: AbortSignal,
   subscribe: SubscribeFn = legacyTransport.subscribe,
+  onRunFinished?: () => void,
 ): ReadableStream<UIMessageChunk> {
   return new ReadableStream<UIMessageChunk>({
     start(controller) {
@@ -231,6 +233,7 @@ export function uiEventStreamToChunks(
             closeText();
             closeReason();
             safe({ type: 'data-final-output', id: `final-${e.step}`, data: { step: e.step, output: e.output } } as unknown as UIMessageChunk);
+            onRunFinished?.();
             break;
           }
           case 'error': {
@@ -294,15 +297,15 @@ export function createAiSdkChatTransport(handle: ChatThreadHandle): ChatTranspor
 
       let threadId = handle.getThreadId();
       if (!threadId) {
-        const thread = await createThread(text.slice(0, 40) || '新会话');
+        const thread = await createThread();
         threadId = thread.id;
         handle.setThreadId(thread.id);
-        handle.onThreadCreated(thread);
+        handle.onThreadCreated({ ...thread, fallback_title: text });
       }
 
       const { runId } = await legacyTransport.send(threadId, { text, modelRef: handle.getSelectedModelRef() });
       handle.setActiveRunId(runId);
-      return uiEventStreamToChunks(runId, abortSignal);
+      return uiEventStreamToChunks(runId, abortSignal, legacyTransport.subscribe, () => handle.onRunFinished(threadId));
     },
 
     // No mid-stream resume for the WS pipeline; recovery is via PG history on load.

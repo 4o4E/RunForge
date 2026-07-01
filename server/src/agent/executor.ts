@@ -22,6 +22,7 @@ import { shellManager } from '../shell/manager.js';
 import { requiresDatabaseAccess } from '../tools/databaseAccessGuard.js';
 import type { SubagentRunRow } from '../store/types.js';
 import { loadWorkflowIndex, renderWorkflowCatalog, renderWorkflowSystemRules } from '../workflows/registry.js';
+import { scheduleThreadTitleGeneration } from './threadTitle.js';
 
 const ASK_USER_TOOL_NAME = 'ask_user';
 const DATABASE_ACCESS_SKILL_NAME = 'database-access';
@@ -43,6 +44,7 @@ export interface ExecutorDeps {
   toolSettings?: ToolSettings;
   mcpSettings?: McpSettings;
   databaseRuntimeEnv?: (runId: string) => Promise<DatabaseRuntimeEnv>;
+  generateThreadTitle: boolean;
 }
 
 interface DatabaseRuntimeEnv {
@@ -158,6 +160,7 @@ async function defaultDeps(overrides: Partial<ExecutorDeps>, modelRef?: string |
     resume: overrides.resume ?? false,
     toolSettings: overrides.toolSettings,
     databaseRuntimeEnv: overrides.databaseRuntimeEnv,
+    generateThreadTitle: overrides.generateThreadTitle ?? overrides.store === undefined,
   };
 }
 
@@ -350,12 +353,17 @@ function runtimeApiBase(): string {
  * 所有依赖都可注入，便于在没有 PG/网络的情况下做单元测试。
  */
 export async function executeRun(runId: string, overrides: Partial<ExecutorDeps> = {}): Promise<void> {
+  const usesDefaultStore = overrides.store === undefined;
   const store = overrides.store ?? defaultStore;
   const run = await store.getRun(runId);
   if (!run) throw new Error(`run 不存在：${runId}`);
   let deps: ExecutorDeps;
   try {
-    deps = await defaultDeps({ ...overrides, store }, run.model_ref);
+    deps = await defaultDeps({
+      ...overrides,
+      store,
+      generateThreadTitle: overrides.generateThreadTitle ?? usesDefaultStore,
+    }, run.model_ref);
   } catch (err) {
     const message = (err as Error).message;
     const publish = overrides.publish ?? ((targetRunId, event) => runBus.publish(targetRunId, event));
@@ -887,6 +895,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           await livePersistQueue;
           await emit(step.id, { type: 'final', step: stepIdx, output: finalText });
           await store.setRunStatus(runId, 'done', { output: finalText });
+          if (deps.generateThreadTitle) scheduleThreadTitleGeneration(runId, { store, provider });
           return;
         }
 

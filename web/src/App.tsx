@@ -62,6 +62,7 @@ const SIDEBAR_MAX_WIDTH = 420;
 const SIDEBAR_SNAP_WIDTH = 104;
 const RIGHT_PANEL_SNAP_WIDTH = 360;
 const MODEL_SELECTION_STORAGE_KEY = 'my-agent:selected-model-ref';
+const TITLE_REFRESH_DELAYS_MS = [0, 1000, 2000, 4000, 8000, 15000, 30000, 60000];
 
 type ActiveView = 'chat' | 'search';
 
@@ -414,6 +415,7 @@ export function App() {
   const reattachedEventsRef = useRef<AgentEvent[]>([]);
   const draftSyncTimerRef = useRef<number | null>(null);
   const draftRouteTimerRef = useRef<number | null>(null);
+  const titleRefreshTimersRef = useRef<number[]>([]);
 
   // 活跃会话 ID 放在 ref 中，稳定的 transport 可以读取和更新它，
   // 不需要在每次选择会话时重新创建 transport。
@@ -501,6 +503,20 @@ export function App() {
     listThreads().then(setThreads).catch(() => {});
   }, []);
   useEffect(refreshThreads, [refreshThreads]);
+  const refreshThreadTitleAfterRun = useCallback((threadId: string) => {
+    titleRefreshTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    titleRefreshTimersRef.current = TITLE_REFRESH_DELAYS_MS.map((delay) => window.setTimeout(() => {
+      void getThread(threadId)
+        .then(({ thread }) => {
+          setThreads((current) => current.map((item) => (item.id === thread.id ? thread : item)));
+          if (thread.title?.trim()) {
+            titleRefreshTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+            titleRefreshTimersRef.current = [];
+          }
+        })
+        .catch(() => {});
+    }, delay));
+  }, []);
 
   const refreshWorkspaceRoot = useCallback(() => {
     getRemoteFileInfo().then((info) => setWorkspaceRoot(info.workspaceRoot)).catch(() => setWorkspaceRoot(null));
@@ -643,6 +659,7 @@ export function App() {
   useEffect(() => () => {
     if (draftRouteTimerRef.current) window.clearTimeout(draftRouteTimerRef.current);
     if (draftSyncTimerRef.current) window.clearTimeout(draftSyncTimerRef.current);
+    titleRefreshTimersRef.current.forEach((timer) => window.clearTimeout(timer));
   }, []);
 
   const navigateSearch = useCallback(() => {
@@ -662,10 +679,13 @@ export function App() {
         skipNextHistoryLoadRef.current = id;
         navigateChatRoute({ draft: '', threadId: id }, 'replace');
       },
-      onThreadCreated: () => refreshThreads(),
+      onThreadCreated: (thread) => {
+        setThreads((current) => [thread, ...current.filter((item) => item.id !== thread.id)]);
+      },
+      onRunFinished: (threadId) => refreshThreadTitleAfterRun(threadId),
       setActiveRunId,
     }),
-    [navigateChatRoute, refreshThreads],
+    [navigateChatRoute, refreshThreadTitleAfterRun],
   );
 
   const transport = useMemo(() => createAiSdkChatTransport(handle), [handle]);
@@ -1164,7 +1184,7 @@ export function App() {
   }
 
   const activeThread = threads.find((t) => t.id === activeThreadId);
-  const title = activeThread?.title ?? (activeThreadId ? '会话' : '新会话');
+  const title = activeThread?.title?.trim() || activeThread?.fallback_title?.trim() || (activeThreadId ? '会话' : '新会话');
   const rightPanelVisible = activeView === 'chat' && rightPanelOpen;
   const threadHref = useCallback((threadId: string) => buildChatPath({ draft: '', threadId }), []);
   const newChatHref = buildChatPath({ draft: '', threadId: null });
