@@ -31,6 +31,8 @@ export function ModelSearchSelect({
   disabled = false,
   variant = 'outline',
   className,
+  compact = false,
+  focusSearchOnOpen = true,
 }: {
   value: string;
   options: LlmModelOption[];
@@ -39,6 +41,8 @@ export function ModelSearchSelect({
   disabled?: boolean;
   variant?: ComponentProps<typeof Button>['variant'];
   className?: string;
+  compact?: boolean;
+  focusSearchOnOpen?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const selected = options.find((option) => option.ref === value);
@@ -55,11 +59,17 @@ export function ModelSearchSelect({
           title={selected ? `当前模型：${selected.label}` : value || placeholder}
         >
           <Bot className="h-4 w-4 shrink-0 opacity-70" />
-          <span className="min-w-0 flex-1 truncate text-left">{selected ? selected.label : value || placeholder}</span>
-          <ChevronsUpDown className="h-4 w-4 shrink-0 opacity-50" />
+          {!compact && <span className="min-w-0 flex-1 truncate text-left">{selected ? selected.label : value || placeholder}</span>}
+          {!compact && <ChevronsUpDown className="h-4 w-4 shrink-0 opacity-50" />}
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-max min-w-[--radix-popover-trigger-width] p-0">
+      <PopoverContent
+        align="start"
+        className="w-max min-w-[--radix-popover-trigger-width] p-0"
+        onOpenAutoFocus={(event) => {
+          if (!focusSearchOnOpen) event.preventDefault();
+        }}
+      >
         <Command>
           <CommandInput placeholder="搜索供应商或模型" />
           <CommandList>

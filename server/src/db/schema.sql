@@ -167,6 +167,22 @@ CREATE TABLE IF NOT EXISTS app_settings (
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- 浏览器后台通知订阅。endpoint 由浏览器 Push Service 分配，keys 用于按 Web Push
+-- 标准加密消息体；用户关闭权限或推送失效后只禁用，不硬删审计信息。
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  endpoint        TEXT PRIMARY KEY,
+  p256dh          TEXT NOT NULL,
+  auth            TEXT NOT NULL,
+  expiration_time TIMESTAMPTZ,
+  user_agent      TEXT,
+  enabled         BOOLEAN NOT NULL DEFAULT true,
+  last_error      TEXT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_push_subscriptions_enabled ON push_subscriptions(enabled, updated_at DESC);
+
 -- 数据源控制面。真实数据库管理凭证只允许存 secret 引用；本地开发可临时使用
 -- admin_config.connectionUrl，生产环境应迁到 Vault/Akeyless/云 Secret Manager。
 CREATE TABLE IF NOT EXISTS datasources (

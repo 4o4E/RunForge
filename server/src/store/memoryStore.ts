@@ -4,6 +4,7 @@ import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
 import { sanitizeThreadMessagesForModel } from './messageView.js';
 import type {
+  PushSubscriptionRow,
   RunRow,
   ShellActor,
   ShellCommandLogRow,
@@ -18,6 +19,7 @@ import type {
   ThreadSearchResultRow,
   ThreadRow,
 } from './types.js';
+import type { WebPushSubscriptionInput } from '@my-agent/contracts';
 import { newRunId, newShellCommandId, newShellSessionId, newStepId, newSubagentRunId, newThreadId } from '../id.js';
 
 function isEphemeralSystemMessage(role: LlmMessage['role'], content: string | null): boolean {
@@ -49,6 +51,7 @@ export class MemoryStore implements Store {
   private shellLogs = new Map<string, ShellCommandLogRow[]>();
   private subagentRuns = new Map<string, SubagentRunRow>();
   private threadNotices = new Map<string, ThreadNoticeRow[]>();
+  private pushSubscriptions = new Map<string, PushSubscriptionRow>();
   private seq = 0;
   private shellLogSeq = 0;
   private now = () => new Date().toISOString();
@@ -664,5 +667,33 @@ export class MemoryStore implements Store {
 
   async addShellSessionEvent(_sessionId: string, _actor: ShellActor, _kind: string, _data: unknown): Promise<void> {
     // 内存 Store 只服务单测和离线演示；session 事件的可视化依赖 AgentEvent。
+  }
+
+  async upsertPushSubscription(input: WebPushSubscriptionInput, userAgent?: string | null): Promise<PushSubscriptionRow> {
+    const existing = this.pushSubscriptions.get(input.endpoint);
+    const now = this.now();
+    const row: PushSubscriptionRow = {
+      endpoint: input.endpoint,
+      p256dh: input.keys.p256dh,
+      auth: input.keys.auth,
+      expiration_time: input.expirationTime ? new Date(input.expirationTime).toISOString() : null,
+      user_agent: userAgent ?? null,
+      enabled: true,
+      last_error: null,
+      created_at: existing?.created_at ?? now,
+      updated_at: now,
+    };
+    this.pushSubscriptions.set(input.endpoint, row);
+    return row;
+  }
+
+  async listEnabledPushSubscriptions(): Promise<PushSubscriptionRow[]> {
+    return [...this.pushSubscriptions.values()].filter((row) => row.enabled);
+  }
+
+  async disablePushSubscription(endpoint: string, error?: string | null): Promise<void> {
+    const row = this.pushSubscriptions.get(endpoint);
+    if (!row) return;
+    this.pushSubscriptions.set(endpoint, { ...row, enabled: false, last_error: error ?? null, updated_at: this.now() });
   }
 }

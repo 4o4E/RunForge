@@ -7,6 +7,7 @@ import { filesApi } from './files.js';
 import { settingsApi } from './settings.js';
 import { datasourcesApi } from './datasources.js';
 import { runtimeApi } from './runtime.js';
+import { notificationsApi } from './notifications.js';
 import { releaseRunLeases } from '../datasources/accountPool.js';
 import type { AskUserAnswer, AskUserOption, AskUserSpec } from '../agent/types.js';
 import { shellManager } from '../shell/manager.js';
@@ -21,6 +22,7 @@ api.use('/files', filesApi);
 api.use('/settings', settingsApi);
 api.use('/datasources', datasourcesApi);
 api.use('/runtime', runtimeApi);
+api.use('/notifications', notificationsApi);
 
 async function killRunShellCommands(runId: string): Promise<void> {
   try {

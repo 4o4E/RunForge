@@ -39,6 +39,9 @@ import type { ComposerAttachment } from './components/Composer';
 import type { AskUserDraft } from './components/AskUserCard';
 import { buildChatPath, currentBrowserPath, readChatRoute, type ChatRoute } from './router';
 import { llmOptionsFromSettings } from './components/ModelSearchSelect';
+import { useNotifications } from './components/GlobalNotifications';
+import { browserPushSupported, currentBrowserPushPermission, disableBrowserPush, enableBrowserPush, readBrowserPushState, type BrowserPushState } from './notifications';
+import { cn } from './lib/utils';
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -63,8 +66,35 @@ const SIDEBAR_SNAP_WIDTH = 104;
 const RIGHT_PANEL_SNAP_WIDTH = 360;
 const MODEL_SELECTION_STORAGE_KEY = 'my-agent:selected-model-ref';
 const TITLE_REFRESH_DELAYS_MS = [0, 1000, 2000, 4000, 8000, 15000, 30000, 60000];
+const MOBILE_MEDIA_QUERY = '(max-width: 767px)';
 
 type ActiveView = 'chat' | 'search';
+
+function useIsMobileViewport(): boolean {
+  const [mobile, setMobile] = useState(() => window.matchMedia(MOBILE_MEDIA_QUERY).matches);
+  useEffect(() => {
+    const media = window.matchMedia(MOBILE_MEDIA_QUERY);
+    const sync = () => setMobile(media.matches);
+    sync();
+    media.addEventListener('change', sync);
+    return () => media.removeEventListener('change', sync);
+  }, []);
+  return mobile;
+}
+
+function useViewportWidth(): number {
+  const [width, setWidth] = useState(() => window.innerWidth);
+  useEffect(() => {
+    const sync = () => setWidth(window.innerWidth);
+    window.addEventListener('resize', sync);
+    window.addEventListener('orientationchange', sync);
+    return () => {
+      window.removeEventListener('resize', sync);
+      window.removeEventListener('orientationchange', sync);
+    };
+  }, []);
+  return width;
+}
 
 function activeViewFromPath(pathname = window.location.pathname): ActiveView {
   if (pathname === '/search') return 'search';
@@ -377,6 +407,9 @@ function replaceAssistantMessage(messages: UIMessage[], runId: string, events: A
 }
 
 export function App() {
+  const { notify } = useNotifications();
+  const isMobile = useIsMobileViewport();
+  const viewportWidth = useViewportWidth();
   const [threads, setThreads] = useState<Thread[]>([]);
   const [route, setRoute] = useState<ChatRoute>(() => readChatRoute());
   const [activeView, setActiveView] = useState<ActiveView>(() => activeViewFromPath());
@@ -391,6 +424,8 @@ export function App() {
   const [statusCardOpen, setStatusCardOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(256);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [mobileRightPanelOpen, setMobileRightPanelOpen] = useState(false);
   const [filesPanelWidth, setFilesPanelWidth] = useState(720);
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
@@ -403,6 +438,13 @@ export function App() {
   const [editingRunId, setEditingRunId] = useState<string | null>(null);
   const [askUserDrafts, setAskUserDrafts] = useState<Record<string, AskUserDraft>>({});
   const [pageStateLoaded, setPageStateLoaded] = useState(false);
+  const [pushState, setPushState] = useState<BrowserPushState>(() => ({
+    supported: browserPushSupported(),
+    permission: currentBrowserPushPermission(),
+    subscribed: false,
+    busy: false,
+    error: null,
+  }));
   const activeThreadId = route.threadId;
   const sidebarFrameRef = useRef<HTMLDivElement>(null);
   const conversationContentRef = useRef<HTMLDivElement>(null);
@@ -549,6 +591,37 @@ export function App() {
       canceled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let canceled = false;
+    readBrowserPushState()
+      .then((state) => {
+        if (!canceled) setPushState(state);
+      })
+      .catch((err) => {
+        if (!canceled) {
+          setPushState({
+            supported: browserPushSupported(),
+            permission: currentBrowserPushPermission(),
+            subscribed: false,
+            busy: false,
+            error: (err as Error).message,
+          });
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isMobile) {
+      setMobileSidebarOpen(false);
+      setMobileRightPanelOpen(false);
+      return;
+    }
+    setStatusCardOpen(false);
+  }, [isMobile]);
 
   useEffect(() => {
     let canceled = false;
@@ -843,9 +916,56 @@ export function App() {
     };
   }, [activeThreadId, reattachedRunId, refreshThreads, setMessages]);
 
+  const pushNotificationState = !pushState.supported
+    ? 'unsupported'
+    : pushState.permission === 'denied'
+      ? 'denied'
+      : pushState.subscribed
+        ? 'enabled'
+        : pushState.permission === 'default'
+          ? 'default'
+          : 'disabled';
+
+  async function togglePushNotifications() {
+    if (pushState.busy) return;
+    if (!pushState.supported) {
+      notify({
+        variant: 'error',
+        title: '后台通知不可用',
+        description: pushState.error ?? '当前浏览器不支持后台通知；移动端通常需要 HTTPS 页面。',
+      });
+      return;
+    }
+    if (pushState.permission === 'denied') {
+      notify({
+        variant: 'error',
+        title: '后台通知被浏览器拒绝',
+        description: pushState.error ?? '请在浏览器或系统设置中重新允许当前站点发送通知。',
+      });
+      return;
+    }
+    setPushState((current) => ({ ...current, busy: true, error: null }));
+    try {
+      const next = pushState.subscribed ? await disableBrowserPush() : await enableBrowserPush();
+      setPushState(next);
+      if (next.subscribed) {
+        notify({ variant: 'success', title: '后台通知已开启', description: '对话完成后浏览器会推送通知。' });
+      } else if (next.permission === 'granted') {
+        notify({ variant: 'success', title: '后台通知已关闭' });
+      } else {
+        notify({ variant: 'info', title: '通知未开启', description: next.error ?? '浏览器没有授予通知权限。' });
+      }
+    } catch (err) {
+      const message = (err as Error).message;
+      setPushState((current) => ({ ...current, busy: false, error: message }));
+      notify({ variant: 'error', title: '后台通知开启失败', description: message });
+    }
+  }
+
   function newChat() {
     stop();
     setEditingRunId(null);
+    setMobileSidebarOpen(false);
     if (activeThreadId) rememberThreadDraft(activeThreadId, draftRef.current);
     navigateChatRoute({ draft: '', threadId: null });
     setMessages([]);
@@ -854,18 +974,21 @@ export function App() {
   function selectThread(id: string) {
     stop();
     setEditingRunId(null);
+    setMobileSidebarOpen(false);
     if (activeThreadId) rememberThreadDraft(activeThreadId, draftRef.current);
     navigateChatRoute({ draft: threadDraftsRef.current[id] ?? '', threadId: id });
   }
 
   function openSettings() {
     stop();
+    setMobileSidebarOpen(false);
     if (activeThreadId) rememberThreadDraft(activeThreadId, draftRef.current);
     setSettingsOpen(true);
   }
 
   function openSearch() {
     stop();
+    setMobileSidebarOpen(false);
     if (activeThreadId) rememberThreadDraft(activeThreadId, draftRef.current);
     navigateSearch();
   }
@@ -1144,7 +1267,11 @@ export function App() {
   function openRightTab(tab: RightTabId) {
     setRightPanelTabs((current) => current.includes(tab) ? current : [...current, tab]);
     setRightPanelMode(tab);
-    setRightPanelOpen(true);
+    if (isMobile) {
+      setMobileRightPanelOpen(true);
+    } else {
+      setRightPanelOpen(true);
+    }
     setStatusCardOpen(false);
   }
 
@@ -1155,13 +1282,24 @@ export function App() {
         const currentIndex = current.indexOf(tab);
         const replacement = next[currentIndex] ?? next[currentIndex - 1] ?? next[0] ?? null;
         setRightPanelMode(replacement);
-        if (!replacement) setRightPanelOpen(false);
+        if (!replacement) {
+          setRightPanelOpen(false);
+          setMobileRightPanelOpen(false);
+        }
       }
       return next;
     });
   }
 
   function toggleRightPanel() {
+    if (isMobile) {
+      if (!rightPanelTabs.length) {
+        setRightPanelTabs(['files']);
+        setRightPanelMode('files');
+      }
+      setMobileRightPanelOpen((open) => !open);
+      return;
+    }
     setRightPanelOpen((open) => !open);
     setStatusCardOpen(false);
   }
@@ -1185,15 +1323,16 @@ export function App() {
 
   const activeThread = threads.find((t) => t.id === activeThreadId);
   const title = activeThread?.title?.trim() || activeThread?.fallback_title?.trim() || (activeThreadId ? '会话' : '新会话');
-  const rightPanelVisible = activeView === 'chat' && rightPanelOpen;
+  const rightPanelVisible = activeView === 'chat' && rightPanelOpen && !isMobile;
   const threadHref = useCallback((threadId: string) => buildChatPath({ draft: '', threadId }), []);
   const newChatHref = buildChatPath({ draft: '', threadId: null });
+  const mobileRightPanelWidth = Math.max(320, Math.min(filesPanelWidth, viewportWidth));
 
   return (
     <div className="app-main-surface flex h-full min-h-0 min-w-0 overflow-hidden">
       <div
         ref={sidebarFrameRef}
-        className="sidebar-frame h-full shrink-0 overflow-hidden"
+        className="sidebar-frame hidden h-full shrink-0 overflow-hidden md:block"
         style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth }}
       >
         <Sidebar
@@ -1220,7 +1359,7 @@ export function App() {
       <div
         role="separator"
         aria-label="拖拽调整或收起会话列表"
-        className="h-full w-1 shrink-0 cursor-col-resize bg-border/40 transition-colors hover:bg-foreground/60"
+        className="hidden h-full w-1 shrink-0 cursor-col-resize bg-border/40 transition-colors hover:bg-foreground/60 md:block"
         onPointerDown={(event) =>
           beginSidebarResize(event, {
             width: sidebarWidth,
@@ -1272,6 +1411,12 @@ export function App() {
           onSwitchRunBranch={switchRunBranch}
           onEditRunInput={editRunInput}
           onForkFromRun={forkFromRun}
+          mobile={isMobile}
+          notificationBusy={pushState.busy}
+          notificationError={pushState.error}
+          notificationState={pushNotificationState}
+          onOpenMobileSidebar={() => setMobileSidebarOpen(true)}
+          onTogglePushNotifications={() => void togglePushNotifications()}
         />
       )}
       {activeView === 'chat' && (
@@ -1293,7 +1438,7 @@ export function App() {
         />
       )}
       <div
-        className="h-full shrink-0 overflow-hidden transition-[width] duration-200 ease-out"
+        className="hidden h-full shrink-0 overflow-hidden transition-[width] duration-200 ease-out md:block"
         style={{ width: rightPanelVisible ? filesPanelWidth : 0 }}
         aria-hidden={!rightPanelVisible}
       >
@@ -1314,8 +1459,73 @@ export function App() {
           onAttach={addAttachment}
         />
       </div>
+      {isMobile && mobileSidebarOpen && (
+        <div className="fixed inset-0 z-50 flex animate-in fade-in-0 bg-background/70 duration-200 backdrop-blur-sm md:hidden">
+          <button
+            type="button"
+            aria-label="关闭会话列表"
+            className="absolute inset-0 cursor-default"
+            onClick={() => setMobileSidebarOpen(false)}
+          />
+          <div className="relative h-full w-[min(86vw,340px)] animate-in slide-in-from-left-full duration-200 shadow-xl">
+            <Sidebar
+              threads={threads}
+              activeId={activeThreadId}
+              activeView={activeView}
+              settingsOpen={settingsOpen}
+              width="100%"
+              collapsed={false}
+              newHref={newChatHref}
+              searchHref="/search"
+              threadHref={threadHref}
+              onToggleCollapsed={() => setMobileSidebarOpen(false)}
+              onNew={newChat}
+              onSearch={openSearch}
+              onSettings={openSettings}
+              onSelect={selectThread}
+              onRename={(id) => void renameThread(id)}
+              onTogglePin={(id) => void toggleThreadPin(id)}
+              onArchive={(id) => void archiveThread(id)}
+              onDelete={(id) => void removeThread(id)}
+            />
+          </div>
+        </div>
+      )}
+      {isMobile && activeView === 'chat' && mobileRightPanelOpen && (
+        <div className="fixed inset-0 z-50 flex animate-in fade-in-0 justify-end bg-background/70 duration-200 backdrop-blur-sm md:hidden">
+          <button
+            type="button"
+            aria-label="关闭资源面板"
+            className="absolute inset-0 cursor-default"
+            onClick={() => setMobileRightPanelOpen(false)}
+          />
+          <div className="relative h-full w-full max-w-[520px] animate-in slide-in-from-right-full duration-200 shadow-xl">
+            <RightSidebar
+              open
+              width={mobileRightPanelWidth}
+              tabs={rightPanelTabs}
+              activeTab={rightPanelMode}
+              threadId={activeThreadId}
+              workspaceRoot={workspaceRoot}
+              onTabChange={setRightPanelMode}
+              onOpenFileBrowser={() => openRightTab('files')}
+              onOpenFileTab={openRemoteFile}
+              onOpenShellTab={(sessionId) => openRightTab(`shell:${sessionId}`)}
+              onOpenSubagentTab={(subagentId) => openRightTab(`subagent:${subagentId}`)}
+              onCloseTab={closeRightTab}
+              onClose={() => setMobileRightPanelOpen(false)}
+              onAttach={addAttachment}
+            />
+          </div>
+        </div>
+      )}
       <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-        <DialogContent className="flex h-[760px] max-h-[calc(100vh-2rem)] w-[1120px] max-w-[calc(100vw-2rem)] flex-col gap-0 overflow-hidden p-0">
+        <DialogContent className={cn(
+          'flex flex-col gap-0 overflow-hidden p-0',
+          isMobile
+            ? 'h-[100dvh] max-h-[100dvh] w-screen max-w-none rounded-none'
+            : 'h-[760px] max-h-[calc(100vh-2rem)] w-[1120px] max-w-[calc(100vw-2rem)]',
+        )}>
           <DialogHeader className="border-b px-6 py-4">
             <DialogTitle>设置</DialogTitle>
             <DialogDescription>外观、用量统计、工具策略和数据源</DialogDescription>

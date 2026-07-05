@@ -5,6 +5,7 @@ import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
 import { sanitizeThreadMessagesForModel } from './messageView.js';
 import type {
+  PushSubscriptionRow,
   RunRow,
   ShellActor,
   ShellCommandLogRow,
@@ -19,6 +20,7 @@ import type {
   ThreadSearchResultRow,
   ThreadRow,
 } from './types.js';
+import type { WebPushSubscriptionInput } from '@my-agent/contracts';
 import { newRunId, newShellCommandId, newShellSessionId, newStepId, newSubagentRunId, newThreadId } from '../id.js';
 
 function isEphemeralSystemMessage(role: LlmMessage['role'], content: string | null): boolean {
@@ -843,6 +845,41 @@ export class PgStore implements Store {
     await query(
       `INSERT INTO shell_session_events (session_id, actor, kind, data) VALUES ($1, $2, $3, $4)`,
       [sessionId, actor, kind, JSON.stringify(data ?? {})],
+    );
+  }
+
+  async upsertPushSubscription(input: WebPushSubscriptionInput, userAgent?: string | null): Promise<PushSubscriptionRow> {
+    const expiresAt = input.expirationTime ? new Date(input.expirationTime).toISOString() : null;
+    const { rows } = await query<PushSubscriptionRow>(
+      `INSERT INTO push_subscriptions (endpoint, p256dh, auth, expiration_time, user_agent, enabled, last_error)
+       VALUES ($1, $2, $3, $4, $5, true, NULL)
+       ON CONFLICT (endpoint) DO UPDATE
+       SET p256dh = EXCLUDED.p256dh,
+           auth = EXCLUDED.auth,
+           expiration_time = EXCLUDED.expiration_time,
+           user_agent = EXCLUDED.user_agent,
+           enabled = true,
+           last_error = NULL,
+           updated_at = now()
+       RETURNING *`,
+      [input.endpoint, input.keys.p256dh, input.keys.auth, expiresAt, userAgent ?? null],
+    );
+    return rows[0];
+  }
+
+  async listEnabledPushSubscriptions(): Promise<PushSubscriptionRow[]> {
+    const { rows } = await query<PushSubscriptionRow>(
+      `SELECT * FROM push_subscriptions WHERE enabled = true ORDER BY updated_at DESC`,
+    );
+    return rows;
+  }
+
+  async disablePushSubscription(endpoint: string, error?: string | null): Promise<void> {
+    await query(
+      `UPDATE push_subscriptions
+       SET enabled = false, last_error = $2, updated_at = now()
+       WHERE endpoint = $1`,
+      [endpoint, error ?? null],
     );
   }
 }

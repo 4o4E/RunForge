@@ -26,6 +26,7 @@ export function MarkdownContent({
       <Streamdown
         className={cn(
           'markdown-content text-sm leading-relaxed text-foreground [&_pre]:my-2 [&_pre]:max-h-[70vh] [&_pre]:overflow-auto',
+          '[&_table]:mx-0 [&_table]:w-full max-sm:[&_td]:px-1.5 max-sm:[&_th]:px-1.5',
           className,
         )}
         components={mergedComponents}

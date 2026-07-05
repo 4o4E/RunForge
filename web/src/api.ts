@@ -36,6 +36,9 @@ import type {
   ThreadUpdateInput,
   ToolSettings,
   ToolSettingsOptions,
+  WebPushPublicKeyResponse,
+  WebPushSubscriptionInput,
+  WebPushSubscriptionRecord,
 } from '@my-agent/contracts';
 
 export type * from '@my-agent/contracts';
@@ -325,6 +328,25 @@ export const getShellCommandLogs = (commandId: string, sinceSeq = 0, limit = 200
 
 export const markShellCommand = (commandId: string) =>
   fetch(`/api/shell-commands/${commandId}/mark`, { method: 'POST' }).then(json<{ attachment: ShellCommandAttachment }>);
+
+export const getWebPushPublicKey = () =>
+  fetch('/api/notifications/push/public-key').then(json<WebPushPublicKeyResponse>);
+
+export const saveWebPushSubscription = (subscription: WebPushSubscriptionInput) =>
+  fetch('/api/notifications/push/subscriptions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(subscription),
+  }).then(json<WebPushSubscriptionRecord>);
+
+export const deleteWebPushSubscription = (endpoint: string) =>
+  fetch('/api/notifications/push/subscriptions', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ endpoint }),
+  }).then((res) => {
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  });
 
 
 /** 通过 WebSocket 订阅 run 的实时事件流。 */

@@ -159,6 +159,11 @@ export const config = {
     otlpEndpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? '',
     console: (process.env.OTEL_CONSOLE ?? 'false') === 'true',
   },
+  webPush: {
+    publicKey: process.env.WEB_PUSH_VAPID_PUBLIC_KEY ?? '',
+    privateKey: process.env.WEB_PUSH_VAPID_PRIVATE_KEY ?? '',
+    subject: process.env.WEB_PUSH_SUBJECT ?? 'mailto:admin@runforge.local',
+  },
 };
 
 export type Config = typeof config;

@@ -23,6 +23,7 @@ import { requiresDatabaseAccess } from '../tools/databaseAccessGuard.js';
 import type { SubagentRunRow } from '../store/types.js';
 import { loadWorkflowIndex, renderWorkflowCatalog, renderWorkflowSystemRules } from '../workflows/registry.js';
 import { scheduleThreadTitleGeneration } from './threadTitle.js';
+import { notifyRunCompleted } from '../notifications/push.js';
 
 const ASK_USER_TOOL_NAME = 'ask_user';
 const DATABASE_ACCESS_SKILL_NAME = 'database-access';
@@ -897,6 +898,10 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           await livePersistQueue;
           await emit(step.id, { type: 'final', step: stepIdx, output: finalText });
           await store.setRunStatus(runId, 'done', { output: finalText });
+          if (usesDefaultStore) {
+            void notifyRunCompleted(runId, { store, output: finalText })
+              .catch((err) => console.warn(`对话完成通知推送失败：${(err as Error).message}`));
+          }
           if (deps.generateThreadTitle) scheduleThreadTitleGeneration(runId, { store, provider });
           return;
         }

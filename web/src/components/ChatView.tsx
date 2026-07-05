@@ -4,7 +4,7 @@ import { Conversation, latestUsageSnapshot } from './Conversation';
 import { Composer, type ComposerAttachment } from './Composer';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Gauge, Maximize2, Minimize2, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { Bell, BellOff, Gauge, Maximize2, Menu, Minimize2, PanelRightClose, PanelRightOpen } from 'lucide-react';
 import type { AskUserAnswer } from '@/api';
 import type { AskUserDraft } from './AskUserCard';
 import { AgentStatusCard } from './StatusCard';
@@ -58,6 +58,12 @@ interface Props {
   onSwitchRunBranch: (runId: string) => void;
   onEditRunInput: (runId: string, currentText: string) => void;
   onForkFromRun: (runId: string) => void;
+  mobile?: boolean;
+  notificationBusy?: boolean;
+  notificationError?: string | null;
+  notificationState?: 'unsupported' | 'default' | 'denied' | 'enabled' | 'disabled';
+  onOpenMobileSidebar?: () => void;
+  onTogglePushNotifications?: () => void;
 }
 
 export function ChatView({
@@ -98,8 +104,14 @@ export function ChatView({
   onSwitchRunBranch,
   onEditRunInput,
   onForkFromRun,
+  mobile = false,
+  notificationBusy = false,
+  notificationError = null,
+  notificationState = 'unsupported',
+  onOpenMobileSidebar,
+  onTogglePushNotifications,
 }: Props) {
-  const showStatusCard = rightPanelOpen ? statusCardOpen : !statusCardOpen;
+  const showStatusCard = mobile ? statusCardOpen : rightPanelOpen ? statusCardOpen : !statusCardOpen;
   const usage = latestUsageFromMessages(messages);
   const renderStatusCard = () => (
     <AgentStatusCard
@@ -111,14 +123,45 @@ export function ChatView({
       className="w-full min-w-0 max-w-none"
     />
   );
+  const notificationTitle =
+    notificationState === 'enabled'
+      ? '关闭后台通知'
+      : notificationState === 'denied'
+        ? '浏览器已拒绝通知，请在浏览器设置中开启'
+        : notificationState === 'unsupported'
+          ? notificationError ?? '当前浏览器不支持后台通知；移动端请使用 HTTPS'
+          : '开启后台通知';
   return (
     <main className="app-main-surface relative flex h-full min-w-0 flex-1 flex-col">
-      <header className="app-topbar-surface flex h-14 shrink-0 items-center border-b px-6">
+      <header className="app-topbar-surface flex h-14 shrink-0 items-center border-b px-3 sm:px-6">
+        {mobile && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="mr-1 size-9 shrink-0"
+            onClick={onOpenMobileSidebar}
+            title="打开会话列表"
+          >
+            <Menu className="size-4" />
+          </Button>
+        )}
         <h1 className="truncate text-sm font-semibold">{title}</h1>
         <Badge variant={busy ? 'default' : 'secondary'} className="ml-3">
           {busy ? '运行中' : '空闲'}
         </Badge>
         <div className="ml-auto flex items-center gap-2">
+          <Button
+            type="button"
+            variant={notificationState === 'enabled' ? 'secondary' : 'ghost'}
+            size="icon"
+            className="size-9"
+            onClick={onTogglePushNotifications}
+            disabled={notificationBusy}
+            title={notificationTitle}
+          >
+            {notificationState === 'enabled' ? <Bell className="size-4" /> : <BellOff className="size-4" />}
+          </Button>
           <Button
             type="button"
             variant={showStatusCard ? 'secondary' : 'ghost'}
@@ -133,7 +176,7 @@ export function ChatView({
             type="button"
             variant={wide ? 'secondary' : 'ghost'}
             size="icon"
-            className="size-9"
+            className="hidden size-9 sm:inline-flex"
             onClick={onToggleWide}
             title={wide ? '恢复正常宽度' : '加宽对话'}
           >

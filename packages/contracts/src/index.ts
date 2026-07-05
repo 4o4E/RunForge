@@ -6,4 +6,5 @@ export type * from './settings.js';
 export type * from './datasources.js';
 export type * from './shell.js';
 export type * from './runtime.js';
+export type * from './notifications.js';
 export * from './schemas.js';

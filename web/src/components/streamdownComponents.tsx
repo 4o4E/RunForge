@@ -180,9 +180,70 @@ function svgNaturalSize(svg: string): { width: number; height: number } {
   return { width: width ?? 960, height: height ?? 540 };
 }
 
-function renderedMermaidSvgSize(svg: string): { svg: string; width: number; height: number } {
-  const naturalSize = svgNaturalSize(svg);
-  return { svg, width: naturalSize.width, height: naturalSize.height };
+function validSvgBox(box: DOMRect | SVGRect | null): box is DOMRect | SVGRect {
+  return Boolean(
+    box
+      && Number.isFinite(box.x)
+      && Number.isFinite(box.y)
+      && Number.isFinite(box.width)
+      && Number.isFinite(box.height)
+      && box.width > 1
+      && box.height > 1,
+  );
+}
+
+function cropSvgToContentBounds(svg: string, measureHost: HTMLElement): string | null {
+  const probe = document.createElement('div');
+  probe.style.left = '0';
+  probe.style.opacity = '0';
+  probe.style.pointerEvents = 'none';
+  probe.style.position = 'absolute';
+  probe.style.top = '0';
+  probe.innerHTML = svg;
+  measureHost.appendChild(probe);
+
+  try {
+    const svgElement = probe.querySelector<SVGSVGElement>('svg');
+    if (!svgElement) return null;
+
+    const candidates: Array<SVGGraphicsElement | SVGSVGElement | null> = [
+      svgElement.querySelector<SVGGElement>('g.root'),
+      svgElement.querySelector<SVGGElement>('g[class*="root"]'),
+      svgElement.querySelector<SVGGElement>('g'),
+      svgElement,
+    ];
+    const box = candidates
+      .map((candidate) => {
+        try {
+          return candidate?.getBBox() ?? null;
+        } catch {
+          return null;
+        }
+      })
+      .find(validSvgBox);
+
+    if (!box) return null;
+
+    // Mermaid 有时会生成和容器一样大的 SVG 画布，真实图形只占中间一小块；这里按图形边界重写 viewBox。
+    const padding = 16;
+    const width = Math.ceil(box.width + padding * 2);
+    const height = Math.ceil(box.height + padding * 2);
+    svgElement.setAttribute('viewBox', `${box.x - padding} ${box.y - padding} ${width} ${height}`);
+    svgElement.setAttribute('width', String(width));
+    svgElement.setAttribute('height', String(height));
+    svgElement.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    svgElement.style.maxWidth = 'none';
+    return new XMLSerializer().serializeToString(svgElement);
+  } finally {
+    probe.remove();
+  }
+}
+
+function renderedMermaidSvgSize(svg: string, measureHost?: HTMLElement): { svg: string; width: number; height: number } {
+  const normalizedSvg = measureHost ? cropSvgToContentBounds(svg, measureHost) : null;
+  const nextSvg = normalizedSvg ?? svg;
+  const naturalSize = svgNaturalSize(nextSvg);
+  return { svg: nextSvg, width: naturalSize.width, height: naturalSize.height };
 }
 
 function flowchartDirection(chart: string): 'horizontal' | 'vertical' | null {
@@ -205,6 +266,46 @@ function shouldRefitFlowchart(chart: string, actualWidth: number, targetWidth: n
 function flowchartFitSpacing(actualWidth: number, targetWidth: number): number {
   const ratio = Math.max(1, targetWidth / Math.max(1, actualWidth));
   return Math.min(260, Math.max(50, Math.round(50 * ratio)));
+}
+
+async function renderMermaidSvgForSize(
+  chart: string,
+  config: MermaidConfig | undefined,
+  renderSize: { width: number; height: number },
+  renderId: string,
+): Promise<{ svg: string; width: number; height: number }> {
+  let renderHost: HTMLDivElement | null = null;
+  try {
+    renderHost = createMermaidRenderHost(renderSize.width, renderSize.height);
+    const baseConfig: MermaidConfig = { fontFamily: 'monospace', securityLevel: 'strict', startOnLoad: false, suppressErrorRendering: true };
+    const responsiveConfig = mermaidRenderConfig(chart, baseConfig, config, renderSize);
+    rawMermaid.initialize(responsiveConfig);
+    // 先校验语法，再在指定尺寸的离屏宿主里生成这一视口专用 SVG。
+    await rawMermaid.parse(chart);
+    const { svg: nextSvg } = await rawMermaid.render(renderId, chart, renderHost);
+    let normalizedSvg = renderedMermaidSvgSize(nextSvg, renderHost);
+    for (let attempt = 0; attempt < 2 && shouldRefitFlowchart(chart, normalizedSvg.width, renderSize.width); attempt += 1) {
+      const direction = flowchartDirection(chart);
+      const spacing = flowchartFitSpacing(normalizedSvg.width, renderSize.width);
+      const flowchartConfig = {
+        ...responsiveConfig,
+        flowchart: {
+          ...responsiveConfig.flowchart,
+          rankSpacing: direction === 'horizontal' ? spacing : responsiveConfig.flowchart?.rankSpacing,
+          nodeSpacing: direction === 'vertical' ? spacing : responsiveConfig.flowchart?.nodeSpacing,
+          useMaxWidth: false,
+        },
+      };
+      rawMermaid.initialize(flowchartConfig);
+      const { svg: fittedSvg } = await rawMermaid.render(`${renderId}-fit-${attempt}`, chart, renderHost);
+      const fittedSize = renderedMermaidSvgSize(fittedSvg, renderHost);
+      if (fittedSize.width <= normalizedSvg.width + 2) break;
+      normalizedSvg = fittedSize;
+    }
+    return normalizedSvg;
+  } finally {
+    renderHost?.remove();
+  }
 }
 
 function IconButton({
@@ -231,6 +332,25 @@ function IconButton({
   );
 }
 
+function pointDistance(a: { x: number; y: number }, b: { x: number; y: number }): number {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function pointCenter(a: { x: number; y: number }, b: { x: number; y: number }): { x: number; y: number } {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+
+function visualViewportRect(): { height: number; left: number; top: number; width: number } {
+  const viewport = window.visualViewport;
+  if (!viewport) return { height: window.innerHeight, left: 0, top: 0, width: window.innerWidth };
+  return {
+    height: viewport.height,
+    left: viewport.offsetLeft,
+    top: viewport.offsetTop,
+    width: viewport.width,
+  };
+}
+
 function MermaidViewport({ height, svg, fullscreen = false, width }: { height: number; svg: string; fullscreen?: boolean; width: number }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const [zoom, setZoom] = useState(1);
@@ -238,7 +358,14 @@ function MermaidViewport({ height, svg, fullscreen = false, width }: { height: n
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
   const dragStartRef = useRef({ pointerX: 0, pointerY: 0, panX: 0, panY: 0 });
+  const panRef = useRef(pan);
+  const pointerPositionsRef = useRef(new Map<number, { x: number; y: number }>());
+  const pinchStartRef = useRef<{ distance: number; zoom: number; centerX: number; centerY: number; panX: number; panY: number } | null>(null);
   const naturalSize = useMemo(() => ({ height, width }), [height, width]);
+
+  useEffect(() => {
+    panRef.current = pan;
+  }, [pan]);
 
   const zoomBy = useCallback((delta: number) => {
     setZoom((value) => Math.max(0.5, Math.min(3, Number((value + delta).toFixed(2)))));
@@ -264,12 +391,20 @@ function MermaidViewport({ height, svg, fullscreen = false, width }: { height: n
         setFitScale(1);
         return;
       }
-      const padding = fullscreen ? 16 : 24;
+      const padding = 0;
       const availableWidth = Math.max(1, rect.width - padding);
       const availableHeight = Math.max(1, rect.height - padding);
       const fitWidth = availableWidth / naturalSize.width;
       const fitBoth = Math.min(fitWidth, availableHeight / naturalSize.height);
-      const next = Math.min(3, Math.max(0.2, fitBoth));
+      const contentAspect = naturalSize.width / naturalSize.height;
+      const viewportAspect = availableWidth / availableHeight;
+      const isWideFullscreen = fullscreen && contentAspect > 1.6 && contentAspect > viewportAspect * 1.4;
+      const readableHeight = Math.min(availableHeight * 0.42, Math.max(220, availableWidth * 0.56));
+      const readableScale = readableHeight / naturalSize.height;
+      // 超宽图完整塞进竖屏会小到不可读；全屏默认优先可读，横向部分交给拖拽查看。
+      const rawScale = isWideFullscreen ? Math.max(fitWidth, readableScale) : fitBoth;
+      const maxAutoFitScale = fullscreen ? 12 : 3;
+      const next = Math.min(maxAutoFitScale, Math.max(0.2, rawScale));
       setFitScale(Number(next.toFixed(3)));
     };
 
@@ -297,18 +432,49 @@ function MermaidViewport({ height, svg, fullscreen = false, width }: { height: n
 
   const onPointerDown = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
-      if (event.button !== 0 || event.isPrimary === false) return;
+      if (event.button !== 0) return;
       event.preventDefault();
       event.currentTarget.setPointerCapture(event.pointerId);
-      dragStartRef.current = { pointerX: event.clientX, pointerY: event.clientY, panX: pan.x, panY: pan.y };
+      pointerPositionsRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      const points = [...pointerPositionsRef.current.values()];
+      if (points.length >= 2) {
+        const [first, second] = points;
+        const center = pointCenter(first, second);
+        pinchStartRef.current = {
+          distance: Math.max(1, pointDistance(first, second)),
+          zoom,
+          centerX: center.x,
+          centerY: center.y,
+          panX: panRef.current.x,
+          panY: panRef.current.y,
+        };
+        setDragging(false);
+        return;
+      }
+      dragStartRef.current = { pointerX: event.clientX, pointerY: event.clientY, panX: panRef.current.x, panY: panRef.current.y };
       setDragging(true);
     },
-    [pan.x, pan.y],
+    [zoom],
   );
 
   const onPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!dragging) return;
+    if (!pointerPositionsRef.current.has(event.pointerId)) return;
     event.preventDefault();
+    pointerPositionsRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    const points = [...pointerPositionsRef.current.values()];
+    if (points.length >= 2 && pinchStartRef.current) {
+      const [first, second] = points;
+      const center = pointCenter(first, second);
+      const ratio = pointDistance(first, second) / pinchStartRef.current.distance;
+      const nextZoom = Math.max(0.5, Math.min(3, Number((pinchStartRef.current.zoom * ratio).toFixed(2))));
+      setZoom(nextZoom);
+      setPan({
+        x: pinchStartRef.current.panX + center.x - pinchStartRef.current.centerX,
+        y: pinchStartRef.current.panY + center.y - pinchStartRef.current.centerY,
+      });
+      return;
+    }
+    if (!dragging) return;
     const start = dragStartRef.current;
     setPan({
       x: start.panX + event.clientX - start.pointerX,
@@ -317,6 +483,8 @@ function MermaidViewport({ height, svg, fullscreen = false, width }: { height: n
   }, [dragging]);
 
   const onPointerUp = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    pointerPositionsRef.current.delete(event.pointerId);
+    if (pointerPositionsRef.current.size < 2) pinchStartRef.current = null;
     setDragging(false);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
@@ -337,7 +505,10 @@ function MermaidViewport({ height, svg, fullscreen = false, width }: { height: n
         </IconButton>
       </div>
       <div
-        className={cn('flex size-full items-center justify-center overflow-hidden', dragging ? 'cursor-grabbing' : 'cursor-grab')}
+        className={cn(
+          'flex size-full touch-none items-center justify-center overflow-hidden',
+          dragging ? 'cursor-grabbing' : 'cursor-grab',
+        )}
         onPointerCancel={onPointerUp}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -363,27 +534,125 @@ function MermaidViewport({ height, svg, fullscreen = false, width }: { height: n
 }
 
 function MermaidFullscreen({
+  chart,
+  config,
   height,
   open,
   onOpenChange,
   svg,
   width,
 }: {
+  chart: string;
+  config?: MermaidConfig;
   height: number;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   svg: string;
   width: number;
 }) {
+  const reactId = useId().replace(/[^a-zA-Z0-9_-]/g, '-');
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [renderSize, setRenderSize] = useState({ width: 0, height: 0 });
+  const [fullscreenSvg, setFullscreenSvg] = useState('');
+  const [fullscreenSize, setFullscreenSize] = useState({ width, height });
+  const [loading, setLoading] = useState(false);
+  const [viewportRect, setViewportRect] = useState(() => visualViewportRect());
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const syncViewportRect = () => setViewportRect(visualViewportRect());
+    syncViewportRect();
+    window.addEventListener('resize', syncViewportRect);
+    window.addEventListener('orientationchange', syncViewportRect);
+    window.visualViewport?.addEventListener('resize', syncViewportRect);
+    window.visualViewport?.addEventListener('scroll', syncViewportRect);
+    return () => {
+      window.removeEventListener('resize', syncViewportRect);
+      window.removeEventListener('orientationchange', syncViewportRect);
+      window.visualViewport?.removeEventListener('resize', syncViewportRect);
+      window.visualViewport?.removeEventListener('scroll', syncViewportRect);
+    };
+  }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const element = containerRef.current;
+    if (!element) return;
+    let frame = 0;
+    const updateSize = () => {
+      frame = 0;
+      const rect = element.getBoundingClientRect();
+      const next = normalizedRenderSize(element.clientWidth || rect.width, element.clientHeight || rect.height);
+      setRenderSize((current) => (
+        next.width && next.height && (next.width !== current.width || next.height !== current.height) ? next : current
+      ));
+    };
+    const scheduleUpdate = () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(updateSize);
+    };
+    updateSize();
+    const observer = new ResizeObserver(scheduleUpdate);
+    observer.observe(element);
+    window.addEventListener('resize', scheduleUpdate);
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener('resize', scheduleUpdate);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || !renderSize.width || !renderSize.height) return;
+    let canceled = false;
+    setLoading(true);
+    setFullscreenSvg('');
+    const renderId = `mermaid-${reactId}-fullscreen-${hashString(chart)}-${renderSize.width}x${renderSize.height}`;
+    void renderMermaidSvgForSize(chart, config, renderSize, renderId)
+      .then((next) => {
+        if (canceled) return;
+        setFullscreenSvg(next.svg);
+        setFullscreenSize({ width: next.width, height: next.height });
+      })
+      .catch(() => {
+        if (canceled) return;
+        setFullscreenSvg(svg);
+        setFullscreenSize({ width, height });
+      })
+      .finally(() => {
+        if (!canceled) setLoading(false);
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [chart, config, height, open, reactId, renderSize, svg, width]);
+
+  const activeSvg = fullscreenSvg || (!loading ? svg : '');
+  const activeSize = fullscreenSvg ? fullscreenSize : { width, height };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-none flex-col gap-0 overflow-hidden bg-background/95 p-4 sm:rounded-lg">
+      <DialogContent
+        className="flex max-w-none flex-col gap-0 overflow-hidden bg-background/95 p-4 sm:rounded-lg"
+        style={{
+          height: `${Math.max(1, viewportRect.height - 16)}px`,
+          left: `${viewportRect.left + viewportRect.width / 2}px`,
+          maxHeight: `${Math.max(1, viewportRect.height - 16)}px`,
+          maxWidth: `${Math.max(1, viewportRect.width - 16)}px`,
+          top: `${viewportRect.top + viewportRect.height / 2}px`,
+          width: `${Math.max(1, viewportRect.width - 16)}px`,
+        }}
+      >
         <DialogTitle className="sr-only">Mermaid 全屏预览</DialogTitle>
         <div className="flex min-h-0 flex-1 items-center justify-center">
-        <div data-streamdown="mermaid" className="mermaid-fullscreen size-full">
-          <MermaidViewport height={height} svg={svg} fullscreen width={width} />
+          <div ref={containerRef} data-streamdown="mermaid" className="mermaid-fullscreen size-full">
+            {activeSvg ? (
+              <MermaidViewport height={activeSize.height} svg={activeSvg} fullscreen width={activeSize.width} />
+            ) : (
+              <div className="flex size-full items-center justify-center text-sm text-muted-foreground">Mermaid 全屏生成中...</div>
+            )}
+          </div>
         </div>
-      </div>
       </DialogContent>
     </Dialog>
   );
@@ -452,35 +721,8 @@ function EagerMermaidBlock({ chart, className, isIncomplete }: { chart: string; 
     setError(null);
 
     void (async () => {
-      let renderHost: HTMLDivElement | null = null;
       try {
-        renderHost = createMermaidRenderHost(renderSize.width, renderSize.height);
-        const baseConfig: MermaidConfig = { fontFamily: 'monospace', securityLevel: 'strict', startOnLoad: false, suppressErrorRendering: true };
-        const responsiveConfig = mermaidRenderConfig(chart, baseConfig, config, renderSize);
-        rawMermaid.initialize(responsiveConfig);
-        // 流式输出期间先做 Mermaid 基础语法校验；不通过就保留上一张有效图，等待下一次同步。
-        await rawMermaid.parse(chart);
-        // 宽度变化时在同宽离屏宿主里重新布局，生成目标宽度下的 SVG。
-        const { svg: nextSvg } = await rawMermaid.render(renderId, chart, renderHost);
-        let normalizedSvg = renderedMermaidSvgSize(nextSvg);
-        for (let attempt = 0; attempt < 2 && shouldRefitFlowchart(chart, normalizedSvg.width, renderSize.width); attempt += 1) {
-          const direction = flowchartDirection(chart);
-          const spacing = flowchartFitSpacing(normalizedSvg.width, renderSize.width);
-          const flowchartConfig = {
-            ...responsiveConfig,
-            flowchart: {
-              ...responsiveConfig.flowchart,
-              rankSpacing: direction === 'horizontal' ? spacing : responsiveConfig.flowchart?.rankSpacing,
-              nodeSpacing: direction === 'vertical' ? spacing : responsiveConfig.flowchart?.nodeSpacing,
-              useMaxWidth: false,
-            },
-          };
-          rawMermaid.initialize(flowchartConfig);
-          const { svg: fittedSvg } = await rawMermaid.render(`${renderId}-fit-${attempt}`, chart, renderHost);
-          const fittedSize = renderedMermaidSvgSize(fittedSvg);
-          if (fittedSize.width <= normalizedSvg.width + 2) break;
-          normalizedSvg = fittedSize;
-        }
+        const normalizedSvg = await renderMermaidSvgForSize(chart, config, renderSize, renderId);
         if (canceled) return;
         setError(null);
         setSvg(normalizedSvg.svg);
@@ -495,7 +737,6 @@ function EagerMermaidBlock({ chart, className, isIncomplete }: { chart: string; 
         setSvgSize({ width: 0, height: 0 });
         setError(reason instanceof Error ? reason.message : 'Mermaid 图表渲染失败');
       } finally {
-        renderHost?.remove();
         if (!canceled) setLoading(false);
       }
     })();
@@ -576,7 +817,7 @@ function EagerMermaidBlock({ chart, className, isIncomplete }: { chart: string; 
       <div
         ref={diagramRef}
         data-streamdown="mermaid"
-        className="h-[min(70vh,32rem)] min-h-60 rounded-md border border-border bg-white dark:bg-[#1f2020]"
+        className="h-[min(38vh,14rem)] min-h-40 rounded-md border border-border bg-white dark:bg-[#1f2020] sm:h-[min(70vh,32rem)] sm:min-h-60"
       >
         {showPanZoom ? (
           body
@@ -596,6 +837,8 @@ function EagerMermaidBlock({ chart, className, isIncomplete }: { chart: string; 
       </div>
       {svg ? (
         <MermaidFullscreen
+          chart={chart}
+          config={config}
           height={svgSize.height || 1}
           open={fullscreenOpen}
           onOpenChange={setFullscreenOpen}

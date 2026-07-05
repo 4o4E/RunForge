@@ -347,12 +347,14 @@ export function Composer({
       placeholder="选择模型"
       disabled={waitingForAskUser}
       variant="ghost"
-      className="h-8 w-auto min-w-0 px-2 text-xs text-muted-foreground hover:text-foreground"
+      compact
+      focusSearchOnOpen={false}
+      className="h-8 w-8 min-w-8 px-0 text-xs text-muted-foreground hover:text-foreground sm:w-auto sm:min-w-0 sm:px-2 [&>span]:hidden sm:[&>span]:block [&>svg:last-child]:hidden sm:[&>svg:last-child]:block"
     />
   );
 
   return (
-    <div className="px-6 py-3">
+    <div className="px-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-3 sm:px-6">
       <div className="flex min-w-0">
         <div className="min-w-0 flex-1">
           <div ref={promptFrameRef} className={cn('mx-auto', wide ? 'max-w-5xl' : 'max-w-3xl')}>
@@ -437,7 +439,7 @@ export function Composer({
                 onChange={(event) => handleDraftChange(event.currentTarget.value, event.currentTarget)}
                 onPaste={handlePasteFiles}
                 disabled={waitingForAskUser}
-                placeholder={waitingForAskUser ? '请在上方 ask_user 表单中回答' : '描述一个任务…（Enter 发送，Shift+Enter 换行）'}
+                placeholder={waitingForAskUser ? '请先回答问题' : '输入任务…'}
                 value={localDraft}
                 wrap={multilineDraft ? 'soft' : 'off'}
                 className={cn(
@@ -447,7 +449,7 @@ export function Composer({
                     : 'h-8 min-h-8 max-h-8 whitespace-pre overflow-x-auto overflow-y-hidden',
                 )}
               />
-              <div className="composer-actions ml-auto flex shrink-0 items-center gap-1">
+              <div className="composer-actions ml-auto flex min-w-0 shrink-0 items-center gap-1">
                 {modelSelect}
                 <ContextUsageMeter usage={usage} />
                 <PromptInputSubmit

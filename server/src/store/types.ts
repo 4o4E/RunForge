@@ -1,6 +1,7 @@
 import type { AgentEvent, RunStatus } from '../agent/types.js';
 import type { GoalState } from '../agent/goal.js';
 import type { LlmMessage } from '../llm/types.js';
+import type { WebPushSubscriptionInput } from '@my-agent/contracts';
 
 export interface ThreadRow {
   id: string;
@@ -148,6 +149,18 @@ export interface ThreadSearchResultRow {
   created_at: string;
 }
 
+export interface PushSubscriptionRow {
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  expiration_time: string | null;
+  user_agent: string | null;
+  enabled: boolean;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 /**
  * Persistence port. The executor depends on this interface, not on PG directly,
  * so it can be unit-tested with an in-memory implementation.
@@ -275,4 +288,8 @@ export interface Store {
   appendShellCommandLog(commandId: string, stream: ShellLogStream, chunk: string): Promise<ShellCommandLogRow>;
   getShellCommandLogs(commandId: string, sinceSeq?: number, limit?: number): Promise<ShellCommandLogRow[]>;
   addShellSessionEvent(sessionId: string, actor: ShellActor, kind: string, data: unknown): Promise<void>;
+
+  upsertPushSubscription(input: WebPushSubscriptionInput, userAgent?: string | null): Promise<PushSubscriptionRow>;
+  listEnabledPushSubscriptions(): Promise<PushSubscriptionRow[]>;
+  disablePushSubscription(endpoint: string, error?: string | null): Promise<void>;
 }
