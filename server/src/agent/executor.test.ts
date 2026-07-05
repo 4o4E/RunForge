@@ -160,6 +160,60 @@ test('thread title: uses first input as fallback and generates for an empty-titl
   assert.equal(backfilled?.title, '余姚玩水地点选择');
 });
 
+test('thread title: keeps generated title and fallback concise for the sidebar', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run = await store.createRun(thread.id, '请帮我分析跨平台对话模型优化方案，以及后续落地建议');
+  await store.setRunStatus(run.id, 'done', { output: '建议从上下文、路由和评估三个方向优化。' });
+
+  const updated = await maybeGenerateThreadTitleAfterFirstRun(run.id, {
+    store,
+    provider: {
+      name: 'verbose-title-provider',
+      async complete() {
+        return { content: '请帮我分析跨平台对话模型优化方案，以及后续落地建议', toolCalls: [] };
+      },
+    },
+  });
+
+  assert.equal(updated?.title, '跨平台对话模型优化方案');
+
+  const fallbackThread = await store.createThread();
+  const fallbackRun = await store.createRun(fallbackThread.id, '楼下50米洗车，建议直接开车还是走路');
+  await store.setRunStatus(fallbackRun.id, 'done', { output: '建议直接走路。' });
+
+  const fallback = await maybeGenerateThreadTitleAfterFirstRun(fallbackRun.id, {
+    store,
+    provider: {
+      name: 'empty-title-provider',
+      async complete() {
+        return { content: '', toolCalls: [] };
+      },
+    },
+  });
+
+  assert.equal(fallback?.title, '楼下50米洗车');
+});
+
+test('thread title: extracts concise title from json-like provider output', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run = await store.createRun(thread.id, '整理Ubuntu 24安装NVIDIA驱动的步骤');
+  await store.setRunStatus(run.id, 'done', { output: '按驱动版本和安全启动状态拆分步骤。' });
+
+  const updated = await maybeGenerateThreadTitleAfterFirstRun(run.id, {
+    store,
+    provider: {
+      name: 'json-title-provider',
+      async complete() {
+        return { content: '```json\n{"title":"Ubuntu 24 安装驱动"}\n```', toolCalls: [] };
+      },
+    },
+  });
+
+  assert.equal(updated?.title, 'Ubuntu 24 安装驱动');
+});
+
 test('executeRun: generates a thread title after completion when enabled', async () => {
   const store = new MemoryStore();
   const thread = await store.createThread();
