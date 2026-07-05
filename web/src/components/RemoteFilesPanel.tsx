@@ -1,11 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import type { BundledLanguage } from 'shiki';
-import { Code2, Eye, ChevronRight, FileText, Folder, FolderOpen, PanelRightClose, PanelRightOpen, Paperclip, RefreshCw, X } from 'lucide-react';
-import { listRemoteFiles, previewRemoteFile, previewRemoteFileHex, remoteFileRawUrl, type FileHexPreview, type FileHexRow, type FilePreview, type RemoteFileEntry } from '@/api';
+import { Check, Code2, Copy, Eye, ChevronRight, FileText, Folder, FolderOpen, Link, PanelRightClose, PanelRightOpen, Paperclip, RefreshCw, X } from 'lucide-react';
+import {
+  createRemoteFileShareLink,
+  listRemoteFiles,
+  previewRemoteFile,
+  previewRemoteFileHex,
+  signedRemoteFileRawUrl,
+  type FileHexPreview,
+  type FileHexRow,
+  type FilePreview,
+  type RemoteFileEntry,
+} from '@/api';
 import { CodeBlock } from '@/components/ai-elements/code-block';
 import { MarkdownContent } from '@/components/MarkdownContent';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 
 interface PreviewChunk {
@@ -58,6 +70,23 @@ const INITIAL_PREVIEW_LINES = 80;
 const MORE_PREVIEW_LINES = 240;
 const INITIAL_HEX_BYTES = 4 * 1024;
 const MORE_HEX_BYTES = 16 * 1024;
+const RAW_URL_TTL_SECONDS = 24 * 60 * 60;
+const SHARE_PRESETS = [
+  { label: '1 天 / 1d', seconds: 24 * 60 * 60 },
+  { label: '3 天 / 3d', seconds: 3 * 24 * 60 * 60 },
+  { label: '7 天 / 7d', seconds: 7 * 24 * 60 * 60 },
+  { label: '1 个月 / 1m', seconds: 30 * 24 * 60 * 60 },
+  { label: '10 年 / 10y 长期', seconds: 10 * 365 * 24 * 60 * 60 },
+];
+const CUSTOM_UNITS = [
+  { label: '分钟', value: 'minute', seconds: 60 },
+  { label: '小时', value: 'hour', seconds: 60 * 60 },
+  { label: '天', value: 'day', seconds: 24 * 60 * 60 },
+  { label: '月', value: 'month', seconds: 30 * 24 * 60 * 60 },
+  { label: '年', value: 'year', seconds: 365 * 24 * 60 * 60 },
+] as const;
+const MIN_SHARE_TTL_SECONDS = 60;
+const MAX_SHARE_TTL_SECONDS = 10 * 365 * 24 * 60 * 60;
 
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'avif']);
 const VIDEO_EXTENSIONS = new Set(['mp4', 'webm', 'ogv', 'mov', 'm4v', 'mkv']);
@@ -120,6 +149,17 @@ function formatHexOffset(offset: number): string {
   return offset.toString(16).toUpperCase().padStart(8, '0');
 }
 
+function clampShareTtl(seconds: number): number {
+  return Math.min(MAX_SHARE_TTL_SECONDS, Math.max(MIN_SHARE_TTL_SECONDS, Math.floor(seconds)));
+}
+
+function formatExpiresAt(value: string | null): string {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
 function fileTone(path: string): string {
   const ext = extOf(path);
   if (['ts', 'tsx', 'js', 'jsx', 'py', 'rs', 'go', 'java', 'c', 'cpp'].includes(ext)) return 'text-foreground';
@@ -169,6 +209,12 @@ export function RemoteFilesPanel({ open, width, previewPath, embedded = false, o
   const [previewMode, setPreviewMode] = useState<'preview' | 'source'>('source');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [rawUrl, setRawUrl] = useState('');
+  const [shareBusy, setShareBusy] = useState(false);
+  const [shareExpiresAt, setShareExpiresAt] = useState<string | null>(null);
+  const [shareCopied, setShareCopied] = useState(false);
+  const [customShareValue, setCustomShareValue] = useState('1');
+  const [customShareUnit, setCustomShareUnit] = useState<typeof CUSTOM_UNITS[number]['value']>('day');
   const previewRequestRef = useRef(0);
   const pendingPreviewStartsRef = useRef<Set<number>>(new Set());
   const pendingHexOffsetsRef = useRef<Set<number>>(new Set());
@@ -202,6 +248,9 @@ export function RemoteFilesPanel({ open, width, previewPath, embedded = false, o
       setChunks([]);
       setHexPreview(null);
       setHexRows([]);
+      setRawUrl('');
+      setShareExpiresAt(null);
+      setShareCopied(false);
       setPreviewMode(mediaKind || ['html', 'htm', 'md'].includes(extOf(path)) ? 'preview' : 'source');
     } else {
       pendingPreviewStartsRef.current.add(startLine);
@@ -316,7 +365,46 @@ export function RemoteFilesPanel({ open, width, previewPath, embedded = false, o
   const previewStartLine = previewRows[0]?.lineNumber ?? 1;
   const loadedLines = previewRows.length;
   const totalLines = preview?.totalLines ?? null;
-  const rawUrl = selectedPath ? remoteFileRawUrl(selectedPath) : '';
+
+  useEffect(() => {
+    let canceled = false;
+    setRawUrl('');
+    if (!selectedPath || !selectedMediaKind) return () => {
+      canceled = true;
+    };
+    signedRemoteFileRawUrl(selectedPath, RAW_URL_TTL_SECONDS)
+      .then((url) => {
+        if (!canceled) setRawUrl(url);
+      })
+      .catch((err) => {
+        if (!canceled) setError((err as Error).message);
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [selectedMediaKind, selectedPath]);
+
+  async function copyShareLink(ttlSeconds: number) {
+    if (!selectedPath || shareBusy) return;
+    setShareBusy(true);
+    setError(null);
+    setShareCopied(false);
+    try {
+      const link = await createRemoteFileShareLink(selectedPath, clampShareTtl(ttlSeconds));
+      const absoluteUrl = new URL(link.url, window.location.origin).toString();
+      await navigator.clipboard?.writeText(absoluteUrl);
+      setShareExpiresAt(link.expiresAt);
+      setShareCopied(true);
+      window.setTimeout(() => setShareCopied(false), 1600);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setShareBusy(false);
+    }
+  }
+
+  const customUnit = CUSTOM_UNITS.find((unit) => unit.value === customShareUnit) ?? CUSTOM_UNITS[2];
+  const customShareSeconds = clampShareTtl((Number(customShareValue) || 0) * customUnit.seconds);
 
   if (!open) return null;
   const hasUnloadedLines = preview?.mode === 'chunk' && (totalLines == null || loadedLines < totalLines);
@@ -432,18 +520,65 @@ export function RemoteFilesPanel({ open, width, previewPath, embedded = false, o
                   添加
                 </Button>
               </div>
+              <div className="flex shrink-0 flex-wrap items-center gap-2 rounded-md border bg-muted/20 p-2">
+                <Link className="size-4 text-muted-foreground" />
+                {SHARE_PRESETS.map((preset) => (
+                  <Button
+                    key={preset.seconds}
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void copyShareLink(preset.seconds)}
+                    disabled={shareBusy}
+                    title={`复制 ${preset.label} 有效的分享链接`}
+                  >
+                    {preset.label}
+                  </Button>
+                ))}
+                <div className="flex items-center gap-1">
+                  <Input
+                    className="h-8 w-16"
+                    min={1}
+                    type="number"
+                    value={customShareValue}
+                    onChange={(event) => setCustomShareValue(event.target.value)}
+                    title="自定义有效期数值"
+                  />
+                  <Select value={customShareUnit} onValueChange={(value) => setCustomShareUnit(value as typeof customShareUnit)}>
+                    <SelectTrigger className="h-8 w-20">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CUSTOM_UNITS.map((unit) => (
+                        <SelectItem key={unit.value} value={unit.value}>{unit.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button variant="secondary" size="sm" onClick={() => void copyShareLink(customShareSeconds)} disabled={shareBusy}>
+                    <Copy className="size-4" />
+                    复制
+                  </Button>
+                </div>
+                {shareCopied ? (
+                  <span className="inline-flex items-center gap-1 text-xs text-emerald-600">
+                    <Check className="size-3.5" />
+                    已复制，到期 {formatExpiresAt(shareExpiresAt)}
+                  </span>
+                ) : shareExpiresAt ? (
+                  <span className="text-xs text-muted-foreground">上次链接到期 {formatExpiresAt(shareExpiresAt)}</span>
+                ) : null}
+              </div>
               <div className="min-h-0 flex-1">
                 {selectedMediaKind === 'image' && previewMode === 'preview' ? (
                   <div className="flex h-full items-center justify-center overflow-auto rounded-md border bg-muted/20 p-3">
-                    <img src={rawUrl} alt={fileName(selectedPath)} className="max-h-full max-w-full object-contain" />
+                    {rawUrl ? <img src={rawUrl} alt={fileName(selectedPath)} className="max-h-full max-w-full object-contain" /> : <span className="text-sm text-muted-foreground">正在生成预览链接…</span>}
                   </div>
                 ) : selectedMediaKind === 'video' && previewMode === 'preview' ? (
                   <div className="flex h-full items-center justify-center overflow-auto rounded-md border bg-black p-3">
-                    <video src={rawUrl} className="max-h-full max-w-full" controls />
+                    {rawUrl ? <video src={rawUrl} className="max-h-full max-w-full" controls /> : <span className="text-sm text-muted-foreground">正在生成预览链接…</span>}
                   </div>
                 ) : selectedMediaKind === 'audio' && previewMode === 'preview' ? (
                   <div className="flex h-full items-center justify-center rounded-md border bg-muted/20 px-4">
-                    <audio src={rawUrl} className="w-full max-w-xl" controls />
+                    {rawUrl ? <audio src={rawUrl} className="w-full max-w-xl" controls /> : <span className="text-sm text-muted-foreground">正在生成预览链接…</span>}
                   </div>
                 ) : selectedUsesHexSource && previewMode === 'source' && hexRows.length > 0 ? (
                   <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-md border bg-background">

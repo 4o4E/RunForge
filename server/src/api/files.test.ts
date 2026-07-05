@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { formatHexRows, parseByteRange, previewTextLines } from './files.js';
+import { signFileShare, verifyFileShare } from './auth.js';
+import { config } from '../config.js';
 
 test('render preview keeps long lines intact', () => {
   const longLine = `const DATA = ${'x'.repeat(13_000)};`;
@@ -28,4 +30,23 @@ test('byte range parser supports browser media requests', () => {
   assert.deepEqual(parseByteRange('bytes=90-', 100), { start: 90, end: 99 });
   assert.deepEqual(parseByteRange('bytes=-10', 100), { start: 90, end: 99 });
   assert.equal(parseByteRange('bytes=100-', 100), 'invalid');
+});
+
+test('file share signature binds path and expiry', () => {
+  const previousAccessToken = config.auth.accessToken;
+  const previousShareSecret = config.auth.shareSecret;
+  config.auth.accessToken = 'test-access-token';
+  config.auth.shareSecret = 'test-share-secret';
+  try {
+    const expires = 2000;
+    const sig = signFileShare('artifacts/report.html', expires);
+
+    assert.equal(verifyFileShare('artifacts/report.html', String(expires), sig, 1000), true);
+    assert.equal(verifyFileShare('artifacts/other.html', String(expires), sig, 1000), false);
+    assert.equal(verifyFileShare('artifacts/report.html', String(expires + 1), sig, 1000), false);
+    assert.equal(verifyFileShare('artifacts/report.html', String(expires), sig, 2001), false);
+  } finally {
+    config.auth.accessToken = previousAccessToken;
+    config.auth.shareSecret = previousShareSecret;
+  }
 });

@@ -68,6 +68,8 @@ cp .env.example .env
 
 ```bash
 PORT=8080
+RUNFORGE_ACCESS_TOKEN=<strong-access-token>
+RUNFORGE_SHARE_SECRET=<strong-share-secret>
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/my_agent
 
 LLM_PROVIDER=aisdk
@@ -87,6 +89,8 @@ TOOL_WORKSPACE_ROOT=/absolute/path/to/RunForge/workspace
 TOOL_NETWORK=disabled
 TOOL_MAX_OUTPUT=40000
 ```
+
+`RUNFORGE_ACCESS_TOKEN` 用来保护后端 `/api/**` 和 `/ws`，前端只通过 `Authorization: Bearer <token>` Header 发送，不放 Cookie，也不放 URL。`RUNFORGE_SHARE_SECRET` 用来生成文件分享签名；分享链接只允许读取单个 `/api/files/raw` 文件，不能浏览目录、访问设置或操作 agent。
 
 当前开发和真实链路调试主要使用 DeepSeek V4 Pro，也就是 `LLM_MODEL=deepseek-v4-pro-202606`。代码保留 OpenAI、Anthropic、mock 等 provider 兼容路径，但本轮没有针对其他模型做专门提示词、参数或行为调优。
 

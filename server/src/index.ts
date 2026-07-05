@@ -11,6 +11,7 @@ import express from 'express';
 import { config } from './config.js';
 import { api } from './api/http.js';
 import { attachWebSocket } from './api/ws.js';
+import { assertAccessTokenConfigured } from './api/auth.js';
 import { describeShellSandbox } from './tools/sandbox.js';
 import { getToolSettings } from './settings.js';
 import { recoverInterruptedRuns } from './agent/recovery.js';
@@ -18,6 +19,7 @@ import { startDatasourceLeaseReconciler } from './datasources/reconciler.js';
 import { shellManager } from './shell/manager.js';
 
 const app = express();
+assertAccessTokenConfigured();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 

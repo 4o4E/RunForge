@@ -8,6 +8,7 @@ import { settingsApi } from './settings.js';
 import { datasourcesApi } from './datasources.js';
 import { runtimeApi } from './runtime.js';
 import { notificationsApi } from './notifications.js';
+import { requireApiAccess } from './auth.js';
 import { releaseRunLeases } from '../datasources/accountPool.js';
 import type { AskUserAnswer, AskUserOption, AskUserSpec } from '../agent/types.js';
 import { shellManager } from '../shell/manager.js';
@@ -18,6 +19,7 @@ import { isWithin } from '../tools/policy.js';
 
 export const api = Router();
 
+api.use(requireApiAccess);
 api.use('/files', filesApi);
 api.use('/settings', settingsApi);
 api.use('/datasources', datasourcesApi);

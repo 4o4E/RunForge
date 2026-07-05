@@ -81,6 +81,10 @@ export const config = {
   host: process.env.HOST ?? '::',
   port: Number(process.env.PORT ?? 8080),
   databaseUrl: process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL,
+  auth: {
+    accessToken: process.env.RUNFORGE_ACCESS_TOKEN ?? '',
+    shareSecret: process.env.RUNFORGE_SHARE_SECRET ?? process.env.RUNFORGE_ACCESS_TOKEN ?? '',
+  },
   llm: {
     // aisdk | openai-responses | openai-chat | anthropic | mock
     provider: process.env.LLM_PROVIDER ?? 'aisdk',

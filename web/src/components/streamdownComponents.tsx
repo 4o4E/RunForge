@@ -28,7 +28,7 @@ import {
 } from 'streamdown';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
-import { remoteFileRawUrl } from '@/api';
+import { remoteFileRawUrl, signedRemoteFileRawUrl } from '@/api';
 
 interface MarkdownRenderOptions {
   streaming?: boolean;
@@ -55,6 +55,7 @@ type MarkdownImageProps = ComponentProps<'img'>;
 const LANGUAGE_CLASS_RE = /language-([^\s]+)/;
 const START_LINE_RE = /showLineNumbers\{(\d+)\}/;
 const IMAGE_PATH_RE = /\.(?:png|jpe?g|gif|webp|svg|bmp|avif)(?:[?#].*)?$/i;
+const RAW_URL_TTL_SECONDS = 24 * 60 * 60;
 
 function getControl(controls: ControlsConfig, scope: 'code' | 'mermaid', action?: string): boolean {
   if (controls === false) return false;
@@ -949,8 +950,41 @@ function normalizeImageSrc(src: string): string | undefined {
   return resolveMarkdownImageSource(src);
 }
 
+function workspacePathFromRawUrl(src: string | undefined): string | null {
+  if (!src?.startsWith('/api/files/raw')) return null;
+  try {
+    return new URL(src, window.location.origin).searchParams.get('path');
+  } catch {
+    return null;
+  }
+}
+
 function StreamdownImage({ className, src, alt = '', ...props }: MarkdownImageProps) {
   const resolvedSrc = src ? normalizeImageSrc(src) : src;
+  const [signedSrc, setSignedSrc] = useState<string | undefined>(resolvedSrc);
+
+  useEffect(() => {
+    let canceled = false;
+    const workspacePath = workspacePathFromRawUrl(resolvedSrc);
+    if (!workspacePath) {
+      setSignedSrc(resolvedSrc);
+      return () => {
+        canceled = true;
+      };
+    }
+    setSignedSrc(undefined);
+    signedRemoteFileRawUrl(workspacePath, RAW_URL_TTL_SECONDS)
+      .then((url) => {
+        if (!canceled) setSignedSrc(url);
+      })
+      .catch(() => {
+        if (!canceled) setSignedSrc(undefined);
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [resolvedSrc]);
+
   return (
     <img
       {...props}
@@ -958,7 +992,7 @@ function StreamdownImage({ className, src, alt = '', ...props }: MarkdownImagePr
       className={cn('my-3 max-h-[70vh] max-w-full rounded-md border border-border object-contain', className)}
       decoding="async"
       loading="lazy"
-      src={resolvedSrc}
+      src={signedSrc}
     />
   );
 }

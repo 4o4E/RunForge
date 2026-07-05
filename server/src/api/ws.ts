@@ -3,6 +3,7 @@ import { WebSocketServer } from 'ws';
 import { runBus } from '../agent/bus.js';
 import { shellBus } from '../shell/bus.js';
 import { store } from '../store/index.js';
+import { isValidAccessTokenValue, tokenFromWebSocketProtocols } from './auth.js';
 import type { AgentEvent } from '../agent/types.js';
 
 /**
@@ -15,6 +16,11 @@ export function attachWebSocket(server: Server): void {
   const wss = new WebSocketServer({ server, path: '/ws' });
 
   wss.on('connection', async (socket, req) => {
+    if (!isValidAccessTokenValue(tokenFromWebSocketProtocols(req.headers['sec-websocket-protocol']))) {
+      socket.close(1008, '访问 token 无效');
+      return;
+    }
+
     const url = new URL(req.url ?? '', 'http://localhost');
     const channel = url.searchParams.get('channel');
     const threadId = url.searchParams.get('threadId');
