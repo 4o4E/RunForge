@@ -347,7 +347,6 @@ export function Composer({
       placeholder="选择模型"
       disabled={waitingForAskUser}
       variant="ghost"
-      compact
       focusSearchOnOpen={false}
       className="h-8 w-8 min-w-8 px-0 text-xs text-muted-foreground hover:text-foreground sm:w-auto sm:min-w-0 sm:px-2 [&>span]:hidden sm:[&>span]:block [&>svg:last-child]:hidden sm:[&>svg:last-child]:block"
     />
