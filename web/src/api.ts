@@ -50,6 +50,12 @@ export interface FileShareLink {
   path: string;
   expiresAt: string;
   url: string;
+  rawUrl: string;
+}
+
+export interface FileShareAccess {
+  expires: string;
+  sig: string;
 }
 
 export function readAccessToken(): string {
@@ -163,26 +169,40 @@ export const listRemoteFiles = (path = '.') =>
 
 export const getRemoteFileInfo = () => authFetch('/api/files/info').then(json<RemoteFileInfo>);
 
-export const previewRemoteFile = (path: string, startLine = 1, limit = 200, options: { render?: boolean } = {}) => {
+export const previewRemoteFile = (path: string, startLine = 1, limit = 200, options: { render?: boolean; share?: FileShareAccess } = {}) => {
   const params = new URLSearchParams({
     path,
     startLine: String(startLine),
     limit: String(limit),
   });
   if (options.render) params.set('render', '1');
+  if (options.share) {
+    params.set('expires', options.share.expires);
+    params.set('sig', options.share.sig);
+  }
   return authFetch(`/api/files/preview?${params.toString()}`).then(json<FilePreview>);
 };
 
-export const previewRemoteFileHex = (path: string, offset = 0, limit = 4096) => {
+export const previewRemoteFileHex = (path: string, offset = 0, limit = 4096, options: { share?: FileShareAccess } = {}) => {
   const params = new URLSearchParams({
     path,
     offset: String(offset),
     limit: String(limit),
   });
+  if (options.share) {
+    params.set('expires', options.share.expires);
+    params.set('sig', options.share.sig);
+  }
   return authFetch(`/api/files/hex?${params.toString()}`).then(json<FileHexPreview>);
 };
 
 export const remoteFileRawUrl = (path: string) => `/api/files/raw?path=${encodeURIComponent(path)}`;
+
+export const signedRemoteFileUrl = (path: string, share: FileShareAccess, options: { download?: boolean } = {}) => {
+  const params = new URLSearchParams({ path, expires: share.expires, sig: share.sig });
+  if (options.download) params.set('download', '1');
+  return `/api/files/raw?${params.toString()}`;
+};
 
 export const createRemoteFileShareLink = (path: string, ttlSeconds: number) =>
   authFetch('/api/files/share-link', {
@@ -192,7 +212,7 @@ export const createRemoteFileShareLink = (path: string, ttlSeconds: number) =>
   }).then(json<FileShareLink>);
 
 export const signedRemoteFileRawUrl = (path: string, ttlSeconds = 24 * 60 * 60) =>
-  createRemoteFileShareLink(path, ttlSeconds).then((link) => link.url);
+  createRemoteFileShareLink(path, ttlSeconds).then((link) => link.rawUrl);
 
 export const uploadLocalFile = (path: string, contentBase64: string) =>
   authFetch('/api/files/upload', {

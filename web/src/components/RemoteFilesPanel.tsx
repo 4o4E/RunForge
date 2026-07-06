@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import type { BundledLanguage } from 'shiki';
-import { Check, Code2, Copy, Eye, ChevronRight, FileText, Folder, FolderOpen, Link, PanelRightClose, PanelRightOpen, Paperclip, RefreshCw, X } from 'lucide-react';
+import { Check, Code2, Copy, Download, Eye, ChevronRight, FileText, Folder, FolderOpen, Link, PanelRightClose, PanelRightOpen, Paperclip, RefreshCw, X } from 'lucide-react';
 import {
   createRemoteFileShareLink,
   listRemoteFiles,
   previewRemoteFile,
   previewRemoteFileHex,
+  signedRemoteFileUrl,
   signedRemoteFileRawUrl,
+  type FileShareAccess,
   type FileHexPreview,
   type FileHexRow,
   type FilePreview,
@@ -17,6 +19,7 @@ import { CodeBlock } from '@/components/ai-elements/code-block';
 import { MarkdownContent } from '@/components/MarkdownContent';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 
@@ -37,6 +40,11 @@ interface Props {
   width: number;
   previewPath: string | null;
   embedded?: boolean;
+  compact?: boolean;
+  shareAccess?: FileShareAccess;
+  showAttach?: boolean;
+  showShare?: boolean;
+  showBrowser?: boolean;
   onClose: () => void;
   onAttach: (entry: { kind: 'remote'; path: string; name: string; size?: number }) => void;
   onOpenFile?: (path: string) => void;
@@ -72,11 +80,11 @@ const INITIAL_HEX_BYTES = 4 * 1024;
 const MORE_HEX_BYTES = 16 * 1024;
 const RAW_URL_TTL_SECONDS = 24 * 60 * 60;
 const SHARE_PRESETS = [
-  { label: '1 天 / 1d', seconds: 24 * 60 * 60 },
-  { label: '3 天 / 3d', seconds: 3 * 24 * 60 * 60 },
-  { label: '7 天 / 7d', seconds: 7 * 24 * 60 * 60 },
-  { label: '1 个月 / 1m', seconds: 30 * 24 * 60 * 60 },
-  { label: '10 年 / 10y 长期', seconds: 10 * 365 * 24 * 60 * 60 },
+  { label: '1 天', seconds: 24 * 60 * 60 },
+  { label: '3 天', seconds: 3 * 24 * 60 * 60 },
+  { label: '7 天', seconds: 7 * 24 * 60 * 60 },
+  { label: '1 个月', seconds: 30 * 24 * 60 * 60 },
+  { label: '10 年', seconds: 10 * 365 * 24 * 60 * 60 },
 ];
 const CUSTOM_UNITS = [
   { label: '分钟', value: 'minute', seconds: 60 },
@@ -171,6 +179,12 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function withDownloadParam(url: string): string {
+  const next = new URL(url, window.location.origin);
+  next.searchParams.set('download', '1');
+  return `${next.pathname}${next.search}`;
+}
+
 function startTreeResize(event: ReactPointerEvent, width: number, onChange: (width: number) => void, direction: 1 | -1 = 1) {
   event.preventDefault();
   const startX = event.clientX;
@@ -194,10 +208,23 @@ function startTreeResize(event: ReactPointerEvent, width: number, onChange: (wid
   window.addEventListener('pointerup', onUp, { once: true });
 }
 
-export function RemoteFilesPanel({ open, width, previewPath, embedded = false, onClose, onAttach, onOpenFile }: Props) {
+export function RemoteFilesPanel({
+  open,
+  width,
+  previewPath,
+  embedded = false,
+  compact = false,
+  shareAccess,
+  showAttach = true,
+  showShare = true,
+  showBrowser = true,
+  onClose,
+  onAttach,
+  onOpenFile,
+}: Props) {
   const [currentPath, setCurrentPath] = useState('.');
   const [treeWidth, setTreeWidth] = useState(270);
-  const [showTree, setShowTree] = useState(true);
+  const [showTree, setShowTree] = useState(() => !compact || !previewPath);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(['.']));
   const [treeEntries, setTreeEntries] = useState<Record<string, RemoteFileEntry[]>>({});
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -210,7 +237,9 @@ export function RemoteFilesPanel({ open, width, previewPath, embedded = false, o
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [rawUrl, setRawUrl] = useState('');
+  const [downloadUrl, setDownloadUrl] = useState('');
   const [shareBusy, setShareBusy] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const [shareExpiresAt, setShareExpiresAt] = useState<string | null>(null);
   const [shareCopied, setShareCopied] = useState(false);
   const [customShareValue, setCustomShareValue] = useState('1');
@@ -240,6 +269,7 @@ export function RemoteFilesPanel({ open, width, previewPath, embedded = false, o
     const mediaKind = mediaKindForPath(path);
     const hexSource = shouldUseHexSource(path);
     if (startLine === 1) {
+      if (compact) setShowTree(false);
       pendingPreviewStartsRef.current.clear();
       pendingHexOffsetsRef.current.clear();
       setSelectedPath(path);
@@ -249,6 +279,8 @@ export function RemoteFilesPanel({ open, width, previewPath, embedded = false, o
       setHexPreview(null);
       setHexRows([]);
       setRawUrl('');
+      setDownloadUrl('');
+      setShareOpen(false);
       setShareExpiresAt(null);
       setShareCopied(false);
       setPreviewMode(mediaKind || ['html', 'htm', 'md'].includes(extOf(path)) ? 'preview' : 'source');
@@ -259,7 +291,7 @@ export function RemoteFilesPanel({ open, width, previewPath, embedded = false, o
     setError(null);
     try {
       if (hexSource) {
-        const data = await previewRemoteFileHex(path, 0, INITIAL_HEX_BYTES);
+        const data = await previewRemoteFileHex(path, 0, INITIAL_HEX_BYTES, { share: shareAccess });
         if (previewRequestRef.current !== requestId) return;
         setSelectedPath(data.path);
         setSelectedSize(size ?? data.size);
@@ -270,7 +302,7 @@ export function RemoteFilesPanel({ open, width, previewPath, embedded = false, o
 
       const limit = startLine === 1 ? INITIAL_PREVIEW_LINES : MORE_PREVIEW_LINES;
       const renderable = ['html', 'htm', 'md'].includes(extOf(path));
-      const data = await previewRemoteFile(path, startLine, limit, { render: startLine === 1 && renderable });
+      const data = await previewRemoteFile(path, startLine, limit, { render: startLine === 1 && renderable, share: shareAccess });
       if (previewRequestRef.current !== requestId) return;
       setSelectedPath(data.path);
       setSelectedSize(size ?? data.size);
@@ -294,7 +326,7 @@ export function RemoteFilesPanel({ open, width, previewPath, embedded = false, o
     setLoading(true);
     setError(null);
     try {
-      const data = await previewRemoteFileHex(selectedPath, offset, MORE_HEX_BYTES);
+      const data = await previewRemoteFileHex(selectedPath, offset, MORE_HEX_BYTES, { share: shareAccess });
       if (previewRequestRef.current !== requestId) return;
       setSelectedSize(data.size);
       setHexPreview(data);
@@ -329,13 +361,18 @@ export function RemoteFilesPanel({ open, width, previewPath, embedded = false, o
   }
 
   useEffect(() => {
-    if (open) void loadDir(currentPath);
+    if (open && showBrowser) void loadDir(currentPath);
     // 打开面板时刷新当前目录，保留用户所在位置。
-  }, [open]);
+  }, [open, showBrowser]);
 
   useEffect(() => {
     if (open && previewPath) void openFile(previewPath);
   }, [open, previewPath]);
+
+  useEffect(() => {
+    if (!compact) return;
+    setShowTree(!previewPath);
+  }, [compact, previewPath]);
 
   const previewLanguage = selectedPath ? languageForPath(selectedPath) : 'log';
   const selectedExt = selectedPath ? extOf(selectedPath) : '';
@@ -372,7 +409,10 @@ export function RemoteFilesPanel({ open, width, previewPath, embedded = false, o
     if (!selectedPath || !selectedMediaKind) return () => {
       canceled = true;
     };
-    signedRemoteFileRawUrl(selectedPath, RAW_URL_TTL_SECONDS)
+    const rawUrlPromise = shareAccess
+      ? Promise.resolve(signedRemoteFileUrl(selectedPath, shareAccess))
+      : signedRemoteFileRawUrl(selectedPath, RAW_URL_TTL_SECONDS);
+    rawUrlPromise
       .then((url) => {
         if (!canceled) setRawUrl(url);
       })
@@ -382,7 +422,28 @@ export function RemoteFilesPanel({ open, width, previewPath, embedded = false, o
     return () => {
       canceled = true;
     };
-  }, [selectedMediaKind, selectedPath]);
+  }, [selectedMediaKind, selectedPath, shareAccess]);
+
+  useEffect(() => {
+    let canceled = false;
+    setDownloadUrl('');
+    if (!selectedPath) return () => {
+      canceled = true;
+    };
+    const rawUrlPromise = shareAccess
+      ? Promise.resolve(signedRemoteFileUrl(selectedPath, shareAccess))
+      : signedRemoteFileRawUrl(selectedPath, RAW_URL_TTL_SECONDS);
+    rawUrlPromise
+      .then((url) => {
+        if (!canceled) setDownloadUrl(withDownloadParam(url));
+      })
+      .catch((err) => {
+        if (!canceled) setError((err as Error).message);
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [selectedPath, shareAccess]);
 
   async function copyShareLink(ttlSeconds: number) {
     if (!selectedPath || shareBusy) return;
@@ -395,6 +456,7 @@ export function RemoteFilesPanel({ open, width, previewPath, embedded = false, o
       await navigator.clipboard?.writeText(absoluteUrl);
       setShareExpiresAt(link.expiresAt);
       setShareCopied(true);
+      setShareOpen(false);
       window.setTimeout(() => setShareCopied(false), 1600);
     } catch (err) {
       setError((err as Error).message);
@@ -414,6 +476,7 @@ export function RemoteFilesPanel({ open, width, previewPath, embedded = false, o
     void openFile(selectedPath, selectedSize, nextLine);
   };
   const hasMoreHex = selectedUsesHexSource && Boolean(hexPreview?.hasMore && hexPreview.nextOffset != null);
+  const showPanelHeader = showBrowser || !embedded;
 
   const renderRows = (entries: RemoteFileEntry[] | undefined, depth: number): JSX.Element[] =>
     (entries ?? []).flatMap((entry) => {
@@ -448,39 +511,75 @@ export function RemoteFilesPanel({ open, width, previewPath, embedded = false, o
       if (!isDir || !isOpen) return [row];
       return [row, ...renderRows(treeEntries[entry.path], depth + 1)];
     });
+  const renderTreeBrowser = (side: boolean) => (
+    <div
+      className={cn(
+        'flex min-h-0 flex-col bg-muted/20',
+        side ? 'shrink-0 border-l' : 'h-full rounded-md border',
+      )}
+      style={side ? { width: treeWidth } : undefined}
+    >
+      <div className="flex h-9 shrink-0 items-center border-b px-2">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Explorer</span>
+      </div>
+      <div className="scrollbar-thin min-h-0 flex-1 overflow-auto py-1">
+        <button
+          className={cn(
+            'flex h-7 w-full items-center gap-1.5 px-2 text-left text-[13px] hover:bg-accent/70',
+            currentPath === '.' && 'bg-accent text-accent-foreground',
+          )}
+          onClick={() => void toggleDir('.')}
+          title="workspace"
+        >
+          <ChevronRight className={cn('size-3.5 shrink-0 text-muted-foreground transition-transform', expanded.has('.') && 'rotate-90')} />
+          {expanded.has('.') ? <FolderOpen className="size-4 shrink-0 text-foreground" /> : <Folder className="size-4 shrink-0 text-muted-foreground" />}
+          <span className="min-w-0 flex-1 truncate">workspace</span>
+        </button>
+        {expanded.has('.') && renderRows(treeEntries['.'], 1)}
+      </div>
+    </div>
+  );
 
   return (
     <aside className={cn('flex h-full shrink-0 flex-col bg-card', !embedded && 'border-l')} style={embedded ? undefined : { width }}>
-      <div className="flex h-14 items-center gap-2 border-b px-3">
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-semibold">远程文件</div>
-          <div className="truncate text-xs text-muted-foreground" title={selectedPath ?? currentPath}>
-            {selectedPath ?? currentPath}
+      {showPanelHeader && (
+        <div className="flex h-14 items-center gap-2 border-b px-3">
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-semibold">远程文件</div>
+            <div className="truncate text-xs text-muted-foreground" title={selectedPath ?? currentPath}>
+              {selectedPath ?? currentPath}
+            </div>
           </div>
+          {showBrowser && (
+            <>
+              <Button variant="ghost" size="icon" onClick={() => void loadDir(currentPath)} title="刷新">
+                <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
+              </Button>
+              <Button
+                variant={showTree ? 'secondary' : 'ghost'}
+                size="icon"
+                onClick={() => setShowTree((value) => !value)}
+                title={compact ? (showTree ? '显示文件预览' : '浏览文件树') : (showTree ? '隐藏文件树' : '显示文件树')}
+              >
+                {showTree ? <PanelRightClose className="size-4" /> : <PanelRightOpen className="size-4" />}
+              </Button>
+            </>
+          )}
+          {!embedded && (
+            <Button variant="ghost" size="icon" onClick={onClose} title="关闭">
+              <X className="size-4" />
+            </Button>
+          )}
         </div>
-        <Button variant="ghost" size="icon" onClick={() => void loadDir(currentPath)} title="刷新">
-          <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
-        </Button>
-        <Button
-          variant={showTree ? 'secondary' : 'ghost'}
-          size="icon"
-          onClick={() => setShowTree((value) => !value)}
-          title={showTree ? '隐藏文件树' : '显示文件树'}
-        >
-          {showTree ? <PanelRightClose className="size-4" /> : <PanelRightOpen className="size-4" />}
-        </Button>
-        {!embedded && (
-          <Button variant="ghost" size="icon" onClick={onClose} title="关闭">
-            <X className="size-4" />
-          </Button>
-        )}
-      </div>
+      )}
 
       {error && <div className="border-b px-3 py-2 text-xs text-destructive">{error}</div>}
 
       <div className="flex min-h-0 flex-1">
         <div className="min-w-0 flex-1 overflow-hidden p-3">
-          {selectedPath ? (
+          {compact && showTree ? (
+            renderTreeBrowser(false)
+          ) : selectedPath ? (
             <div className="flex h-full min-h-0 flex-col gap-3">
               <div className="flex shrink-0 items-center gap-2">
                 <div className="min-w-0 flex-1">
@@ -511,62 +610,102 @@ export function RemoteFilesPanel({ open, width, previewPath, embedded = false, o
                     </Button>
                   </div>
                 )}
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => onAttach({ kind: 'remote', path: selectedPath, name: fileName(selectedPath), size: selectedSize })}
-                >
-                  <Paperclip className="size-4" />
-                  添加
-                </Button>
-              </div>
-              <div className="flex shrink-0 flex-wrap items-center gap-2 rounded-md border bg-muted/20 p-2">
-                <Link className="size-4 text-muted-foreground" />
-                {SHARE_PRESETS.map((preset) => (
+                {showAttach && (
                   <Button
-                    key={preset.seconds}
-                    variant="outline"
-                    size="sm"
-                    onClick={() => void copyShareLink(preset.seconds)}
-                    disabled={shareBusy}
-                    title={`复制 ${preset.label} 有效的分享链接`}
+                    variant="secondary"
+                    size="icon-sm"
+                    onClick={() => onAttach({ kind: 'remote', path: selectedPath, name: fileName(selectedPath), size: selectedSize })}
+                    title="添加到输入框"
+                    aria-label="添加到输入框"
                   >
-                    {preset.label}
+                    <Paperclip className="size-4" />
                   </Button>
-                ))}
-                <div className="flex items-center gap-1">
-                  <Input
-                    className="h-8 w-16"
-                    min={1}
-                    type="number"
-                    value={customShareValue}
-                    onChange={(event) => setCustomShareValue(event.target.value)}
-                    title="自定义有效期数值"
-                  />
-                  <Select value={customShareUnit} onValueChange={(value) => setCustomShareUnit(value as typeof customShareUnit)}>
-                    <SelectTrigger className="h-8 w-20">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {CUSTOM_UNITS.map((unit) => (
-                        <SelectItem key={unit.value} value={unit.value}>{unit.label}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Button variant="secondary" size="sm" onClick={() => void copyShareLink(customShareSeconds)} disabled={shareBusy}>
-                    <Copy className="size-4" />
-                    复制
+                )}
+                {downloadUrl && (
+                  <Button asChild variant="ghost" size="icon-sm" title="下载文件" aria-label="下载文件">
+                    <a href={downloadUrl}>
+                      <Download className="size-4" />
+                    </a>
                   </Button>
-                </div>
-                {shareCopied ? (
-                  <span className="inline-flex items-center gap-1 text-xs text-emerald-600">
-                    <Check className="size-3.5" />
-                    已复制，到期 {formatExpiresAt(shareExpiresAt)}
-                  </span>
-                ) : shareExpiresAt ? (
-                  <span className="text-xs text-muted-foreground">上次链接到期 {formatExpiresAt(shareExpiresAt)}</span>
-                ) : null}
+                )}
+                {showShare && (
+                  <Popover open={shareOpen} onOpenChange={setShareOpen}>
+                    <PopoverTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        disabled={shareBusy}
+                        title="分享文件"
+                        aria-label="分享文件"
+                      >
+                        <Link className="size-4" />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent align="end" className="w-72 p-3">
+                      <div className="grid gap-3">
+                        <div>
+                          <div className="text-sm font-medium">选择分享有效期</div>
+                          <div className="mt-1 truncate text-xs text-muted-foreground" title={selectedPath}>
+                            {selectedPath}
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          {SHARE_PRESETS.map((preset) => (
+                            <Button
+                              key={preset.seconds}
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void copyShareLink(preset.seconds)}
+                              disabled={shareBusy}
+                              title={`复制 ${preset.label} 有效的分享链接`}
+                            >
+                              {preset.label}
+                            </Button>
+                          ))}
+                        </div>
+                        <div className="grid gap-2 border-t pt-3">
+                          <div className="text-xs font-medium text-muted-foreground">自定义有效期</div>
+                          <div className="flex items-center gap-1">
+                            <Input
+                              className="h-8 w-16"
+                              min={1}
+                              type="number"
+                              value={customShareValue}
+                              onChange={(event) => setCustomShareValue(event.target.value)}
+                              title="自定义有效期数值"
+                            />
+                            <Select value={customShareUnit} onValueChange={(value) => setCustomShareUnit(value as typeof customShareUnit)}>
+                              <SelectTrigger className="h-8 flex-1">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {CUSTOM_UNITS.map((unit) => (
+                                  <SelectItem key={unit.value} value={unit.value}>{unit.label}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            <Button variant="secondary" size="icon-sm" onClick={() => void copyShareLink(customShareSeconds)} disabled={shareBusy} title="复制分享链接" aria-label="复制分享链接">
+                              <Copy className="size-4" />
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    </PopoverContent>
+                  </Popover>
+                )}
               </div>
+              {(shareCopied || shareExpiresAt) && (
+                <div className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
+                  {shareCopied ? (
+                    <>
+                      <Check className="size-3.5 text-emerald-600" />
+                      <span className="text-emerald-600">分享链接已复制，到期 {formatExpiresAt(shareExpiresAt)}</span>
+                    </>
+                  ) : (
+                    <span>上次分享链接到期 {formatExpiresAt(shareExpiresAt)}</span>
+                  )}
+                </div>
+              )}
               <div className="min-h-0 flex-1">
                 {selectedMediaKind === 'image' && previewMode === 'preview' ? (
                   <div className="flex h-full items-center justify-center overflow-auto rounded-md border bg-muted/20 p-3">
@@ -662,7 +801,7 @@ export function RemoteFilesPanel({ open, width, previewPath, embedded = false, o
             <div className="py-10 text-center text-sm text-muted-foreground">选择一个文件查看预览</div>
           )}
         </div>
-        {showTree && (
+        {showBrowser && showTree && !compact && (
           <>
             <div
               role="separator"
@@ -670,26 +809,7 @@ export function RemoteFilesPanel({ open, width, previewPath, embedded = false, o
               className="h-full w-1 shrink-0 cursor-col-resize bg-border/40 transition-colors hover:bg-foreground/60"
               onPointerDown={(event) => startTreeResize(event, treeWidth, setTreeWidth, -1)}
             />
-            <div className="flex min-h-0 shrink-0 flex-col border-l bg-muted/20" style={{ width: treeWidth }}>
-              <div className="flex h-9 items-center border-b px-2">
-                <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Explorer</span>
-              </div>
-              <div className="scrollbar-thin min-h-0 flex-1 overflow-auto py-1">
-                <button
-                  className={cn(
-                    'flex h-7 w-full items-center gap-1.5 px-2 text-left text-[13px] hover:bg-accent/70',
-                    currentPath === '.' && 'bg-accent text-accent-foreground',
-                  )}
-                  onClick={() => void toggleDir('.')}
-                  title="workspace"
-                >
-                  <ChevronRight className={cn('size-3.5 shrink-0 text-muted-foreground transition-transform', expanded.has('.') && 'rotate-90')} />
-                  {expanded.has('.') ? <FolderOpen className="size-4 shrink-0 text-foreground" /> : <Folder className="size-4 shrink-0 text-muted-foreground" />}
-                  <span className="min-w-0 flex-1 truncate">workspace</span>
-                </button>
-                {expanded.has('.') && renderRows(treeEntries['.'], 1)}
-              </div>
-            </div>
+            {renderTreeBrowser(true)}
           </>
         )}
       </div>

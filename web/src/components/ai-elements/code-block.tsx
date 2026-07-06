@@ -974,26 +974,28 @@ export const CodeBlock = memo(({
                 <Button
                   type="button"
                   variant={glanceOpen ? "secondary" : "ghost"}
-                  size="sm"
-                  className="h-7 px-2 text-xs"
+                  size="icon-sm"
+                  className="size-7"
                   onClick={() => setGlanceOpen((value) => !value)}
+                  aria-label={glanceOpen ? "关闭代码缩略图" : "打开代码缩略图"}
+                  aria-pressed={glanceOpen}
                   title={glanceOpen ? "关闭代码缩略图" : "打开代码缩略图"}
                 >
                   <MapIcon className="size-3.5" />
-                  缩略图
                 </Button>
               )}
               {showWrapToggle && (
                 <Button
                   type="button"
                   variant={wrap ? "secondary" : "ghost"}
-                  size="sm"
-                  className="h-7 px-2 text-xs"
+                  size="icon-sm"
+                  className="size-7"
                   onClick={() => setWrap((value) => !value)}
+                  aria-label={wrap ? "关闭自动换行" : "开启自动换行"}
+                  aria-pressed={wrap}
                   title={wrap ? "关闭自动换行" : "开启自动换行"}
                 >
                   <AlignLeftIcon className="size-3.5" />
-                  {wrap ? "换行" : "不换行"}
                 </Button>
               )}
               <CodeBlockCopyButton className="size-7" />

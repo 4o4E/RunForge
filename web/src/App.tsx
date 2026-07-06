@@ -64,6 +64,7 @@ const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 420;
 const SIDEBAR_SNAP_WIDTH = 104;
 const RIGHT_PANEL_SNAP_WIDTH = 360;
+const RIGHT_PANEL_TRANSITION_MS = 200;
 const MODEL_SELECTION_STORAGE_KEY = 'runforge:selected-model-ref';
 const LEGACY_MODEL_SELECTION_STORAGE_KEY = 'my-agent:selected-model-ref';
 const TITLE_REFRESH_DELAYS_MS = [0, 1000, 2000, 4000, 8000, 15000, 30000, 60000];
@@ -85,7 +86,7 @@ function useIsMobileViewport(): boolean {
 
 function useViewportWidth(): number {
   const [width, setWidth] = useState(() => window.innerWidth);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const sync = () => setWidth(window.innerWidth);
     window.addEventListener('resize', sync);
     window.addEventListener('orientationchange', sync);
@@ -421,11 +422,13 @@ export function App() {
   const [composerDraft, setComposerDraft] = useState(route.draft);
   const [wide, setWide] = useState(false);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
+  const [rightPanelClosing, setRightPanelClosing] = useState(false);
   const [rightPanelTabs, setRightPanelTabs] = useState<RightTabId[]>([]);
   const [rightPanelMode, setRightPanelMode] = useState<RightTabId | null>(null);
   const [threadPanelStates, setThreadPanelStates] = useState<Record<string, ThreadPanelState>>({});
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
   const [statusCardOpen, setStatusCardOpen] = useState(false);
+  const [mobileStatusCardOpen, setMobileStatusCardOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(256);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -462,6 +465,8 @@ export function App() {
   const draftSyncTimerRef = useRef<number | null>(null);
   const draftRouteTimerRef = useRef<number | null>(null);
   const titleRefreshTimersRef = useRef<number[]>([]);
+  const previousRightPanelVisibleRef = useRef(false);
+  const rightPanelCloseTimerRef = useRef<number | null>(null);
 
   // 活跃会话 ID 放在 ref 中，稳定的 transport 可以读取和更新它，
   // 不需要在每次选择会话时重新创建 transport。
@@ -622,9 +627,9 @@ export function App() {
     if (!isMobile) {
       setMobileSidebarOpen(false);
       setMobileRightPanelOpen(false);
+      setMobileStatusCardOpen(false);
       return;
     }
-    setStatusCardOpen(false);
   }, [isMobile]);
 
   useEffect(() => {
@@ -1273,10 +1278,11 @@ export function App() {
     setRightPanelMode(tab);
     if (isMobile) {
       setMobileRightPanelOpen(true);
+      setMobileStatusCardOpen(false);
     } else {
       setRightPanelOpen(true);
+      setStatusCardOpen(false);
     }
-    setStatusCardOpen(false);
   }
 
   function closeRightTab(tab: RightTabId) {
@@ -1302,6 +1308,7 @@ export function App() {
         setRightPanelMode('files');
       }
       setMobileRightPanelOpen((open) => !open);
+      setMobileStatusCardOpen(false);
       return;
     }
     setRightPanelOpen((open) => !open);
@@ -1328,9 +1335,43 @@ export function App() {
   const activeThread = threads.find((t) => t.id === activeThreadId);
   const title = activeThread?.title?.trim() || activeThread?.fallback_title?.trim() || (activeThreadId ? '会话' : '新会话');
   const rightPanelVisible = activeView === 'chat' && rightPanelOpen && !isMobile;
+  const conversationRightPanelOpen = rightPanelVisible || rightPanelClosing;
   const threadHref = useCallback((threadId: string) => buildChatPath({ draft: '', threadId }), []);
   const newChatHref = buildChatPath({ draft: '', threadId: null });
-  const mobileRightPanelWidth = Math.max(320, Math.min(filesPanelWidth, viewportWidth));
+  const mobileRightPanelWidth = Math.min(filesPanelWidth, viewportWidth, 520);
+
+  useLayoutEffect(() => {
+    const wasVisible = previousRightPanelVisibleRef.current;
+    previousRightPanelVisibleRef.current = rightPanelVisible;
+    if (rightPanelCloseTimerRef.current != null) {
+      window.clearTimeout(rightPanelCloseTimerRef.current);
+      rightPanelCloseTimerRef.current = null;
+    }
+
+    if (rightPanelVisible) {
+      setRightPanelClosing(false);
+      return;
+    }
+
+    if (!wasVisible) {
+      setRightPanelClosing(false);
+      return;
+    }
+
+    // 右侧栏宽度动画结束前继续占位，避免状态卡片提前跳出来。
+    setRightPanelClosing(true);
+    rightPanelCloseTimerRef.current = window.setTimeout(() => {
+      setRightPanelClosing(false);
+      rightPanelCloseTimerRef.current = null;
+    }, RIGHT_PANEL_TRANSITION_MS);
+
+    return () => {
+      if (rightPanelCloseTimerRef.current != null) {
+        window.clearTimeout(rightPanelCloseTimerRef.current);
+        rightPanelCloseTimerRef.current = null;
+      }
+    };
+  }, [rightPanelVisible]);
 
   return (
     <div className="app-main-surface flex h-full min-h-0 min-w-0 overflow-hidden">
@@ -1375,7 +1416,12 @@ export function App() {
         }
       />
       {activeView === 'search' ? (
-        <SearchView threadHref={threadHref} onOpenThread={selectThread} />
+        <SearchView
+          threadHref={threadHref}
+          onOpenThread={selectThread}
+          mobile={isMobile}
+          onOpenMobileSidebar={() => setMobileSidebarOpen(true)}
+        />
       ) : (
         <ChatView
           title={title}
@@ -1399,9 +1445,12 @@ export function App() {
           onCancelEdit={cancelEditRunInput}
           onToggleWide={() => setWide((v) => !v)}
           onRemoveAttachment={(path) => setAttachments((current) => current.filter((a) => a.path !== path))}
-          rightPanelOpen={rightPanelVisible}
-          statusCardOpen={statusCardOpen}
-          onToggleStatusCard={() => setStatusCardOpen((open) => !open)}
+          rightPanelOpen={conversationRightPanelOpen}
+          statusCardOpen={isMobile ? mobileStatusCardOpen : statusCardOpen}
+          onToggleStatusCard={() => {
+            if (isMobile) setMobileStatusCardOpen((open) => !open);
+            else setStatusCardOpen((open) => !open);
+          }}
           onToggleRightPanel={toggleRightPanel}
           onOpenShellPreview={(sessionId) => openRightTab(`shell:${sessionId}`)}
           onOpenSubagentPreview={(subagentId) => openRightTab(`subagent:${subagentId}`)}
@@ -1507,6 +1556,7 @@ export function App() {
             <RightSidebar
               open
               width={mobileRightPanelWidth}
+              compact
               tabs={rightPanelTabs}
               activeTab={rightPanelMode}
               threadId={activeThreadId}

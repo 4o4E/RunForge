@@ -18,6 +18,7 @@ interface Props {
   activeTab: RightTabId | null;
   threadId: string | null;
   workspaceRoot: string | null;
+  compact?: boolean;
   onTabChange: (tab: RightTabId | null) => void;
   onOpenFileBrowser: () => void;
   onOpenFileTab: (path: string) => void;
@@ -182,6 +183,7 @@ export function RightSidebar({
   activeTab,
   threadId,
   workspaceRoot,
+  compact = false,
   onTabChange,
   onOpenFileBrowser,
   onOpenFileTab,
@@ -299,6 +301,7 @@ export function RightSidebar({
             width={width}
             previewPath={null}
             embedded
+            compact={compact}
             onClose={onClose}
             onAttach={onAttach}
             onOpenFile={onOpenFileTab}
@@ -310,6 +313,8 @@ export function RightSidebar({
             width={width}
             previewPath={activeFilePath}
             embedded
+            compact={compact}
+            showBrowser={false}
             onClose={onClose}
             onAttach={onAttach}
             onOpenFile={onOpenFileTab}

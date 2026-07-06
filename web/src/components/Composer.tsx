@@ -348,7 +348,7 @@ export function Composer({
       disabled={waitingForAskUser}
       variant="ghost"
       focusSearchOnOpen={false}
-      className="h-8 w-8 min-w-8 px-0 text-xs text-muted-foreground hover:text-foreground sm:w-auto sm:min-w-0 sm:px-2 [&>span]:hidden sm:[&>span]:block [&>svg:last-child]:hidden sm:[&>svg:last-child]:block"
+      className="h-8 w-8 min-w-8 px-0 text-xs text-muted-foreground hover:text-foreground md:w-auto md:min-w-0 md:px-2 [&>span]:hidden md:[&>span]:block [&>svg:last-child]:hidden md:[&>svg:last-child]:block"
     />
   );
 

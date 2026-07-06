@@ -1,14 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { MouseEvent } from 'react';
-import { Search } from 'lucide-react';
+import { Menu, Search } from 'lucide-react';
 import { searchThreads, type ThreadSearchResult } from '@/api';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
 interface Props {
   threadHref: (threadId: string) => string;
   onOpenThread: (threadId: string) => void;
+  mobile?: boolean;
+  onOpenMobileSidebar?: () => void;
 }
 
 interface ThreadGroup {
@@ -131,7 +134,7 @@ function shouldHandleAppLink(event: MouseEvent<HTMLAnchorElement>): boolean {
   return event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && !event.defaultPrevented;
 }
 
-export function SearchView({ threadHref, onOpenThread }: Props) {
+export function SearchView({ threadHref, onOpenThread, mobile = false, onOpenMobileSidebar }: Props) {
   const [query, setQuery] = useState(searchParam);
   const [results, setResults] = useState<ThreadSearchResult[]>([]);
   const [loading, setLoading] = useState(false);
@@ -187,86 +190,103 @@ export function SearchView({ threadHref, onOpenThread }: Props) {
   }, [error, groups.length, loading, results.length, trimmedQuery]);
 
   return (
-    <main className="app-main-surface h-full min-w-0 flex-1 overflow-y-auto">
-      <div className="mx-auto flex max-w-5xl flex-col gap-4 px-6 py-5">
-        <div>
-          <h1 className="text-xl font-semibold">搜索</h1>
-          <p className="mt-1 text-sm text-muted-foreground">全文搜索会话中的用户消息和助手回复</p>
-        </div>
+    <main className="app-main-surface flex h-full min-w-0 flex-1 flex-col overflow-hidden">
+      {mobile && (
+        <header className="app-topbar-surface flex h-14 shrink-0 items-center border-b px-3">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="mr-1 size-9 shrink-0"
+            onClick={onOpenMobileSidebar}
+            title="打开会话列表"
+          >
+            <Menu className="size-4" />
+          </Button>
+          <h1 className="truncate text-sm font-semibold">搜索</h1>
+        </header>
+      )}
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto flex max-w-5xl flex-col gap-4 px-3 py-4 md:px-6 md:py-5">
+          <div className={cn(mobile && 'hidden')}>
+            <h1 className="text-xl font-semibold">搜索</h1>
+            <p className="mt-1 text-sm text-muted-foreground">全文搜索会话中的用户消息和助手回复</p>
+          </div>
 
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            autoFocus
-            value={query}
-            onChange={(event) => setQuery(event.currentTarget.value)}
-            placeholder="搜索全部会话内容"
-            className="h-10 pl-9"
-          />
-        </div>
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              autoFocus
+              value={query}
+              onChange={(event) => setQuery(event.currentTarget.value)}
+              placeholder="搜索全部会话内容"
+              className="h-10 pl-9"
+            />
+          </div>
 
-        <div className={cn('text-sm text-muted-foreground', error && 'text-destructive')}>{statusText}</div>
+          <div className={cn('text-sm text-muted-foreground', error && 'text-destructive')}>{statusText}</div>
 
-        <div className="grid gap-3">
-          {groups.map((group) => (
-            <section key={group.threadId} className="rounded-md border bg-card">
-              <a
-                href={threadHref(group.threadId)}
-                onClick={(event) => {
-                  if (!shouldHandleAppLink(event)) return;
-                  event.preventDefault();
-                  onOpenThread(group.threadId);
-                }}
-                className="flex w-full min-w-0 items-center gap-3 border-b px-3 py-2 text-left transition-colors hover:bg-accent/60"
-              >
-                <span className="min-w-0 flex-1 truncate text-sm font-semibold">{group.title}</span>
-                <Badge variant="secondary">{group.results.length} 条</Badge>
-                <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{shortTime(group.latestAt)}</span>
-              </a>
+          <div className="grid gap-3">
+            {groups.map((group) => (
+              <section key={group.threadId} className="rounded-md border bg-card">
+                <a
+                  href={threadHref(group.threadId)}
+                  onClick={(event) => {
+                    if (!shouldHandleAppLink(event)) return;
+                    event.preventDefault();
+                    onOpenThread(group.threadId);
+                  }}
+                  className="flex w-full min-w-0 items-center gap-3 border-b px-3 py-2 text-left transition-colors hover:bg-accent/60"
+                >
+                  <span className="min-w-0 flex-1 truncate text-sm font-semibold">{group.title}</span>
+                  <Badge variant="secondary">{group.results.length} 条</Badge>
+                  <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{shortTime(group.latestAt)}</span>
+                </a>
 
-              <div className="grid gap-1 p-2">
-                {group.results.map((result) => {
-                  const snippetBlocks = resultSnippetBlocks(result.content, trimmedQuery);
-                  return (
-                    <a
-                      key={`${result.message_id}:${result.run_id}`}
-                      href={threadHref(result.thread_id)}
-                      onClick={(event) => {
-                        if (!shouldHandleAppLink(event)) return;
-                        event.preventDefault();
-                        onOpenThread(result.thread_id);
-                      }}
-                      className="grid gap-1.5 rounded-md p-2 text-left transition-colors hover:bg-accent/60"
-                    >
-                      <div className="flex min-w-0 items-center gap-2">
-                        <Badge variant="outline">{ROLE_LABELS[result.role]}</Badge>
-                        <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{shortTime(result.created_at)}</span>
-                      </div>
-                      <div className="grid gap-2 text-sm leading-5 text-muted-foreground">
-                        {snippetBlocks.map((block) => (
-                          <div
-                            key={`${block.startLine}:${block.endLine}`}
-                            className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border bg-background px-2 py-1.5"
-                          >
-                            {block.hasPrefix && <span className="block text-muted-foreground/70">...</span>}
-                            {highlightParts(block.text, trimmedQuery).map((part, index) => (
-                              <span
-                                key={`${index}:${part.text}`}
-                                className={part.hit ? 'rounded bg-primary px-0.5 text-primary-foreground' : undefined}
-                              >
-                                {part.text}
-                              </span>
-                            ))}
-                            {block.hasSuffix && <span className="block text-muted-foreground/70">...</span>}
-                          </div>
-                        ))}
-                      </div>
-                    </a>
-                  );
-                })}
-              </div>
-            </section>
-          ))}
+                <div className="grid gap-1 p-2">
+                  {group.results.map((result) => {
+                    const snippetBlocks = resultSnippetBlocks(result.content, trimmedQuery);
+                    return (
+                      <a
+                        key={`${result.message_id}:${result.run_id}`}
+                        href={threadHref(result.thread_id)}
+                        onClick={(event) => {
+                          if (!shouldHandleAppLink(event)) return;
+                          event.preventDefault();
+                          onOpenThread(result.thread_id);
+                        }}
+                        className="grid gap-1.5 rounded-md p-2 text-left transition-colors hover:bg-accent/60"
+                      >
+                        <div className="flex min-w-0 items-center gap-2">
+                          <Badge variant="outline">{ROLE_LABELS[result.role]}</Badge>
+                          <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{shortTime(result.created_at)}</span>
+                        </div>
+                        <div className="grid gap-2 text-sm leading-5 text-muted-foreground">
+                          {snippetBlocks.map((block) => (
+                            <div
+                              key={`${block.startLine}:${block.endLine}`}
+                              className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border bg-background px-2 py-1.5"
+                            >
+                              {block.hasPrefix && <span className="block text-muted-foreground/70">...</span>}
+                              {highlightParts(block.text, trimmedQuery).map((part, index) => (
+                                <span
+                                  key={`${index}:${part.text}`}
+                                  className={part.hit ? 'rounded bg-primary px-0.5 text-primary-foreground' : undefined}
+                                >
+                                  {part.text}
+                                </span>
+                              ))}
+                              {block.hasSuffix && <span className="block text-muted-foreground/70">...</span>}
+                            </div>
+                          ))}
+                        </div>
+                      </a>
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
+          </div>
         </div>
       </div>
     </main>

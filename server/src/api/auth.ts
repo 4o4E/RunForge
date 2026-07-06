@@ -28,12 +28,15 @@ export function hasValidAccessToken(req: Request): boolean {
   return Boolean(token && config.auth.accessToken && safeEqual(token, config.auth.accessToken));
 }
 
-function isSignedRawFileRequest(req: Request): boolean {
-  return req.method === 'GET' && req.path === '/files/raw' && typeof req.query.sig === 'string' && typeof req.query.expires === 'string';
+function isSignedFileRequest(req: Request): boolean {
+  return req.method === 'GET'
+    && (req.path === '/files/raw' || req.path === '/files/preview' || req.path === '/files/hex')
+    && typeof req.query.sig === 'string'
+    && typeof req.query.expires === 'string';
 }
 
 export function requireApiAccess(req: Request, res: Response, next: NextFunction): void {
-  if (hasValidAccessToken(req) || isSignedRawFileRequest(req)) {
+  if (hasValidAccessToken(req) || isSignedFileRequest(req)) {
     next();
     return;
   }

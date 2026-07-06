@@ -176,7 +176,7 @@ export function ChatView({
             type="button"
             variant={wide ? 'secondary' : 'ghost'}
             size="icon"
-            className="hidden size-9 sm:inline-flex"
+            className="hidden size-9 md:inline-flex"
             onClick={onToggleWide}
             title={wide ? '恢复正常宽度' : '加宽对话'}
           >

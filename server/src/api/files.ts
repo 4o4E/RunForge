@@ -3,6 +3,7 @@ import { createReadStream } from 'node:fs';
 import { mkdir, open as openFile, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
+import type { Request, Response } from 'express';
 import { getToolSettings } from '../settings.js';
 import { mediaTypeFromPath, normalizeRemotePath, streamWorkspaceFile, toRemotePath, workspaceRoot } from '../files/workspace.js';
 import { clampShareTtlSeconds, hasValidAccessToken, signFileShare, verifyFileShare } from './auth.js';
@@ -35,6 +36,24 @@ function canonicalRemotePath(abs: string, configuredRoot: string): string {
 function rawFileUrl(path: string, expires: number, sig: string): string {
   const params = new URLSearchParams({ path, expires: String(expires), sig });
   return `/api/files/raw?${params.toString()}`;
+}
+
+function sharePageUrl(path: string, expires: number, sig: string): string {
+  const params = new URLSearchParams({ path, expires: String(expires), sig });
+  return `/share/file?${params.toString()}`;
+}
+
+function fileName(path: string): string {
+  const parts = path.split('/').filter(Boolean);
+  return parts.at(-1) || path || 'file';
+}
+
+function requireFileAccess(req: Request, res: Response, absPath: string, configuredRoot: string): boolean {
+  if (hasValidAccessToken(req)) return true;
+  const path = canonicalRemotePath(absPath, configuredRoot);
+  if (verifyFileShare(path, req.query.expires, req.query.sig)) return true;
+  res.status(403).json({ error: '文件分享签名无效或已过期' });
+  return false;
 }
 
 function previewLine(line: string): string {
@@ -142,7 +161,8 @@ filesApi.post('/share-link', async (req, res) => {
     res.status(201).json({
       path,
       expiresAt: new Date(expires * 1000).toISOString(),
-      url: rawFileUrl(path, expires, sig),
+      url: sharePageUrl(path, expires, sig),
+      rawUrl: rawFileUrl(path, expires, sig),
     });
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
@@ -153,6 +173,7 @@ filesApi.get('/preview', async (req, res) => {
   try {
     const settings = await getToolSettings();
     const file = normalizeRemotePath(req.query.path, settings.workspaceRoot);
+    if (!requireFileAccess(req, res, file, settings.workspaceRoot)) return;
     const info = await stat(file);
     if (!info.isFile()) return res.status(400).json({ error: 'path 不是文件' });
 
@@ -211,6 +232,7 @@ filesApi.get('/hex', async (req, res) => {
   try {
     const settings = await getToolSettings();
     const file = normalizeRemotePath(req.query.path, settings.workspaceRoot);
+    if (!requireFileAccess(req, res, file, settings.workspaceRoot)) return;
     const info = await stat(file);
     if (!info.isFile()) return res.status(400).json({ error: 'path 不是文件' });
 
@@ -251,19 +273,17 @@ filesApi.get('/raw', async (req, res) => {
   try {
     const settings = await getToolSettings();
     const file = normalizeRemotePath(req.query.path, settings.workspaceRoot);
+    if (!requireFileAccess(req, res, file, settings.workspaceRoot)) return;
     const info = await stat(file);
     if (!info.isFile()) return res.status(400).json({ error: 'path 不是文件' });
-    if (!hasValidAccessToken(req)) {
-      const path = canonicalRemotePath(file, settings.workspaceRoot);
-      if (!verifyFileShare(path, req.query.expires, req.query.sig)) {
-        return res.status(403).json({ error: '文件分享签名无效或已过期' });
-      }
-    }
 
     const range = parseByteRange(req.headers.range, info.size);
     res.setHeader('Content-Type', mediaTypeFromPath(file));
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Cache-Control', 'private, max-age=60');
+    if (req.query.download === '1') {
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(fileName(toRemotePath(file, settings.workspaceRoot)))}`);
+    }
     if (range === 'invalid') {
       res.status(416);
       res.setHeader('Content-Range', `bytes */${info.size}`);

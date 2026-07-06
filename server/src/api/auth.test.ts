@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { WebSocket } from 'ws';
 import { config } from '../config.js';
-import { requireApiAccess } from './auth.js';
+import { requireApiAccess, signFileShare } from './auth.js';
 import { attachWebSocket } from './ws.js';
 
 function listen(server: ReturnType<typeof createServer>): Promise<number> {
@@ -39,6 +39,33 @@ test('api auth middleware requires bearer token', async () => {
   } finally {
     server.close();
     config.auth.accessToken = previousAccessToken;
+  }
+});
+
+test('api auth middleware allows signed file raw, text preview and hex preview requests', async () => {
+  const previousAccessToken = config.auth.accessToken;
+  const previousShareSecret = config.auth.shareSecret;
+  config.auth.accessToken = 'test-access-token';
+  config.auth.shareSecret = 'test-share-secret';
+  const app = express();
+  app.use(requireApiAccess);
+  app.get('/files/raw', (_req, res) => res.json({ ok: true }));
+  app.get('/files/preview', (_req, res) => res.json({ ok: true }));
+  app.get('/files/hex', (_req, res) => res.json({ ok: true }));
+  const server = createServer(app);
+  const port = await listen(server);
+  try {
+    const expires = 2_000_000_000;
+    const sig = signFileShare('artifacts/report.html', expires);
+    const query = `path=artifacts%2Freport.html&expires=${expires}&sig=${sig}`;
+    assert.equal((await fetch(`http://127.0.0.1:${port}/files/raw?${query}`)).status, 200);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/files/preview?${query}`)).status, 200);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/files/hex?${query}`)).status, 200);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/files/preview?path=artifacts%2Freport.html`)).status, 401);
+  } finally {
+    server.close();
+    config.auth.accessToken = previousAccessToken;
+    config.auth.shareSecret = previousShareSecret;
   }
 });
 

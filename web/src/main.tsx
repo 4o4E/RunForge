@@ -3,11 +3,14 @@ import ReactDOM from 'react-dom/client';
 import { App } from './App.js';
 import { onAccessTokenInvalid, readAccessToken, writeAccessToken } from './api.js';
 import { NotificationProvider } from './components/GlobalNotifications.js';
+import { ShareFileView } from './components/ShareFileView.js';
 import { Button } from './components/ui/button.js';
 import { Input } from './components/ui/input.js';
 import { ThemeProvider } from './theme.js';
 import './index.css';
 import 'streamdown/styles.css';
+
+const shareFileRoute = window.location.pathname === '/share/file';
 
 function AccessTokenGate({ children }: { children: React.ReactNode }) {
   const [token, setToken] = useState(() => readAccessToken());
@@ -52,9 +55,13 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ThemeProvider>
       <NotificationProvider>
-        <AccessTokenGate>
-          <App />
-        </AccessTokenGate>
+        {shareFileRoute ? (
+          <ShareFileView />
+        ) : (
+          <AccessTokenGate>
+            <App />
+          </AccessTokenGate>
+        )}
       </NotificationProvider>
     </ThemeProvider>
   </React.StrictMode>,
