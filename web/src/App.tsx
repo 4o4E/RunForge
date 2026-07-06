@@ -1003,7 +1003,6 @@ export function App() {
   }
 
   async function removeThread(id: string) {
-    if (!window.confirm('删除这个会话？相关运行记录也会一起删除。')) return;
     stop();
     await deleteThread(id);
     setThreads((current) => current.filter((t) => t.id !== id));

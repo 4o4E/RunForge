@@ -1,4 +1,4 @@
-import type { MouseEvent } from 'react';
+import { useState, type MouseEvent } from 'react';
 import { Archive, Bot, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, PinOff, Search, Settings, SquarePen, Trash2 } from 'lucide-react';
 import type { Thread } from '../api';
 import { Button } from '@/components/ui/button';
@@ -63,6 +63,8 @@ export function Sidebar({
   onArchive,
   onDelete,
 }: Props) {
+  const [pendingDeleteThreadId, setPendingDeleteThreadId] = useState<string | null>(null);
+
   if (collapsed) {
     return (
       <aside className="app-sidebar-surface flex h-full w-full shrink-0 flex-col items-center border-r py-3">
@@ -173,63 +175,85 @@ export function Sidebar({
       <div className="mt-4 px-4 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">会话</div>
       <nav className="scrollbar-thin mt-1 flex-1 space-y-0.5 overflow-y-auto px-2 pb-4">
         {threads.length === 0 && <div className="px-2 py-3 text-xs text-muted-foreground">还没有会话</div>}
-        {threads.map((t) => (
-          <div
-            key={t.id}
-            className={cn(
-              'group/thread relative flex items-center rounded-md transition-colors',
-              activeView === 'chat' && t.id === activeId
-                ? 'bg-accent text-accent-foreground shadow-sm ring-1 ring-border'
-                : 'text-foreground hover:bg-accent/60',
-            )}
-          >
-            <a
-              href={threadHref(t.id)}
-              onClick={(event) => {
-                if (!shouldHandleAppLink(event)) return;
-                event.preventDefault();
-                onSelect(t.id);
-              }}
-              title={threadLabel(t)}
-              className="flex min-w-0 flex-1 items-center gap-1.5 py-2 pl-2 pr-3 text-left text-sm transition-[padding] group-hover/thread:pr-9"
+        {threads.map((t) => {
+          const confirmingDelete = pendingDeleteThreadId === t.id;
+
+          return (
+            <div
+              key={t.id}
+              className={cn(
+                'group/thread relative flex items-center rounded-md transition-colors',
+                activeView === 'chat' && t.id === activeId
+                  ? 'bg-accent text-accent-foreground shadow-sm ring-1 ring-border'
+                  : 'text-foreground hover:bg-accent/60',
+              )}
             >
-              {t.pinned_at && <Pin className="size-3 shrink-0 text-muted-foreground" />}
-              <span className="min-w-0 truncate">{threadLabel(t)}</span>
-            </a>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button
-                  type="button"
-                  title="会话操作"
-                  onClick={(event) => event.stopPropagation()}
-                  className="absolute right-1 top-1/2 flex size-7 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground data-[state=open]:bg-accent data-[state=open]:opacity-100 group-hover/thread:opacity-100"
-                >
-                  <MoreHorizontal className="size-4" />
-                  <span className="sr-only">会话操作</span>
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-36" onClick={(event) => event.stopPropagation()}>
-                <DropdownMenuItem onSelect={() => onTogglePin(t.id)}>
-                  {t.pinned_at ? <PinOff className="size-4" /> : <Pin className="size-4" />}
-                  {t.pinned_at ? '取消置顶' : '置顶'}
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => onRename(t.id)}>
-                  <Pencil className="size-4" />
-                  重命名
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => onArchive(t.id)}>
-                  <Archive className="size-4" />
-                  归档
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => onDelete(t.id)}>
-                  <Trash2 className="size-4" />
-                  删除
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        ))}
+              <a
+                href={threadHref(t.id)}
+                onClick={(event) => {
+                  if (!shouldHandleAppLink(event)) return;
+                  event.preventDefault();
+                  onSelect(t.id);
+                }}
+                title={threadLabel(t)}
+                className="flex min-w-0 flex-1 items-center gap-1.5 py-2 pl-2 pr-3 text-left text-sm transition-[padding] group-hover/thread:pr-9"
+              >
+                {t.pinned_at && <Pin className="size-3 shrink-0 text-muted-foreground" />}
+                <span className="min-w-0 truncate">{threadLabel(t)}</span>
+              </a>
+              <DropdownMenu
+                onOpenChange={(open) => {
+                  if (!open && confirmingDelete) setPendingDeleteThreadId(null);
+                }}
+              >
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type="button"
+                    title="会话操作"
+                    onClick={(event) => event.stopPropagation()}
+                    className="absolute right-1 top-1/2 flex size-7 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground data-[state=open]:bg-accent data-[state=open]:opacity-100 group-hover/thread:opacity-100"
+                  >
+                    <MoreHorizontal className="size-4" />
+                    <span className="sr-only">会话操作</span>
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-36" onClick={(event) => event.stopPropagation()}>
+                  <DropdownMenuItem onSelect={() => onTogglePin(t.id)}>
+                    {t.pinned_at ? <PinOff className="size-4" /> : <Pin className="size-4" />}
+                    {t.pinned_at ? '取消置顶' : '置顶'}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => onRename(t.id)}>
+                    <Pencil className="size-4" />
+                    重命名
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => onArchive(t.id)}>
+                    <Archive className="size-4" />
+                    归档
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    className={cn(
+                      'text-destructive focus:text-destructive',
+                      confirmingDelete && 'bg-destructive/10 focus:bg-destructive/15',
+                    )}
+                    onSelect={(event) => {
+                      if (!confirmingDelete) {
+                        event.preventDefault();
+                        setPendingDeleteThreadId(t.id);
+                        return;
+                      }
+                      setPendingDeleteThreadId(null);
+                      onDelete(t.id);
+                    }}
+                  >
+                    <Trash2 className="size-4" />
+                    {confirmingDelete ? '确认删除' : '删除'}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+          );
+        })}
       </nav>
 
       <div className="mt-auto">
