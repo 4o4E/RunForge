@@ -1,17 +1,14 @@
 import type { LlmMessage, LlmUsage } from '../llm/types.js';
 import type { ThreadMessage } from '../store/types.js';
-import { config } from '../config.js';
-import {
-  estimateTokens,
-  maskOldAssistantToolCalls,
-  maskOldToolResults,
-  renderSummaryPrompt,
-  slidingWindow,
-  summaryCandidate,
-  summaryMessage,
-  totalChars,
-} from './compaction.js';
 import type { Provider } from '../llm/types.js';
+import {
+  createContextCompactor,
+  type CompactionInfo,
+  type CompactionResult,
+  type ContextCompactor,
+  type WorkingMessage,
+} from './contextCompactor.js';
+import { estimateTokens, totalChars } from './compaction.js';
 
 const SYSTEM_PROMPT = `你是 RunForge，一个通用自主助手。
 
@@ -68,29 +65,7 @@ export function renderRuntimeContext(info: RuntimeContextInfo): string {
 - shell session 会长期记住当前目录 / The shell session remembers cwd across commands: 需要切目录时直接执行 cd，不要给每次命令单独传 cwd。旧 shell 工具只是兼容入口。`;
 }
 
-/** 一次压缩实际做了什么，用于事件和遥测。 */
-export interface CompactionInfo {
-  estBefore: number;
-  estAfter: number;
-  masked: number;
-  summarized: number;
-  dropped: number;
-  reason?: string;
-}
-
-export interface CompactionResult {
-  info: CompactionInfo;
-  /** 本次新增 mask 的 DB id，executor 会落库；窗口丢弃只在内存中发生。 */
-  collapsedIds: number[];
-  summarizedIds: number[];
-  summaryMessage?: LlmMessage;
-}
-
-/** 工作上下文里的消息及其 DB 行；null 表示尚未落库或不可 mask，例如 system prompt。 */
-interface WorkingMessage {
-  msg: LlmMessage;
-  dbId: number | null;
-}
+export type { CompactionInfo, CompactionResult };
 
 interface ContextOptions {
   appendUserInput?: boolean;
@@ -104,6 +79,7 @@ interface ContextOptions {
  */
 export class ContextManager {
   private readonly forceMaskedToolNames: string[] = [];
+  private readonly compactor: ContextCompactor = createContextCompactor();
   private items: WorkingMessage[] = [];
   /** 目标锚点 system 消息按引用保存，每步可原地刷新，并放在前置 system 区避免被压缩丢掉。 */
   private goalItem: WorkingMessage;
@@ -167,52 +143,10 @@ export class ContextManager {
     return estimateTokens(this.all(), this.tokensPerChar);
   }
 
-  /** 执行低成本 L1 mask，并返回本次新折叠的 DB id。 */
-  private maskOldPayloads(keepRecent: number): { collapsedIds: number[]; masked: number } {
-    const collapsedIds: number[] = [];
-    let masked = 0;
-    const m1 = maskOldToolResults(this.all(), { keepRecent });
-    const m2 = maskOldAssistantToolCalls(m1.messages, { keepRecent, forceToolNames: this.forceMaskedToolNames });
-    for (let i = 0; i < this.items.length; i++) {
-      if (m2.messages[i].collapsed === 'masked' && this.items[i].msg.collapsed !== 'masked') {
-        this.items[i].msg = m2.messages[i];
-        masked += 1;
-        if (this.items[i].dbId != null) collapsedIds.push(this.items[i].dbId as number);
-      }
-    }
-    return { collapsedIds, masked };
-  }
-
-  /** 展示型工具的大参数没有推理价值，即使整体预算没超也要在模型调用前清理。 */
-  private maskForcedToolCallPayloads(): { collapsedIds: number[]; masked: number } {
-    const collapsedIds: number[] = [];
-    let masked = 0;
-    const m1 = maskOldAssistantToolCalls(this.all(), {
-      keepRecent: Number.MAX_SAFE_INTEGER,
-      forceToolNames: this.forceMaskedToolNames,
-    });
-    for (let i = 0; i < this.items.length; i++) {
-      if (m1.messages[i].collapsed === 'masked' && this.items[i].msg.collapsed !== 'masked') {
-        this.items[i].msg = m1.messages[i];
-        masked += 1;
-        if (this.items[i].dbId != null) collapsedIds.push(this.items[i].dbId as number);
-      }
-    }
-    return { collapsedIds, masked };
-  }
-
   /** run 结束清理：即使本轮没触发实时压缩，也为后续轮次收缩旧的大 payload。 */
   compactForHistory(reason = 'post-run-history'): CompactionResult | null {
-    const { keepRecentMessages } = config.agent;
-    const estBefore = this.estTokens();
-    const { collapsedIds, masked } = this.maskOldPayloads(keepRecentMessages);
-    this.lastSentChars = totalChars(this.all());
-    if (!masked) return null;
-    return {
-      info: { estBefore, estAfter: this.estTokens(), masked, summarized: 0, dropped: 0, reason },
-      collapsedIds,
-      summarizedIds: [],
-    };
+    const result = this.compactor.compactForHistory(this.compactionInput(), reason);
+    return this.applyCompactionOutput(result);
   }
 
   /**
@@ -220,64 +154,32 @@ export class ContextManager {
    * 这里会原地修改工作列表；有改动则返回新 mask 的 DB id 和压缩结果，否则返回 null。
    */
   async maybeCompact(provider?: Provider): Promise<CompactionResult | null> {
-    const { contextBudget, compactWarnRatio, compactHardRatio, keepRecentMessages, contextBudgetSource, modelContextWindow } =
-      config.agent;
-    const estBefore = this.estTokens();
+    const result = await this.compactor.compact(this.compactionInput(provider));
+    return this.applyCompactionOutput(result);
+  }
 
-    if (estBefore < contextBudget * compactWarnRatio) {
-      const forced = this.maskForcedToolCallPayloads();
+  private compactionInput(provider?: Provider) {
+    return {
+      items: this.items,
+      goalContent: this.goalItem.msg.content ?? '',
+      tokensPerChar: this.tokensPerChar,
+      provider,
+      forceMaskedToolNames: this.forceMaskedToolNames,
+    };
+  }
+
+  private applyCompactionOutput(result: (CompactionResult & { items?: WorkingMessage[]; sentChars?: number }) | null): CompactionResult | null {
+    if (!result) {
       this.lastSentChars = totalChars(this.all());
-      if (forced.masked) {
-        return {
-          info: { estBefore, estAfter: this.estTokens(), masked: forced.masked, summarized: 0, dropped: 0, reason: 'display-payload' },
-          collapsedIds: forced.collapsedIds,
-          summarizedIds: [],
-        };
-      }
       return null;
     }
-
-    const summarizedIds: number[] = [];
-    let summarized = 0;
-    let dropped = 0;
-    const reason = `${contextBudgetSource}: budget=${contextBudget}, modelWindow=${modelContextWindow}`;
-
-    // L1：mask 旧的大工具结果和 assistant 工具参数，同时保持消息结构合法。
-    const { collapsedIds, masked } = this.maskOldPayloads(keepRecentMessages);
-
-    let l3Summary: LlmMessage | undefined;
-    // L3 — 锚定摘要。只有 L1 后仍超过硬阈值才调用模型，摘要替换旧区间，原文只打标不删除。
-    if (provider && estimateTokens(this.all(), this.tokensPerChar) >= contextBudget * compactHardRatio) {
-      const candidate = summaryCandidate(this.all(), { keepRecent: keepRecentMessages });
-      if (candidate) {
-        const ids = this.items.slice(candidate.start, candidate.end).map((it) => it.dbId).filter((id): id is number => id != null);
-        if (ids.length) {
-          const summary = await provider.complete(renderSummaryPrompt(candidate.messages, this.goalItem.msg.content ?? ''), []);
-          l3Summary = summaryMessage(summary.content || 'Earlier context was summarized, but the model returned an empty summary.');
-          this.items.splice(candidate.start, candidate.end - candidate.start, { msg: l3Summary, dbId: null });
-          summarizedIds.push(...ids);
-          summarized = ids.length;
-        }
-      }
-    }
-
-    // L2：滑动窗口只作为内存安全阀，不落库丢弃；完整历史仍保留在 DB 中。
-    if (estimateTokens(this.all(), this.tokensPerChar) >= contextBudget * compactHardRatio) {
-      const m2 = slidingWindow(this.all(), { keepRecent: keepRecentMessages });
-      if (m2.dropped > 0) {
-        const kept = new Set(m2.messages);
-        const before = this.items.length;
-        this.items = this.items.filter((it) => kept.has(it.msg));
-        dropped = before - this.items.length;
-      }
-    }
-
-    this.lastSentChars = totalChars(this.all());
+    if (result.items) this.items = result.items;
+    this.lastSentChars = result.sentChars ?? totalChars(this.all());
     return {
-      info: { estBefore, estAfter: this.estTokens(), masked, summarized, dropped, reason },
-      collapsedIds,
-      summarizedIds,
-      summaryMessage: l3Summary,
+      info: result.info,
+      collapsedIds: result.collapsedIds,
+      summarizedIds: result.summarizedIds,
+      summaryMessage: result.summaryMessage,
     };
   }
 }

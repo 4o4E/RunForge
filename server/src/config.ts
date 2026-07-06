@@ -48,6 +48,10 @@ function contextBudget(model: string): number {
   return Math.floor(modelContextWindow(model) * 0.5);
 }
 
+function contextStrategy(v: string | undefined): 'current' | 'langchain-trim' {
+  return v === 'langchain-trim' ? 'langchain-trim' : 'current';
+}
+
 const DEFAULT_DATABASE_URL = 'postgres://postgres:postgres@localhost:5432/runforge';
 const DEFAULT_SHELL_ALLOW_COMMANDS = [
   'cat',
@@ -118,6 +122,8 @@ export const config = {
     compactHardRatio: Number(process.env.AGENT_COMPACT_HARD_RATIO ?? 0.9),
     // Most-recent messages always kept verbatim (never masked or windowed out).
     keepRecentMessages: Number(process.env.AGENT_KEEP_RECENT_MESSAGES ?? 12),
+    // 上下文裁剪策略。默认 current 保持现有行为；langchain-trim 只接管普通历史裁剪适配层。
+    contextStrategy: contextStrategy(process.env.AGENT_CONTEXT_STRATEGY),
   },
   // Tool sandbox / permission policy (Phase 6). The product is a general-purpose
   // OS agent, so confinement is OPT-IN: TOOL_SANDBOX=enforce turns on path

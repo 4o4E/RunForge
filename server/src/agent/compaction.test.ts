@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { estimateTokens, maskOldAssistantToolCalls, maskOldToolResults, slidingWindow, summaryCandidate, totalChars } from './compaction.js';
+import { ContextManager } from './context.js';
+import { config } from '../config.js';
 import type { LlmMessage } from '../llm/types.js';
+import type { ThreadMessage } from '../store/types.js';
 
 const big = (n: number) => 'x'.repeat(n);
 
@@ -158,4 +161,69 @@ test('slidingWindow never starts a window on an orphan tool message', () => {
   const { messages } = slidingWindow(msgs, { keepRecent: 1 });
   const firstNonHead = messages.find((m) => m.role !== 'system' && m.content !== 'req');
   assert.notEqual(firstNonHead?.role, 'tool');
+});
+
+test('context strategy defaults to current compaction behavior', async () => {
+  const { contextBudget, keepRecentMessages, contextStrategy } = config.agent;
+  config.agent.contextBudget = 100;
+  config.agent.keepRecentMessages = 1;
+  config.agent.contextStrategy = 'current';
+  try {
+    const prior: ThreadMessage[] = [
+      { id: 10, role: 'assistant', content: null, toolCalls: [{ id: 'c1', name: 'read_file', arguments: '{}' }] },
+      { id: 11, role: 'tool', content: big(4000), toolCallId: 'c1' },
+    ];
+    const ctx = new ContextManager(prior, 'continue');
+    const res = await ctx.maybeCompact();
+
+    assert.ok(res);
+    assert.deepEqual(res.collapsedIds, [11]);
+    assert.equal(res.info.masked, 1);
+    assert.match(res.info.reason ?? '', /strategy=current/);
+  } finally {
+    config.agent.contextBudget = contextBudget;
+    config.agent.keepRecentMessages = keepRecentMessages;
+    config.agent.contextStrategy = contextStrategy;
+  }
+});
+
+test('langchain-trim preserves anchors, repairs tool pairs and leaves source messages unchanged', async () => {
+  const { contextBudget, keepRecentMessages, contextStrategy } = config.agent;
+  config.agent.contextBudget = 80;
+  config.agent.keepRecentMessages = 2;
+  config.agent.contextStrategy = 'langchain-trim';
+  try {
+    const prior: ThreadMessage[] = [
+      { id: 1, role: 'user', content: 'original request anchor' },
+      { id: 2, role: 'assistant', content: 'plain history ' + big(120) },
+      { id: 3, role: 'assistant', content: null, toolCalls: [{ id: 'c1', name: 'read_file', arguments: '{}' }] },
+      { id: 4, role: 'tool', content: 'tool result one ' + big(40), toolCallId: 'c1' },
+      { id: 5, role: 'assistant', content: null, toolCalls: [{ id: 'c2', name: 'read_file', arguments: '{}' }] },
+      { id: 6, role: 'tool', content: 'tool result two ' + big(40), toolCallId: 'c2' },
+      { id: 7, role: 'assistant', content: 'recent plain history ' + big(120) },
+    ];
+    const before = JSON.stringify(prior);
+    const ctx = new ContextManager(prior, 'continue', 'GOAL: keep working');
+    const res = await ctx.maybeCompact();
+    const view = ctx.all();
+
+    assert.ok(res);
+    assert.match(res.info.reason ?? '', /strategy=langchain-trim/);
+    assert.ok(view.some((m) => m.role === 'system' && m.content === 'GOAL: keep working'));
+    assert.ok(view.some((m) => m.role === 'user' && m.content === 'original request anchor'));
+    assert.equal(JSON.stringify(prior), before);
+
+    for (const message of view) {
+      if (message.role === 'tool') {
+        assert.ok(view.some((parent) => parent.toolCalls?.some((call) => call.id === message.toolCallId)));
+      }
+      for (const call of message.toolCalls ?? []) {
+        assert.ok(view.some((tool) => tool.role === 'tool' && tool.toolCallId === call.id));
+      }
+    }
+  } finally {
+    config.agent.contextBudget = contextBudget;
+    config.agent.keepRecentMessages = keepRecentMessages;
+    config.agent.contextStrategy = contextStrategy;
+  }
 });
