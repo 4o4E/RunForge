@@ -15,7 +15,7 @@ import { maybeGenerateThreadTitleAfterFirstRun } from './threadTitle.js';
 let testWorkspace = '';
 
 before(async () => {
-  testWorkspace = await mkdtemp(join(tmpdir(), 'my-agent-executor-'));
+  testWorkspace = await mkdtemp(join(tmpdir(), 'runforge-executor-'));
 });
 
 after(async () => {
@@ -349,7 +349,7 @@ test('executeRun: injects database workload token at run startup', async () => {
     databaseRuntimeEnv: async () => ({
       env: {
         DB_WORKLOAD_TOKEN: 'wat_test_runtime',
-        MY_AGENT_RUNTIME_API_BASE: 'http://localhost:8080/api/runtime',
+        RUNFORGE_RUNTIME_API_BASE: 'http://localhost:8080/api/runtime',
         DATASOURCE_ID: 'ds_test',
         DATASOURCE_PROFILE: 'readonly',
       },

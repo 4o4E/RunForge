@@ -36,7 +36,7 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@4.4.3)
-      '@my-agent/contracts':
+      '@runforge/contracts':
         specifier: workspace:*
         version: link:../packages/contracts
       '@opentelemetry/api':
@@ -112,7 +112,7 @@ importers:
       '@ai-sdk/react':
         specifier: ^3.0.203
         version: 3.0.203(react@18.3.1)(zod@4.4.3)
-      '@my-agent/contracts':
+      '@runforge/contracts':
         specifier: workspace:*
         version: link:../packages/contracts
       '@radix-ui/react-collapsible':

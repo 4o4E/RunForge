@@ -3,7 +3,7 @@ name: data-analysis
 description: 用一套可复查的数据分析流程处理 CSV、Parquet、JSON、数据库导出或查询结果，包含质量检查、聚合、分组、趋势、异常和结论验证。Use when the task asks for data profiling, transformation, statistical summaries, or analytical findings.
 allowed-tools: shell grep file_read file_write glob
 metadata:
-  my-agent.tool-scope: workspace-readwrite
+  runforge.tool-scope: workspace-readwrite
 ---
 
 # Data Analysis

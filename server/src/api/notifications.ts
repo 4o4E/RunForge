@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import type { WebPushSubscriptionInput } from '@my-agent/contracts';
+import type { WebPushSubscriptionInput } from '@runforge/contracts';
 import { store } from '../store/index.js';
 import { getWebPushPublicKey } from '../notifications/push.js';
 

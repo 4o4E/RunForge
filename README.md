@@ -39,19 +39,19 @@ docker compose up -d
 这种方式对应的连接串是：
 
 ```bash
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/my_agent
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/runforge
 ```
 
 如果接入已有 PostgreSQL，也可以使用同类连接串：
 
 ```bash
-DATABASE_URL=postgres://<user>:<password>@localhost:5432/my_agent
+DATABASE_URL=postgres://<user>:<password>@localhost:5432/runforge
 ```
 
 已有库需要提前创建好用户和数据库，例如：
 
 ```bash
-createdb my_agent
+createdb runforge
 ```
 
 迁移会创建核心执行表：`threads`、`runs`、`steps`、`messages`、`events`、`app_settings`，以及 `subagent_runs`、`shell_sessions`、`shell_commands`、`shell_command_logs`、`shell_session_events` 和数据源账号池相关表。其中 `app_settings` 保存运行时工具配置；保存过设置后，数据库里的值会优先于 env 默认值。
@@ -70,7 +70,7 @@ cp .env.example .env
 PORT=8080
 RUNFORGE_ACCESS_TOKEN=<strong-access-token>
 RUNFORGE_SHARE_SECRET=<strong-share-secret>
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/my_agent
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/runforge
 
 LLM_PROVIDER=aisdk
 LLM_AISDK_FLAVOR=openai-compatible

@@ -1,5 +1,5 @@
-import type { GoalPatch, GoalState, PlanItem } from '@my-agent/contracts';
-export type { GoalPatch, GoalState, PlanItem } from '@my-agent/contracts';
+import type { GoalPatch, GoalState, PlanItem } from '@runforge/contracts';
+export type { GoalPatch, GoalState, PlanItem } from '@runforge/contracts';
 
 // 目标锚点（长任务设计 §3.2、§9/G1）：用一段短小、结构化且始终存在的文本描述
 // 当前 run 要完成什么。每一步都会重新渲染为 system message，使其在上下文压缩后仍保留，

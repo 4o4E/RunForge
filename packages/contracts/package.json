@@ -1,5 +1,5 @@
 {
-  "name": "@my-agent/contracts",
+  "name": "@runforge/contracts",
   "version": "0.1.0",
   "private": true,
   "type": "module",

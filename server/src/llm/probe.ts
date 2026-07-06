@@ -3,7 +3,7 @@ import type {
   LlmProviderPingResult,
   LlmProviderProbeResult,
   LlmProviderSettings,
-} from '@my-agent/contracts';
+} from '@runforge/contracts';
 import { createProviderFromSettings } from './index.js';
 import type { LlmMessage } from './types.js';
 

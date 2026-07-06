@@ -3,8 +3,8 @@ import { accessSync, constants, existsSync, mkdtempSync, readdirSync, realpathSy
 import { tmpdir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import type { SandboxBackendName } from '@my-agent/contracts';
-export type { SandboxBackendName } from '@my-agent/contracts';
+import type { SandboxBackendName } from '@runforge/contracts';
+export type { SandboxBackendName } from '@runforge/contracts';
 
 const execFileAsync = promisify(execFile);
 const isWindows = process.platform === 'win32';
@@ -166,7 +166,7 @@ function hostPathForConfig(cfg: ShellSandboxConfig): { envPath: string; cleanupP
   const commands = resolveAllowedCommands(cfg.allowCommands, envPath);
   if (!commands.length) return { envPath: '', cleanupPaths: [] };
 
-  const dir = mkdtempSync(join(tmpdir(), 'my-agent-shell-path-'));
+  const dir = mkdtempSync(join(tmpdir(), 'runforge-shell-path-'));
   const linked = new Set<string>();
   for (const command of commands) {
     const linkName = basename(command.dest);

@@ -15,7 +15,7 @@ import {
 } from '../datasources/accountPool.js';
 import { testDatasourceById, testDatasourceDraft } from '../datasources/introspection.js';
 import type { DatasourceRow } from '../datasources/types.js';
-import type { Datasource } from '@my-agent/contracts';
+import type { Datasource } from '@runforge/contracts';
 
 export const datasourcesApi = Router();
 

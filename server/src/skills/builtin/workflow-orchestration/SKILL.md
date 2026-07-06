@@ -3,7 +3,7 @@ name: workflow-orchestration
 description: 使用本地 workflow 文件拆解任务、规划阶段、派发异步 subagent、轮询结果并汇总交付。Use when a task should follow a staged workflow or coordinate multiple subagents.
 allowed-tools: workflow_list workflow_read subagent_run subagent_poll subagent_list update_plan file_read grep glob
 metadata:
-  my-agent.tool-scope: orchestration
+  runforge.tool-scope: orchestration
 ---
 
 # Workflow Orchestration

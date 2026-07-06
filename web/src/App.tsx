@@ -64,7 +64,8 @@ const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 420;
 const SIDEBAR_SNAP_WIDTH = 104;
 const RIGHT_PANEL_SNAP_WIDTH = 360;
-const MODEL_SELECTION_STORAGE_KEY = 'my-agent:selected-model-ref';
+const MODEL_SELECTION_STORAGE_KEY = 'runforge:selected-model-ref';
+const LEGACY_MODEL_SELECTION_STORAGE_KEY = 'my-agent:selected-model-ref';
 const TITLE_REFRESH_DELAYS_MS = [0, 1000, 2000, 4000, 8000, 15000, 30000, 60000];
 const MOBILE_MEDIA_QUERY = '(max-width: 767px)';
 
@@ -107,7 +108,9 @@ function isSettingsPath(pathname = window.location.pathname): boolean {
 
 function readStoredModelRef(): string {
   try {
-    return window.localStorage.getItem(MODEL_SELECTION_STORAGE_KEY) ?? '';
+    const current = window.localStorage.getItem(MODEL_SELECTION_STORAGE_KEY);
+    if (current != null) return current;
+    return window.localStorage.getItem(LEGACY_MODEL_SELECTION_STORAGE_KEY) ?? '';
   } catch {
     return '';
   }
@@ -116,6 +119,7 @@ function readStoredModelRef(): string {
 function writeStoredModelRef(modelRef: string) {
   try {
     window.localStorage.setItem(MODEL_SELECTION_STORAGE_KEY, modelRef);
+    window.localStorage.removeItem(LEGACY_MODEL_SELECTION_STORAGE_KEY);
   } catch {
     // 本地存储不可用时只影响“记住模型”，不影响本次发送。
   }

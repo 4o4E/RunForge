@@ -22,7 +22,7 @@ import { config } from './config.js';
 
 let sdk: NodeSDK | null = null;
 
-const TRACER_NAME = 'my-agent';
+const TRACER_NAME = 'runforge';
 
 /** Whether tracing is active this process. */
 export const telemetryEnabled = config.telemetry.enabled;

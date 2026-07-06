@@ -119,13 +119,13 @@ SELECT * FROM orders LIMIT 20;
 export DB_WORKLOAD_TOKEN="..."
 export DATASOURCE_ID="ds_xxx"
 export DATASOURCE_PROFILE="readonly"
-export MY_AGENT_RUNTIME_API_BASE="http://localhost:8080/api/runtime"
+export RUNFORGE_RUNTIME_API_BASE="http://localhost:8080/api/runtime"
 ```
 
 直接调用接口：
 
 ```bash
-curl -s -X POST "$MY_AGENT_RUNTIME_API_BASE/datasources/$DATASOURCE_ID/credentials" \
+curl -s -X POST "$RUNFORGE_RUNTIME_API_BASE/datasources/$DATASOURCE_ID/credentials" \
   -H "Authorization: Bearer $DB_WORKLOAD_TOKEN" \
   -H "Content-Type: application/json" \
   -d "{\"profile\":\"${DATASOURCE_PROFILE:-readonly}\"}"

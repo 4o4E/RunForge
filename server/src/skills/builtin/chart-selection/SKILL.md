@@ -3,7 +3,7 @@ name: chart-selection
 description: 为回答或报告选择合适展示方式：默认优先 Markdown/Mermaid，仅在 Mermaid 不支持、用户明确需要交互或独立页面时使用 HTML artifact。Use when choosing between Markdown/Mermaid by default and HTML artifacts only for unsupported chart types or clearly interactive/standalone pages.
 allowed-tools: file_read grep shell file_write
 metadata:
-  my-agent.tool-scope: markdown
+  runforge.tool-scope: markdown
 ---
 
 # Chart Selection

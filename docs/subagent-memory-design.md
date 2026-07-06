@@ -1,6 +1,6 @@
 # Subagent、Agent 配置与 Gene Memory 设计
 
-本文记录 `my-agent` 当前 subagent v1、skill、workflow 的协作边界，并设计后续 runtime profile
+本文记录 `RunForge` 当前 subagent v1、skill、workflow 的协作边界，并设计后续 runtime profile
 和 gene memory 体系。目标不是把 agent 变成低代码流程编排器，而是让入口 agent 能按任务成熟度选择：
 
 - 稳定工作：读稳定文档和 skill，自动注入少量相关经验，按已验证流程执行。
@@ -183,7 +183,7 @@ anti_signals:
   - "不适用场景"
 scope:
   user: "*"
-  project: "my-agent"
+  project: "RunForge"
   agent_roles: ["router", "coder"]
   models: ["*"]
 strategy:

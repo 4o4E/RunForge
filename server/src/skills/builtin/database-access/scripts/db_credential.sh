@@ -6,7 +6,7 @@
 db_credential_json() {
   local datasource_id="${1:-${DATASOURCE_ID:-}}"
   local profile="${2:-${DATASOURCE_PROFILE:-readonly}}"
-  local api_base="${MY_AGENT_RUNTIME_API_BASE:-http://localhost:8080/api/runtime}"
+  local api_base="${RUNFORGE_RUNTIME_API_BASE:-${MY_AGENT_RUNTIME_API_BASE:-http://localhost:8080/api/runtime}}"
 
   if [ -z "$datasource_id" ]; then
     echo "missing DATASOURCE_ID" >&2

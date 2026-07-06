@@ -13,7 +13,7 @@
 - 根 `package.json` 声明 `packageManager: pnpm@11.5.3`。
 - `pnpm-workspace.yaml` 显式允许 `esbuild` / `protobufjs` 执行安装期构建脚本，避免 pnpm 11 的供应链保护在可预期依赖上阻断安装。
 - 当前锁文件中的 `@ai-sdk/react@3.0.203`、`@types/node@25.9.3`、`ai@6.0.201` 仍处于 pnpm minimum release age 策略窗口内，`pnpm-workspace.yaml` 保留对应例外，否则 `pnpm install --frozen-lockfile` 会失败。
-- 新增 `scripts/my-agent.sh` 作为共享实现，`scripts/start.sh` / `stop.sh` / `restart.sh` 作为稳定入口。
+- 新增 `scripts/runforge.sh` 作为共享实现，`scripts/start.sh` / `stop.sh` / `restart.sh` 作为稳定入口。
 - 启动脚本使用 Linux `setsid` 建立独立进程组，停止脚本按进程组发送信号，确保后端、前端和 `concurrently` 一起退出。
 - `.run/` 保存 PID，`logs/` 保存运行日志，并加入 `.gitignore`。
 

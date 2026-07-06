@@ -8,7 +8,7 @@ import type {
   LeaseStatus,
   PermissionMode,
   PublicCredentialResponse,
-} from '@my-agent/contracts';
+} from '@runforge/contracts';
 
 export type {
   AccountStatus,
@@ -20,7 +20,7 @@ export type {
   LeaseStatus,
   PermissionMode,
   PublicCredentialResponse,
-} from '@my-agent/contracts';
+} from '@runforge/contracts';
 
 export interface DatasourceRow {
   id: string;

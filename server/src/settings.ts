@@ -10,8 +10,8 @@ import type {
   McpSettings,
   SandboxBackendName,
   ToolSettings,
-} from '@my-agent/contracts';
-export type { LlmModelOption, LlmProviderSettings, LlmSettings, McpServerSettings, McpSettings, ToolSettings } from '@my-agent/contracts';
+} from '@runforge/contracts';
+export type { LlmModelOption, LlmProviderSettings, LlmSettings, McpServerSettings, McpSettings, ToolSettings } from '@runforge/contracts';
 import { config } from './config.js';
 import { query } from './db/pool.js';
 

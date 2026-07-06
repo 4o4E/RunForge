@@ -78,7 +78,7 @@ async function connectServer(server: McpServerSettings): Promise<Client> {
   if (existing?.signature === signature) return existing.client;
   await closeEntry(server.id);
 
-  const client = new Client({ name: 'my-agent', version: '0.1.0' }, { capabilities: {} });
+  const client = new Client({ name: 'RunForge', version: '0.1.0' }, { capabilities: {} });
   if (!server.url.trim()) throw new Error(`MCP server ${server.id} 缺少远程 MCP URL`);
   await client.connect(new StreamableHTTPClientTransport(new URL(server.url), {
     requestInit: { headers: headersForServer(server) },

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import type { LlmProviderSettings, LlmSettingsOptions, McpServerProbeResult, McpSettings, McpSettingsOptions, ShellCommandOptionItem, ToolSettingsOptionItem, ToolSettingsOptions } from '@my-agent/contracts';
+import type { LlmProviderSettings, LlmSettingsOptions, McpServerProbeResult, McpSettings, McpSettingsOptions, ShellCommandOptionItem, ToolSettingsOptionItem, ToolSettingsOptions } from '@runforge/contracts';
 import { getLlmSettings, getMcpSettings, getPageState, getToolSettings, llmModelOptions, normalizeLlmSettings, normalizeMcpSettings, saveLlmSettings, saveMcpSettings, savePageState, saveToolSettings, shellPathForSettings } from '../settings.js';
 import { toolSchemas } from '../tools/registry.js';
 import { findExecutable, scanExecutableNames } from '../tools/sandbox.js';

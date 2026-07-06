@@ -1,22 +1,22 @@
 {
-  "name": "my-agent",
+  "name": "runforge",
   "version": "0.1.0",
   "private": true,
-  "description": "A general-purpose AI agent: Node/TypeScript backend + React web console",
+  "description": "RunForge: Node/TypeScript backend + React web console for general-purpose AI agent runs",
   "type": "module",
   "packageManager": "pnpm@11.5.3",
   "scripts": {
-    "dev": "pnpm --filter @my-agent/contracts build && concurrently -n contracts,server,web -c yellow,blue,green \"pnpm --filter @my-agent/contracts dev\" \"pnpm --filter server dev\" \"pnpm --filter web dev\"",
+    "dev": "pnpm --filter @runforge/contracts build && concurrently -n contracts,server,web -c yellow,blue,green \"pnpm --filter @runforge/contracts dev\" \"pnpm --filter server dev\" \"pnpm --filter web dev\"",
     "dev:server": "pnpm --filter server dev",
     "dev:web": "pnpm --filter web dev",
-    "build": "pnpm --filter @my-agent/contracts build && pnpm --filter server build && pnpm --filter web build",
+    "build": "pnpm --filter @runforge/contracts build && pnpm --filter server build && pnpm --filter web build",
     "db:migrate": "pnpm --filter server db:migrate",
     "start": "bash scripts/start.sh",
     "stop": "bash scripts/stop.sh",
     "restart": "bash scripts/restart.sh",
     "start:server": "pnpm --filter server start",
-    "test": "pnpm --filter @my-agent/contracts typecheck && pnpm --filter server test",
-    "typecheck": "pnpm --filter @my-agent/contracts typecheck && pnpm --filter server typecheck && pnpm --filter web typecheck"
+    "test": "pnpm --filter @runforge/contracts typecheck && pnpm --filter server test",
+    "typecheck": "pnpm --filter @runforge/contracts typecheck && pnpm --filter server typecheck && pnpm --filter web typecheck"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

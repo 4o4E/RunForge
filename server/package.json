@@ -17,7 +17,7 @@
     "@ai-sdk/openai": "^3.0.69",
     "@ai-sdk/openai-compatible": "^2.0.48",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@my-agent/contracts": "workspace:*",
+    "@runforge/contracts": "workspace:*",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-trace-otlp-http": "^0.218.0",
     "@opentelemetry/resources": "^2.7.1",

@@ -1,7 +1,7 @@
 import type { AgentEvent, RunStatus } from '../agent/types.js';
 import type { GoalState } from '../agent/goal.js';
 import type { LlmMessage } from '../llm/types.js';
-import type { WebPushSubscriptionInput } from '@my-agent/contracts';
+import type { WebPushSubscriptionInput } from '@runforge/contracts';
 
 export interface ThreadRow {
   id: string;

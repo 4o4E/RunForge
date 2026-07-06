@@ -20,7 +20,7 @@ import type {
   ThreadSearchResultRow,
   ThreadRow,
 } from './types.js';
-import type { WebPushSubscriptionInput } from '@my-agent/contracts';
+import type { WebPushSubscriptionInput } from '@runforge/contracts';
 import { newRunId, newShellCommandId, newShellSessionId, newStepId, newSubagentRunId, newThreadId } from '../id.js';
 
 function isEphemeralSystemMessage(role: LlmMessage['role'], content: string | null): boolean {

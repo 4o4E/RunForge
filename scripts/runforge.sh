@@ -4,8 +4,8 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_DIR="${ROOT_DIR}/.run"
 LOG_DIR="${ROOT_DIR}/logs"
-PID_FILE="${RUN_DIR}/my-agent.pid"
-LOG_FILE="${LOG_DIR}/my-agent.log"
+PID_FILE="${RUN_DIR}/runforge.pid"
+LOG_FILE="${LOG_DIR}/runforge.log"
 PNPM_BIN="${PNPM_BIN:-pnpm}"
 
 info() {
@@ -55,12 +55,12 @@ start_app() {
   local old_pid
   old_pid="$(read_pid)"
   if is_running "${old_pid}"; then
-    info "my-agent 已在运行，PID: ${old_pid}"
+    info "RunForge 已在运行，PID: ${old_pid}"
     return 0
   fi
   [[ -n "${old_pid}" ]] && rm -f "${PID_FILE}"
 
-  info "启动 my-agent，日志: ${LOG_FILE}"
+  info "启动 RunForge，日志: ${LOG_FILE}"
   (
     cd "${ROOT_DIR}"
     exec setsid bash -c 'printf "%s\n" "$$" > "$1"; exec "$2" dev' bash "${PID_FILE}" "${PNPM_BIN}"
@@ -70,14 +70,14 @@ start_app() {
   for _ in {1..20}; do
     new_pid="$(read_pid)"
     if is_running "${new_pid}"; then
-      info "my-agent 已启动，PID: ${new_pid}"
+      info "RunForge 已启动，PID: ${new_pid}"
       return 0
     fi
     sleep 0.2
   done
 
   rm -f "${PID_FILE}"
-  fail "my-agent 启动失败，请查看日志: ${LOG_FILE}"
+  fail "RunForge 启动失败，请查看日志: ${LOG_FILE}"
 }
 
 stop_app() {
@@ -86,24 +86,24 @@ stop_app() {
   local pid
   pid="$(read_pid)"
   if [[ -z "${pid}" ]]; then
-    info "my-agent 未运行"
+    info "RunForge 未运行"
     return 0
   fi
   is_pid "${pid}" || fail "PID 文件内容非法: ${PID_FILE}"
 
   if ! is_running "${pid}"; then
     rm -f "${PID_FILE}"
-    info "my-agent 未运行，已清理过期 PID 文件"
+    info "RunForge 未运行，已清理过期 PID 文件"
     return 0
   fi
 
-  info "停止 my-agent，PID: ${pid}"
+  info "停止 RunForge，PID: ${pid}"
   kill -TERM "-${pid}" 2>/dev/null || kill -TERM "${pid}" 2>/dev/null || true
 
   for _ in {1..20}; do
     if ! is_running "${pid}"; then
       rm -f "${PID_FILE}"
-      info "my-agent 已停止"
+      info "RunForge 已停止"
       return 0
     fi
     sleep 1
@@ -111,7 +111,7 @@ stop_app() {
 
   kill -KILL "-${pid}" 2>/dev/null || kill -KILL "${pid}" 2>/dev/null || true
   rm -f "${PID_FILE}"
-  info "my-agent 已强制停止"
+  info "RunForge 已强制停止"
 }
 
 restart_app() {

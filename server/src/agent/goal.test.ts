@@ -12,7 +12,7 @@ import type { ToolSettings } from '../settings.js';
 let testWorkspace = '';
 
 before(async () => {
-  testWorkspace = await mkdtemp(join(tmpdir(), 'my-agent-goal-'));
+  testWorkspace = await mkdtemp(join(tmpdir(), 'runforge-goal-'));
 });
 
 after(async () => {

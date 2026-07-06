@@ -3,7 +3,7 @@ name: database-access
 description: 使用当前环境已有的数据库 CLI 连接数据库、探查 schema、执行只读 SQL、导出小样本数据。Use when the task needs database inspection, read-only querying, schema discovery, or datasource CLI access.
 allowed-tools: datasource_list shell shell_session_reuse shell_exec shell_poll shell_kill grep file_read file_write
 metadata:
-  my-agent.tool-scope: readonly
+  runforge.tool-scope: readonly
 ---
 
 # Database Access
@@ -45,7 +45,8 @@ metadata:
 - `DB_WORKLOAD_TOKEN`：本次 run 的 workload token。
 - `DATASOURCE_ID`：要访问的数据源 id。
 - `DATASOURCE_PROFILE`：权限档位，默认 `readonly`。
-- `MY_AGENT_RUNTIME_API_BASE`：运行时 API 根路径，默认 `http://localhost:8080/api/runtime`。
+- `RUNFORGE_RUNTIME_API_BASE`：运行时 API 根路径，默认 `http://localhost:8080/api/runtime`。
+- `MY_AGENT_RUNTIME_API_BASE`：旧变量名，仅作为兼容 fallback，不建议新脚本继续使用。
 
 SDK 返回的凭证只在内存中使用；不要打印到最终回答、不要写入日志、不要保存到 workspace 文件。
 

@@ -7,7 +7,7 @@ import { hydrateImageAttachments } from './attachments.js';
 import type { LlmMessage } from './types.js';
 
 test('hydrateImageAttachments: turns file tokens into image parts', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'my-agent-images-'));
+  const root = await mkdtemp(join(tmpdir(), 'runforge-images-'));
   try {
     await writeFile(join(root, 'photo.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     const token = `[[file:${JSON.stringify({ kind: 'local', path: 'photo.png', name: 'photo.png' })}]]`;
@@ -29,7 +29,7 @@ test('hydrateImageAttachments: turns file tokens into image parts', async () => 
 });
 
 test('hydrateImageAttachments: leaves non-image attachments as text', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'my-agent-files-'));
+  const root = await mkdtemp(join(tmpdir(), 'runforge-files-'));
   try {
     await writeFile(join(root, 'note.txt'), 'hello');
     const token = `[[file:${JSON.stringify({ kind: 'local', path: 'note.txt', name: 'note.txt' })}]]`;

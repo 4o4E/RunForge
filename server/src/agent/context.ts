@@ -13,7 +13,7 @@ import {
 } from './compaction.js';
 import type { Provider } from '../llm/types.js';
 
-const SYSTEM_PROMPT = `你是 my-agent，一个通用自主助手。
+const SYSTEM_PROMPT = `你是 RunForge，一个通用自主助手。
 
 你以循环方式工作：先思考，必要时调用工具，观察结果，然后继续推进，直到任务完成。
 本次 run 以最终汇报自然结束：没有工具调用且输出可见正文时，系统会结束 run 并收敛计划状态。

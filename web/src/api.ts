@@ -39,9 +39,9 @@ import type {
   WebPushPublicKeyResponse,
   WebPushSubscriptionInput,
   WebPushSubscriptionRecord,
-} from '@my-agent/contracts';
+} from '@runforge/contracts';
 
-export type * from '@my-agent/contracts';
+export type * from '@runforge/contracts';
 
 export const ACCESS_TOKEN_STORAGE_KEY = 'runforge.accessToken';
 const ACCESS_TOKEN_INVALID_EVENT = 'runforge:access-token-invalid';

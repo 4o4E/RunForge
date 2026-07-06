@@ -27,7 +27,8 @@ type ActivityEntry = { part: Part; index: number };
 type FileToken = { kind?: string; path: string; name?: string; size?: number };
 
 const RELATIVE_PATH_RE = /(?:\.{1,2}\/)?(?:server|web|docs|src|uploads|tests)\/[A-Za-z0-9._~+/@:-]+/g;
-const FILE_LINK_PREFIX = 'my-agent-file://';
+const FILE_LINK_PREFIX = 'runforge-file://';
+const LEGACY_FILE_LINK_PREFIX = 'my-agent-file://';
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -351,16 +352,21 @@ function decodeHrefPath(value: string): string {
 }
 
 function pathFromHref(href: string): string | null {
-  if (!href.startsWith(FILE_LINK_PREFIX)) return null;
+  const prefix = href.startsWith(FILE_LINK_PREFIX)
+    ? FILE_LINK_PREFIX
+    : href.startsWith(LEGACY_FILE_LINK_PREFIX)
+      ? LEGACY_FILE_LINK_PREFIX
+      : null;
+  if (!prefix) return null;
   try {
-    return decodeURIComponent(href.slice(FILE_LINK_PREFIX.length));
+    return decodeURIComponent(href.slice(prefix.length));
   } catch {
-    return href.slice(FILE_LINK_PREFIX.length);
+    return href.slice(prefix.length);
   }
 }
 
 function workspacePathFromHref(href: string, workspaceRoot: string | null): string | null {
-  if (href.startsWith(FILE_LINK_PREFIX)) return pathFromHref(href);
+  if (href.startsWith(FILE_LINK_PREFIX) || href.startsWith(LEGACY_FILE_LINK_PREFIX)) return pathFromHref(href);
   if (/^[a-z][a-z0-9+.-]*:/i.test(href) && !href.startsWith('file://')) return null;
 
   let rawPath = href;
@@ -989,7 +995,7 @@ export function Conversation({
   contentRef,
   embedded = false,
   showToc = true,
-  emptyTitle = 'my-agent',
+  emptyTitle = 'RunForge',
   emptyDescription = '通用 AI Agent。描述一个任务，它会自主调用工具（shell、文件、glob/grep、web）逐步完成。',
 }: {
   messages: UIMessage[];

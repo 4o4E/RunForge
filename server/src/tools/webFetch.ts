@@ -39,7 +39,7 @@ export const webFetchTool: Tool = {
     const url = String(args.url ?? '');
     const maxChars = Number(args.max_chars ?? 8000);
     try {
-      const res = await fetch(url, { headers: { 'User-Agent': 'my-agent/0.1' } });
+      const res = await fetch(url, { headers: { 'User-Agent': 'RunForge/0.1' } });
       if (!res.ok) return `抓取失败（${res.status}）：${url}`;
       const ct = res.headers.get('content-type') ?? '';
       const raw = await res.text();

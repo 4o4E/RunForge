@@ -33,7 +33,7 @@ startDatasourceLeaseReconciler();
 const displayHost = config.host.includes(':') ? `[${config.host}]` : config.host;
 
 server.listen(config.port, config.host, () => {
-  console.log(`🚀 my-agent server listening on http://${displayHost}:${config.port}`);
+  console.log(`🚀 RunForge server listening on http://${displayHost}:${config.port}`);
   console.log(`   WebSocket: ws://${displayHost}:${config.port}/ws?runId=<id>`);
   void getToolSettings().then((settings) => {
     console.log(

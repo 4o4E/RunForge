@@ -9,4 +9,4 @@ export type {
   StreamStage,
   StreamStats,
   TimedEventFields,
-} from '@my-agent/contracts';
+} from '@runforge/contracts';

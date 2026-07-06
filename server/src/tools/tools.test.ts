@@ -26,7 +26,7 @@ let dir: string;
 const emptyMcpSettings = { servers: [] };
 
 before(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'my-agent-test-'));
+  dir = await mkdtemp(join(tmpdir(), 'runforge-test-'));
   await mkdir(join(dir, 'sub'), { recursive: true });
   await writeFile(join(dir, 'a.ts'), 'export const a = 1;\n// TODO: fix\n');
   await writeFile(join(dir, 'sub', 'b.ts'), 'export const b = 2;\n');
@@ -173,7 +173,7 @@ test('shell runs a command (PowerShell on Windows, sh elsewhere)', async () => {
 });
 
 test('shell redacts credential-shaped output before returning it', async () => {
-  const out = text(await shellTool.run({ command: "printf '%s\\n' '{\"password\":\"secret\",\"username\":\"agent\"}' 'DATABASE_URL=postgres://root:123456@localhost:5432/my_agent'" }));
+  const out = text(await shellTool.run({ command: "printf '%s\\n' '{\"password\":\"secret\",\"username\":\"agent\"}' 'DATABASE_URL=postgres://root:123456@localhost:5432/runforge'" }));
   assert.match(out, /"password":"\[redacted\]"/);
   assert.match(out, /DATABASE_URL=\[redacted\]/);
   assert.equal(out.includes('secret'), false);
@@ -231,7 +231,7 @@ test('shell blocks database-access SDK scripts before workload token injection',
 });
 
 test('shell blocks direct database CLI even when workload token exists', async () => {
-  const command = 'psql -h localhost -U ag_readonly_old -d my_agent -c "select 1"';
+  const command = 'psql -h localhost -U ag_readonly_old -d runforge -c "select 1"';
   const blocked = text(await shellTool.run(
     { command },
     { settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }), env: { DB_WORKLOAD_TOKEN: 'wat_test' } },

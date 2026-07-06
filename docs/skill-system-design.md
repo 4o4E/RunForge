@@ -1,6 +1,6 @@
 # Skill 系统设计
 
-本文设计 `my-agent` 的 skill 系统。目标是把业务流程、项目经验、工具用法、模板和脚本沉淀为可复用能力，同时避免把大量工具说明和流程文档长期塞进 LLM 上下文。
+本文设计 `RunForge` 的 skill 系统。目标是把业务流程、项目经验、工具用法、模板和脚本沉淀为可复用能力，同时避免把大量工具说明和流程文档长期塞进 LLM 上下文。
 
 ## 背景和目标
 
@@ -138,8 +138,8 @@ description: Query project datasource docs and run readonly SQL helper scripts. 
 allowed-tools: shell grep file_read
 compatibility: Requires node and psql client when running scripts.
 metadata:
-  my-agent.tool-scope: readonly
-  my-agent.requires-network: "false"
+  runforge.tool-scope: readonly
+  runforge.requires-network: "false"
 ---
 ```
 
@@ -149,7 +149,7 @@ metadata:
 - `description`：必需，写清楚这个 skill 做什么、什么时候用；这是初始路由的核心。
 - `allowed-tools`：可选，声明该 skill 预期需要的最小工具集合。
 - `compatibility`：可选，说明运行环境要求，例如需要 `python3`、`node`、`psql`。
-- `metadata.my-agent.*`：可选，本项目私有扩展。
+- `metadata.runforge.*`：可选，本项目私有扩展。
 
 不建议注入给模型的字段：
 

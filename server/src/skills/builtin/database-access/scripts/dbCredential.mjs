@@ -10,7 +10,12 @@ export async function acquireDatasourceCredential(options = {}) {
   const datasourceId = required(options.datasourceId ?? process.env.DATASOURCE_ID, "DATASOURCE_ID");
   const token = required(options.token ?? process.env.DB_WORKLOAD_TOKEN, "DB_WORKLOAD_TOKEN");
   const profile = options.profile ?? process.env.DATASOURCE_PROFILE ?? "readonly";
-  const apiBase = (options.apiBase ?? process.env.MY_AGENT_RUNTIME_API_BASE ?? DEFAULT_API_BASE).replace(/\/+$/, "");
+  const apiBase = (
+    options.apiBase
+    ?? process.env.RUNFORGE_RUNTIME_API_BASE
+    ?? process.env.MY_AGENT_RUNTIME_API_BASE
+    ?? DEFAULT_API_BASE
+  ).replace(/\/+$/, "");
 
   const response = await fetch(`${apiBase}/datasources/${datasourceId}/credentials`, {
     method: "POST",

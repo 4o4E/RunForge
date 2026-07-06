@@ -7,7 +7,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { renderToolResult } from './client.js';
 
 test('renderToolResult: saves MCP image content and returns a markdown image link', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'my-agent-mcp-image-'));
+  const root = await mkdtemp(join(tmpdir(), 'runforge-mcp-image-'));
   try {
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
     const result: CallToolResult = {
@@ -32,7 +32,7 @@ test('renderToolResult: saves MCP image content and returns a markdown image lin
 });
 
 test('renderToolResult: saves MCP binary resources with the resource file name', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'my-agent-mcp-resource-'));
+  const root = await mkdtemp(join(tmpdir(), 'runforge-mcp-resource-'));
   try {
     const body = Buffer.from('hello');
     const result: CallToolResult = {
@@ -62,7 +62,7 @@ test('renderToolResult: saves MCP binary resources with the resource file name',
 });
 
 test('renderToolResult: keeps repeated MCP file names unique', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'my-agent-mcp-unique-'));
+  const root = await mkdtemp(join(tmpdir(), 'runforge-mcp-unique-'));
   try {
     const first = Buffer.from([1]);
     const second = Buffer.from([2]);

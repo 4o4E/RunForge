@@ -9,8 +9,8 @@ let workspaceRoot = '';
 let builtinRoot = '';
 
 before(async () => {
-  workspaceRoot = await mkdtemp(join(tmpdir(), 'my-agent-workflows-workspace-'));
-  builtinRoot = await mkdtemp(join(tmpdir(), 'my-agent-workflows-builtin-'));
+  workspaceRoot = await mkdtemp(join(tmpdir(), 'runforge-workflows-workspace-'));
+  builtinRoot = await mkdtemp(join(tmpdir(), 'runforge-workflows-builtin-'));
 
   const builtin = join(builtinRoot, 'sample-flow');
   await mkdir(builtin, { recursive: true });

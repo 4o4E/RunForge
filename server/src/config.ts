@@ -48,7 +48,7 @@ function contextBudget(model: string): number {
   return Math.floor(modelContextWindow(model) * 0.5);
 }
 
-const DEFAULT_DATABASE_URL = 'postgres://postgres:postgres@localhost:5432/my_agent';
+const DEFAULT_DATABASE_URL = 'postgres://postgres:postgres@localhost:5432/runforge';
 const DEFAULT_SHELL_ALLOW_COMMANDS = [
   'cat',
   'ls',
@@ -159,7 +159,7 @@ export const config = {
   //   OTEL_CONSOLE=true                          also print spans to stdout (debug)
   telemetry: {
     enabled: (process.env.OTEL_ENABLED ?? 'false') === 'true',
-    serviceName: process.env.OTEL_SERVICE_NAME ?? 'my-agent',
+    serviceName: process.env.OTEL_SERVICE_NAME ?? 'runforge',
     otlpEndpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? '',
     console: (process.env.OTEL_CONSOLE ?? 'false') === 'true',
   },

@@ -248,9 +248,10 @@ async function createDefaultDatabaseRuntimeEnv(runId: string): Promise<DatabaseR
 
   const env: Record<string, string> = {
     DB_WORKLOAD_TOKEN: created.token,
-    MY_AGENT_RUNTIME_API_BASE: runtimeApiBase(),
+    RUNFORGE_RUNTIME_API_BASE: runtimeApiBase(),
     DATASOURCE_PROFILE: 'readonly',
   };
+  env.MY_AGENT_RUNTIME_API_BASE = env.RUNFORGE_RUNTIME_API_BASE;
 
   if (activeDatasources.length === 1) {
     const datasource = activeDatasources[0];
@@ -262,7 +263,7 @@ async function createDefaultDatabaseRuntimeEnv(runId: string): Promise<DatabaseR
 
   const visible = [
     'DB_WORKLOAD_TOKEN=已注入',
-    `MY_AGENT_RUNTIME_API_BASE=${env.MY_AGENT_RUNTIME_API_BASE}`,
+    `RUNFORGE_RUNTIME_API_BASE=${env.RUNFORGE_RUNTIME_API_BASE}`,
     env.DATASOURCE_ID ? `DATASOURCE_ID=${env.DATASOURCE_ID}` : 'DATASOURCE_ID=未自动选择',
     `DATASOURCE_PROFILE=${env.DATASOURCE_PROFILE}`,
     `allowedDatasourceIds=${allowedDatasourceIds.length ? allowedDatasourceIds.join(',') : '无'}`,
@@ -343,7 +344,7 @@ function defaultAskUserAnswer(): AskUserAnswer {
 }
 
 function runtimeApiBase(): string {
-  return (process.env.MY_AGENT_RUNTIME_API_BASE ?? `http://127.0.0.1:${config.port}/api/runtime`).replace(/\/+$/, '');
+  return (process.env.RUNFORGE_RUNTIME_API_BASE ?? process.env.MY_AGENT_RUNTIME_API_BASE ?? `http://127.0.0.1:${config.port}/api/runtime`).replace(/\/+$/, '');
 }
 
 /**
@@ -517,7 +518,8 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       });
 
       toolEnv.DB_WORKLOAD_TOKEN = created.token;
-      toolEnv.MY_AGENT_RUNTIME_API_BASE = runtimeApiBase();
+      toolEnv.RUNFORGE_RUNTIME_API_BASE = runtimeApiBase();
+      toolEnv.MY_AGENT_RUNTIME_API_BASE = toolEnv.RUNFORGE_RUNTIME_API_BASE;
       toolEnv.DATASOURCE_PROFILE = 'readonly';
 
       if (activeDatasources.length === 1) {
@@ -530,7 +532,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
 
       const visible = [
         `DB_WORKLOAD_TOKEN=已注入`,
-        `MY_AGENT_RUNTIME_API_BASE=${toolEnv.MY_AGENT_RUNTIME_API_BASE}`,
+        `RUNFORGE_RUNTIME_API_BASE=${toolEnv.RUNFORGE_RUNTIME_API_BASE}`,
         toolEnv.DATASOURCE_ID ? `DATASOURCE_ID=${toolEnv.DATASOURCE_ID}` : 'DATASOURCE_ID=未自动选择',
         `DATASOURCE_PROFILE=${toolEnv.DATASOURCE_PROFILE}`,
         `allowedDatasourceIds=${allowedDatasourceIds.length ? allowedDatasourceIds.join(',') : '无'}`,

@@ -16,7 +16,8 @@ interface Props {
   onOpenSubagentPreview?: (subagentId: string) => void;
 }
 
-const STORAGE_KEY = 'my-agent:right-status-fields';
+const STORAGE_KEY = 'runforge:right-status-fields';
+const LEGACY_STORAGE_KEY = 'my-agent:right-status-fields';
 const STREAM_STATS_POINTS = 24;
 export const DEFAULT_STATUS_FIELDS: StatusField[] = ['run', 'plan', 'shell', 'tokens', 'cache'];
 export const STATUS_FIELD_LABELS: Record<StatusField, string> = {
@@ -161,7 +162,7 @@ function StreamStatsPanel({ messages, busy }: { messages: UIMessage[]; busy: boo
 
 export function readStatusFields(): StatusField[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(LEGACY_STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : null;
     if (Array.isArray(parsed)) {
       const fields = parsed.filter((item): item is StatusField => DEFAULT_STATUS_FIELDS.includes(item));
@@ -176,6 +177,7 @@ export function readStatusFields(): StatusField[] {
 export function writeStatusFields(fields: StatusField[]): StatusField[] {
   const next = fields.length ? fields : DEFAULT_STATUS_FIELDS;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  localStorage.removeItem(LEGACY_STORAGE_KEY);
   return next;
 }
 

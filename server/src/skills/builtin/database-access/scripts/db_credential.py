@@ -32,7 +32,12 @@ def acquire_datasource_credential(
     datasource_id = datasource_id or os.environ.get("DATASOURCE_ID")
     profile = profile or os.environ.get("DATASOURCE_PROFILE", "readonly")
     token = token or os.environ.get("DB_WORKLOAD_TOKEN")
-    api_base = (api_base or os.environ.get("MY_AGENT_RUNTIME_API_BASE") or DEFAULT_API_BASE).rstrip("/")
+    api_base = (
+        api_base
+        or os.environ.get("RUNFORGE_RUNTIME_API_BASE")
+        or os.environ.get("MY_AGENT_RUNTIME_API_BASE")
+        or DEFAULT_API_BASE
+    ).rstrip("/")
 
     datasource_id = _required(datasource_id, "DATASOURCE_ID")
     token = _required(token, "DB_WORKLOAD_TOKEN")

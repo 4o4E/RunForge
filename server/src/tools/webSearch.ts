@@ -16,7 +16,7 @@ export const webSearchTool: Tool = {
     const query = String(args.query ?? '');
     try {
       const res = await fetch('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query), {
-        headers: { 'User-Agent': 'Mozilla/5.0 my-agent/0.1' },
+        headers: { 'User-Agent': 'Mozilla/5.0 RunForge/0.1' },
       });
       if (!res.ok) return `搜索失败（${res.status}）`;
       const html = await res.text();

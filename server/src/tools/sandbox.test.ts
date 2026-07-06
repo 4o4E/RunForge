@@ -20,7 +20,7 @@ after(async () => {
 });
 
 test('findExecutable resolves executable from a supplied PATH', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'my-agent-sandbox-'));
+  const dir = await mkdtemp(join(tmpdir(), 'runforge-sandbox-'));
   tempDirs.push(dir);
   const bin = join(dir, 'allowed');
   await writeFile(bin, '#!/bin/sh\n');
@@ -31,11 +31,11 @@ test('findExecutable resolves executable from a supplied PATH', async () => {
 });
 
 test('parentDirs returns mount parents from shallow to deep', () => {
-  assert.deepEqual(parentDirs('/root/projects/my-agent'), ['/root', '/root/projects']);
+  assert.deepEqual(parentDirs('/root/projects/RunForge'), ['/root', '/root/projects']);
 });
 
 test('resolveAllowedCommands skips missing commands', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'my-agent-sandbox-'));
+  const dir = await mkdtemp(join(tmpdir(), 'runforge-sandbox-'));
   tempDirs.push(dir);
   const bin = join(dir, 'present');
   await writeFile(bin, '#!/bin/sh\n');
@@ -50,7 +50,7 @@ test('resolveAllowedCommands skips missing commands', async () => {
 });
 
 test('scanExecutableNames returns executable files from PATH directories', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'my-agent-sandbox-'));
+  const dir = await mkdtemp(join(tmpdir(), 'runforge-sandbox-'));
   tempDirs.push(dir);
   const bin = join(dir, 'scan-me');
   const text = join(dir, 'skip-me');
@@ -62,7 +62,7 @@ test('scanExecutableNames returns executable files from PATH directories', async
 });
 
 test('buildShellSpawnSpec limits host PATH to selected commands', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'my-agent-sandbox-'));
+  const dir = await mkdtemp(join(tmpdir(), 'runforge-sandbox-'));
   tempDirs.push(dir);
   const allowed = join(dir, 'allowed');
   const hidden = join(dir, 'hidden');

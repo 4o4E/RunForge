@@ -1,16 +1,16 @@
 services:
   postgres:
     image: postgres:16
-    container_name: my-agent-pg
+    container_name: runforge-pg
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: my_agent
+      POSTGRES_DB: runforge
     ports:
       - "5432:5432"
     volumes:
-      - my-agent-pgdata:/var/lib/postgresql/data
+      - runforge-pgdata:/var/lib/postgresql/data
 
   # Opt-in tracing backend (Phase 4). Start with: docker compose --profile debug up
   # Then run the server with:
@@ -20,7 +20,7 @@ services:
   # the same way (Langfuse / Laminar): just point OTEL_EXPORTER_OTLP_ENDPOINT at it.
   jaeger:
     image: jaegertracing/all-in-one:1.62
-    container_name: my-agent-jaeger
+    container_name: runforge-jaeger
     restart: unless-stopped
     profiles: ["debug"]
     environment:
@@ -30,4 +30,4 @@ services:
       - "4318:4318"   # OTLP HTTP
 
 volumes:
-  my-agent-pgdata:
+  runforge-pgdata:
