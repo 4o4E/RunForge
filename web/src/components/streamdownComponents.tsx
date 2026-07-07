@@ -56,6 +56,8 @@ const LANGUAGE_CLASS_RE = /language-([^\s]+)/;
 const START_LINE_RE = /showLineNumbers\{(\d+)\}/;
 const IMAGE_PATH_RE = /\.(?:png|jpe?g|gif|webp|svg|bmp|avif)(?:[?#].*)?$/i;
 const RAW_URL_TTL_SECONDS = 24 * 60 * 60;
+const MERMAID_MIN_ZOOM = 0.2;
+const MERMAID_MAX_ZOOM = 8;
 
 function getControl(controls: ControlsConfig, scope: 'code' | 'mermaid', action?: string): boolean {
   if (controls === false) return false;
@@ -352,6 +354,10 @@ function visualViewportRect(): { height: number; left: number; top: number; widt
   };
 }
 
+function clampMermaidZoom(value: number): number {
+  return Math.max(MERMAID_MIN_ZOOM, Math.min(MERMAID_MAX_ZOOM, Number(value.toFixed(2))));
+}
+
 function MermaidViewport({ height, svg, fullscreen = false, width }: { height: number; svg: string; fullscreen?: boolean; width: number }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const [zoom, setZoom] = useState(1);
@@ -369,7 +375,7 @@ function MermaidViewport({ height, svg, fullscreen = false, width }: { height: n
   }, [pan]);
 
   const zoomBy = useCallback((delta: number) => {
-    setZoom((value) => Math.max(0.5, Math.min(3, Number((value + delta).toFixed(2)))));
+    setZoom((value) => clampMermaidZoom(value + delta));
   }, []);
 
   const resetView = useCallback(() => {
@@ -467,7 +473,7 @@ function MermaidViewport({ height, svg, fullscreen = false, width }: { height: n
       const [first, second] = points;
       const center = pointCenter(first, second);
       const ratio = pointDistance(first, second) / pinchStartRef.current.distance;
-      const nextZoom = Math.max(0.5, Math.min(3, Number((pinchStartRef.current.zoom * ratio).toFixed(2))));
+      const nextZoom = clampMermaidZoom(pinchStartRef.current.zoom * ratio);
       setZoom(nextZoom);
       setPan({
         x: pinchStartRef.current.panX + center.x - pinchStartRef.current.centerX,
@@ -495,10 +501,10 @@ function MermaidViewport({ height, svg, fullscreen = false, width }: { height: n
   return (
     <div className={cn('relative size-full overflow-hidden', fullscreen ? 'min-h-0' : null)}>
       <div className="absolute bottom-2 left-2 z-10 flex flex-col gap-1 rounded-md border border-border bg-background/80 p-1 supports-[backdrop-filter]:bg-background/70 supports-[backdrop-filter]:backdrop-blur-sm">
-        <IconButton title="放大 Mermaid 图表" onClick={() => zoomBy(0.1)} disabled={zoom >= 3}>
+        <IconButton title="放大 Mermaid 图表" onClick={() => zoomBy(0.1)} disabled={zoom >= MERMAID_MAX_ZOOM}>
           <ZoomInIcon className="size-4" />
         </IconButton>
-        <IconButton title="缩小 Mermaid 图表" onClick={() => zoomBy(-0.1)} disabled={zoom <= 0.5}>
+        <IconButton title="缩小 Mermaid 图表" onClick={() => zoomBy(-0.1)} disabled={zoom <= MERMAID_MIN_ZOOM}>
           <ZoomOutIcon className="size-4" />
         </IconButton>
         <IconButton title="重置 Mermaid 视图" onClick={resetView}>
