@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import type { BundledLanguage } from 'shiki';
-import { Check, Code2, Copy, Download, Eye, ChevronRight, FileText, Folder, FolderOpen, FolderTree, Link, PanelRightClose, PanelRightOpen, Paperclip, RefreshCw, X } from 'lucide-react';
+import { Code2, Copy, Download, Eye, ChevronRight, FileText, Folder, FolderOpen, FolderTree, Link, PanelRightClose, PanelRightOpen, Paperclip, RefreshCw, X } from 'lucide-react';
 import {
   createRemoteFileShareLink,
   listRemoteFiles,
@@ -16,6 +16,7 @@ import {
   type RemoteFileEntry,
 } from '@/api';
 import { CodeBlock } from '@/components/ai-elements/code-block';
+import { useNotifications } from '@/components/GlobalNotifications';
 import { MarkdownContent } from '@/components/MarkdownContent';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -222,6 +223,7 @@ export function RemoteFilesPanel({
   onAttach,
   onOpenFile,
 }: Props) {
+  const { notify } = useNotifications();
   const [currentPath, setCurrentPath] = useState('.');
   const [treeWidth, setTreeWidth] = useState(270);
   const [showTree, setShowTree] = useState(() => !compact || !previewPath);
@@ -240,8 +242,6 @@ export function RemoteFilesPanel({
   const [downloadUrl, setDownloadUrl] = useState('');
   const [shareBusy, setShareBusy] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
-  const [shareExpiresAt, setShareExpiresAt] = useState<string | null>(null);
-  const [shareCopied, setShareCopied] = useState(false);
   const [customShareValue, setCustomShareValue] = useState('1');
   const [customShareUnit, setCustomShareUnit] = useState<typeof CUSTOM_UNITS[number]['value']>('day');
   const previewRequestRef = useRef(0);
@@ -281,8 +281,6 @@ export function RemoteFilesPanel({
       setRawUrl('');
       setDownloadUrl('');
       setShareOpen(false);
-      setShareExpiresAt(null);
-      setShareCopied(false);
       setPreviewMode(mediaKind || ['html', 'htm', 'md'].includes(extOf(path)) ? 'preview' : 'source');
     } else {
       pendingPreviewStartsRef.current.add(startLine);
@@ -449,17 +447,19 @@ export function RemoteFilesPanel({
     if (!selectedPath || shareBusy) return;
     setShareBusy(true);
     setError(null);
-    setShareCopied(false);
     try {
       const link = await createRemoteFileShareLink(selectedPath, clampShareTtl(ttlSeconds));
-      const absoluteUrl = new URL(link.url, window.location.origin).toString();
-      await navigator.clipboard?.writeText(absoluteUrl);
-      setShareExpiresAt(link.expiresAt);
-      setShareCopied(true);
+      await navigator.clipboard?.writeText(new URL(link.url, window.location.origin).toString());
       setShareOpen(false);
-      window.setTimeout(() => setShareCopied(false), 1600);
+      notify({
+        variant: 'success',
+        title: '分享链接已复制',
+        description: `到期 ${formatExpiresAt(link.expiresAt)}`,
+      });
     } catch (err) {
-      setError((err as Error).message);
+      const message = (err as Error).message;
+      setError(message);
+      notify({ variant: 'error', title: '分享链接生成失败', description: message });
     } finally {
       setShareBusy(false);
     }
@@ -721,18 +721,6 @@ export function RemoteFilesPanel({
                   </Button>
                 )}
               </div>
-              {(shareCopied || shareExpiresAt) && (
-                <div className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-                  {shareCopied ? (
-                    <>
-                      <Check className="size-3.5 text-emerald-600" />
-                      <span className="text-emerald-600">分享链接已复制，到期 {formatExpiresAt(shareExpiresAt)}</span>
-                    </>
-                  ) : (
-                    <span>上次分享链接到期 {formatExpiresAt(shareExpiresAt)}</span>
-                  )}
-                </div>
-              )}
               <div className="min-h-0 flex-1">
                 {selectedMediaKind === 'image' && previewMode === 'preview' ? (
                   <div className="flex h-full items-center justify-center overflow-auto rounded-md border bg-muted/20 p-3">
