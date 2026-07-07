@@ -247,6 +247,10 @@ export function RightSidebar({
   const activeShellSessionId = activeTab?.startsWith('shell:') ? activeTab.slice('shell:'.length) : null;
   const activeSubagentId = activeTab?.startsWith('subagent:') ? activeTab.slice('subagent:'.length) : null;
   const activeFilePath = activeTab?.startsWith('file:') ? activeTab.slice('file:'.length) : null;
+  const openFileAndCloseBrowser = useCallback((path: string) => {
+    onOpenFileTab(path);
+    onCloseTab('files');
+  }, [onCloseTab, onOpenFileTab]);
   const scrollTabsWithWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
     const element = tabsScrollRef.current;
     if (!element || element.scrollWidth <= element.clientWidth) return;
@@ -304,7 +308,7 @@ export function RightSidebar({
             compact={compact}
             onClose={onClose}
             onAttach={onAttach}
-            onOpenFile={onOpenFileTab}
+            onOpenFile={openFileAndCloseBrowser}
           />
         )}
         {activeFilePath && (
@@ -314,7 +318,6 @@ export function RightSidebar({
             previewPath={activeFilePath}
             embedded
             compact={compact}
-            showBrowser={false}
             onClose={onClose}
             onAttach={onAttach}
             onOpenFile={onOpenFileTab}

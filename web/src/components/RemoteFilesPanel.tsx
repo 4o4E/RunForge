@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import type { BundledLanguage } from 'shiki';
-import { Check, Code2, Copy, Download, Eye, ChevronRight, FileText, Folder, FolderOpen, Link, PanelRightClose, PanelRightOpen, Paperclip, RefreshCw, X } from 'lucide-react';
+import { Check, Code2, Copy, Download, Eye, ChevronRight, FileText, Folder, FolderOpen, FolderTree, Link, PanelRightClose, PanelRightOpen, Paperclip, RefreshCw, X } from 'lucide-react';
 import {
   createRemoteFileShareLink,
   listRemoteFiles,
@@ -353,7 +353,7 @@ export function RemoteFilesPanel({
   }
 
   function selectFile(entry: RemoteFileEntry) {
-    if (onOpenFile) {
+    if (onOpenFile && entry.path !== selectedPath) {
       onOpenFile(entry.path);
       return;
     }
@@ -476,7 +476,10 @@ export function RemoteFilesPanel({
     void openFile(selectedPath, selectedSize, nextLine);
   };
   const hasMoreHex = selectedUsesHexSource && Boolean(hexPreview?.hasMore && hexPreview.nextOffset != null);
-  const showPanelHeader = showBrowser || !embedded;
+  const showPanelHeader = !embedded;
+  const showHeaderTreeToggle = showBrowser && !selectedPath;
+  const showTreePlaceholder = showBrowser && showTree && !selectedPath;
+  const showTreeSide = showBrowser && showTree && Boolean(selectedPath);
 
   const renderRows = (entries: RemoteFileEntry[] | undefined, depth: number): JSX.Element[] =>
     (entries ?? []).flatMap((entry) => {
@@ -555,14 +558,16 @@ export function RemoteFilesPanel({
               <Button variant="ghost" size="icon" onClick={() => void loadDir(currentPath)} title="刷新">
                 <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
               </Button>
-              <Button
-                variant={showTree ? 'secondary' : 'ghost'}
-                size="icon"
-                onClick={() => setShowTree((value) => !value)}
-                title={compact ? (showTree ? '显示文件预览' : '浏览文件树') : (showTree ? '隐藏文件树' : '显示文件树')}
-              >
-                {showTree ? <PanelRightClose className="size-4" /> : <PanelRightOpen className="size-4" />}
-              </Button>
+              {showHeaderTreeToggle && (
+                <Button
+                  variant={showTree ? 'secondary' : 'ghost'}
+                  size="icon"
+                  onClick={() => setShowTree((value) => !value)}
+                  title={showTree ? '隐藏文件树' : '显示文件树'}
+                >
+                  {showTree ? <PanelRightClose className="size-4" /> : <PanelRightOpen className="size-4" />}
+                </Button>
+              )}
             </>
           )}
           {!embedded && (
@@ -577,7 +582,7 @@ export function RemoteFilesPanel({
 
       <div className="flex min-h-0 flex-1">
         <div className="min-w-0 flex-1 overflow-hidden p-3">
-          {compact && showTree ? (
+          {showTreePlaceholder ? (
             renderTreeBrowser(false)
           ) : selectedPath ? (
             <div className="flex h-full min-h-0 flex-col gap-3">
@@ -693,6 +698,28 @@ export function RemoteFilesPanel({
                     </PopoverContent>
                   </Popover>
                 )}
+                {showBrowser && (
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={() => void loadDir(currentPath)}
+                    title="刷新文件树"
+                    aria-label="刷新文件树"
+                  >
+                    <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
+                  </Button>
+                )}
+                {showBrowser && (
+                  <Button
+                    variant={showTree ? 'secondary' : 'ghost'}
+                    size="icon-sm"
+                    onClick={() => setShowTree((value) => !value)}
+                    title={showTree ? '隐藏文件树' : '显示文件树'}
+                    aria-label={showTree ? '隐藏文件树' : '显示文件树'}
+                  >
+                    {showTree ? <PanelRightClose className="size-4" /> : <FolderTree className="size-4" />}
+                  </Button>
+                )}
               </div>
               {(shareCopied || shareExpiresAt) && (
                 <div className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
@@ -801,7 +828,7 @@ export function RemoteFilesPanel({
             <div className="py-10 text-center text-sm text-muted-foreground">选择一个文件查看预览</div>
           )}
         </div>
-        {showBrowser && showTree && !compact && (
+        {showTreeSide && (
           <>
             <div
               role="separator"
