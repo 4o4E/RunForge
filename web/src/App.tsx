@@ -404,9 +404,16 @@ function assistantMessageFromEvents(runId: string, events: AgentEvent[]): UIMess
   return { id: `${runId}:a`, role: 'assistant', parts };
 }
 
+function assistantRunId(message: UIMessage): string | null {
+  if (message.role !== 'assistant') return null;
+  const part = message.parts.find((p) => p.type === 'data-run-id') as { data?: { runId?: string } } | undefined;
+  return part?.data?.runId ?? null;
+}
+
 function replaceAssistantMessage(messages: UIMessage[], runId: string, events: AgentEvent[]): UIMessage[] {
   const assistant = assistantMessageFromEvents(runId, events);
-  const index = messages.findIndex((m) => m.id === assistant.id);
+  // AI SDK 直播消息的 id 由 SDK 生成；恢复 ask_user 时必须用 data-run-id 对齐同一个 run。
+  const index = messages.findIndex((m) => m.id === assistant.id || assistantRunId(m) === runId);
   if (index >= 0) return messages.map((m, i) => (i === index ? assistant : m));
   return [...messages, assistant];
 }
