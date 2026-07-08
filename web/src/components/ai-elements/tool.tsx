@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { isValidElement } from "react";
+import type { BundledLanguage } from "shiki";
 
 import { CodeBlock } from "./code-block";
 
@@ -124,11 +125,18 @@ export const ToolContent = ({ className, ...props }: ToolContentProps) => (
 
 export type ToolInputProps = ComponentProps<"div"> & {
   input: ToolPart["input"];
+  toolName?: string;
   workspaceRoot?: string | null;
   onOpenRemoteFile?: (path: string) => void;
 };
 
 type JsonLike = null | boolean | number | string | JsonLike[] | { [key: string]: JsonLike };
+type ToolCodeInput = {
+  code: string;
+  key: string;
+  language: BundledLanguage;
+  showLineNumbers: boolean;
+};
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value) && !isValidElement(value);
@@ -262,14 +270,134 @@ function JsonPanel({
   );
 }
 
-export const ToolInput = ({ className, input, workspaceRoot, onOpenRemoteFile, ...props }: ToolInputProps) => (
-  <div className={cn("space-y-1 overflow-hidden", className)} {...props}>
-    <h4 className="font-medium text-muted-foreground text-xs">
-      参数
-    </h4>
-    <JsonPanel value={input ?? {}} workspaceRoot={workspaceRoot} onOpenRemoteFile={onOpenRemoteFile} />
-  </div>
-);
+function inputObject(input: unknown): Record<string, unknown> | null {
+  if (isPlainObject(input)) return input;
+  if (typeof input !== "string") return null;
+  const parsed = tryParseJson(input);
+  return isPlainObject(parsed) ? parsed : null;
+}
+
+function languageFromPath(path: unknown): BundledLanguage {
+  if (typeof path !== "string") return "log";
+  const extension = path.toLowerCase().split(".").pop() ?? "";
+  const languageByExtension: Record<string, BundledLanguage> = {
+    css: "css",
+    html: "html",
+    js: "javascript",
+    json: "json",
+    jsx: "jsx",
+    md: "markdown",
+    py: "python",
+    sh: "bash",
+    sql: "sql",
+    ts: "typescript",
+    tsx: "tsx",
+    yaml: "yaml",
+    yml: "yaml",
+  };
+  return languageByExtension[extension] ?? "log";
+}
+
+function codeInputForTool(toolName: string | undefined, value: Record<string, unknown>): ToolCodeInput | null {
+  // 大段正文参数要按代码块渲染，避免 JSON 行内展示吞掉换行。
+  if (toolName === "shell" && typeof value.command === "string") {
+    return {
+      code: value.command,
+      key: "command",
+      language: "bash",
+      showLineNumbers: true,
+    };
+  }
+
+  if (toolName === "file_write" && typeof value.content === "string") {
+    return {
+      code: value.content,
+      key: "content",
+      language: languageFromPath(value.path),
+      showLineNumbers: true,
+    };
+  }
+
+  return null;
+}
+
+function ToolInputTable({
+  entries,
+  workspaceRoot,
+  onOpenRemoteFile,
+}: {
+  entries: Array<[string, unknown]>;
+  workspaceRoot?: string | null;
+  onOpenRemoteFile?: (path: string) => void;
+}) {
+  if (entries.length === 0) return null;
+
+  return (
+    <div className="overflow-hidden rounded-md border bg-background">
+      <table className="w-full border-collapse text-left text-xs">
+        <tbody>
+          {entries.map(([key, value]) => (
+            <tr key={key} className="border-b last:border-0">
+              <th className="w-32 max-w-40 bg-muted/45 px-2 py-1.5 align-top font-medium text-muted-foreground">
+                <span className="block truncate" title={key}>{key}</span>
+              </th>
+              <td className="min-w-0 px-2 py-1.5 align-top text-foreground">
+                <JsonValue value={value} objectKey={key} workspaceRoot={workspaceRoot} onOpenRemoteFile={onOpenRemoteFile} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ToolCodeInputView({
+  input,
+  codeInput,
+  workspaceRoot,
+  onOpenRemoteFile,
+}: {
+  input: Record<string, unknown>;
+  codeInput: ToolCodeInput;
+  workspaceRoot?: string | null;
+  onOpenRemoteFile?: (path: string) => void;
+}) {
+  const tableEntries = Object.entries(input).filter(([key]) => key !== codeInput.key);
+
+  return (
+    <div className="space-y-2">
+      <ToolInputTable entries={tableEntries} workspaceRoot={workspaceRoot} onOpenRemoteFile={onOpenRemoteFile} />
+      <div className="rounded-md bg-muted/35 text-xs text-foreground">
+        <CodeBlock
+          code={codeInput.code}
+          language={codeInput.language}
+          showGlance
+          showLineNumbers={codeInput.showLineNumbers}
+          showWrapToggle
+        />
+      </div>
+    </div>
+  );
+}
+
+export const ToolInput = ({ className, input, toolName, workspaceRoot, onOpenRemoteFile, ...props }: ToolInputProps) => {
+  const objectInput = inputObject(input);
+  const codeInput = objectInput ? codeInputForTool(toolName, objectInput) : null;
+
+  return (
+    <div className={cn("space-y-1 overflow-hidden", className)} {...props}>
+      <h4 className="font-medium text-muted-foreground text-xs">
+        参数
+      </h4>
+      {objectInput && codeInput ? (
+        <ToolCodeInputView input={objectInput} codeInput={codeInput} workspaceRoot={workspaceRoot} onOpenRemoteFile={onOpenRemoteFile} />
+      ) : (
+        <JsonPanel value={input ?? {}} workspaceRoot={workspaceRoot} onOpenRemoteFile={onOpenRemoteFile} />
+      )}
+    </div>
+  );
+};
 
 export type ToolOutputProps = ComponentProps<"div"> & {
   output: ToolPart["output"];

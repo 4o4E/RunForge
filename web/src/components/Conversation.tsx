@@ -513,6 +513,7 @@ function ToolBlock({
     }
   }, [active]);
   const open = override ?? active;
+  const toolName = p.toolName ?? p.type.split('-').slice(1).join('-');
   return (
     <Tool open={open} onOpenChange={setOverride}>
       {p.type === 'dynamic-tool' ? (
@@ -521,7 +522,7 @@ function ToolBlock({
         <ToolHeader type={p.type as ToolUIPart['type']} state={p.state} duration={formatDuration(durationFromTiming(timing))} />
       )}
       <ToolContent>
-        <ToolInput input={p.input} workspaceRoot={workspaceRoot} onOpenRemoteFile={onOpenRemoteFile} />
+        <ToolInput input={p.input} toolName={toolName} workspaceRoot={workspaceRoot} onOpenRemoteFile={onOpenRemoteFile} />
         <ToolOutput output={p.output as never} errorText={p.errorText} />
       </ToolContent>
     </Tool>
