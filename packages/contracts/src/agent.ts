@@ -9,6 +9,8 @@ export type RunStatus =
   | 'canceling'
   | 'canceled';
 
+export type FinishReason = 'stop' | 'length' | 'content-filter' | 'tool-calls' | 'error' | 'other';
+
 export type AskUserMode = 'single' | 'multiple' | 'text';
 
 export interface AskUserOption {
@@ -154,5 +156,5 @@ export type AgentEvent =
   | { type: 'user_cancel'; step: number; reason?: string }
   | { type: 'progress_stalled'; step: number; reason: string; question?: string }
   | { type: 'recovery'; step: number; message: string }
-  | { type: 'final'; step: number; output: string }
-  | { type: 'error'; step: number; message: string };
+  | { type: 'final'; step: number; output: string; finishReason?: FinishReason; rawFinishReason?: string }
+  | { type: 'error'; step: number; message: string; finishReason?: FinishReason; rawFinishReason?: string };

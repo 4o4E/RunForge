@@ -258,6 +258,31 @@ api.post('/runs/:id/cancel', async (req, res) => {
   res.json({ id: run.id, status: run.status });
 });
 
+// 继续同一个 run：用于网络错误、服务重启后恢复失败等场景。
+// 模型上下文只使用已完整落库的 messages；半截流式事件保留审计，不作为续跑输入。
+api.post('/runs/:id/continue', async (req, res) => {
+  const run = await store.getRun(req.params.id);
+  if (!run) return res.status(404).json({ error: 'run 不存在' });
+  const thread = await store.getThread(run.thread_id);
+  if (!thread) return res.status(404).json({ error: 'thread 不存在' });
+  if (thread.active_run_id !== run.id) {
+    return res.status(409).json({ error: '只能继续当前分支最后一条 run' });
+  }
+  if (run.status !== 'error' && run.status !== 'pending') {
+    return res.status(409).json({ error: `run 当前状态为 ${run.status}，不能继续生成` });
+  }
+
+  const lastStep = await store.getLastStepIndex(run.id);
+  const lastCompletedStep = await store.getLastCompletedStepIndex(run.id);
+  const message = lastStep > lastCompletedStep
+    ? `正在继续生成：从第 ${lastCompletedStep} 个完整 step 后恢复；未完整落库的 step 只保留为事件审计，不进入模型上下文。`
+    : '正在继续生成：从最近的持久化检查点恢复。';
+  await store.addEvent(run.id, null, { type: 'recovery', step: lastStep + 1, message });
+  await store.setRunStatus(run.id, 'pending', { output: null, error: null });
+  void executeRun(run.id, { resume: true });
+  res.json({ id: run.id, threadId: run.thread_id, status: 'running' });
+});
+
 // 回答暂停中的 run，并恢复同一个 run。空回答表示“按默认假设继续”。
 api.post('/runs/:id/answer', async (req, res) => {
   const run = await store.getRun(req.params.id);

@@ -4,7 +4,7 @@ import { Conversation, latestUsageSnapshot } from './Conversation';
 import { Composer, type ComposerAttachment } from './Composer';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Bell, BellOff, Gauge, Maximize2, Menu, Minimize2, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { Bell, BellOff, Gauge, Maximize2, Menu, Minimize2, PanelRightClose, PanelRightOpen, RotateCw } from 'lucide-react';
 import type { AskUserAnswer } from '@/api';
 import type { AskUserDraft } from './AskUserCard';
 import { AgentStatusCard } from './StatusCard';
@@ -35,10 +35,13 @@ interface Props {
   modelOptions: LlmModelOption[];
   selectedModelRef: string;
   editingRunId: string | null;
+  canContinueRun: boolean;
+  continuingRun: boolean;
   onDraftChange: (text: string) => void;
   onModelChange: (modelRef: string) => void;
   onSend: (text: string, modelRef: string) => void;
   onCancel: () => void;
+  onContinueRun: () => void;
   onCancelEdit: () => void;
   onToggleWide: () => void;
   onRemoveAttachment: (path: string) => void;
@@ -81,10 +84,13 @@ export function ChatView({
   modelOptions,
   selectedModelRef,
   editingRunId,
+  canContinueRun,
+  continuingRun,
   onDraftChange,
   onModelChange,
   onSend,
   onCancel,
+  onContinueRun,
   onCancelEdit,
   onToggleWide,
   onRemoveAttachment,
@@ -151,6 +157,20 @@ export function ChatView({
           {busy ? '运行中' : '空闲'}
         </Badge>
         <div className="ml-auto flex items-center gap-2">
+          {canContinueRun && (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="h-9 shrink-0 gap-2"
+              onClick={onContinueRun}
+              disabled={busy || continuingRun}
+              title="从最后一个完整 step 继续生成"
+            >
+              <RotateCw className={cn('size-4', continuingRun && 'animate-spin')} />
+              <span className="hidden sm:inline">继续生成</span>
+            </Button>
+          )}
           <Button
             type="button"
             variant={notificationState === 'enabled' ? 'secondary' : 'ghost'}

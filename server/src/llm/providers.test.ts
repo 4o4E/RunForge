@@ -57,6 +57,18 @@ test('openai-responses: parses message text and function_call output', () => {
   assert.equal(result.toolCalls.length, 1);
   assert.equal(result.toolCalls[0].id, 'call_9');
   assert.equal(result.usage?.outputTokens, 7);
+  assert.equal(result.finishReason, 'tool-calls');
+});
+
+test('openai-responses: maps incomplete max output to length finish reason', () => {
+  const result = parseResponsesOutput({
+    status: 'incomplete',
+    incomplete_details: { reason: 'max_output_tokens' },
+    output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'partial' }] }],
+  });
+  assert.equal(result.content, 'partial');
+  assert.equal(result.finishReason, 'length');
+  assert.equal(result.rawFinishReason, 'max_output_tokens');
 });
 
 test('openai-chat: builds nested function tool defs and tool messages', () => {
@@ -76,9 +88,10 @@ test('openai-chat: maps image parts to image_url content', () => {
 
 test('openai-chat: parses tool_calls', () => {
   const result = parseChatResponse({
-    choices: [{ message: { content: null, tool_calls: [{ id: 'c1', function: { name: 'echo', arguments: '{}' } }] } }],
+    choices: [{ finish_reason: 'tool_calls', message: { content: null, tool_calls: [{ id: 'c1', function: { name: 'echo', arguments: '{}' } }] } }],
   });
   assert.equal(result.toolCalls[0].name, 'echo');
+  assert.equal(result.finishReason, 'tool-calls');
 });
 
 test('openai-chat: captures reasoning_content (deepseek-style)', () => {
@@ -90,7 +103,13 @@ test('openai-chat: captures reasoning_content (deepseek-style)', () => {
 });
 
 test('openai-chat: streaming chunks accumulate content, reasoning, and tool calls', () => {
-  const acc = { content: '', reasoning: '', toolCalls: [] as { id: string; name: string; arguments: string }[] };
+  const acc = {
+    content: '',
+    reasoning: '',
+    toolCalls: [] as { id: string; name: string; arguments: string }[],
+    finishReason: undefined,
+    rawFinishReason: undefined,
+  };
   const deltas = [
     applyStreamChunk({ choices: [{ delta: { reasoning_content: 'think' } }] }, acc),
     applyStreamChunk({ choices: [{ delta: { content: 'Hel' } }] }, acc),
@@ -100,6 +119,7 @@ test('openai-chat: streaming chunks accumulate content, reasoning, and tool call
       acc,
     ),
     applyStreamChunk({ choices: [{ delta: { tool_calls: [{ index: 0, function: { name: 'ho', arguments: ':1}' } }] } }] }, acc),
+    applyStreamChunk({ choices: [{ finish_reason: 'length', delta: {} }] }, acc),
   ];
   assert.equal(acc.content, 'Hello');
   assert.equal(acc.reasoning, 'think');
@@ -110,6 +130,8 @@ test('openai-chat: streaming chunks accumulate content, reasoning, and tool call
   assert.deepEqual(deltas[3].toolInputStart, { id: 'c1', name: 'ec' });
   assert.deepEqual(deltas[3].toolInputDelta, { id: 'c1', name: 'ec', delta: '{"a"' });
   assert.deepEqual(deltas[4].toolInputDelta, { id: 'c1', name: 'echo', delta: ':1}' });
+  assert.equal(acc.finishReason, 'length');
+  assert.equal(acc.rawFinishReason, 'length');
 });
 
 test('anthropic: system field + tool_use / tool_result blocks', () => {
@@ -134,6 +156,7 @@ test('anthropic: maps image parts to base64 image blocks', () => {
 
 test('anthropic: parses text + tool_use', () => {
   const result = parseAnthropicResponse({
+    stop_reason: 'tool_use',
     content: [
       { type: 'text', text: 'hi' },
       { type: 'tool_use', id: 'tu_1', name: 'echo', input: { text: 'x' } },
@@ -142,6 +165,8 @@ test('anthropic: parses text + tool_use', () => {
   assert.equal(result.content, 'hi');
   assert.equal(result.toolCalls[0].id, 'tu_1');
   assert.equal(result.toolCalls[0].arguments, '{"text":"x"}');
+  assert.equal(result.finishReason, 'tool-calls');
+  assert.equal(result.rawFinishReason, 'tool_use');
 });
 
 test('mock provider: calls glob then finalizes on tool result', async () => {

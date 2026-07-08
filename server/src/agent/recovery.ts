@@ -13,15 +13,20 @@ export async function recoverInterruptedRuns(store: Store = defaultStore): Promi
       await store.addEvent(run.id, null, { type: 'error', step: 0, message: '服务恢复期间，run 已被取消。' });
       continue;
     }
+    const lastStep = await store.getLastStepIndex(run.id);
+    const lastCompletedStep = await store.getLastCompletedStepIndex(run.id);
+    const message = lastStep > lastCompletedStep
+      ? `服务已重启，正在从第 ${lastCompletedStep} 个完整 step 后继续；未完整落库的 step 只保留为事件审计，不进入模型上下文。`
+      : '服务已重启，正在从最近的持久化检查点恢复 run。';
     await store.addEvent(run.id, null, {
       type: 'recovery',
-      step: (await store.getLastStepIndex(run.id)) + 1,
-      message: '服务已重启，正在从最近的持久化检查点恢复 run。',
+      step: lastStep + 1,
+      message,
     });
     runBus.publish(run.id, {
       type: 'recovery',
-      step: (await store.getLastStepIndex(run.id)) + 1,
-      message: '服务已重启，正在从最近的持久化检查点恢复 run。',
+      step: lastStep + 1,
+      message,
     });
     void executeRun(run.id, { resume: true });
     started += 1;

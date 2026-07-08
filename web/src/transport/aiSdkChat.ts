@@ -232,7 +232,11 @@ export function uiEventStreamToChunks(
             }
             closeText();
             closeReason();
-            safe({ type: 'data-final-output', id: `final-${e.step}`, data: { step: e.step, output: e.output } } as unknown as UIMessageChunk);
+            safe({
+              type: 'data-final-output',
+              id: `final-${e.step}`,
+              data: { step: e.step, output: e.output, finishReason: e.finishReason, rawFinishReason: e.rawFinishReason },
+            } as unknown as UIMessageChunk);
             onRunFinished?.();
             break;
           }

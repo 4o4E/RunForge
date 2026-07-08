@@ -1,4 +1,5 @@
 // Provider-neutral LLM types. Each provider translates these to/from its own wire format.
+import type { FinishReason } from '@runforge/contracts';
 
 export type LlmRole = 'system' | 'user' | 'assistant' | 'tool';
 
@@ -47,6 +48,10 @@ export interface LlmResult {
   reasoning?: string | null;
   toolCalls: LlmToolCall[];
   usage?: LlmUsage;
+  /** 模型结束原因；用于区分正常 stop 和 max tokens 截断等非正常完成。 */
+  finishReason?: FinishReason;
+  /** 上游供应商原始结束原因，便于排查兼容层映射问题。 */
+  rawFinishReason?: string;
 }
 
 /** Settings a provider needs. Kept small so providers stay easy to unit test. */

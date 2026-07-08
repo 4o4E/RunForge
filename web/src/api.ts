@@ -372,6 +372,9 @@ export const forkThreadFromRun = (runId: string) =>
 export const cancelRun = (runId: string) =>
   authFetch(`/api/runs/${runId}/cancel`, { method: 'POST' }).then(json<{ id: string; status: 'canceling' | 'canceled' }>);
 
+export const continueRun = (runId: string) =>
+  authFetch(`/api/runs/${runId}/continue`, { method: 'POST' }).then(json<{ id: string; threadId: string; status: 'running' }>);
+
 export const answerRun = (runId: string, answer: AskUserAnswer) =>
   authFetch(`/api/runs/${runId}/answer`, {
     method: 'POST',

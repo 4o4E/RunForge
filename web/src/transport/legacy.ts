@@ -85,9 +85,9 @@ export function toUiEvent(e: AgentEvent): UiEvent | null {
     case 'recovery':
       return { kind: 'notice', step: e.step, message: e.message };
     case 'final':
-      return { kind: 'final', step: e.step, output: e.output };
+      return { kind: 'final', step: e.step, output: e.output, finishReason: e.finishReason, rawFinishReason: e.rawFinishReason };
     case 'error':
-      return { kind: 'error', step: e.step, message: e.message };
+      return { kind: 'error', step: e.step, message: e.message, finishReason: e.finishReason, rawFinishReason: e.rawFinishReason };
     default:
       // `compaction` and any unmodeled future event: no UI representation.
       return null;

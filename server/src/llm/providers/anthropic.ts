@@ -1,3 +1,4 @@
+import type { FinishReason } from '@runforge/contracts';
 import type { LlmConfig, LlmMessage, LlmResult, LlmTool, Provider } from '../types.js';
 import { postJson } from '../http.js';
 
@@ -72,7 +73,16 @@ function safeParse(s: string): unknown {
 
 interface AnthropicData {
   content?: { type: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown }[];
+  stop_reason?: string | null;
   usage?: { input_tokens?: number; output_tokens?: number };
+}
+
+function mapAnthropicFinishReason(raw: string | null | undefined): FinishReason {
+  if (raw === 'end_turn' || raw === 'stop_sequence') return 'stop';
+  if (raw === 'max_tokens') return 'length';
+  if (raw === 'tool_use') return 'tool-calls';
+  if (raw === 'refusal' || raw === 'content_filter') return 'content-filter';
+  return raw ? 'other' : 'stop';
 }
 
 export function parseAnthropicResponse(data: AnthropicData): LlmResult {
@@ -91,6 +101,8 @@ export function parseAnthropicResponse(data: AnthropicData): LlmResult {
     reasoning,
     toolCalls,
     usage: { inputTokens: data.usage?.input_tokens, outputTokens: data.usage?.output_tokens },
+    finishReason: mapAnthropicFinishReason(data.stop_reason),
+    rawFinishReason: data.stop_reason ?? undefined,
   };
 }
 

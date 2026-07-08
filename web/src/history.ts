@@ -192,7 +192,11 @@ export function foldUiEventsToParts(events: UiEvent[]): Part[] {
         flushReason();
         if (textBuf) flushText();
         else if (e.output) parts.push({ type: 'text', text: e.output, state: 'done' });
-        parts.push({ type: 'data-final-output', id: `final-${e.step}`, data: { step: e.step, output: e.output } } as unknown as Part);
+        parts.push({
+          type: 'data-final-output',
+          id: `final-${e.step}`,
+          data: { step: e.step, output: e.output, finishReason: e.finishReason, rawFinishReason: e.rawFinishReason },
+        } as unknown as Part);
         break;
       case 'error':
         flushReason();

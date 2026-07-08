@@ -51,6 +51,20 @@ async function waitUntil(predicate: () => boolean | Promise<boolean>, timeoutMs 
   assert.fail('等待条件超时');
 }
 
+async function captureWarnings(fn: () => Promise<void>): Promise<string[]> {
+  const original = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(' '));
+  };
+  try {
+    await fn();
+  } finally {
+    console.warn = original;
+  }
+  return warnings;
+}
+
 // 一个先调用工具、再直接输出最终汇报的 provider。
 function scriptedProvider(): Provider {
   let turn = 0;
@@ -62,6 +76,31 @@ function scriptedProvider(): Provider {
         return { content: null, toolCalls: [{ id: 'call_1', name: 'glob', arguments: '{"pattern":"**/*.json"}' }] };
       }
       return { content: 'all done', toolCalls: [] };
+    },
+  };
+}
+
+function truncatedStreamProvider(state: { retryMessages: string[] }): Provider {
+  let turn = 0;
+  return {
+    name: 'fake-truncated-stream',
+    async complete() {
+      throw new Error('流式 provider 不应回退到非流式 complete');
+    },
+    async completeStream(messages, _tools, onDelta) {
+      turn += 1;
+      if (turn === 1) {
+        onDelta({ content: '第一段半截' });
+        onDelta({ content: '，停在这里' });
+        return {
+          content: '第一段半截，停在这里',
+          toolCalls: [],
+          finishReason: 'length',
+          rawFinishReason: 'max_output_tokens',
+        };
+      }
+      state.retryMessages = messages.map((message) => `${message.role}:${message.content ?? ''}`);
+      return { content: '继续后的完整收尾', toolCalls: [], finishReason: 'stop' };
     },
   };
 }
@@ -937,6 +976,124 @@ test('executeRun: text without tools completes when no plan is open', async () =
   assert.equal(finished?.output, 'premature final answer');
 });
 
+test('executeRun: non-stop finish reason is surfaced as run error instead of final', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run = await store.createRun(thread.id, 'write a long report');
+  const published: AgentEvent[] = [];
+
+  const warnings = await captureWarnings(async () => {
+    await executeRun(run.id, {
+      store,
+      provider: {
+        name: 'length-finish',
+        async complete() {
+          return {
+            content: '这是一段被截断的输出',
+            toolCalls: [],
+            finishReason: 'length',
+            rawFinishReason: 'max_output_tokens',
+          };
+        },
+      },
+      publish: (_id, e) => published.push(e),
+      hardStepCap: 2,
+      toolSettings: testToolSettings(),
+    });
+  });
+
+  const finished = await store.getRun(run.id);
+  assert.equal(finished?.status, 'error');
+  assert.match(finished?.error ?? '', /模型输出达到上限/);
+  assert.equal(published.some((event) => event.type === 'final'), false);
+  const error = published.find((event): event is Extract<AgentEvent, { type: 'error' }> => event.type === 'error');
+  assert.equal(error?.finishReason, 'length');
+  assert.equal(error?.rawFinishReason, 'max_output_tokens');
+  assert.equal(warnings.some((line) => line.includes('finishReason=length') && line.includes('rawFinishReason=max_output_tokens')), true);
+  const msgs = await store.loadThreadMessages(thread.id);
+  assert.equal(msgs.at(-1)?.content, '这是一段被截断的输出');
+});
+
+test('executeRun: truncated tool-call turn does not execute tools', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run = await store.createRun(thread.id, 'write file');
+  const published: AgentEvent[] = [];
+
+  const warnings = await captureWarnings(async () => {
+    await executeRun(run.id, {
+      store,
+      provider: {
+        name: 'truncated-tool-call',
+        async complete() {
+          return {
+            content: null,
+            toolCalls: [{ id: 'write_1', name: 'file_write', arguments: '{"path":"x.txt","content":"半截' }],
+            finishReason: 'length',
+            rawFinishReason: 'max_output_tokens',
+          };
+        },
+      },
+      publish: (_id, e) => published.push(e),
+      hardStepCap: 2,
+      toolSettings: testToolSettings({ toolAccessMode: 'allow', allow: ['file_write'] }),
+    });
+  });
+
+  const finished = await store.getRun(run.id);
+  assert.equal(finished?.status, 'error');
+  assert.equal(published.some((event) => event.type === 'tool_call'), false);
+  assert.equal(published.some((event) => event.type === 'tool_result'), false);
+  assert.equal(published.some((event) => event.type === 'error' && event.finishReason === 'length'), true);
+  assert.equal(warnings.some((line) => line.includes('truncated-tool-call') && line.includes('with 1 tool calls')), true);
+});
+
+test('executeRun: streaming length finish is persisted as resumable error', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run = await store.createRun(thread.id, '请生成一段长总结');
+  const published: AgentEvent[] = [];
+  const providerState = { retryMessages: [] as string[] };
+  const provider = truncatedStreamProvider(providerState);
+
+  const warnings = await captureWarnings(async () => {
+    await executeRun(run.id, {
+      store,
+      provider,
+      publish: (_id, event) => published.push(event),
+      hardStepCap: 3,
+      stream: true,
+      toolSettings: testToolSettings(),
+    });
+  });
+
+  const failed = await store.getRun(run.id);
+  assert.equal(failed?.status, 'error');
+  assert.match(failed?.error ?? '', /模型输出达到上限/);
+  assert.equal(published.some((event) => event.type === 'final'), false);
+  assert.equal(published.some((event) => event.type === 'llm_delta' && event.text === '第一段半截'), true);
+  assert.equal(published.some((event) => event.type === 'error' && event.finishReason === 'length'), true);
+  assert.equal(await store.getLastCompletedStepIndex(run.id), 1);
+  assert.equal(warnings.some((line) => line.includes('fake-truncated-stream') && line.includes('finishReason=length')), true);
+
+  await store.setRunStatus(run.id, 'pending', { error: null });
+  await executeRun(run.id, {
+    store,
+    provider,
+    publish: (_id, event) => published.push(event),
+    hardStepCap: 3,
+    stream: true,
+    resume: true,
+    toolSettings: testToolSettings(),
+  });
+
+  const finished = await store.getRun(run.id);
+  assert.equal(finished?.status, 'done');
+  assert.equal(finished?.output, '继续后的完整收尾');
+  assert.ok(providerState.retryMessages.some((message) => message.includes('第一段半截，停在这里')));
+  assert.equal(published.some((event) => event.type === 'final' && event.output === '继续后的完整收尾'), true);
+});
+
 test('executeRun: stops and errors at the hard step cap', async () => {
   const store = new MemoryStore();
   const thread = await store.createThread();
@@ -1101,6 +1258,51 @@ test('executeRun: resumes the same run after a user answer without duplicating i
   const msgs = await store.loadThreadMessages(thread.id);
   assert.equal(msgs.filter((m) => m.role === 'user' && m.content === 'needs answer').length, 1);
   assert.ok(msgs.some((m) => m.role === 'user' && m.content?.includes('用户回答')));
+});
+
+test('executeRun: retries after interrupted streaming output from durable messages only', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run = await store.createRun(thread.id, '请生成一段总结');
+  let calls = 0;
+  let retryMessages: string[] = [];
+
+  const provider: Provider = {
+    name: 'interrupted-stream',
+    async complete() {
+      throw new Error('不应该回退到非流式 complete');
+    },
+    async completeStream(messages, _tools, onDelta) {
+      calls += 1;
+      if (calls === 1) {
+        onDelta({ content: '半截输出' });
+        throw new Error('network disconnected');
+      }
+      retryMessages = messages.map((message) => `${message.role}:${message.content ?? ''}`);
+      return { content: '继续后的完整结果', toolCalls: [] };
+    },
+  };
+
+  const warnings = await captureWarnings(async () => {
+    await executeRun(run.id, { store, provider, publish: () => {}, hardStepCap: 3, stream: true, toolSettings: testToolSettings() });
+  });
+
+  const failed = await store.getRun(run.id);
+  assert.equal(failed?.status, 'error');
+  assert.equal(await store.getLastStepIndex(run.id), 1);
+  assert.equal(await store.getLastCompletedStepIndex(run.id), 0);
+  assert.equal(warnings.some((line) => line.includes('interrupted-stream') && line.includes('network disconnected')), true);
+
+  await store.setRunStatus(run.id, 'pending', { error: null });
+  await executeRun(run.id, { store, provider, publish: () => {}, hardStepCap: 3, stream: true, resume: true, toolSettings: testToolSettings() });
+
+  const finished = await store.getRun(run.id);
+  assert.equal(finished?.status, 'done');
+  assert.equal(finished?.output, '继续后的完整结果');
+  assert.deepEqual(retryMessages.filter((message) => message.includes('半截输出')), []);
+  const msgs = await store.loadThreadMessages(thread.id);
+  assert.equal(msgs.filter((message) => message.role === 'user' && message.content === '请生成一段总结').length, 1);
+  assert.equal(msgs.at(-1)?.content, '继续后的完整结果');
 });
 
 test('memory store: deleteThread removes dependent run data', async () => {

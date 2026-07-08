@@ -191,12 +191,14 @@ export interface Store {
   getRun(id: string): Promise<RunRow | null>;
   listRuns(threadId: string): Promise<RunRow[]>;
   listRunsByStatus(statuses: RunStatus[]): Promise<RunRow[]>;
-  setRunStatus(id: string, status: RunStatus, fields?: { output?: string; error?: string }): Promise<void>;
+  setRunStatus(id: string, status: RunStatus, fields?: { output?: string | null; error?: string | null }): Promise<void>;
   /** Persist the run's goal anchor (so it's inspectable and survives a restart). */
   setGoalState(runId: string, goal: GoalState): Promise<void>;
 
   createStep(runId: string, idx: number): Promise<StepRow>;
   getLastStepIndex(runId: string): Promise<number>;
+  /** 最后一个 assistant turn 已完整落到 messages 的 step。 */
+  getLastCompletedStepIndex(runId: string): Promise<number>;
 
   /** Conversation history for a thread, in order, as the compacted LLM-facing view:
    *  masked tool results return their placeholder, 'summarized' rows are omitted. */

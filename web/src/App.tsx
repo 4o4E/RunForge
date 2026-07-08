@@ -7,6 +7,7 @@ import {
   answerRun,
   branchRun,
   cancelRun,
+  continueRun,
   deleteThread,
   forkThreadFromRun,
   getLlmSettings,
@@ -319,6 +320,11 @@ function liveRunFrom(runs: RunWithEvents[]): RunWithEvents | null {
   return [...runs].reverse().find((r) => r.status === 'pending' || r.status === 'running' || r.status === 'canceling') ?? null;
 }
 
+function continuableRunFrom(runs: RunWithEvents[]): RunWithEvents | null {
+  const latest = runs[runs.length - 1] ?? null;
+  return latest?.status === 'error' ? latest : null;
+}
+
 function activeBranchRuns(runs: RunWithEvents[], activeRunId: string | null): RunWithEvents[] {
   if (!activeRunId) return runs;
   const byId = new Map(runs.map((run) => [run.id, run]));
@@ -449,6 +455,7 @@ export function App() {
   const [reattachedRunId, setReattachedRunId] = useState<string | null>(null);
   const [waitingRun, setWaitingRun] = useState<{ id: string; spec: AskUserSpec } | null>(null);
   const [resumingRunId, setResumingRunId] = useState<string | null>(null);
+  const [continuableRunId, setContinuableRunId] = useState<string | null>(null);
   const [editingRunId, setEditingRunId] = useState<string | null>(null);
   const [askUserDrafts, setAskUserDrafts] = useState<Record<string, AskUserDraft>>({});
   const [pageStateLoaded, setPageStateLoaded] = useState(false);
@@ -850,6 +857,7 @@ export function App() {
       setMessages([]);
       reattachedEventsRef.current = [];
       setReattachedRunId(null);
+      setContinuableRunId(null);
       return () => {
         canceled = true;
       };
@@ -869,9 +877,11 @@ export function App() {
           setMessages(runsToUiMessages(runs, thread.active_run_id, notices));
           setWaitingRun(waitingRunFrom(branchRuns));
           const liveRun = liveRunFrom(branchRuns);
+          const continuableRun = continuableRunFrom(branchRuns);
           reattachedEventsRef.current = liveRun?.events ?? [];
           setReattachedRunId(liveRun?.id ?? null);
-          if (liveRun) setActiveRunId(liveRun.id);
+          setActiveRunId(liveRun?.id ?? null);
+          setContinuableRunId(continuableRun?.id ?? null);
         }
       })
       .catch(() => {
@@ -879,6 +889,8 @@ export function App() {
           setMessages([]);
           reattachedEventsRef.current = [];
           setReattachedRunId(null);
+          setActiveRunId(null);
+          setContinuableRunId(null);
         }
       });
 
@@ -904,9 +916,11 @@ export function App() {
           setMessages(runsToUiMessages(runs, thread.active_run_id, notices));
           setWaitingRun(waitingRunFrom(branchRuns));
           const liveRun = liveRunFrom(branchRuns);
+          const continuableRun = continuableRunFrom(branchRuns);
           reattachedEventsRef.current = liveRun?.events ?? [];
           setReattachedRunId(liveRun?.id ?? null);
           setActiveRunId(liveRun?.id ?? null);
+          setContinuableRunId(continuableRun?.id ?? null);
           if (!liveRun) refreshThreads();
         })
         .catch(() => {});
@@ -981,6 +995,7 @@ export function App() {
   function newChat() {
     stop();
     setEditingRunId(null);
+    setContinuableRunId(null);
     setMobileSidebarOpen(false);
     if (activeThreadId) rememberThreadDraft(activeThreadId, draftRef.current);
     navigateChatRoute({ draft: '', threadId: null });
@@ -990,6 +1005,7 @@ export function App() {
   function selectThread(id: string) {
     stop();
     setEditingRunId(null);
+    setContinuableRunId(null);
     setMobileSidebarOpen(false);
     if (activeThreadId) rememberThreadDraft(activeThreadId, draftRef.current);
     navigateChatRoute({ draft: threadDraftsRef.current[id] ?? '', threadId: id });
@@ -997,6 +1013,7 @@ export function App() {
 
   function openSettings() {
     stop();
+    setContinuableRunId(null);
     setMobileSidebarOpen(false);
     if (activeThreadId) rememberThreadDraft(activeThreadId, draftRef.current);
     setSettingsOpen(true);
@@ -1004,6 +1021,7 @@ export function App() {
 
   function openSearch() {
     stop();
+    setContinuableRunId(null);
     setMobileSidebarOpen(false);
     if (activeThreadId) rememberThreadDraft(activeThreadId, draftRef.current);
     navigateSearch();
@@ -1026,6 +1044,7 @@ export function App() {
       return next;
     });
     if (activeThreadId === id) {
+      setContinuableRunId(null);
       navigateChatRoute({ draft: '', threadId: null });
       setMessages([]);
     }
@@ -1050,6 +1069,7 @@ export function App() {
     await updateThread(id, { archived: true });
     setThreads((current) => current.filter((thread) => thread.id !== id));
     if (activeThreadId === id) {
+      setContinuableRunId(null);
       navigateChatRoute({ draft: '', threadId: null });
       setMessages([]);
     }
@@ -1071,9 +1091,11 @@ export function App() {
       setMessages(runsToUiMessages(runs, thread.active_run_id, notices));
       setWaitingRun(waitingRunFrom(branchRuns));
       const liveRun = liveRunFrom(branchRuns);
+      const continuableRun = continuableRunFrom(branchRuns);
       reattachedEventsRef.current = liveRun?.events ?? [];
       setReattachedRunId(liveRun?.id ?? null);
       setActiveRunId(liveRun?.id ?? null);
+      setContinuableRunId(continuableRun?.id ?? null);
     });
   }, [activeThreadId, setMessages]);
 
@@ -1169,10 +1191,56 @@ export function App() {
         refreshActiveThread();
         setResumingRunId(null);
         setActiveRunId(null);
+        setContinuableRunId(null);
         refreshThreads();
       },
     );
   }, [refreshActiveThread, refreshThreads, setMessages]);
+
+  const continueFailedRun = useCallback(() => {
+    const runId = continuableRunId;
+    if (!runId || busy) return;
+    setWaitingRun(null);
+    setReattachedRunId(null);
+    setResumingRunId(runId);
+    setActiveRunId(runId);
+    void continueRun(runId)
+      .then(() => {
+        let unsubscribe = () => {};
+        const events: AgentEvent[] = [];
+        let renderFrame = 0;
+        const flushEvents = () => {
+          renderFrame = 0;
+          setMessages((current) => replaceAssistantMessage(current, runId, events));
+        };
+        unsubscribe = subscribeRun(
+          runId,
+          (event) => {
+            events.push(event);
+            if (renderFrame) return;
+            renderFrame = window.requestAnimationFrame(flushEvents);
+          },
+          () => {
+            if (renderFrame) {
+              window.cancelAnimationFrame(renderFrame);
+              flushEvents();
+            }
+            unsubscribe();
+            refreshActiveThread();
+            setResumingRunId(null);
+            setActiveRunId(null);
+            setContinuableRunId(null);
+            refreshThreads();
+          },
+        );
+      })
+      .catch((err) => {
+        console.error('continue run failed', err);
+        setResumingRunId(null);
+        setActiveRunId(null);
+        refreshActiveThread();
+      });
+  }, [busy, continuableRunId, refreshActiveThread, refreshThreads, setMessages]);
 
   const switchRunBranch = useCallback((runId: string) => {
     if (!activeThreadId || busy) return;
@@ -1252,6 +1320,7 @@ export function App() {
       ? [text.trim(), attachments.map(attachmentToken).join('\n')].filter(Boolean).join('\n\n')
       : text;
     rememberSelectedModelRef(modelRef);
+    setContinuableRunId(null);
     if (activeThreadId) rememberThreadDraft(activeThreadId, '');
     draftRef.current = '';
     setComposerDraft('');
@@ -1444,10 +1513,13 @@ export function App() {
           modelOptions={modelOptions}
           selectedModelRef={selectedModelRef}
           editingRunId={editingRunId}
+          canContinueRun={!!continuableRunId}
+          continuingRun={!!continuableRunId && resumingRunId === continuableRunId}
           onDraftChange={changeDraft}
           onModelChange={rememberSelectedModelRef}
           onSend={send}
           onCancel={cancelActiveRun}
+          onContinueRun={continueFailedRun}
           onCancelEdit={cancelEditRunInput}
           onToggleWide={() => setWide((v) => !v)}
           onRemoveAttachment={(path) => setAttachments((current) => current.filter((a) => a.path !== path))}

@@ -177,6 +177,8 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
           outputTokens: r.usage?.outputTokens,
           cachedInputTokens: (r.usage as { cachedInputTokens?: number } | undefined)?.cachedInputTokens,
         },
+        finishReason: r.finishReason,
+        rawFinishReason: r.rawFinishReason,
       };
     },
 
@@ -190,11 +192,13 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
         else if (part.type === 'tool-call') onDelta({ toolInputAvailable: { id: part.toolCallId, name: part.toolName, input: part.input } });
         else if (part.type === 'error') throw part.error;
       }
-      const [text, reasoningText, toolCalls, usage] = await Promise.all([
+      const [text, reasoningText, toolCalls, usage, finishReason, rawFinishReason] = await Promise.all([
         r.text,
         r.reasoningText,
         r.toolCalls,
         r.usage,
+        r.finishReason,
+        r.rawFinishReason,
       ]);
       return {
         content: text || null,
@@ -209,6 +213,8 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
           outputTokens: usage?.outputTokens,
           cachedInputTokens: (usage as { cachedInputTokens?: number } | undefined)?.cachedInputTokens,
         },
+        finishReason,
+        rawFinishReason,
       };
     },
   };

@@ -1,3 +1,4 @@
+import type { FinishReason } from '@runforge/contracts';
 import type { LlmConfig, LlmDelta, LlmMessage, LlmResult, LlmTool, Provider } from '../types.js';
 import { postJson, streamPost } from '../http.js';
 
@@ -51,6 +52,7 @@ export function buildChatRequest(messages: LlmMessage[], tools: LlmTool[], model
 
 interface ChatData {
   choices?: {
+    finish_reason?: string | null;
     message?: {
       content?: string | null;
       // deepseek / some gateways expose chain-of-thought here
@@ -62,8 +64,17 @@ interface ChatData {
   usage?: { prompt_tokens?: number; completion_tokens?: number };
 }
 
+function mapOpenAiFinishReason(raw: string | null | undefined): FinishReason {
+  if (raw === 'stop') return 'stop';
+  if (raw === 'length') return 'length';
+  if (raw === 'content_filter') return 'content-filter';
+  if (raw === 'tool_calls' || raw === 'function_call') return 'tool-calls';
+  return raw ? 'other' : 'stop';
+}
+
 export function parseChatResponse(data: ChatData): LlmResult {
-  const msg = data.choices?.[0]?.message;
+  const choice = data.choices?.[0];
+  const msg = choice?.message;
   return {
     content: msg?.content ?? null,
     reasoning: msg?.reasoning_content ?? msg?.reasoning ?? null,
@@ -73,12 +84,15 @@ export function parseChatResponse(data: ChatData): LlmResult {
       arguments: tc.function.arguments,
     })),
     usage: { inputTokens: data.usage?.prompt_tokens, outputTokens: data.usage?.completion_tokens },
+    finishReason: mapOpenAiFinishReason(choice?.finish_reason),
+    rawFinishReason: choice?.finish_reason ?? undefined,
   };
 }
 
 // Streaming delta shape (chat.completion.chunk).
 interface StreamChunk {
   choices?: {
+    finish_reason?: string | null;
     delta?: {
       content?: string | null;
       reasoning_content?: string | null;
@@ -91,9 +105,20 @@ interface StreamChunk {
 /** Pure: fold one streamed chunk into accumulators, returning the user-visible delta. */
 export function applyStreamChunk(
   chunk: StreamChunk,
-  acc: { content: string; reasoning: string; toolCalls: { id: string; name: string; arguments: string; started?: boolean }[] },
+  acc: {
+    content: string;
+    reasoning: string;
+    toolCalls: { id: string; name: string; arguments: string; started?: boolean }[];
+    finishReason?: FinishReason;
+    rawFinishReason?: string;
+  },
 ): LlmDelta {
-  const delta = chunk.choices?.[0]?.delta;
+  const choice = chunk.choices?.[0];
+  if (choice?.finish_reason) {
+    acc.finishReason = mapOpenAiFinishReason(choice.finish_reason);
+    acc.rawFinishReason = choice.finish_reason;
+  }
+  const delta = choice?.delta;
   if (!delta) return {};
   const out: LlmDelta = {};
   if (delta.content) {
@@ -135,7 +160,13 @@ export function createOpenAIChatProvider(cfg: LlmConfig): Provider {
       return parseChatResponse(data as ChatData);
     },
     async completeStream(messages, tools, onDelta) {
-      const acc = { content: '', reasoning: '', toolCalls: [] as { id: string; name: string; arguments: string; started?: boolean }[] };
+      const acc = {
+        content: '',
+        reasoning: '',
+        toolCalls: [] as { id: string; name: string; arguments: string; started?: boolean }[],
+        finishReason: undefined as FinishReason | undefined,
+        rawFinishReason: undefined as string | undefined,
+      };
       await streamPost(
         url,
         auth,
@@ -157,6 +188,8 @@ export function createOpenAIChatProvider(cfg: LlmConfig): Provider {
         content: acc.content || null,
         reasoning: acc.reasoning || null,
         toolCalls: acc.toolCalls.filter((t) => t.name),
+        finishReason: acc.finishReason ?? 'stop',
+        rawFinishReason: acc.rawFinishReason,
       };
     },
   };

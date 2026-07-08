@@ -10,7 +10,7 @@ import type { SkillIndexItem, SkillActivation } from '../skills/registry.js';
 import { createWorkloadToken, listDatasources, listPermissionProfiles } from '../datasources/accountPool.js';
 import { finishGoal, initGoal, mergeGoal, parseGoalPatch, renderGoal } from './goal.js';
 import { runBus } from './bus.js';
-import type { AgentEvent } from './types.js';
+import type { AgentEvent, FinishReason } from './types.js';
 import { store as defaultStore } from '../store/index.js';
 import type { Store } from '../store/types.js';
 import { getMcpSettings, getToolSettings } from '../settings.js';
@@ -231,6 +231,27 @@ function isPendingSubagentWait(name: string, result: string): boolean {
   return (name === SUBAGENT_POLL_TOOL_NAME || name === SUBAGENT_LIST_TOOL_NAME) && /\bstatus: running\b/.test(result);
 }
 
+function renderAbnormalFinishMessage(finishReason: FinishReason, rawFinishReason: string | undefined, hasText: boolean): string {
+  const raw = rawFinishReason && rawFinishReason !== finishReason ? `，上游原始原因：${rawFinishReason}` : '';
+  if (finishReason === 'length') {
+    return `模型输出达到上限，被截断后停止${raw}。已保留当前已生成内容，可以点击“继续生成”从最后一个完整 step 继续。`;
+  }
+  if (finishReason === 'content-filter') {
+    return `模型输出被内容安全策略拦截${raw}。已保留当前已生成内容，请调整请求或换模型后重试。`;
+  }
+  if (finishReason === 'tool-calls') {
+    return `模型结束原因为 tool-calls，但本轮没有返回可执行工具调用${raw}。这通常是供应商兼容层异常，请重试或切换模型。`;
+  }
+  if (finishReason === 'error') {
+    return `模型侧报告生成错误${raw}。${hasText ? '已保留当前已生成内容，' : ''}可以重试继续生成。`;
+  }
+  return `模型未以正常 stop 结束：finishReason=${finishReason}${raw}。${hasText ? '已保留当前已生成内容，' : ''}可以重试继续生成。`;
+}
+
+function errorStack(err: unknown): string {
+  return err instanceof Error ? (err.stack ?? err.message) : String(err);
+}
+
 function commandFromToolCall(name: string, args: unknown): string | null {
   if (name !== 'shell' && name !== 'shell_exec') return null;
   const command = args && typeof args === 'object' ? (args as Record<string, unknown>).command : null;
@@ -368,6 +389,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     }, run.model_ref);
   } catch (err) {
     const message = (err as Error).message;
+    console.warn(`[agent] run ${runId} failed before start: ${errorStack(err)}`);
     const publish = overrides.publish ?? ((targetRunId, event) => runBus.publish(targetRunId, event));
     const event: AgentEvent = { type: 'error', step: 0, message };
     publish(runId, event);
@@ -431,6 +453,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     );
   } catch (err) {
     const message = (err as Error).message;
+    console.warn(`[agent] run ${runId} step ${currentStepIdx || 0} provider ${provider.name} failed: ${errorStack(err)}`);
     await emit(null, { type: 'error', step: 0, message });
     await store.setRunStatus(runId, 'error', { error: message });
   }
@@ -438,13 +461,14 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
   // agent 主循环保持为闭包，让 invoke_agent span 包住内部的模型调用和工具执行 span。
   async function runLoop(): Promise<void> {
     const existingMessageCount = await store.countRunMessages(runId);
-    const isResume = resume || existingMessageCount > 0;
+    const hasPersistedMessages = existingMessageCount > 0;
+    const shouldRecover = resume || hasPersistedMessages;
     let prior = await store.loadThreadMessages(threadId, { runId });
     let nextStepIdx = (await store.getLastStepIndex(runId)) + 1;
 
     // 恢复时如果进程死在工具执行中间，库里可能只有 assistant tool_call，
     // 没有对应 tool_result。这里补一条中断结果，保证 provider 消息配对完整。
-    if (isResume) {
+    if (shouldRecover) {
       const missing = findMissingToolResults(prior);
       for (const call of missing) {
         const content =
@@ -478,12 +502,12 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     const skillRuntimeContext = [renderSkillSystemRules(), renderSkillCatalog(skillIndex)].join('\n\n');
     const workflowRuntimeContext = [renderWorkflowSystemRules(), renderWorkflowCatalog(workflowIndex)].join('\n\n');
     const ctx = new ContextManager(prior, userInput, renderGoal(goal), {
-      appendUserInput: !isResume,
+      appendUserInput: !hasPersistedMessages,
       runtimeContext: `${renderRuntimeContext(toolSettings)}\n\n${databaseRuntimeSummary}\n\n${workflowRuntimeContext}\n\n${skillRuntimeContext}`,
     });
     currentCtx = ctx;
-    if (!isResume) {
-      // 新 run 只在首次执行时写入用户输入；恢复时历史里已经有这条消息。
+    if (!hasPersistedMessages) {
+      // 新 run 或尚未写入任何消息的 pending run，必须先落用户输入。
       await store.addMessage(threadId, runId, null, { role: 'user', content: userInput });
     }
 
@@ -880,6 +904,25 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       ctx.add(assistantMsg);
       ctx.setLastDbId(await store.addMessage(threadId, runId, step.id, assistantMsg));
 
+      if (toolCalls.length && result.finishReason && result.finishReason !== 'tool-calls') {
+        const message = renderAbnormalFinishMessage(result.finishReason, result.rawFinishReason, Boolean(content?.trim()));
+        console.warn(
+          `[agent] run ${runId} step ${stepIdx} provider ${provider.name} returned abnormal finishReason=${result.finishReason}` +
+            `${result.rawFinishReason ? ` rawFinishReason=${result.rawFinishReason}` : ''} with ${toolCalls.length} tool calls; marking run error.`,
+        );
+        streamStats.mark(stepIdx, 'error', undefined, true);
+        await livePersistQueue;
+        await emit(step.id, {
+          type: 'error',
+          step: stepIdx,
+          message,
+          finishReason: result.finishReason,
+          rawFinishReason: result.rawFinishReason,
+        });
+        await store.setRunStatus(runId, 'error', { error: message });
+        return;
+      }
+
       if (content && (toolCalls.length || liveStreamed) && !persistedLiveContent) {
         const ev = { type: 'llm_delta' as const, step: stepIdx, text: content };
         if (liveStreamed) await store.addEvent(runId, step.id, ev);
@@ -888,6 +931,20 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
 
       if (!toolCalls.length) {
         const finalText = content?.trim() ?? '';
+        const finishReason = result.finishReason ?? 'stop';
+        const rawFinishReason = result.rawFinishReason;
+        if (finishReason !== 'stop') {
+          const message = renderAbnormalFinishMessage(finishReason, rawFinishReason, Boolean(finalText));
+          console.warn(
+            `[agent] run ${runId} step ${stepIdx} provider ${provider.name} returned abnormal finishReason=${finishReason}` +
+              `${rawFinishReason ? ` rawFinishReason=${rawFinishReason}` : ''}; marking run error.`,
+          );
+          streamStats.mark(stepIdx, 'error', undefined, true);
+          await livePersistQueue;
+          await emit(step.id, { type: 'error', step: stepIdx, message, finishReason, rawFinishReason });
+          await store.setRunStatus(runId, 'error', { error: message });
+          return;
+        }
         if (finalText) {
           // 无工具的可见正文就是本轮对话的终点。计划状态只做收敛记录，
           // 不能再反向驱动模型补跑一轮，否则会用后续短摘要覆盖真实最终输出。
@@ -898,7 +955,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           await persistCompaction(step.id, ctx.compactForHistory());
           streamStats.mark(stepIdx, 'done', undefined, true);
           await livePersistQueue;
-          await emit(step.id, { type: 'final', step: stepIdx, output: finalText });
+          await emit(step.id, { type: 'final', step: stepIdx, output: finalText, finishReason, rawFinishReason });
           await store.setRunStatus(runId, 'done', { output: finalText });
           if (usesDefaultStore) {
             void notifyRunCompleted(runId, { store, output: finalText })

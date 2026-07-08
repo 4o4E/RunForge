@@ -5,6 +5,7 @@ export type {
   AskUserMode,
   AskUserOption,
   AskUserSpec,
+  FinishReason,
   RunStatus,
   StreamStage,
   StreamStats,

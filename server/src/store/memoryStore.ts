@@ -350,7 +350,7 @@ export class MemoryStore implements Store {
     const set = new Set(statuses);
     return [...this.runs.values()].filter((r) => set.has(r.status));
   }
-  async setRunStatus(id: string, status: RunStatus, fields: { output?: string; error?: string } = {}) {
+  async setRunStatus(id: string, status: RunStatus, fields: { output?: string | null; error?: string | null } = {}) {
     const run = this.runs.get(id);
     if (!run) return;
     run.status = status;
@@ -373,6 +373,18 @@ export class MemoryStore implements Store {
   }
   async getLastStepIndex(runId: string): Promise<number> {
     return this.steps.filter((s) => s.run_id === runId).reduce((max, s) => Math.max(max, s.idx), 0);
+  }
+  async getLastCompletedStepIndex(runId: string): Promise<number> {
+    let last = 0;
+    for (const step of this.steps.filter((s) => s.run_id === runId).sort((a, b) => a.idx - b.idx)) {
+      const stepMessages = this.messages.filter((m) => m.step_id === step.id);
+      const assistantMessages = stepMessages.filter((m) => m.role === 'assistant');
+      if (!assistantMessages.length) continue;
+      const requiredToolIds = assistantMessages.flatMap((m) => (m.toolCalls ?? []).map((call) => call.id));
+      const answeredToolIds = new Set(stepMessages.filter((m) => m.role === 'tool' && m.toolCallId).map((m) => m.toolCallId as string));
+      if (requiredToolIds.every((id) => answeredToolIds.has(id))) last = Math.max(last, step.idx);
+    }
+    return last;
   }
 
   private branchRunIds(threadId: string, runId?: string | null): Set<string> {

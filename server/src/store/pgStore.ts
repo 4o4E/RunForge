@@ -444,10 +444,22 @@ export class PgStore implements Store {
     return rows;
   }
 
-  async setRunStatus(id: string, status: RunStatus, fields: { output?: string; error?: string } = {}): Promise<void> {
+  async setRunStatus(id: string, status: RunStatus, fields: { output?: string | null; error?: string | null } = {}): Promise<void> {
     await query(
-      `UPDATE runs SET status = $2, output = COALESCE($3, output), error = COALESCE($4, error), updated_at = now() WHERE id = $1`,
-      [id, status, fields.output ?? null, fields.error ?? null],
+      `UPDATE runs
+       SET status = $2,
+           output = CASE WHEN $3 THEN $4 ELSE output END,
+           error = CASE WHEN $5 THEN $6 ELSE error END,
+           updated_at = now()
+       WHERE id = $1`,
+      [
+        id,
+        status,
+        Object.prototype.hasOwnProperty.call(fields, 'output'),
+        fields.output ?? null,
+        Object.prototype.hasOwnProperty.call(fields, 'error'),
+        fields.error ?? null,
+      ],
     );
   }
 
@@ -467,6 +479,38 @@ export class PgStore implements Store {
   async getLastStepIndex(runId: string): Promise<number> {
     const { rows } = await query<{ idx: number | null }>(`SELECT max(idx) AS idx FROM steps WHERE run_id = $1`, [runId]);
     return rows[0]?.idx ?? 0;
+  }
+
+  async getLastCompletedStepIndex(runId: string): Promise<number> {
+    const { rows } = await query<{
+      step_id: string;
+      idx: number;
+      role: LlmMessage['role'] | null;
+      tool_calls: LlmMessage['toolCalls'] | null;
+      tool_call_id: string | null;
+    }>(
+      `SELECT s.id AS step_id, s.idx, m.role, m.tool_calls, m.tool_call_id
+       FROM steps s
+       LEFT JOIN messages m ON m.step_id = s.id
+       WHERE s.run_id = $1
+       ORDER BY s.idx, m.id`,
+      [runId],
+    );
+    const byStep = new Map<string, typeof rows>();
+    const stepIndex = new Map<string, number>();
+    for (const row of rows) {
+      byStep.set(row.step_id, [...(byStep.get(row.step_id) ?? []), row]);
+      stepIndex.set(row.step_id, row.idx);
+    }
+    let last = 0;
+    for (const [stepId, stepRows] of byStep) {
+      const assistantRows = stepRows.filter((row) => row.role === 'assistant');
+      if (!assistantRows.length) continue;
+      const requiredToolIds = assistantRows.flatMap((row) => (row.tool_calls ?? []).map((call) => call.id));
+      const answeredToolIds = new Set(stepRows.filter((row) => row.role === 'tool' && row.tool_call_id).map((row) => row.tool_call_id as string));
+      if (requiredToolIds.every((id) => answeredToolIds.has(id))) last = Math.max(last, stepIndex.get(stepId) ?? 0);
+    }
+    return last;
   }
 
   async loadThreadMessages(threadId: string, options: { runId?: string | null } = {}): Promise<ThreadMessage[]> {

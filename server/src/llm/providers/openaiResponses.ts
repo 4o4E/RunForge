@@ -1,3 +1,4 @@
+import type { FinishReason } from '@runforge/contracts';
 import type { LlmConfig, LlmMessage, LlmResult, LlmTool, Provider } from '../types.js';
 import { postJson } from '../http.js';
 
@@ -66,6 +67,8 @@ export function buildResponsesRequest(
 }
 
 interface ResponsesData {
+  status?: string;
+  incomplete_details?: { reason?: string | null } | null;
   output?: {
     type: string;
     role?: string;
@@ -76,6 +79,16 @@ interface ResponsesData {
     arguments?: string;
   }[];
   usage?: { input_tokens?: number; output_tokens?: number };
+}
+
+function mapResponsesFinishReason(data: ResponsesData, toolCalls: LlmResult['toolCalls']): { finishReason: FinishReason; rawFinishReason?: string } {
+  const raw = data.incomplete_details?.reason ?? data.status;
+  if (data.incomplete_details?.reason === 'max_output_tokens') return { finishReason: 'length', rawFinishReason: raw ?? undefined };
+  if (data.status === 'incomplete') return { finishReason: 'length', rawFinishReason: raw ?? undefined };
+  if (data.status === 'failed') return { finishReason: 'error', rawFinishReason: raw ?? undefined };
+  if (data.status === 'cancelled') return { finishReason: 'error', rawFinishReason: raw ?? undefined };
+  if (toolCalls.length) return { finishReason: 'tool-calls', rawFinishReason: raw ?? undefined };
+  return { finishReason: 'stop', rawFinishReason: raw ?? undefined };
 }
 
 /** Pure: parse a Responses API response into a neutral result. */
@@ -103,11 +116,13 @@ export function parseResponsesOutput(data: ResponsesData): LlmResult {
     }
   }
 
+  const finish = mapResponsesFinishReason(data, toolCalls);
   return {
     content,
     reasoning,
     toolCalls,
     usage: { inputTokens: data.usage?.input_tokens, outputTokens: data.usage?.output_tokens },
+    ...finish,
   };
 }
 

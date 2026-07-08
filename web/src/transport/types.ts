@@ -26,8 +26,8 @@ export type UiEvent =
   | { kind: 'ask_user_question'; step: number; runId?: string; spec: AskUserSpec }
   | { kind: 'ask_user_answer'; step: number; answer: AskUserAnswer }
   | { kind: 'ask_user_cancel'; step: number; reason?: string }
-  | { kind: 'final'; step: number; output: string }
-  | { kind: 'error'; step: number; message: string };
+  | { kind: 'final'; step: number; output: string; finishReason?: FinishReason; rawFinishReason?: string }
+  | { kind: 'error'; step: number; message: string; finishReason?: FinishReason; rawFinishReason?: string };
 
 /**
  * run 启动和流式订阅的抽象。上层只调用 send 和 subscribe，
@@ -39,5 +39,5 @@ export interface UiTransport {
   /** 订阅 run 的实时 UiEvent，并返回取消订阅函数。 */
   subscribe(runId: string, onEvent: (e: UiEvent) => void, onClose?: () => void): () => void;
 }
-import type { AskUserAnswer, AskUserSpec, GoalState } from '@/api';
+import type { AskUserAnswer, AskUserSpec, FinishReason, GoalState } from '@/api';
 import type { StreamStats } from '@/api';
