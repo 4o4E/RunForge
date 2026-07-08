@@ -202,7 +202,12 @@ export function ChatView({
       )}
 
       {!rightPanelOpen && (
-        <div className="pointer-events-none absolute bottom-28 right-6 top-16 z-30 hidden min-h-0 w-72 flex-col gap-3 2xl:flex">
+        <div
+          className={cn(
+            'pointer-events-none absolute bottom-28 right-6 top-16 z-30 hidden min-h-0 w-72 flex-col gap-3 2xl:flex',
+            showStatusCard ? 'justify-start' : 'justify-center',
+          )}
+        >
           {showStatusCard && <div className="pointer-events-auto">{renderStatusCard()}</div>}
           <TableOfContents contentRef={contentRef} floating={false} />
         </div>
