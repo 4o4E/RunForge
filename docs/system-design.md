@@ -90,7 +90,7 @@ Web 创建 thread
 - Provider 抽象隔离不同 LLM 协议，执行循环只依赖中立消息和工具类型。
 - Store 抽象隔离 PostgreSQL，测试可以使用 MemoryStore。
 - Tool registry 是工具调用统一入口，策略检查和输出截断都在这里执行。
-- ContextManager 在每次 LLM 调用前检查 token 预算，必要时做 observation masking、L3 摘要或滑动窗口压缩。
+- ContextManager 在每次 LLM 调用前检查 token 预算，并通过可插拔 ContextCompactor 策略执行压缩；默认策略保留 RunForge 自研级联，可选策略可接入社区裁剪能力。社区方案和自研 runtime 的边界见 [Agent 核心边界](agent-core-boundaries.md)。
 - 服务启动时会恢复 `pending` / `running` run；`canceling` run 会收束为 `canceled`。
 - shell session、subagent run 是 thread 级资源，可跨 run 继续观察；但后台执行仍依赖当前 server 进程，不具备跨 worker 接管。
 
@@ -113,6 +113,7 @@ Web 创建 thread
 - `executor.ts`：Agent 主循环，负责 run 状态、step 创建、LLM 调用、工具调度、事件落库。
 - `executor.ts` 内置处理 `skill_activate` 和 `subagent_run` / `subagent_poll` / `subagent_list`，避免这些调度能力退化成普通工具文本。
 - `context.ts`：上下文管理，注入 system prompt、Goal 锚点、历史消息和当前用户输入。
+- `contextCompactor.ts`：上下文压缩策略端口，默认 `current` 策略保留自研级联，`langchain-trim` 策略通过 LangChain Core 接入普通历史裁剪。
 - `compaction.ts`：上下文压缩纯函数，包括 token 估算、tool result masking、L3 摘要候选和滑动窗口。
 - `goal.ts`：GoalState 初始化、更新和渲染。
 - `recovery.ts`：服务启动恢复入口；恢复执行时由 `executor.ts` 补齐中断前缺失的工具结果提示。
