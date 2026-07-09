@@ -30,16 +30,56 @@ interface Frontmatter {
 const SKILL_NAME_RE = /^[a-z0-9-]+$/;
 const BUILTIN_SOURCE_ROOT = resolve(process.cwd(), 'src/skills/builtin');
 
+function unquoteScalar(value: string): string {
+  return value.trim().replace(/^["']|["']$/g, '');
+}
+
+function foldYamlBlock(lines: string[], folded: boolean): string {
+  const normalized = lines.map((line) => line.replace(/^\s+/, '').trimEnd());
+  if (!folded) return normalized.join('\n').trim();
+  return normalized
+    .join('\n')
+    .split(/\n{2,}/)
+    .map((part) => part.replace(/\n+/g, ' ').trim())
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
+function parseFrontmatterFields(raw: string): Map<string, string> {
+  const fields = new Map<string, string>();
+  const lines = raw.split('\n');
+  for (let i = 0; i < lines.length;) {
+    const m = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(lines[i]);
+    if (!m) {
+      i += 1;
+      continue;
+    }
+    const key = m[1];
+    const value = m[2].trim();
+    if (/^[>|][+-]?$/.test(value)) {
+      const block: string[] = [];
+      i += 1;
+      while (i < lines.length && !/^([A-Za-z0-9_-]+):\s*/.test(lines[i])) {
+        block.push(lines[i]);
+        i += 1;
+      }
+      // skill 入口只需要 YAML 标量字段，支持 description: > 这类常见折叠写法。
+      fields.set(key, foldYamlBlock(block, value.startsWith('>')));
+      continue;
+    }
+    fields.set(key, unquoteScalar(value));
+    i += 1;
+  }
+  return fields;
+}
+
 function parseFrontmatter(content: string, file: string): { frontmatter: Frontmatter; body: string } {
   const match = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(content);
   if (!match) throw new Error(`${file} 缺少 SKILL.md YAML frontmatter`);
   const raw = match[1];
   const body = match[2];
-  const fields = new Map<string, string>();
-  for (const line of raw.split('\n')) {
-    const m = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line);
-    if (m) fields.set(m[1], m[2].trim().replace(/^["']|["']$/g, ''));
-  }
+  const fields = parseFrontmatterFields(raw);
   const name = fields.get('name') ?? '';
   const description = fields.get('description') ?? '';
   if (!SKILL_NAME_RE.test(name)) throw new Error(`${file} 的 skill name 无效: ${name}`);

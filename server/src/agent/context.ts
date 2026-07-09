@@ -70,6 +70,13 @@ export type { CompactionInfo, CompactionResult };
 interface ContextOptions {
   appendUserInput?: boolean;
   runtimeContext?: string;
+  userInputPrefix?: string;
+}
+
+function prefixUserInput(prefix: string | undefined, content: string | null): string | null {
+  const trimmed = prefix?.trim();
+  if (!trimmed) return content;
+  return `${trimmed}\n\n用户请求 / User request:\n${content ?? ''}`;
 }
 
 /**
@@ -100,7 +107,13 @@ export class ContextManager {
         dbId: p.id,
       });
     }
-    if (appendUserInput) this.items.push({ msg: { role: 'user', content: userInput }, dbId: null });
+    if (appendUserInput) {
+      this.items.push({ msg: { role: 'user', content: prefixUserInput(opts.userInputPrefix, userInput) }, dbId: null });
+    } else if (opts.userInputPrefix) {
+      // 恢复 run 时用户消息已经落库，只改模型视图，不回写数据库原文。
+      const latestUser = [...this.items].reverse().find((item) => item.msg.role === 'user');
+      if (latestUser) latestUser.msg = { ...latestUser.msg, content: prefixUserInput(opts.userInputPrefix, latestUser.msg.content) };
+    }
   }
 
   /** 刷新目标锚点 system 消息；每步重注入，用来防止目标漂移。 */

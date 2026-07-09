@@ -33,6 +33,39 @@ const SUBAGENT_LIST_TOOL_NAME = 'subagent_list';
 const STREAM_STATS_POINTS = 24;
 const STREAM_STATS_MIN_INTERVAL_MS = 250;
 const SECRET_KEY_RE = /(password|passwd|pwd|secret|token|key|credential|connectionurl)/i;
+const SUBAGENT_MAX_TOOL_TURNS = 12;
+const SUBAGENT_POLL_MAX_WAIT_SECONDS = 120;
+const SUBAGENT_FORBIDDEN_TOOLS = new Set([
+  ASK_USER_TOOL_NAME,
+  'update_plan',
+  'skill_activate',
+  SUBAGENT_RUN_TOOL_NAME,
+  SUBAGENT_POLL_TOOL_NAME,
+  SUBAGENT_LIST_TOOL_NAME,
+]);
+const SUBAGENT_READONLY_TOOLS = [
+  'file_read',
+  'glob',
+  'grep',
+  'web_fetch',
+  'web_search',
+  'workflow_list',
+  'workflow_read',
+  'datasource_list',
+];
+const SUBAGENT_WRITER_TOOLS = [
+  ...SUBAGENT_READONLY_TOOLS,
+  'file_write',
+  'file_edit',
+  'shell',
+  'shell_session_open',
+  'shell_session_reuse',
+  'shell_session_list',
+  'shell_exec',
+  'shell_poll',
+  'shell_kill',
+  'shell_session_close',
+];
 
 export interface ExecutorDeps {
   provider: Provider;
@@ -256,6 +289,28 @@ function commandFromToolCall(name: string, args: unknown): string | null {
   if (name !== 'shell' && name !== 'shell_exec') return null;
   const command = args && typeof args === 'object' ? (args as Record<string, unknown>).command : null;
   return typeof command === 'string' ? command : null;
+}
+
+function subagentProfile(runtimeProfileId: string | null): { label: string; tools: string[] } {
+  if (runtimeProfileId === 'writer') return { label: 'writer', tools: SUBAGENT_WRITER_TOOLS };
+  return { label: runtimeProfileId ?? 'default-readonly', tools: SUBAGENT_READONLY_TOOLS };
+}
+
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function numericArg(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function addUsage(total: LlmUsage | undefined, next: LlmUsage | undefined): LlmUsage | undefined {
+  if (!next) return total;
+  return {
+    inputTokens: (total?.inputTokens ?? 0) + (next.inputTokens ?? 0),
+    outputTokens: (total?.outputTokens ?? 0) + (next.outputTokens ?? 0),
+    cachedInputTokens: (total?.cachedInputTokens ?? 0) + (next.cachedInputTokens ?? 0),
+  };
 }
 
 async function createDefaultDatabaseRuntimeEnv(runId: string): Promise<DatabaseRuntimeEnv> {
@@ -499,10 +554,12 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     }
     const skillIndex = await loadSkillIndex(toolSettings.workspaceRoot);
     const workflowIndex = await loadWorkflowIndex(toolSettings.workspaceRoot);
-    const skillRuntimeContext = [renderSkillSystemRules(), renderSkillCatalog(skillIndex)].join('\n\n');
+    const skillRuntimeContext = renderSkillSystemRules();
+    const skillCatalog = renderSkillCatalog(skillIndex);
     const workflowRuntimeContext = [renderWorkflowSystemRules(), renderWorkflowCatalog(workflowIndex)].join('\n\n');
     const ctx = new ContextManager(prior, userInput, renderGoal(goal), {
       appendUserInput: !hasPersistedMessages,
+      userInputPrefix: skillCatalog,
       runtimeContext: `${renderRuntimeContext(toolSettings)}\n\n${databaseRuntimeSummary}\n\n${workflowRuntimeContext}\n\n${skillRuntimeContext}`,
     });
     currentCtx = ctx;
@@ -600,6 +657,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       const modelRef = optionalString(args.modelRef);
       const skillNames = stringList(args.skillNames);
       const taskAssignment = row.task_assignment;
+      const profile = subagentProfile(runtimeProfileId);
 
       try {
         const skillMessages: string[] = [];
@@ -611,15 +669,28 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
             skillMessages.push(`Skill "${name}" 加载失败：${(err as Error).message}`);
           }
         }
+        const toolSchemasForProfile = await toolSchemas(profile.tools, mcpSettings);
+        const tools = toolSchemasForProfile.filter((tool) => !SUBAGENT_FORBIDDEN_TOOLS.has(tool.name));
+        const allowedToolNames = new Set(tools.map((tool) => tool.name));
 
         const messages: LlmMessage[] = [
           {
             role: 'system',
             content: [
-              '你是当前 thread 内部的异步只读推理型 subagent。',
-              'You are an asynchronous read-only reasoning subagent inside the current thread.',
-              '你不会直接修改文件、调用工具或写入长期 memory；你只基于输入材料、workflow stage 和 skill 给出结构化结论。',
-              'Do not claim that you changed files or ran tools. Return evidence, risks, and next-step recommendations.',
+              profile.label === 'writer'
+                ? `你是当前 thread 内部的异步 writer subagent，runtimeProfileId=${profile.label}。`
+                : `你是当前 thread 内部的异步只读推理型 subagent，runtimeProfileId=${profile.label}。`,
+              profile.label === 'writer'
+                ? `You are an asynchronous writer subagent inside the current thread, runtimeProfileId=${profile.label}.`
+                : `You are an asynchronous read-only reasoning subagent inside the current thread, runtimeProfileId=${profile.label}.`,
+              profile.label === 'writer'
+                ? '你可以调用本轮提供的工具读写 workspace 文件、执行 shell，并必须只声称自己真实执行过的动作。'
+                : '你只能调用本轮提供的只读工具收集证据；不要修改文件、执行写操作或声称自己创建了文件。',
+              profile.label === 'writer'
+                ? 'You may use the provided tools to read/write workspace files and run shell commands; only claim actions actually performed.'
+                : 'Use only the provided read-only tools for evidence; do not modify files or claim that you created files.',
+              '不要调用 subagent_*、ask_user、update_plan 或 skill_activate；需要额外 skill 时由主 agent 调度。',
+              'Do not call subagent_*, ask_user, update_plan, or skill_activate; the main agent schedules extra skills.',
             ].join('\n'),
           },
           {
@@ -636,27 +707,74 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
               '',
               skillMessages.length ? `Loaded skills:\n${skillMessages.join('\n\n---\n\n')}` : 'Loaded skills: none',
               '',
-              '请输出：结论、关键证据、风险/不确定性、建议下一步。',
+              profile.label === 'writer'
+                ? '请完成任务；如果需要创建文件或运行命令，直接调用工具执行。最后输出：完成情况、真实产物路径、关键证据、风险/不确定性。'
+                : '请输出：结论、关键证据、风险/不确定性、建议下一步。',
             ].join('\n'),
           },
         ];
 
         const subagentProvider = modelRef ? (await getConfiguredProvider(modelRef)).provider : provider;
-        const result = await subagentProvider.complete(messages, []);
-        const output = result.content?.trim() || 'subagent 未返回文本结果。';
+        const toolTrace: string[] = [];
+        let output = '';
+        let usage: LlmUsage | undefined;
+        for (let turn = 0; turn < SUBAGENT_MAX_TOOL_TURNS; turn += 1) {
+          const result = await subagentProvider.complete(messages, tools);
+          usage = addUsage(usage, result.usage);
+          output = result.content?.trim() || output;
+          const assistantMsg = { role: 'assistant' as const, content: result.content, toolCalls: result.toolCalls.length ? result.toolCalls : undefined };
+          messages.push(assistantMsg);
+          if (!result.toolCalls.length) break;
+
+          for (const call of result.toolCalls) {
+            let text: string;
+            const parsedArgs = parseToolArguments(call.arguments || '{}');
+            if (!allowedToolNames.has(call.name)) {
+              text = `subagent 当前 profile 不允许调用工具：${call.name}`;
+            } else if (!parsedArgs.ok) {
+              text = `工具参数无效，未执行 ${call.name}：${parsedArgs.error}`;
+            } else {
+              const command = commandFromToolCall(call.name, parsedArgs.args);
+              if (
+                command
+                && requiresDatabaseAccess(command)
+                && !activeSkills.some((skill) => skill.name === DATABASE_ACCESS_SKILL_NAME)
+              ) {
+                text = 'subagent 需要数据库访问时必须先由主 agent 激活 database-access skill；本次未执行数据库命令。';
+              } else {
+                const resultText = await runTool(call.name, parsedArgs.args, {
+                  settings: toolSettings,
+                  env: toolEnv,
+                  threadId,
+                  runId,
+                  stepId,
+                  step: stepIdx,
+                  mcpSettings,
+                });
+                text = resultText.text;
+              }
+            }
+            toolTrace.push(`- ${call.name}: ${text.split('\n')[0]?.slice(0, 200) ?? ''}`);
+            messages.push({ role: 'tool', content: text, toolCallId: call.id });
+          }
+        }
+        if (!output) output = 'subagent 未返回文本结果。';
+        if (toolTrace.length) {
+          output = `${output}\n\n工具执行摘要 / Tool execution summary:\n${toolTrace.join('\n')}`;
+        }
         const endedAt = new Date().toISOString();
         await store.finishSubagentRun(row.id, {
           status: 'done',
           output,
-          usage: result.usage ? { ...result.usage } : null,
+          usage: usage ? { ...usage } : null,
         });
         await emit(stepId, {
           type: 'subagent_finished',
           step: stepIdx,
           subagentRunId: row.id,
           output,
-          inputTokens: result.usage?.inputTokens,
-          outputTokens: result.usage?.outputTokens,
+          inputTokens: usage?.inputTokens,
+          outputTokens: usage?.outputTokens,
           startedAt,
           endedAt,
           durationMs: durationMs(startedAt, endedAt),
@@ -742,11 +860,21 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     const pollSubagent = async (args: Record<string, unknown>): Promise<{ text: string }> => {
       const subagentRunId = optionalString(args.subagentRunId);
       if (!subagentRunId) return { text: 'subagent_poll 缺少必填 subagentRunId。' };
-      const row = await store.getSubagentRun(subagentRunId);
+      const waitSeconds = Math.min(Math.max(numericArg(args.waitSeconds ?? args.timeoutSeconds, 0), 0), SUBAGENT_POLL_MAX_WAIT_SECONDS);
+      const deadline = Date.now() + waitSeconds * 1000;
+      let row = await store.getSubagentRun(subagentRunId);
       if (!row) return { text: `没有找到 subagentRunId: ${subagentRunId}` };
+      const rowId = row.id;
       const visibleRows = await store.listSubagentRunsByThread(threadId);
-      if (!visibleRows.some((item) => item.id === row.id)) {
+      if (!visibleRows.some((item) => item.id === rowId)) {
         return { text: `当前 thread 无权读取 subagentRunId: ${subagentRunId}` };
+      }
+      while (row.status === 'running' && Date.now() < deadline) {
+        await waitMs(Math.min(1000, Math.max(100, deadline - Date.now())));
+        row = (await store.getSubagentRun(subagentRunId)) ?? row;
+      }
+      if (row.status === 'running' && waitSeconds > 0) {
+        return { text: `${renderSubagentRow(row, false)}\n\n等待 ${waitSeconds} 秒后仍未完成，返回当前状态。` };
       }
       return { text: renderSubagentRow(row, true) };
     };

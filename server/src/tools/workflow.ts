@@ -1,4 +1,5 @@
 import { loadWorkflowIndex, readWorkflow } from '../workflows/registry.js';
+import { loadSkillIndex, selectSkill } from '../skills/registry.js';
 import type { Tool } from './types.js';
 
 function requireWorkspaceRoot(ctx?: Parameters<Tool['run']>[1]): string {
@@ -32,7 +33,7 @@ export const workflowListTool: Tool = {
 
 export const workflowReadTool: Tool = {
   name: 'workflow_read',
-  description: '读取一个 workflow 的 WORKFLOW.md 正文。可传 name 或 source:name。用户 workflow 优先于同名内置 workflow。',
+  description: '读取 RunForge workspace workflow 的 WORKFLOW.md 正文，只适用于 .workflows 和 .agents/workflows。注意：skill 内部 workflows/*.md 不是 RunForge workflow；先激活对应 skill，再按 skill root 用文件工具读取。',
   parameters: {
     type: 'object',
     properties: {
@@ -43,7 +44,27 @@ export const workflowReadTool: Tool = {
   async run(args, ctx) {
     const name = typeof args.name === 'string' ? args.name.trim() : '';
     if (!name) return 'workflow_read 缺少必填 name。';
-    const { workflow, body } = await readWorkflow(requireWorkspaceRoot(ctx), name);
+    const workspaceRoot = requireWorkspaceRoot(ctx);
+    let loaded;
+    try {
+      loaded = await readWorkflow(workspaceRoot, name);
+    } catch (err) {
+      const skills = await loadSkillIndex(workspaceRoot);
+      const skill = selectSkill(skills, name);
+      if (skill) {
+        return [
+          `未找到 RunForge workflow: ${name}`,
+          `但找到了同名 skill: ${skill.name}`,
+          `skill root: ${skill.root}`,
+          '',
+          '说明：RunForge workflow 只来自 workspace 的 .workflows 或 .agents/workflows。',
+          '说明：skill 内部的 workflows/*.md 属于该 skill 的普通资源，不会被 workflow_read 读取。',
+          '下一步：请先使用 skill_activate 激活该 skill，然后用 file_read 或 shell 读取 skill root 下的 SKILL.md、workflows/index.md 或具体 workflows/*.md。',
+        ].join('\n');
+      }
+      throw err;
+    }
+    const { workflow, body } = loaded;
     return [
       '已读取 Workflow / Loaded Workflow:',
       `- name: ${workflow.name}`,

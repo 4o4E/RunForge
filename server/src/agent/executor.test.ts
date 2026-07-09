@@ -1,6 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { executeRun } from './executor.js';
@@ -429,6 +429,7 @@ test('executeRun: activates a skill and trims tools to allowed-tools', async () 
   const published: AgentEvent[] = [];
   const toolNamesByTurn: string[][] = [];
   let firstSystemText = '';
+  let firstUserText = '';
   let secondSystemText = '';
   let turn = 0;
 
@@ -442,6 +443,7 @@ test('executeRun: activates a skill and trims tools to allowed-tools', async () 
         const systemText = messages.filter((m) => m.role === 'system').map((m) => m.content ?? '').join('\n');
         if (turn === 1) {
           firstSystemText = systemText;
+          firstUserText = messages.filter((m) => m.role === 'user').at(-1)?.content ?? '';
           return {
             content: null,
             toolCalls: [
@@ -459,7 +461,9 @@ test('executeRun: activates a skill and trims tools to allowed-tools', async () 
     toolSettings: testToolSettings(),
   });
 
-  assert.match(firstSystemText, /sample-skill: Use when a test needs a tiny skill/);
+  assert.doesNotMatch(firstSystemText, /sample-skill: Use when a test needs a tiny skill/);
+  assert.match(firstUserText, /sample-skill: Use when a test needs a tiny skill/);
+  assert.match(firstUserText, /用户请求 \/ User request:\nuse a skill/);
   assert.match(secondSystemText, /已激活 Skill/);
   assert.match(secondSystemText, /root:/);
   assert.match(secondSystemText, /# Sample Skill/);
@@ -474,10 +478,92 @@ test('executeRun: activates a skill and trims tools to allowed-tools', async () 
   assert.deepEqual(activated?.type === 'skill_activated' ? activated.allowedTools : [], ['file_read']);
   const msgs = await store.loadThreadMessages(thread.id);
   assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'tool', 'tool', 'assistant']);
+  assert.equal(msgs[0].content, 'use a skill');
   assert.equal(msgs[2].toolCallId, 'skill_1');
   assert.equal(msgs[3].toolCallId, 'read_1');
   assert.equal(msgs.some((m) => m.role === 'system' && (m.content ?? '').includes('已激活 Skill')), false);
   assert.equal((await store.getRun(run.id))?.status, 'done');
+});
+
+test('executeRun: skill catalog uses folded YAML descriptions in user prompt without persisting them', async () => {
+  const skillRoot = join(testWorkspace, '.skills', 'ppt-master');
+  await mkdir(skillRoot, { recursive: true });
+  await writeFile(
+    join(skillRoot, 'SKILL.md'),
+    [
+      '---',
+      'name: ppt-master',
+      'description: >',
+      '  AI-driven multi-format SVG content generation system.',
+      '  Use when user asks to "create PPT", "make presentation",',
+      '  "生成PPT", "做PPT", or mentions "ppt-master".',
+      '---',
+      '',
+      '# PPT Master Skill',
+    ].join('\n'),
+    'utf8',
+  );
+
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run = await store.createRun(thread.id, '测试：做一个example ppt');
+  let userText = '';
+
+  await executeRun(run.id, {
+    store,
+    provider: {
+      name: 'capture-skill-catalog',
+      async complete(messages) {
+        userText = messages.filter((m) => m.role === 'user').at(-1)?.content ?? '';
+        return { content: 'done', toolCalls: [] };
+      },
+    },
+    publish: () => {},
+    hardStepCap: 3,
+    toolSettings: testToolSettings(),
+  });
+
+  assert.match(userText, /ppt-master: AI-driven multi-format SVG content generation system\. Use when user asks/);
+  assert.match(userText, /生成PPT/);
+  assert.doesNotMatch(userText, /ppt-master: >/);
+  assert.match(userText, /用户请求 \/ User request:\n测试：做一个example ppt/);
+  const msgs = await store.loadThreadMessages(thread.id);
+  assert.equal(msgs[0].content, '测试：做一个example ppt');
+});
+
+test('executeRun: resumed runs still expose the skill catalog before the persisted user message', async () => {
+  const skillRoot = join(testWorkspace, '.skills', 'resume-skill');
+  await mkdir(skillRoot, { recursive: true });
+  await writeFile(
+    join(skillRoot, 'SKILL.md'),
+    ['---', 'name: resume-skill', 'description: Use when checking resumed prompt context.', '---', '', '# Resume Skill'].join('\n'),
+    'utf8',
+  );
+
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run = await store.createRun(thread.id, 'resume needs skill list');
+  await store.addMessage(thread.id, run.id, null, { role: 'user', content: 'resume needs skill list' });
+  let userText = '';
+
+  await executeRun(run.id, {
+    store,
+    provider: {
+      name: 'capture-resumed-skill-catalog',
+      async complete(messages) {
+        userText = messages.filter((m) => m.role === 'user').at(-1)?.content ?? '';
+        return { content: 'done', toolCalls: [] };
+      },
+    },
+    publish: () => {},
+    hardStepCap: 3,
+    toolSettings: testToolSettings(),
+  });
+
+  assert.match(userText, /resume-skill: Use when checking resumed prompt context/);
+  assert.match(userText, /用户请求 \/ User request:\nresume needs skill list/);
+  const msgs = await store.loadThreadMessages(thread.id);
+  assert.equal(msgs[0].content, 'resume needs skill list');
 });
 
 test('executeRun: skill activation instructions do not leak into the next run history', async () => {
@@ -642,6 +728,84 @@ test('executeRun: starts async subagents and allows cross-run polling', async ()
   const pollResult = msgs.find((m) => m.role === 'tool' && m.toolCallId === 'poll_1')?.content ?? '';
   assert.match(pollResult, /status: done/);
   assert.match(pollResult, /没有发现阻塞风险/);
+});
+
+test('executeRun: writer subagent can use scheduled write tools and poll waits for completion', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread();
+  const run = await store.createRun(thread.id, 'delegate writer');
+  const outputPath = join(testWorkspace, 'writer-subagent.txt');
+  let parentTurn = 0;
+  let writerTurn = 0;
+
+  await executeRun(run.id, {
+    store,
+    provider: {
+      name: 'writer-subagent',
+      async complete(messages) {
+        const prompt = messages.map((m) => m.content ?? '').join('\n');
+        if (prompt.includes('异步 writer subagent')) {
+          writerTurn += 1;
+          if (writerTurn === 1) {
+            return {
+              content: null,
+              toolCalls: [{
+                id: 'write_1',
+                name: 'file_write',
+                arguments: JSON.stringify({ path: outputPath, content: 'writer subagent output\n' }),
+              }],
+            };
+          }
+          return { content: `writer file done: ${outputPath}`, toolCalls: [] };
+        }
+
+        parentTurn += 1;
+        if (parentTurn === 1) {
+          return {
+            content: null,
+            toolCalls: [{
+              id: 'sub_1',
+              name: 'subagent_run',
+              arguments: JSON.stringify({
+                runtimeProfileId: 'writer',
+                task: '创建 writer-subagent.txt。',
+                expectedOutput: '返回产物路径。',
+              }),
+            }],
+          };
+        }
+
+        const history = messages.map((m) => m.content ?? '').join('\n');
+        const subagentRunId = history.match(/subagentRunId: (sr_[A-Za-z0-9]+)/)?.[1];
+        if (parentTurn === 2 && subagentRunId) {
+          return {
+            content: null,
+            toolCalls: [{ id: 'poll_1', name: 'subagent_poll', arguments: JSON.stringify({ subagentRunId, waitSeconds: 2 }) }],
+          };
+        }
+
+        return { content: '已确认 writer subagent 产物。', toolCalls: [] };
+      },
+    },
+    publish: () => {},
+    hardStepCap: 6,
+    toolSettings: testToolSettings(),
+  });
+
+  assert.equal((await store.getRun(run.id))?.status, 'done');
+  assert.equal(await readFile(outputPath, 'utf8'), 'writer subagent output\n');
+  const rows = await store.listSubagentRunsByThread(thread.id);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].runtime_profile_id, 'writer');
+  assert.equal(rows[0].status, 'done');
+  assert.match(rows[0].output ?? '', /工具执行摘要 \/ Tool execution summary:/);
+  assert.match(rows[0].output ?? '', /file_write/);
+
+  const msgs = await store.loadThreadMessages(thread.id);
+  const pollResult = msgs.find((m) => m.role === 'tool' && m.toolCallId === 'poll_1')?.content ?? '';
+  assert.match(pollResult, /status: done/);
+  assert.match(pollResult, /writer file done:/);
+  assert.doesNotMatch(pollResult, /等待 2 秒后仍未完成/);
 });
 
 test('executeRun: repeated running subagent polls do not trigger loop guard', async () => {

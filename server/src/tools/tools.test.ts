@@ -167,6 +167,38 @@ test('registry forwards run context to tool implementations', async () => {
   }
 });
 
+test('workflow_read explains same-name skill instead of reading skill workflows as RunForge workflows', async () => {
+  const skillRoot = join(dir, '.skills', 'ppt-master');
+  await mkdir(join(skillRoot, 'workflows'), { recursive: true });
+  await writeFile(
+    join(skillRoot, 'SKILL.md'),
+    [
+      '---',
+      'name: ppt-master',
+      'description: Generate presentation artifacts.',
+      '---',
+      '',
+      '# PPT Master',
+      '',
+      'See workflows/index.md for the skill internal workflow.',
+    ].join('\n'),
+    'utf8',
+  );
+  await writeFile(join(skillRoot, 'workflows', 'index.md'), '# Internal skill workflow\n', 'utf8');
+
+  const out = await runTool(
+    'workflow_read',
+    { name: 'ppt-master' },
+    { settings: normalizeToolSettings({ workspaceRoot: dir }) },
+  );
+
+  assert.match(out.text, /未找到 RunForge workflow: ppt-master/);
+  assert.match(out.text, /但找到了同名 skill: ppt-master/);
+  assert.match(out.text, /skill root:/);
+  assert.match(out.text, /skill_activate/);
+  assert.match(out.text, /skill 内部的 workflows\/\*\.md 属于该 skill 的普通资源/);
+});
+
 test('shell runs a command (PowerShell on Windows, sh elsewhere)', async () => {
   const out = text(await shellTool.run({ command: 'echo agent-shell-ok' }));
   assert.match(out, /agent-shell-ok/);
