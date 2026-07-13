@@ -12,7 +12,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { markdownRemarkPlugins, markdownUrlTransform, useStreamdownComponents } from "@/components/streamdownComponents";
-import { streamdownPlugins, useThemedMermaid } from "@/components/streamdownConfig";
+import { streamdownPlugins, streamdownRehypePlugins, useThemedMermaid } from "@/components/streamdownConfig";
 import { cn } from "@/lib/utils";
 import type { UIMessage } from "ai";
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
@@ -335,6 +335,7 @@ export const MessageResponse = memo(
         mermaid={mermaid}
         components={mergedComponents}
         plugins={streamdownPlugins}
+        rehypePlugins={streamdownRehypePlugins}
         remarkPlugins={remarkPlugins ?? markdownRemarkPlugins}
         urlTransform={urlTransform ?? markdownUrlTransform}
         {...props}

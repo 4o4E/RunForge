@@ -8,7 +8,7 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import { markdownRemarkPlugins, markdownUrlTransform, useStreamdownComponents } from "@/components/streamdownComponents";
-import { streamdownPlugins, useThemedMermaid } from "@/components/streamdownConfig";
+import { streamdownPlugins, streamdownRehypePlugins, useThemedMermaid } from "@/components/streamdownConfig";
 import { BrainIcon, ChevronDownIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import {
@@ -216,7 +216,7 @@ export const ReasoningContent = memo(
         )}
         {...props}
       >
-        <Streamdown components={components} mermaid={mermaid} plugins={streamdownPlugins} remarkPlugins={markdownRemarkPlugins} urlTransform={markdownUrlTransform}>{children}</Streamdown>
+        <Streamdown components={components} mermaid={mermaid} plugins={streamdownPlugins} rehypePlugins={streamdownRehypePlugins} remarkPlugins={markdownRemarkPlugins} urlTransform={markdownUrlTransform}>{children}</Streamdown>
       </CollapsibleContent>
     );
   }
