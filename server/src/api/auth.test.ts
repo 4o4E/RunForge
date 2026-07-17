@@ -42,7 +42,7 @@ test('api auth middleware requires bearer token', async () => {
   }
 });
 
-test('api auth middleware allows signed file raw, text preview and hex preview requests', async () => {
+test('api auth middleware allows signed file raw, text preview, hex preview and pdf preview requests', async () => {
   const previousAccessToken = config.auth.accessToken;
   const previousShareSecret = config.auth.shareSecret;
   config.auth.accessToken = 'test-access-token';
@@ -52,6 +52,7 @@ test('api auth middleware allows signed file raw, text preview and hex preview r
   app.get('/files/raw', (_req, res) => res.json({ ok: true }));
   app.get('/files/preview', (_req, res) => res.json({ ok: true }));
   app.get('/files/hex', (_req, res) => res.json({ ok: true }));
+  app.get('/files/pdf-preview', (_req, res) => res.json({ ok: true }));
   const server = createServer(app);
   const port = await listen(server);
   try {
@@ -61,6 +62,7 @@ test('api auth middleware allows signed file raw, text preview and hex preview r
     assert.equal((await fetch(`http://127.0.0.1:${port}/files/raw?${query}`)).status, 200);
     assert.equal((await fetch(`http://127.0.0.1:${port}/files/preview?${query}`)).status, 200);
     assert.equal((await fetch(`http://127.0.0.1:${port}/files/hex?${query}`)).status, 200);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/files/pdf-preview?${query}`)).status, 200);
     assert.equal((await fetch(`http://127.0.0.1:${port}/files/preview?path=artifacts%2Freport.html`)).status, 401);
   } finally {
     server.close();

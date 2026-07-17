@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { formatHexRows, parseByteRange, previewTextLines } from './files.js';
 import { signFileShare, verifyFileShare } from './auth.js';
 import { config } from '../config.js';
+import { isOfficeConvertiblePath, officePdfCacheKey } from '../files/officePreview.js';
 
 test('render preview keeps long lines intact', () => {
   const longLine = `const DATA = ${'x'.repeat(13_000)};`;
@@ -49,4 +50,18 @@ test('file share signature binds path and expiry', () => {
     config.auth.accessToken = previousAccessToken;
     config.auth.shareSecret = previousShareSecret;
   }
+});
+
+test('office pdf preview only accepts office documents', () => {
+  assert.equal(isOfficeConvertiblePath('demo.pptx'), true);
+  assert.equal(isOfficeConvertiblePath('demo.xlsx'), true);
+  assert.equal(isOfficeConvertiblePath('demo.docx'), true);
+  assert.equal(isOfficeConvertiblePath('demo.pdf'), false);
+});
+
+test('office pdf cache key changes when source metadata changes', () => {
+  const base = { remotePath: 'artifacts/demo.pptx', size: 10, mtimeMs: 100, converterUrl: 'http://converter:3000' };
+  assert.equal(officePdfCacheKey(base), officePdfCacheKey(base));
+  assert.notEqual(officePdfCacheKey(base), officePdfCacheKey({ ...base, mtimeMs: 101 }));
+  assert.notEqual(officePdfCacheKey(base), officePdfCacheKey({ ...base, cacheVersion: 'fonts-v2' }));
 });

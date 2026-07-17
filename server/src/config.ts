@@ -169,6 +169,12 @@ export const config = {
     otlpEndpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? '',
     console: (process.env.OTEL_CONSOLE ?? 'false') === 'true',
   },
+  preview: {
+    officeConverterUrl: process.env.OFFICE_PREVIEW_CONVERTER_URL ?? '',
+    officeTimeoutMs: Number(process.env.OFFICE_PREVIEW_TIMEOUT_MS ?? 180000),
+    officeCacheDir: process.env.OFFICE_PREVIEW_CACHE_DIR ?? '',
+    officeCacheVersion: process.env.OFFICE_PREVIEW_CACHE_VERSION ?? '',
+  },
   webPush: {
     publicKey: process.env.WEB_PUSH_VAPID_PUBLIC_KEY ?? '',
     privateKey: process.env.WEB_PUSH_VAPID_PRIVATE_KEY ?? '',

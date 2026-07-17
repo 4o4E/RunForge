@@ -30,7 +30,7 @@ export function hasValidAccessToken(req: Request): boolean {
 
 function isSignedFileRequest(req: Request): boolean {
   return req.method === 'GET'
-    && (req.path === '/files/raw' || req.path === '/files/preview' || req.path === '/files/hex')
+    && (req.path === '/files/raw' || req.path === '/files/preview' || req.path === '/files/hex' || req.path === '/files/pdf-preview')
     && typeof req.query.sig === 'string'
     && typeof req.query.expires === 'string';
 }

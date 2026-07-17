@@ -88,9 +88,14 @@ TOOL_SANDBOX_BACKEND=bwrap
 TOOL_WORKSPACE_ROOT=/absolute/path/to/RunForge/workspace
 TOOL_NETWORK=disabled
 TOOL_MAX_OUTPUT=40000
+
+# 可选: Office 文件预览。填 Gotenberg/LibreOffice 转换服务地址。
+OFFICE_PREVIEW_CONVERTER_URL=http://127.0.0.1:3002
 ```
 
-`RUNFORGE_ACCESS_TOKEN` 用来保护后端 `/api/**` 和 `/ws`，前端只通过 `Authorization: Bearer <token>` Header 发送，不放 Cookie，也不放 URL。`RUNFORGE_SHARE_SECRET` 用来生成文件分享签名；分享链接只允许读取单个 `/api/files/raw` 文件，不能浏览目录、访问设置或操作 agent。
+`RUNFORGE_ACCESS_TOKEN` 用来保护后端 `/api/**` 和 `/ws`，前端只通过 `Authorization: Bearer <token>` Header 发送，不放 Cookie，也不放 URL。`RUNFORGE_SHARE_SECRET` 用来生成文件分享签名；分享链接只允许访问同一个文件的读取/预览接口，不能浏览目录、访问设置或操作 agent。
+
+Office 预览走后端转换：`doc/docx/ppt/pptx/xls/xlsx` 等文件先通过 `OFFICE_PREVIEW_CONVERTER_URL` 指向的 LibreOffice 转换服务生成 PDF，前端再用 PDF.js 只读渲染。RunForge 后端和转换服务在同一个 Docker 网络时，建议填服务名地址；如果转换服务单独绑定在宿主机端口，再填宿主机可访问地址。转换容器需要按部署环境挂载常用中英文字体，否则 LibreOffice 可能因字体替换产生版式偏移；字体目录或转换服务镜像变更后，递增 `OFFICE_PREVIEW_CACHE_VERSION` 可让旧 PDF 预览缓存自动失效。
 
 当前开发和真实链路调试主要使用 DeepSeek V4 Pro，也就是 `LLM_MODEL=deepseek-v4-pro-202606`。代码保留 OpenAI、Anthropic、mock 等 provider 兼容路径，但本轮没有针对其他模型做专门提示词、参数或行为调优。
 

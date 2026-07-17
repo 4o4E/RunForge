@@ -18,6 +18,7 @@ import {
 import { CodeBlock } from '@/components/ai-elements/code-block';
 import { useNotifications } from '@/components/GlobalNotifications';
 import { MarkdownContent } from '@/components/MarkdownContent';
+import { OfficePreview, officePreviewKindForPath } from '@/components/OfficePreview';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -102,6 +103,13 @@ const VIDEO_EXTENSIONS = new Set(['mp4', 'webm', 'ogv', 'mov', 'm4v', 'mkv']);
 const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'ogg', 'oga', 'm4a', 'flac', 'aac', 'weba']);
 const BINARY_EXTENSIONS = new Set([
   'pdf',
+  'docx',
+  'pptx',
+  'xls',
+  'xlsx',
+  'xlsm',
+  'xlsb',
+  'ods',
   'zip',
   'gz',
   'tgz',
@@ -281,7 +289,7 @@ export function RemoteFilesPanel({
       setRawUrl('');
       setDownloadUrl('');
       setShareOpen(false);
-      setPreviewMode(mediaKind || ['html', 'htm', 'md'].includes(extOf(path)) ? 'preview' : 'source');
+      setPreviewMode(mediaKind || officePreviewKindForPath(path) || ['html', 'htm', 'md'].includes(extOf(path)) ? 'preview' : 'source');
     } else {
       pendingPreviewStartsRef.current.add(startLine);
     }
@@ -375,10 +383,11 @@ export function RemoteFilesPanel({
   const previewLanguage = selectedPath ? languageForPath(selectedPath) : 'log';
   const selectedExt = selectedPath ? extOf(selectedPath) : '';
   const selectedMediaKind = selectedPath ? mediaKindForPath(selectedPath) : null;
+  const selectedOfficeKind = selectedPath ? officePreviewKindForPath(selectedPath) : null;
   const selectedUsesHexSource = selectedPath ? shouldUseHexSource(selectedPath) : false;
   const selectedIsHtml = ['html', 'htm'].includes(selectedExt);
   const selectedIsMarkdown = selectedExt === 'md';
-  const selectedCanRender = selectedIsHtml || selectedIsMarkdown || selectedMediaKind != null;
+  const selectedCanRender = selectedIsHtml || selectedIsMarkdown || selectedMediaKind != null || selectedOfficeKind != null;
   const previewRows = useMemo<PreviewRow[]>(() => {
     const byLine = new Map<number, string>();
     const sortedChunks = [...chunks].sort((a, b) => a.startLine - b.startLine);
@@ -600,7 +609,7 @@ export function RemoteFilesPanel({
                       size="sm"
                       className="h-8 px-2"
                       onClick={() => setPreviewMode('preview')}
-                      title={selectedMediaKind ? '预览媒体' : selectedIsHtml ? '渲染 HTML' : '渲染 Markdown'}
+                      title={selectedOfficeKind ? '预览文档' : selectedMediaKind ? '预览媒体' : selectedIsHtml ? '渲染 HTML' : '渲染 Markdown'}
                     >
                       <Eye className="size-4" />
                     </Button>
@@ -734,6 +743,8 @@ export function RemoteFilesPanel({
                   <div className="flex h-full items-center justify-center rounded-md border bg-muted/20 px-4">
                     {rawUrl ? <audio src={rawUrl} className="w-full max-w-xl" controls /> : <span className="text-sm text-muted-foreground">正在生成预览链接…</span>}
                   </div>
+                ) : selectedOfficeKind && previewMode === 'preview' ? (
+                  <OfficePreview path={selectedPath} kind={selectedOfficeKind} shareAccess={shareAccess} />
                 ) : selectedUsesHexSource && previewMode === 'source' && hexRows.length > 0 ? (
                   <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-md border bg-background">
                     <div className="grid grid-cols-[6rem_minmax(24rem,1fr)_8rem] border-b bg-muted/40 px-3 py-2 font-mono text-[11px] text-muted-foreground">

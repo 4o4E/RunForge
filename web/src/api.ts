@@ -198,6 +198,15 @@ export const previewRemoteFileHex = (path: string, offset = 0, limit = 4096, opt
 
 export const remoteFileRawUrl = (path: string) => `/api/files/raw?path=${encodeURIComponent(path)}`;
 
+export const remoteFilePdfPreviewUrl = (path: string, share?: FileShareAccess) => {
+  const params = new URLSearchParams({ path });
+  if (share) {
+    params.set('expires', share.expires);
+    params.set('sig', share.sig);
+  }
+  return `/api/files/pdf-preview?${params.toString()}`;
+};
+
 export const signedRemoteFileUrl = (path: string, share: FileShareAccess, options: { download?: boolean } = {}) => {
   const params = new URLSearchParams({ path, expires: share.expires, sig: share.sig });
   if (options.download) params.set('download', '1');

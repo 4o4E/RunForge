@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Request, Response } from 'express';
 import { getToolSettings } from '../settings.js';
+import { ensureOfficePdfPreview, isOfficeConvertiblePath } from '../files/officePreview.js';
 import { mediaTypeFromPath, normalizeRemotePath, streamWorkspaceFile, toRemotePath, workspaceRoot } from '../files/workspace.js';
 import { clampShareTtlSeconds, hasValidAccessToken, signFileShare, verifyFileShare } from './auth.js';
 
@@ -266,6 +267,48 @@ filesApi.get('/hex', async (req, res) => {
     });
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+filesApi.get('/pdf-preview', async (req, res) => {
+  try {
+    const settings = await getToolSettings();
+    const file = normalizeRemotePath(req.query.path, settings.workspaceRoot);
+    if (!requireFileAccess(req, res, file, settings.workspaceRoot)) return;
+    const info = await stat(file);
+    if (!info.isFile()) return res.status(400).json({ error: 'path 不是文件' });
+    if (!isOfficeConvertiblePath(file)) return res.status(415).json({ error: '当前文件类型不支持 PDF 预览' });
+
+    const remotePath = canonicalRemotePath(file, settings.workspaceRoot);
+    const pdfPath = await ensureOfficePdfPreview({ file, remotePath, size: info.size, mtimeMs: info.mtimeMs });
+    const pdfInfo = await stat(pdfPath);
+    const range = parseByteRange(req.headers.range, pdfInfo.size);
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(`${fileName(remotePath)}.pdf`)}`);
+
+    if (range === 'invalid') {
+      res.status(416);
+      res.setHeader('Content-Range', `bytes */${pdfInfo.size}`);
+      res.end();
+      return;
+    }
+    if (range) {
+      const contentLength = range.end - range.start + 1;
+      res.status(206);
+      res.setHeader('Content-Length', String(contentLength));
+      res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${pdfInfo.size}`);
+      streamWorkspaceFile(pdfPath, range).pipe(res);
+      return;
+    }
+
+    res.setHeader('Content-Length', String(pdfInfo.size));
+    streamWorkspaceFile(pdfPath).pipe(res);
+  } catch (err) {
+    const message = (err as Error).name === 'AbortError' ? 'Office 转 PDF 超时' : (err as Error).message;
+    res.status(400).json({ error: message });
   }
 });
 
