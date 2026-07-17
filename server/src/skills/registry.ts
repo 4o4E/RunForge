@@ -230,8 +230,3 @@ export async function activateSkill(workspaceRoot: string, nameOrId: string): Pr
   ].join('\n');
   return { skill, systemMessage };
 }
-
-export function activeAllowedTools(activeSkills: SkillIndexItem[]): string[] | undefined {
-  if (!activeSkills.length) return undefined;
-  return [...new Set(activeSkills.flatMap((skill) => skill.allowedTools))];
-}

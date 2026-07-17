@@ -404,7 +404,7 @@ test('executeRun: injects database workload token at run startup', async () => {
   assert.equal(sawSkillReusedRunEnv, true);
 });
 
-test('executeRun: activates a skill and trims tools to allowed-tools', async () => {
+test('executeRun: activates a skill without trimming main-agent tools to allowed-tools', async () => {
   const skillRoot = join(testWorkspace, '.skills', 'sample-skill');
   await mkdir(skillRoot, { recursive: true });
   await writeFile(
@@ -471,7 +471,7 @@ test('executeRun: activates a skill and trims tools to allowed-tools', async () 
   assert.ok(toolNamesByTurn[0].includes('skill_activate'));
   assert.ok(toolNamesByTurn[1].includes('file_read'));
   assert.ok(toolNamesByTurn[1].includes('skill_activate'));
-  assert.equal(toolNamesByTurn[1].includes('shell'), false);
+  assert.ok(toolNamesByTurn[1].includes('shell'));
   const activated = published.find((e) => e.type === 'skill_activated');
   assert.equal(activated?.type, 'skill_activated');
   assert.equal(activated?.type === 'skill_activated' ? activated.name : '', 'sample-skill');

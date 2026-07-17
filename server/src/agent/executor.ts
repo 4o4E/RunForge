@@ -5,7 +5,7 @@ import { parseToolArguments } from '../llm/toolArgs.js';
 import { hydrateImageAttachments } from '../llm/attachments.js';
 import { runTool, toolSchemas } from '../tools/registry.js';
 import { ContextManager } from './context.js';
-import { activateSkill, activeAllowedTools, loadSkillIndex, renderSkillCatalog, renderSkillSystemRules } from '../skills/registry.js';
+import { activateSkill, loadSkillIndex, renderSkillCatalog, renderSkillSystemRules } from '../skills/registry.js';
 import type { SkillIndexItem, SkillActivation } from '../skills/registry.js';
 import { createWorkloadToken, listDatasources, listPermissionProfiles } from '../datasources/accountPool.js';
 import { finishGoal, initGoal, mergeGoal, parseGoalPatch, renderGoal } from './goal.js';
@@ -939,7 +939,8 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       const streamedToolNames = new Map<string, string>();
       const stopLlmHeartbeat = streamStats.startHeartbeat(stepIdx, () => llmStage, () => llmActiveTool);
       try {
-        const tools = await toolSchemas(activeAllowedTools(activeSkills), mcpSettings);
+        // skill 是外部能力说明，不是主 agent 的工具权限边界；工具权限由 RunForge 设置/策略统一管理。
+        const tools = await toolSchemas(undefined, mcpSettings);
         const modelMessages = await hydrateImageAttachments(ctx.all(), toolSettings.workspaceRoot);
         if (stream && provider.completeStream) {
           try {
