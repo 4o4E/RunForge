@@ -373,3 +373,47 @@ CREATE TABLE IF NOT EXISTS shell_session_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_shell_session_events_session ON shell_session_events(session_id, id);
+
+-- 多租户改造 Phase 1(docs/multi-tenancy-design.md §4)。本阶段只加身份层的表,
+-- 不改动 threads/runs 等业务表(tenant_id 列、RLS 留给后续阶段,见文档 §5-§9)。
+CREATE TABLE IF NOT EXISTS tenants (
+  id            TEXT PRIMARY KEY,
+  name          TEXT NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS users (
+  id            TEXT PRIMARY KEY,
+  tenant_id     TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  email         TEXT NOT NULL,
+  password_hash TEXT NOT NULL,        -- 自描述格式 "scrypt:N:r:p:saltHex:hashHex"
+  role          TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('owner', 'admin', 'member')),
+  status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (tenant_id, email)
+);
+
+CREATE TABLE IF NOT EXISTS system_admins (
+  id            TEXT PRIMARY KEY,
+  email         TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- refresh token(交互登录续期)和 api token(自动化调用)复用同一张表,靠 kind 区分,
+-- 风格与既有 workload_tokens 一致:只存 hash,不存明文。
+CREATE TABLE IF NOT EXISTS auth_tokens (
+  id            TEXT PRIMARY KEY,
+  tenant_id     TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind          TEXT NOT NULL CHECK (kind IN ('refresh', 'api')),
+  token_hash    TEXT NOT NULL UNIQUE,
+  label         TEXT,
+  expires_at    TIMESTAMPTZ,
+  revoked_at    TIMESTAMPTZ,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_tokens_user ON auth_tokens(user_id, kind, revoked_at);

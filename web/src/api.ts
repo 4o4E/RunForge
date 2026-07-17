@@ -29,6 +29,7 @@ import type {
   ShellCommandScanResult,
   ShellSession,
   SubagentRun,
+  TenantUserSummary,
   Thread,
   ThreadDetailResponse,
   ThreadForkResponse,
@@ -43,8 +44,13 @@ import type {
 
 export type * from '@runforge/contracts';
 
-export const ACCESS_TOKEN_STORAGE_KEY = 'runforge.accessToken';
+// access token 只存内存(不落 localStorage)：页面 XSS 时被偷到的窗口更小,
+// 代价是刷新页面后需要先用 refreshToken 静默换新的，见 restoreSession()。
+// refreshToken 是长期凭证，必须持久化才能跨刷新/关闭标签页存活。
+const REFRESH_TOKEN_STORAGE_KEY = 'runforge.refreshToken';
 const ACCESS_TOKEN_INVALID_EVENT = 'runforge:access-token-invalid';
+
+let currentAccessToken = '';
 
 export interface FileShareLink {
   path: string;
@@ -59,32 +65,108 @@ export interface FileShareAccess {
 }
 
 export function readAccessToken(): string {
+  return currentAccessToken;
+}
+
+function setAccessToken(token: string): void {
+  currentAccessToken = token;
+}
+
+function readRefreshToken(): string {
   try {
-    return window.localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY) ?? '';
+    return window.localStorage.getItem(REFRESH_TOKEN_STORAGE_KEY) ?? '';
   } catch {
     return '';
   }
 }
 
-export function writeAccessToken(token: string): void {
+function writeRefreshToken(token: string): void {
   try {
-    window.localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, token);
+    window.localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, token);
   } catch {
-    // localStorage 不可用时，页面刷新后需要重新输入访问 token。
+    // localStorage 不可用时，页面刷新后需要重新登录。
   }
 }
 
-export function clearAccessToken(): void {
+function clearRefreshToken(): void {
   try {
-    window.localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
+    window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
   } catch {
     // 清理失败只影响本地状态，不影响后端鉴权结果。
   }
 }
 
+export function clearAccessToken(): void {
+  setAccessToken('');
+  clearRefreshToken();
+}
+
 export function onAccessTokenInvalid(listener: () => void): () => void {
   window.addEventListener(ACCESS_TOKEN_INVALID_EVENT, listener);
   return () => window.removeEventListener(ACCESS_TOKEN_INVALID_EVENT, listener);
+}
+
+export async function login(email: string, password: string, tenantId?: string): Promise<TenantUserSummary> {
+  const res = await globalThis.fetch('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password, tenantId }),
+  });
+  if (!res.ok) {
+    let detail = '';
+    try {
+      detail = ((await res.json()) as { error?: string }).error ?? '';
+    } catch {
+      detail = '';
+    }
+    throw new Error(detail || `${res.status} ${res.statusText}`);
+  }
+  const body = (await res.json()) as { accessToken: string; refreshToken: string; user: TenantUserSummary };
+  setAccessToken(body.accessToken);
+  writeRefreshToken(body.refreshToken);
+  return body.user;
+}
+
+/** 页面刷新后调用：用持久化的 refreshToken 静默换一个新的 access token。
+ *  没有 refreshToken 或刷新失败都返回 false，调用方应展示登录页。 */
+export async function restoreSession(): Promise<boolean> {
+  const refreshToken = readRefreshToken();
+  if (!refreshToken) return false;
+  return refreshAccessToken(refreshToken);
+}
+
+async function refreshAccessToken(refreshToken: string): Promise<boolean> {
+  try {
+    const res = await globalThis.fetch('/api/auth/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken }),
+    });
+    if (!res.ok) {
+      clearAccessToken();
+      return false;
+    }
+    const body = (await res.json()) as { accessToken: string };
+    setAccessToken(body.accessToken);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function logout(): Promise<void> {
+  const refreshToken = readRefreshToken();
+  clearAccessToken();
+  if (!refreshToken) return;
+  try {
+    await globalThis.fetch('/api/auth/logout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken }),
+    });
+  } catch {
+    // 登出请求失败不影响本地已清空的登录态；服务端 refresh token 会自然过期。
+  }
 }
 
 function authHeaders(headers?: HeadersInit): Headers {
@@ -95,12 +177,16 @@ function authHeaders(headers?: HeadersInit): Headers {
 }
 
 export function authFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
-  return globalThis.fetch(input, { ...init, headers: authHeaders(init.headers) }).then((res) => {
-    if (res.status === 401) {
+  return globalThis.fetch(input, { ...init, headers: authHeaders(init.headers) }).then(async (res) => {
+    if (res.status !== 401) return res;
+    const refreshToken = readRefreshToken();
+    if (!refreshToken || !(await refreshAccessToken(refreshToken))) {
       clearAccessToken();
       window.dispatchEvent(new Event(ACCESS_TOKEN_INVALID_EVENT));
+      return res;
     }
-    return res;
+    // 静默换新成功，用新 access token 重试一次原请求。
+    return globalThis.fetch(input, { ...init, headers: authHeaders(init.headers) });
   });
 }
 

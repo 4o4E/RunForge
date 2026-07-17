@@ -18,6 +18,10 @@ const ID_PREFIXES = {
   shellSession: 'ss',
   shellCommand: 'sc',
   subagentRun: 'sr',
+  tenant: 'tn',
+  user: 'us',
+  authToken: 'at',
+  systemAdmin: 'sa',
 } as const;
 
 export type EntityIdKind = keyof typeof ID_PREFIXES;
@@ -126,4 +130,20 @@ export function newShellCommandId(): string {
 
 export function newSubagentRunId(): string {
   return newEntityId('subagentRun');
+}
+
+export function newTenantId(): string {
+  return newEntityId('tenant');
+}
+
+export function newUserId(): string {
+  return newEntityId('user');
+}
+
+export function newAuthTokenId(): string {
+  return newEntityId('authToken');
+}
+
+export function newSystemAdminId(): string {
+  return newEntityId('systemAdmin');
 }

@@ -1,7 +1,7 @@
 import type { AgentEvent, RunStatus } from '../agent/types.js';
 import type { GoalState } from '../agent/goal.js';
 import type { LlmMessage } from '../llm/types.js';
-import type { WebPushSubscriptionInput } from '@runforge/contracts';
+import type { TenantUserRole, WebPushSubscriptionInput } from '@runforge/contracts';
 
 export interface ThreadRow {
   id: string;
@@ -161,6 +161,46 @@ export interface PushSubscriptionRow {
   updated_at: string;
 }
 
+// 多租户改造 Phase 1(docs/multi-tenancy-design.md §4)——身份层的表。
+export interface TenantRow {
+  id: string;
+  name: string;
+  status: 'active' | 'suspended';
+  created_at: string;
+}
+
+export interface UserRow {
+  id: string;
+  tenant_id: string;
+  email: string;
+  password_hash: string;
+  role: TenantUserRole;
+  status: 'active' | 'disabled';
+  created_at: string;
+}
+
+export interface SystemAdminRow {
+  id: string;
+  email: string;
+  password_hash: string;
+  status: 'active' | 'disabled';
+  created_at: string;
+}
+
+export type AuthTokenKind = 'refresh' | 'api';
+
+export interface AuthTokenRow {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  kind: AuthTokenKind;
+  token_hash: string;
+  label: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+}
+
 /**
  * Persistence port. The executor depends on this interface, not on PG directly,
  * so it can be unit-tested with an in-memory implementation.
@@ -294,4 +334,32 @@ export interface Store {
   upsertPushSubscription(input: WebPushSubscriptionInput, userAgent?: string | null): Promise<PushSubscriptionRow>;
   listEnabledPushSubscriptions(): Promise<PushSubscriptionRow[]>;
   disablePushSubscription(endpoint: string, error?: string | null): Promise<void>;
+
+  // 多租户改造 Phase 1(docs/multi-tenancy-design.md §4)。
+  createTenant(input: { id: string; name: string }): Promise<TenantRow>;
+  findTenant(id: string): Promise<TenantRow | null>;
+  listTenants(): Promise<TenantRow[]>;
+
+  createUser(input: { tenantId: string; email: string; passwordHash: string; role: TenantUserRole }): Promise<UserRow>;
+  findUserByEmail(tenantId: string, email: string): Promise<UserRow | null>;
+  findUserById(id: string): Promise<UserRow | null>;
+  listUsersByTenant(tenantId: string): Promise<UserRow[]>;
+  updateUserRole(id: string, role: TenantUserRole): Promise<UserRow | null>;
+  updateUserStatus(id: string, status: 'active' | 'disabled'): Promise<UserRow | null>;
+
+  createAuthToken(input: {
+    tenantId: string;
+    userId: string;
+    kind: AuthTokenKind;
+    tokenHash: string;
+    label?: string | null;
+    expiresAt?: string | null;
+  }): Promise<AuthTokenRow>;
+  findAuthTokenByHash(tokenHash: string): Promise<AuthTokenRow | null>;
+  revokeAuthToken(id: string): Promise<void>;
+  listApiTokensByTenant(tenantId: string): Promise<AuthTokenRow[]>;
+
+  createSystemAdmin(input: { email: string; passwordHash: string }): Promise<SystemAdminRow>;
+  findSystemAdminByEmail(email: string): Promise<SystemAdminRow | null>;
+  listSystemAdmins(): Promise<SystemAdminRow[]>;
 }

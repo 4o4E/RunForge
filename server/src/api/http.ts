@@ -9,6 +9,11 @@ import { datasourcesApi } from './datasources.js';
 import { runtimeApi } from './runtime.js';
 import { notificationsApi } from './notifications.js';
 import { requireApiAccess } from './auth.js';
+import { authApi } from './authRoutes.js';
+import { systemAuthApi } from './systemAuth.js';
+import { tenantsApi } from './tenants.js';
+import { systemApi } from './system.js';
+import { requireSystemScope, requireTenantScope } from '../auth/guards.js';
 import { releaseRunLeases } from '../datasources/accountPool.js';
 import type { AskUserAnswer, AskUserOption, AskUserSpec } from '../agent/types.js';
 import { shellManager } from '../shell/manager.js';
@@ -19,8 +24,26 @@ import { isWithin } from '../tools/policy.js';
 
 export const api = Router();
 
+// 登录/刷新/登出不需要已建立的身份，必须挂在 requireApiAccess 之前
+// (docs/multi-tenancy-design.md §4"请求校验路径")。
+api.use('/auth', authApi);
+api.use('/system/auth', systemAuthApi);
+
 api.use(requireApiAccess);
+
+// /system 和 /files 各自单独处理 scope:/system 本身就要求 system 身份；/files 还要
+// 兼容"免身份的签名分享链接"这个例外(见 files.ts 的 requireFileAccess)，所以两者都要
+// 挂在下面这条"租户身份"总闸之前，否则会被总闸挡在门外。
+api.use('/system', requireSystemScope, systemApi);
 api.use('/files', filesApi);
+
+// 总闸:下面全部路由都是面向租户用户的接口，系统管理员 JWT 不能冒充租户用户调用
+// (docs/multi-tenancy-design.md §4)。注意这只堵住了"系统管理员访问租户接口"这个越权，
+// 不是"租户之间互相看到对方数据"——后者需要 threads/runs 等业务表加 tenant_id 过滤，
+// 是下一阶段的事，这里没有一并解决。
+api.use(requireTenantScope);
+
+api.use('/tenants', tenantsApi);
 api.use('/settings', settingsApi);
 api.use('/datasources', datasourcesApi);
 api.use('/runtime', runtimeApi);

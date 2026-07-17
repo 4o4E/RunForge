@@ -1,31 +1,16 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
 import { config } from '../config.js';
+import { resolveIdentityFromAuthorizationHeader } from '../auth/resolve.js';
+import { runWithIdentity } from '../auth/context.js';
 
 export const MIN_SHARE_TTL_SECONDS = 60;
 export const MAX_SHARE_TTL_SECONDS = 10 * 365 * 24 * 60 * 60;
-
-export function assertAccessTokenConfigured(): void {
-  if (!config.auth.accessToken.trim()) {
-    throw new Error('缺少 RUNFORGE_ACCESS_TOKEN，请在 .env 中配置访问 token');
-  }
-}
-
-function tokenFromAuthorization(header: unknown): string {
-  if (typeof header !== 'string') return '';
-  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
-  return match?.[1]?.trim() ?? '';
-}
 
 function safeEqual(a: string, b: string): boolean {
   const left = Buffer.from(a);
   const right = Buffer.from(b);
   return left.length === right.length && timingSafeEqual(left, right);
-}
-
-export function hasValidAccessToken(req: Request): boolean {
-  const token = tokenFromAuthorization(req.headers.authorization);
-  return Boolean(token && config.auth.accessToken && safeEqual(token, config.auth.accessToken));
 }
 
 function isSignedFileRequest(req: Request): boolean {
@@ -35,12 +20,19 @@ function isSignedFileRequest(req: Request): boolean {
     && typeof req.query.expires === 'string';
 }
 
-export function requireApiAccess(req: Request, res: Response, next: NextFunction): void {
-  if (hasValidAccessToken(req) || isSignedFileRequest(req)) {
+/** 全局鉴权中间件:签名文件请求直接放行(不建立身份上下文);否则解析出
+ *  {tenantId, userId, role} 或系统管理员身份,写入 AsyncLocalStorage 再继续。 */
+export async function requireApiAccess(req: Request, res: Response, next: NextFunction): Promise<void> {
+  if (isSignedFileRequest(req)) {
     next();
     return;
   }
-  res.status(401).json({ error: '缺少或无效的访问 token' });
+  const identity = await resolveIdentityFromAuthorizationHeader(req.headers.authorization);
+  if (!identity) {
+    res.status(401).json({ error: '缺少或无效的访问 token' });
+    return;
+  }
+  runWithIdentity(identity, next);
 }
 
 export function tokenFromWebSocketProtocols(header: unknown): string {
@@ -55,13 +47,9 @@ export function tokenFromWebSocketProtocols(header: unknown): string {
   }
 }
 
-export function isValidAccessTokenValue(token: string): boolean {
-  return Boolean(token && config.auth.accessToken && safeEqual(token, config.auth.accessToken));
-}
-
 function shareSecret(): string {
   const secret = config.auth.shareSecret.trim();
-  if (!secret) throw new Error('缺少 RUNFORGE_SHARE_SECRET 或 RUNFORGE_ACCESS_TOKEN，无法生成分享签名');
+  if (!secret) throw new Error('缺少 RUNFORGE_SHARE_SECRET，无法生成分享签名');
   return secret;
 }
 

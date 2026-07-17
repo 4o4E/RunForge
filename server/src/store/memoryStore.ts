@@ -4,6 +4,7 @@ import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
 import { sanitizeThreadMessagesForModel } from './messageView.js';
 import type {
+  AuthTokenRow,
   PushSubscriptionRow,
   RunRow,
   ShellActor,
@@ -14,13 +15,26 @@ import type {
   Store,
   SubagentRunRow,
   StepRow,
+  SystemAdminRow,
+  TenantRow,
   ThreadNoticeRow,
   ThreadMessage,
   ThreadSearchResultRow,
   ThreadRow,
+  UserRow,
 } from './types.js';
-import type { WebPushSubscriptionInput } from '@runforge/contracts';
-import { newRunId, newShellCommandId, newShellSessionId, newStepId, newSubagentRunId, newThreadId } from '../id.js';
+import type { TenantUserRole, WebPushSubscriptionInput } from '@runforge/contracts';
+import {
+  newAuthTokenId,
+  newRunId,
+  newShellCommandId,
+  newShellSessionId,
+  newStepId,
+  newSubagentRunId,
+  newSystemAdminId,
+  newThreadId,
+  newUserId,
+} from '../id.js';
 
 function isEphemeralSystemMessage(role: LlmMessage['role'], content: string | null): boolean {
   return role === 'system' && typeof content === 'string' && content.startsWith('已激活 Skill / Activated Skill:');
@@ -52,6 +66,10 @@ export class MemoryStore implements Store {
   private subagentRuns = new Map<string, SubagentRunRow>();
   private threadNotices = new Map<string, ThreadNoticeRow[]>();
   private pushSubscriptions = new Map<string, PushSubscriptionRow>();
+  private tenants = new Map<string, TenantRow>();
+  private users = new Map<string, UserRow>();
+  private systemAdmins = new Map<string, SystemAdminRow>();
+  private authTokens = new Map<string, AuthTokenRow>();
   private seq = 0;
   private shellLogSeq = 0;
   private now = () => new Date().toISOString();
@@ -707,5 +725,118 @@ export class MemoryStore implements Store {
     const row = this.pushSubscriptions.get(endpoint);
     if (!row) return;
     this.pushSubscriptions.set(endpoint, { ...row, enabled: false, last_error: error ?? null, updated_at: this.now() });
+  }
+
+  // 多租户改造 Phase 1(docs/multi-tenancy-design.md §4)。
+  async createTenant(input: { id: string; name: string }): Promise<TenantRow> {
+    const row: TenantRow = { id: input.id, name: input.name, status: 'active', created_at: this.now() };
+    this.tenants.set(row.id, row);
+    return row;
+  }
+
+  async findTenant(id: string): Promise<TenantRow | null> {
+    return this.tenants.get(id) ?? null;
+  }
+
+  async listTenants(): Promise<TenantRow[]> {
+    return [...this.tenants.values()].sort((a, b) => a.created_at.localeCompare(b.created_at));
+  }
+
+  async createUser(input: { tenantId: string; email: string; passwordHash: string; role: TenantUserRole }): Promise<UserRow> {
+    const row: UserRow = {
+      id: newUserId(),
+      tenant_id: input.tenantId,
+      email: input.email,
+      password_hash: input.passwordHash,
+      role: input.role,
+      status: 'active',
+      created_at: this.now(),
+    };
+    this.users.set(row.id, row);
+    return row;
+  }
+
+  async findUserByEmail(tenantId: string, email: string): Promise<UserRow | null> {
+    return [...this.users.values()].find((u) => u.tenant_id === tenantId && u.email === email) ?? null;
+  }
+
+  async findUserById(id: string): Promise<UserRow | null> {
+    return this.users.get(id) ?? null;
+  }
+
+  async listUsersByTenant(tenantId: string): Promise<UserRow[]> {
+    return [...this.users.values()].filter((u) => u.tenant_id === tenantId).sort((a, b) => a.created_at.localeCompare(b.created_at));
+  }
+
+  async updateUserRole(id: string, role: TenantUserRole): Promise<UserRow | null> {
+    const row = this.users.get(id);
+    if (!row) return null;
+    row.role = role;
+    return row;
+  }
+
+  async updateUserStatus(id: string, status: 'active' | 'disabled'): Promise<UserRow | null> {
+    const row = this.users.get(id);
+    if (!row) return null;
+    row.status = status;
+    return row;
+  }
+
+  async createAuthToken(input: {
+    tenantId: string;
+    userId: string;
+    kind: 'refresh' | 'api';
+    tokenHash: string;
+    label?: string | null;
+    expiresAt?: string | null;
+  }): Promise<AuthTokenRow> {
+    const row: AuthTokenRow = {
+      id: newAuthTokenId(),
+      tenant_id: input.tenantId,
+      user_id: input.userId,
+      kind: input.kind,
+      token_hash: input.tokenHash,
+      label: input.label ?? null,
+      expires_at: input.expiresAt ?? null,
+      revoked_at: null,
+      created_at: this.now(),
+    };
+    this.authTokens.set(row.id, row);
+    return row;
+  }
+
+  async findAuthTokenByHash(tokenHash: string): Promise<AuthTokenRow | null> {
+    return [...this.authTokens.values()].find((t) => t.token_hash === tokenHash) ?? null;
+  }
+
+  async revokeAuthToken(id: string): Promise<void> {
+    const row = this.authTokens.get(id);
+    if (row && !row.revoked_at) row.revoked_at = this.now();
+  }
+
+  async listApiTokensByTenant(tenantId: string): Promise<AuthTokenRow[]> {
+    return [...this.authTokens.values()]
+      .filter((t) => t.tenant_id === tenantId && t.kind === 'api')
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+  }
+
+  async createSystemAdmin(input: { email: string; passwordHash: string }): Promise<SystemAdminRow> {
+    const row: SystemAdminRow = {
+      id: newSystemAdminId(),
+      email: input.email,
+      password_hash: input.passwordHash,
+      status: 'active',
+      created_at: this.now(),
+    };
+    this.systemAdmins.set(row.id, row);
+    return row;
+  }
+
+  async findSystemAdminByEmail(email: string): Promise<SystemAdminRow | null> {
+    return [...this.systemAdmins.values()].find((a) => a.email === email) ?? null;
+  }
+
+  async listSystemAdmins(): Promise<SystemAdminRow[]> {
+    return [...this.systemAdmins.values()].sort((a, b) => a.created_at.localeCompare(b.created_at));
   }
 }

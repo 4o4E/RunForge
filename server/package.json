@@ -8,7 +8,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "test": "node --import tsx --test src/id.test.ts src/api/auth.test.ts src/api/files.test.ts src/tools/tools.test.ts src/tools/policy.test.ts src/tools/sandbox.test.ts src/datasources/accountPool.test.ts src/mcp/client.test.ts src/llm/providers.test.ts src/llm/aiSdk.test.ts src/llm/attachments.test.ts src/workflows/registry.test.ts src/agent/executor.test.ts src/agent/compaction.test.ts src/agent/persistence.test.ts src/agent/goal.test.ts",
+    "test": "STORE=memory node --import tsx --test src/id.test.ts src/api/auth.test.ts src/api/files.test.ts src/tools/tools.test.ts src/tools/policy.test.ts src/tools/sandbox.test.ts src/datasources/accountPool.test.ts src/mcp/client.test.ts src/llm/providers.test.ts src/llm/aiSdk.test.ts src/llm/attachments.test.ts src/workflows/registry.test.ts src/agent/executor.test.ts src/agent/compaction.test.ts src/agent/persistence.test.ts src/agent/goal.test.ts src/auth/bootstrap.test.ts src/api/authRoutes.test.ts",
     "verify:agent-core": "tsx src/evals/agentCoreVerification.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "db:migrate": "tsx src/db/migrate.ts"
@@ -30,6 +30,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.3",
     "pg": "^8.13.1",
     "web-push": "^3.6.7",
     "ws": "^8.18.0",
@@ -38,6 +39,7 @@
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^20.17.10",
     "@types/pg": "^8.11.10",
     "@types/web-push": "^3.6.4",

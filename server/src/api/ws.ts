@@ -3,7 +3,8 @@ import { WebSocketServer } from 'ws';
 import { runBus } from '../agent/bus.js';
 import { shellBus } from '../shell/bus.js';
 import { store } from '../store/index.js';
-import { isValidAccessTokenValue, tokenFromWebSocketProtocols } from './auth.js';
+import { tokenFromWebSocketProtocols } from './auth.js';
+import { looksLikeJwt, verifyAccessToken } from '../auth/jwt.js';
 import type { AgentEvent } from '../agent/types.js';
 
 /**
@@ -16,7 +17,16 @@ export function attachWebSocket(server: Server): void {
   const wss = new WebSocketServer({ server, path: '/ws' });
 
   wss.on('connection', async (socket, req) => {
-    if (!isValidAccessTokenValue(tokenFromWebSocketProtocols(req.headers['sec-websocket-protocol']))) {
+    // WebSocket 只接受 access JWT(不再兼容老的静态共享 token，见
+    // docs/multi-tenancy-design.md §4)：连接建立时机短，前端在建连前用
+    // refresh token 换新 JWT 即可，不需要"两种凭证并存"的兼容路径。
+    const token = tokenFromWebSocketProtocols(req.headers['sec-websocket-protocol']);
+    const claims = looksLikeJwt(token) ? verifyAccessToken(token) : null;
+    // run/shell 事件天生是租户用户的资源；系统管理员在 Phase 1 没有自己的 thread/run，
+    // 不应该能借着一个合法的系统管理员 JWT 去订阅任意 runId/threadId 的事件流
+    // (docs/multi-tenancy-design.md §4)。真正的"租户之间互相看不到彼此事件"还需要
+    // runBus/shellBus 按 tenant_id 过滤，那是下一阶段的事，这里只堵住 scope 越界这一层。
+    if (!claims || claims.scope !== 'tenant') {
       socket.close(1008, '访问 token 无效');
       return;
     }

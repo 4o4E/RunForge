@@ -86,8 +86,20 @@ export const config = {
   port: Number(process.env.PORT ?? 8080),
   databaseUrl: process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL,
   auth: {
+    // 兼容路径:老部署的静态共享 token。多租户改造(docs/multi-tenancy-design.md §4)后
+    // 只在启动 bootstrap 时使用一次,注册成 default tenant 下 owner 账号的一条 API token,
+    // 不再是唯一的鉴权手段。
     accessToken: process.env.RUNFORGE_ACCESS_TOKEN ?? '',
     shareSecret: process.env.RUNFORGE_SHARE_SECRET ?? process.env.RUNFORGE_ACCESS_TOKEN ?? '',
+    // JWT 签名密钥(HS256)。单体部署没有跨服务验签需求,不需要非对称密钥。
+    jwtSecret: process.env.RUNFORGE_JWT_SECRET ?? '',
+    // access token 短期有效(默认 45 分钟),换取"免查库校验"和"吊销延迟可接受"之间的折中。
+    accessTokenTtlSeconds: Number(process.env.RUNFORGE_ACCESS_TOKEN_TTL_SECONDS ?? 45 * 60),
+    // refresh token 长期有效(默认 30 天),存 hash,前端用它静默换取新的 access token。
+    refreshTokenTtlSeconds: Number(process.env.RUNFORGE_REFRESH_TOKEN_TTL_SECONDS ?? 30 * 24 * 60 * 60),
+    // 首次启动引导账号的初始密码;不填则随机生成并只在启动日志打印一次。
+    bootstrapAdminPassword: process.env.RUNFORGE_BOOTSTRAP_ADMIN_PASSWORD ?? '',
+    bootstrapSysadminPassword: process.env.RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD ?? '',
   },
   llm: {
     // aisdk | openai-responses | openai-chat | anthropic | mock

@@ -5,6 +5,7 @@ import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
 import { sanitizeThreadMessagesForModel } from './messageView.js';
 import type {
+  AuthTokenRow,
   PushSubscriptionRow,
   RunRow,
   ShellActor,
@@ -15,13 +16,26 @@ import type {
   Store,
   SubagentRunRow,
   StepRow,
+  SystemAdminRow,
+  TenantRow,
   ThreadNoticeRow,
   ThreadMessage,
   ThreadSearchResultRow,
   ThreadRow,
+  UserRow,
 } from './types.js';
-import type { WebPushSubscriptionInput } from '@runforge/contracts';
-import { newRunId, newShellCommandId, newShellSessionId, newStepId, newSubagentRunId, newThreadId } from '../id.js';
+import type { TenantUserRole, WebPushSubscriptionInput } from '@runforge/contracts';
+import {
+  newAuthTokenId,
+  newRunId,
+  newShellCommandId,
+  newShellSessionId,
+  newStepId,
+  newSubagentRunId,
+  newSystemAdminId,
+  newThreadId,
+  newUserId,
+} from '../id.js';
 
 function isEphemeralSystemMessage(role: LlmMessage['role'], content: string | null): boolean {
   return role === 'system' && typeof content === 'string' && content.startsWith('已激活 Skill / Activated Skill:');
@@ -925,5 +939,127 @@ export class PgStore implements Store {
        WHERE endpoint = $1`,
       [endpoint, error ?? null],
     );
+  }
+
+  // 多租户改造 Phase 1(docs/multi-tenancy-design.md §4)。
+  async createTenant(input: { id: string; name: string }): Promise<TenantRow> {
+    const { rows } = await query<TenantRow>(
+      `INSERT INTO tenants (id, name) VALUES ($1, $2) RETURNING *`,
+      [input.id, input.name],
+    );
+    return rows[0];
+  }
+
+  async findTenant(id: string): Promise<TenantRow | null> {
+    const { rows } = await query<TenantRow>(`SELECT * FROM tenants WHERE id = $1`, [id]);
+    return rows[0] ?? null;
+  }
+
+  async listTenants(): Promise<TenantRow[]> {
+    const { rows } = await query<TenantRow>(`SELECT * FROM tenants ORDER BY created_at`);
+    return rows;
+  }
+
+  async createUser(input: { tenantId: string; email: string; passwordHash: string; role: TenantUserRole }): Promise<UserRow> {
+    const { rows } = await query<UserRow>(
+      `INSERT INTO users (id, tenant_id, email, password_hash, role)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [newUserId(), input.tenantId, input.email, input.passwordHash, input.role],
+    );
+    return rows[0];
+  }
+
+  async findUserByEmail(tenantId: string, email: string): Promise<UserRow | null> {
+    const { rows } = await query<UserRow>(
+      `SELECT * FROM users WHERE tenant_id = $1 AND email = $2`,
+      [tenantId, email],
+    );
+    return rows[0] ?? null;
+  }
+
+  async findUserById(id: string): Promise<UserRow | null> {
+    const { rows } = await query<UserRow>(`SELECT * FROM users WHERE id = $1`, [id]);
+    return rows[0] ?? null;
+  }
+
+  async listUsersByTenant(tenantId: string): Promise<UserRow[]> {
+    const { rows } = await query<UserRow>(
+      `SELECT * FROM users WHERE tenant_id = $1 ORDER BY created_at`,
+      [tenantId],
+    );
+    return rows;
+  }
+
+  async updateUserRole(id: string, role: TenantUserRole): Promise<UserRow | null> {
+    const { rows } = await query<UserRow>(
+      `UPDATE users SET role = $2 WHERE id = $1 RETURNING *`,
+      [id, role],
+    );
+    return rows[0] ?? null;
+  }
+
+  async updateUserStatus(id: string, status: 'active' | 'disabled'): Promise<UserRow | null> {
+    const { rows } = await query<UserRow>(
+      `UPDATE users SET status = $2 WHERE id = $1 RETURNING *`,
+      [id, status],
+    );
+    return rows[0] ?? null;
+  }
+
+  async createAuthToken(input: {
+    tenantId: string;
+    userId: string;
+    kind: 'refresh' | 'api';
+    tokenHash: string;
+    label?: string | null;
+    expiresAt?: string | null;
+  }): Promise<AuthTokenRow> {
+    const { rows } = await query<AuthTokenRow>(
+      `INSERT INTO auth_tokens (id, tenant_id, user_id, kind, token_hash, label, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [newAuthTokenId(), input.tenantId, input.userId, input.kind, input.tokenHash, input.label ?? null, input.expiresAt ?? null],
+    );
+    return rows[0];
+  }
+
+  async findAuthTokenByHash(tokenHash: string): Promise<AuthTokenRow | null> {
+    const { rows } = await query<AuthTokenRow>(
+      `SELECT * FROM auth_tokens WHERE token_hash = $1`,
+      [tokenHash],
+    );
+    return rows[0] ?? null;
+  }
+
+  async revokeAuthToken(id: string): Promise<void> {
+    await query(
+      `UPDATE auth_tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL`,
+      [id],
+    );
+  }
+
+  async listApiTokensByTenant(tenantId: string): Promise<AuthTokenRow[]> {
+    const { rows } = await query<AuthTokenRow>(
+      `SELECT * FROM auth_tokens WHERE tenant_id = $1 AND kind = 'api' ORDER BY created_at DESC`,
+      [tenantId],
+    );
+    return rows;
+  }
+
+  async createSystemAdmin(input: { email: string; passwordHash: string }): Promise<SystemAdminRow> {
+    const { rows } = await query<SystemAdminRow>(
+      `INSERT INTO system_admins (id, email, password_hash) VALUES ($1, $2, $3) RETURNING *`,
+      [newSystemAdminId(), input.email, input.passwordHash],
+    );
+    return rows[0];
+  }
+
+  async findSystemAdminByEmail(email: string): Promise<SystemAdminRow | null> {
+    const { rows } = await query<SystemAdminRow>(`SELECT * FROM system_admins WHERE email = $1`, [email]);
+    return rows[0] ?? null;
+  }
+
+  async listSystemAdmins(): Promise<SystemAdminRow[]> {
+    const { rows } = await query<SystemAdminRow>(`SELECT * FROM system_admins ORDER BY created_at`);
+    return rows;
   }
 }
