@@ -2,6 +2,7 @@ import { Router } from 'express';
 import type { WebPushSubscriptionInput } from '@runforge/contracts';
 import { store } from '../store/index.js';
 import { getWebPushPublicKey } from '../notifications/push.js';
+import { requireScope } from '../auth/context.js';
 
 export const notificationsApi = Router();
 
@@ -26,8 +27,10 @@ notificationsApi.get('/push/public-key', async (_req, res) => {
 });
 
 notificationsApi.post('/push/subscriptions', async (req, res) => {
+  const scope = requireScope();
+  if (!scope) return res.status(403).json({ error: '需要租户身份' });
   try {
-    const row = await store.upsertPushSubscription(subscriptionFromBody(req.body), req.get('user-agent') ?? null);
+    const row = await store.upsertPushSubscription(scope, subscriptionFromBody(req.body), req.get('user-agent') ?? null);
     res.status(201).json(row);
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });

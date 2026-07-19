@@ -5,10 +5,12 @@ import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Request, Response } from 'express';
 import { getToolSettings } from '../settings.js';
+import { resolveWorkspaceRoot } from '../files/workspaceRoot.js';
 import { ensureOfficePdfPreview, isOfficeConvertiblePath } from '../files/officePreview.js';
 import { mediaTypeFromPath, normalizeRemotePath, streamWorkspaceFile, toRemotePath, workspaceRoot } from '../files/workspace.js';
 import { clampShareTtlSeconds, signFileShare, verifyFileShare } from './auth.js';
 import { resolveIdentityFromAuthorizationHeader } from '../auth/resolve.js';
+import { requireScope } from '../auth/context.js';
 import { requireTenantScope } from '../auth/guards.js';
 
 const SMALL_FILE_BYTES = 200 * 1024;
@@ -36,13 +38,13 @@ function canonicalRemotePath(abs: string, configuredRoot: string): string {
   return remotePath === '.' ? '' : remotePath;
 }
 
-function rawFileUrl(path: string, expires: number, sig: string): string {
-  const params = new URLSearchParams({ path, expires: String(expires), sig });
+function rawFileUrl(path: string, tenantId: string, expires: number, sig: string): string {
+  const params = new URLSearchParams({ path, tenant: tenantId, expires: String(expires), sig });
   return `/api/files/raw?${params.toString()}`;
 }
 
-function sharePageUrl(path: string, expires: number, sig: string): string {
-  const params = new URLSearchParams({ path, expires: String(expires), sig });
+function sharePageUrl(path: string, tenantId: string, expires: number, sig: string): string {
+  const params = new URLSearchParams({ path, tenant: tenantId, expires: String(expires), sig });
   return `/share/file?${params.toString()}`;
 }
 
@@ -51,15 +53,31 @@ function fileName(path: string): string {
   return parts.at(-1) || path || 'file';
 }
 
-async function requireFileAccess(req: Request, res: Response, absPath: string, configuredRoot: string): Promise<boolean> {
+/** 签名分享链接没有请求身份，tenantId 只能来自调用方自己声明的 query.tenant，
+ *  且必须和签名当时绑定的 tenantId 一致(verifyFileShare 会校验)——否则改一下
+ *  query.tenant 就能让同一个签名在别的租户 workspaceRoot 下"重放"
+ *  (docs/multi-tenancy-design.md §7)。 */
+async function resolveFileAccess(
+  req: Request,
+  res: Response,
+  requestedPath: unknown,
+): Promise<{ tenantId: string; workspaceRoot: string; file: string } | null> {
   const identity = await resolveIdentityFromAuthorizationHeader(req.headers.authorization);
   // 只有租户身份才能直接读工作区文件；系统管理员不能借着这条路径绕过审计去看任意租户的文件
   // (docs/multi-tenancy-design.md §4)。免身份的签名分享链接不受影响，走下面的签名校验分支。
-  if (identity?.scope === 'tenant') return true;
-  const path = canonicalRemotePath(absPath, configuredRoot);
-  if (verifyFileShare(path, req.query.expires, req.query.sig)) return true;
+  if (identity?.scope === 'tenant') {
+    const root = resolveWorkspaceRoot(identity.tenantId);
+    return { tenantId: identity.tenantId, workspaceRoot: root, file: normalizeRemotePath(requestedPath, root) };
+  }
+  const tenantId = typeof req.query.tenant === 'string' && req.query.tenant.trim() ? req.query.tenant.trim() : 'default';
+  const root = resolveWorkspaceRoot(tenantId);
+  const file = normalizeRemotePath(requestedPath, root);
+  const path = canonicalRemotePath(file, root);
+  if (verifyFileShare(path, tenantId, req.query.expires, req.query.sig)) {
+    return { tenantId, workspaceRoot: root, file };
+  }
   res.status(403).json({ error: '文件分享签名无效或已过期' });
-  return false;
+  return null;
 }
 
 function previewLine(line: string): string {
@@ -104,14 +122,18 @@ export function parseByteRange(header: unknown, size: number): ByteRangeResult {
 }
 
 filesApi.get('/info', requireTenantScope, async (_req, res) => {
-  const settings = await getToolSettings();
+  const scope = requireScope();
+  if (!scope) return res.status(403).json({ error: '需要租户身份' });
+  const settings = await getToolSettings(scope);
   const root = workspaceRoot(settings.workspaceRoot);
   res.json({ workspaceRoot: root, rootPath: toRemotePath(root, settings.workspaceRoot) });
 });
 
 filesApi.get('/list', requireTenantScope, async (req, res) => {
+  const scope = requireScope();
+  if (!scope) return res.status(403).json({ error: '需要租户身份' });
   try {
-    const settings = await getToolSettings();
+    const settings = await getToolSettings(scope);
     const dir = normalizeRemotePath(req.query.path, settings.workspaceRoot);
     const info = await stat(dir);
     if (!info.isDirectory()) return res.status(400).json({ error: 'path 不是目录' });
@@ -138,8 +160,10 @@ filesApi.get('/list', requireTenantScope, async (req, res) => {
 });
 
 filesApi.post('/upload', requireTenantScope, async (req, res) => {
+  const scope = requireScope();
+  if (!scope) return res.status(403).json({ error: '需要租户身份' });
   try {
-    const settings = await getToolSettings();
+    const settings = await getToolSettings(scope);
     const targetPath = normalizeRemotePath(req.body?.path, settings.workspaceRoot);
     const contentBase64 = String(req.body?.contentBase64 ?? '');
     if (!contentBase64) return res.status(400).json({ error: 'contentBase64 为必填' });
@@ -154,8 +178,10 @@ filesApi.post('/upload', requireTenantScope, async (req, res) => {
 });
 
 filesApi.post('/share-link', requireTenantScope, async (req, res) => {
+  const scope = requireScope();
+  if (!scope) return res.status(403).json({ error: '需要租户身份' });
   try {
-    const settings = await getToolSettings();
+    const settings = await getToolSettings(scope);
     const file = normalizeRemotePath(req.body?.path, settings.workspaceRoot);
     const info = await stat(file);
     if (!info.isFile()) return res.status(400).json({ error: 'path 不是文件' });
@@ -163,12 +189,12 @@ filesApi.post('/share-link', requireTenantScope, async (req, res) => {
     const path = canonicalRemotePath(file, settings.workspaceRoot);
     const ttlSeconds = clampShareTtlSeconds(req.body?.ttlSeconds);
     const expires = Math.floor(Date.now() / 1000) + ttlSeconds;
-    const sig = signFileShare(path, expires);
+    const sig = signFileShare(path, scope.tenantId, expires);
     res.status(201).json({
       path,
       expiresAt: new Date(expires * 1000).toISOString(),
-      url: sharePageUrl(path, expires, sig),
-      rawUrl: rawFileUrl(path, expires, sig),
+      url: sharePageUrl(path, scope.tenantId, expires, sig),
+      rawUrl: rawFileUrl(path, scope.tenantId, expires, sig),
     });
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
@@ -177,9 +203,9 @@ filesApi.post('/share-link', requireTenantScope, async (req, res) => {
 
 filesApi.get('/preview', async (req, res) => {
   try {
-    const settings = await getToolSettings();
-    const file = normalizeRemotePath(req.query.path, settings.workspaceRoot);
-    if (!(await requireFileAccess(req, res, file, settings.workspaceRoot))) return;
+    const access = await resolveFileAccess(req, res, req.query.path);
+    if (!access) return;
+    const { file, workspaceRoot: root } = access;
     const info = await stat(file);
     if (!info.isFile()) return res.status(400).json({ error: 'path 不是文件' });
 
@@ -196,7 +222,7 @@ filesApi.get('/preview', async (req, res) => {
       // 渲染模式必须使用原文；截断后的 HTML/Markdown 会变成另一份损坏内容。
       const lines = previewTextLines(text, { truncateLongLines: !renderMode });
       return res.json({
-        path: toRemotePath(file, settings.workspaceRoot),
+        path: toRemotePath(file, root),
         size: info.size,
         mode: 'full',
         startLine: 1,
@@ -220,7 +246,7 @@ filesApi.get('/preview', async (req, res) => {
     const nextLine = startLine + lines.length;
     const hasMore = nextLine <= lineNo;
     res.json({
-      path: toRemotePath(file, settings.workspaceRoot),
+      path: toRemotePath(file, root),
       size: info.size,
       mode: 'chunk',
       startLine,
@@ -236,9 +262,9 @@ filesApi.get('/preview', async (req, res) => {
 
 filesApi.get('/hex', async (req, res) => {
   try {
-    const settings = await getToolSettings();
-    const file = normalizeRemotePath(req.query.path, settings.workspaceRoot);
-    if (!(await requireFileAccess(req, res, file, settings.workspaceRoot))) return;
+    const access = await resolveFileAccess(req, res, req.query.path);
+    if (!access) return;
+    const { file } = access;
     const info = await stat(file);
     if (!info.isFile()) return res.status(400).json({ error: 'path 不是文件' });
 
@@ -262,7 +288,7 @@ filesApi.get('/hex', async (req, res) => {
     const nextOffset = offset + bytesRead;
     const hasMore = nextOffset < info.size;
     res.json({
-      path: toRemotePath(file, settings.workspaceRoot),
+      path: toRemotePath(file, access.workspaceRoot),
       size: info.size,
       offset,
       limit: bytesRead,
@@ -277,15 +303,15 @@ filesApi.get('/hex', async (req, res) => {
 
 filesApi.get('/pdf-preview', async (req, res) => {
   try {
-    const settings = await getToolSettings();
-    const file = normalizeRemotePath(req.query.path, settings.workspaceRoot);
-    if (!(await requireFileAccess(req, res, file, settings.workspaceRoot))) return;
+    const access = await resolveFileAccess(req, res, req.query.path);
+    if (!access) return;
+    const { file, workspaceRoot: root, tenantId } = access;
     const info = await stat(file);
     if (!info.isFile()) return res.status(400).json({ error: 'path 不是文件' });
     if (!isOfficeConvertiblePath(file)) return res.status(415).json({ error: '当前文件类型不支持 PDF 预览' });
 
-    const remotePath = canonicalRemotePath(file, settings.workspaceRoot);
-    const pdfPath = await ensureOfficePdfPreview({ file, remotePath, size: info.size, mtimeMs: info.mtimeMs });
+    const remotePath = canonicalRemotePath(file, root);
+    const pdfPath = await ensureOfficePdfPreview({ tenantId, file, remotePath, size: info.size, mtimeMs: info.mtimeMs });
     const pdfInfo = await stat(pdfPath);
     const range = parseByteRange(req.headers.range, pdfInfo.size);
 
@@ -319,9 +345,9 @@ filesApi.get('/pdf-preview', async (req, res) => {
 
 filesApi.get('/raw', async (req, res) => {
   try {
-    const settings = await getToolSettings();
-    const file = normalizeRemotePath(req.query.path, settings.workspaceRoot);
-    if (!(await requireFileAccess(req, res, file, settings.workspaceRoot))) return;
+    const access = await resolveFileAccess(req, res, req.query.path);
+    if (!access) return;
+    const { file, workspaceRoot: root } = access;
     const info = await stat(file);
     if (!info.isFile()) return res.status(400).json({ error: 'path 不是文件' });
 
@@ -330,7 +356,7 @@ filesApi.get('/raw', async (req, res) => {
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Cache-Control', 'private, max-age=60');
     if (req.query.download === '1') {
-      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(fileName(toRemotePath(file, settings.workspaceRoot)))}`);
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(fileName(toRemotePath(file, root)))}`);
     }
     if (range === 'invalid') {
       res.status(416);

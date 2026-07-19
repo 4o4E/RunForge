@@ -25,7 +25,7 @@ export function isOfficeConvertiblePath(path: string): boolean {
   return OFFICE_EXTENSIONS.has(ext);
 }
 
-export function officePdfCacheKey(input: { remotePath: string; size: number; mtimeMs: number; converterUrl: string; cacheVersion?: string }): string {
+export function officePdfCacheKey(input: { tenantId: string; remotePath: string; size: number; mtimeMs: number; converterUrl: string; cacheVersion?: string }): string {
   return createHash('sha256')
     .update(JSON.stringify({ version: 1, ...input, cacheVersion: input.cacheVersion ?? '' }))
     .digest('hex');
@@ -35,8 +35,10 @@ function converterUrl(): string {
   return config.preview.officeConverterUrl.trim().replace(/\/+$/, '');
 }
 
-function cacheRoot(): string {
-  return config.preview.officeCacheDir.trim() || join(tmpdir(), 'runforge-office-previews');
+// tenantId 既进哈希输入(防跨租户缓存碰撞)，也单独分目录(docs/multi-tenancy-design.md §7)。
+function cacheRoot(tenantId: string): string {
+  const base = config.preview.officeCacheDir.trim() || join(tmpdir(), 'runforge-office-previews');
+  return tenantId === 'default' ? base : join(base, 'tenants', tenantId);
 }
 
 async function convertWithLibreOffice(file: string, signal: AbortSignal): Promise<Buffer> {
@@ -59,17 +61,18 @@ async function convertWithLibreOffice(file: string, signal: AbortSignal): Promis
   return Buffer.from(await res.arrayBuffer());
 }
 
-export async function ensureOfficePdfPreview(input: { file: string; remotePath: string; size: number; mtimeMs: number }): Promise<string> {
+export async function ensureOfficePdfPreview(input: { tenantId: string; file: string; remotePath: string; size: number; mtimeMs: number }): Promise<string> {
   if (!isOfficeConvertiblePath(input.file)) throw new Error('当前文件类型不支持 Office PDF 预览');
 
   const key = officePdfCacheKey({
+    tenantId: input.tenantId,
     remotePath: input.remotePath,
     size: input.size,
     mtimeMs: input.mtimeMs,
     converterUrl: converterUrl(),
     cacheVersion: config.preview.officeCacheVersion,
   });
-  const dir = join(cacheRoot(), key);
+  const dir = join(cacheRoot(input.tenantId), key);
   const pdfPath = join(dir, 'preview.pdf');
 
   try {

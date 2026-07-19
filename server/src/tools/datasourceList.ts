@@ -46,12 +46,13 @@ export const datasourceListTool: Tool = {
       includeDisabled: { type: 'boolean', description: '是否包含 disabled 数据源，默认 false' },
     },
   },
-  async run(args) {
+  async run(args, ctx) {
+    if (!ctx?.scope) throw new Error('datasource_list 需要当前身份 scope，上下文缺失。');
     const includeDisabled = args.includeDisabled === true;
-    const datasources = (await listDatasources()).filter((datasource) => datasource.enabled && (includeDisabled || datasource.status === 'active'));
+    const datasources = (await listDatasources(ctx.scope)).filter((datasource) => datasource.enabled && (includeDisabled || datasource.status === 'active'));
     const result = [];
     for (const datasource of datasources) {
-      result.push(publicDatasourceForTool(datasource, await listPermissionProfiles(datasource.id)));
+      result.push(publicDatasourceForTool(datasource, await listPermissionProfiles(ctx.scope, datasource.id)));
     }
     return JSON.stringify({ datasources: result }, null, 2);
   },

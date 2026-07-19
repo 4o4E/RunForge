@@ -5,7 +5,7 @@ import { runBus } from '../agent/bus.js';
 import type { AgentEvent } from '../agent/types.js';
 import { shellPathForSettings, type ToolSettings } from '../settings.js';
 import { store } from '../store/index.js';
-import type { ShellActor, ShellCommandRow, ShellLogStream, ShellSessionRow } from '../store/types.js';
+import type { Scope, ShellActor, ShellCommandRow, ShellLogStream, ShellSessionRow } from '../store/types.js';
 import { buildShellSpawnSpec } from '../tools/sandbox.js';
 import { shellBus } from './bus.js';
 import { redactShellOutput } from './redact.js';
@@ -25,6 +25,7 @@ export interface ShellToolContext {
 
 interface ActiveCommand {
   process: ChildProcess;
+  scope: Scope;
   threadId: string;
   sessionId: string;
   commandId: string;
@@ -169,6 +170,7 @@ export class ShellManager {
   private active = new Map<string, ActiveCommand>();
 
   async openSession(input: {
+    scope: Scope;
     threadId: string;
     settings: ToolSettings;
     runId?: string;
@@ -177,8 +179,8 @@ export class ShellManager {
     step?: number;
   }): Promise<ShellSessionRow> {
     const owner = input.owner ?? 'agent';
-    const name = await this.nextSessionName(input.threadId, input.settings.workspaceRoot, owner, input.name);
-    const session = await store.createShellSession({
+    const name = await this.nextSessionName(input.scope, input.threadId, input.settings.workspaceRoot, owner, input.name);
+    const session = await store.createShellSession(input.scope, {
       threadId: input.threadId,
       name,
       owner,
@@ -186,9 +188,9 @@ export class ShellManager {
       backend: input.settings.sandboxBackend,
       configSnapshot: settingsSnapshot(input.settings),
     });
-    await store.addShellSessionEvent(session.id, 'system', 'opened', { runId: input.runId ?? null });
+    await store.addShellSessionEvent(input.scope, session.id, 'system', 'opened', { runId: input.runId ?? null });
     if (input.runId) {
-      await this.emit(input.threadId, input.runId, null, {
+      await this.emit(input.scope, input.threadId, input.runId, null, {
         type: 'shell_session_opened',
         step: input.step ?? 0,
         sessionId: session.id,
@@ -207,31 +209,32 @@ export class ShellManager {
     return session;
   }
 
-  async ensureDefaultSession(threadId: string, settings: ToolSettings): Promise<ShellSessionRow> {
-    const existing = (await store.listShellSessions(threadId, settings.workspaceRoot)).find((session) => session.name === 'Default');
-    return existing ?? this.openSession({ threadId, settings, owner: 'system', name: 'Default' });
+  async ensureDefaultSession(scope: Scope, threadId: string, settings: ToolSettings): Promise<ShellSessionRow> {
+    const existing = (await store.listShellSessions(scope, threadId, settings.workspaceRoot)).find((session) => session.name === 'Default');
+    return existing ?? this.openSession({ scope, threadId, settings, owner: 'system', name: 'Default' });
   }
 
-  async reuseSession(input: { threadId: string; settings: ToolSettings; sessionId?: string; runId?: string; step?: number }): Promise<ShellSessionRow> {
+  async reuseSession(input: { scope: Scope; threadId: string; settings: ToolSettings; sessionId?: string; runId?: string; step?: number }): Promise<ShellSessionRow> {
     if (input.sessionId) {
-      const session = await store.getShellSession(input.sessionId);
+      const session = await store.getShellSession(input.scope, input.sessionId);
       if (!session) throw new Error(`shell session 不存在：${input.sessionId}`);
       if (session.thread_id !== input.threadId) throw new Error('shell session 不属于当前 thread');
       if (session.deleted_at) throw new Error('shell session 已删除');
       if (session.status === 'closed' || session.status === 'orphaned') throw new Error(`shell session 当前状态为 ${session.status}`);
       return session;
     }
-    const sessions = await store.listShellSessions(input.threadId, input.settings.workspaceRoot);
+    const sessions = await store.listShellSessions(input.scope, input.threadId, input.settings.workspaceRoot);
     const existing = scopedSession(sessions);
-    return existing ?? this.ensureDefaultSession(input.threadId, input.settings);
+    return existing ?? this.ensureDefaultSession(input.scope, input.threadId, input.settings);
   }
 
-  async listSessions(threadId: string, settings: ToolSettings): Promise<ShellSessionRow[]> {
-    await this.ensureDefaultSession(threadId, settings);
-    return store.listShellSessions(threadId, settings.workspaceRoot);
+  async listSessions(scope: Scope, threadId: string, settings: ToolSettings): Promise<ShellSessionRow[]> {
+    await this.ensureDefaultSession(scope, threadId, settings);
+    return store.listShellSessions(scope, threadId, settings.workspaceRoot);
   }
 
   async exec(input: {
+    scope: Scope;
     sessionId: string;
     command: string;
     settings: ToolSettings;
@@ -246,11 +249,11 @@ export class ShellManager {
   }): Promise<{ command: ShellCommandRow; timedOutWaiting: boolean; tail: string }> {
     const commandText = input.command.trim();
     if (!commandText) throw new Error('command 不能为空');
-    const session = await store.getShellSession(input.sessionId);
+    const session = await store.getShellSession(input.scope, input.sessionId);
     if (!session) throw new Error(`shell session 不存在：${input.sessionId}`);
     if (session.thread_id !== input.context.threadId) throw new Error('shell session 不属于当前 thread');
     if (session.deleted_at) throw new Error('shell session 已删除');
-    const recent = await store.listShellCommandsBySession(session.id, 10);
+    const recent = await store.listShellCommandsBySession(input.scope, session.id, 10);
     const running = recent.find((cmd) => cmd.status === 'queued' || cmd.status === 'running');
     if (running) throw new Error(`shell session 正在执行命令 ${running.id}，请先 poll 或 kill；需要并发时请打开新的 session。`);
 
@@ -259,8 +262,8 @@ export class ShellManager {
     const hardTimeoutMs = input.hardTimeoutMs ?? DEFAULT_HARD_TIMEOUT_MS;
     const cwd = resolve(input.cwd || session.cwd || session.workspace_root);
     if (!isWithin(session.workspace_root, cwd)) throw new Error(`cwd 超出 workspace：${cwd}`);
-    if (session.cwd !== cwd) await store.updateShellSession(session.id, { cwd });
-    const command = await store.createShellCommand({
+    if (session.cwd !== cwd) await store.updateShellSession(input.scope, session.id, { cwd });
+    const command = await store.createShellCommand(input.scope, {
       sessionId: session.id,
       runId: input.context.runId ?? null,
       stepId: input.context.stepId ?? null,
@@ -275,10 +278,11 @@ export class ShellManager {
     });
     const cwdFile = resolve(session.workspace_root, `.codex-shell-cwd-${command.id}`);
 
-    await store.updateShellSession(session.id, { status: 'busy', lease_actor: input.actor ?? 'agent', lease_run_id: input.context.runId ?? null });
-    await store.addShellSessionEvent(session.id, input.actor ?? 'agent', 'command_started', { commandId: command.id, command: commandText });
+    await store.updateShellSession(input.scope, session.id, { status: 'busy', lease_actor: input.actor ?? 'agent', lease_run_id: input.context.runId ?? null });
+    await store.addShellSessionEvent(input.scope, session.id, input.actor ?? 'agent', 'command_started', { commandId: command.id, command: commandText });
 
     const active = await this.spawnCommand({
+      scope: input.scope,
       command,
       session,
       cwdFile,
@@ -289,47 +293,47 @@ export class ShellManager {
       context: input.context,
     });
     if (waitMode === 'background') {
-      return { command: await store.getShellCommand(command.id) ?? command, timedOutWaiting: false, tail: '' };
+      return { command: await store.getShellCommand(input.scope, command.id) ?? command, timedOutWaiting: false, tail: '' };
     }
 
     const waitMs = input.waitTimeoutMs ?? DEFAULT_WAIT_MS;
     const completed = await Promise.race([active.done, sleep(waitMs)]);
     if (completed === 'timeout') {
-      const logs = await store.getShellCommandLogs(command.id, 0, 50);
+      const logs = await store.getShellCommandLogs(input.scope, command.id, 0, 50);
       return {
-        command: await store.getShellCommand(command.id) ?? command,
+        command: await store.getShellCommand(input.scope, command.id) ?? command,
         timedOutWaiting: true,
         tail: redactShellOutput(tailText(logs)),
       };
     }
-    const logs = await store.getShellCommandLogs(command.id, 0, 200);
+    const logs = await store.getShellCommandLogs(input.scope, command.id, 0, 200);
     return { command: completed, timedOutWaiting: false, tail: redactShellOutput(tailText(logs, 4000)) };
   }
 
-  async poll(id: string, sinceSeq = 0): Promise<{ session?: ShellSessionRow; command?: ShellCommandRow; logs: Awaited<ReturnType<typeof store.getShellCommandLogs>> }> {
-    const command = await store.getShellCommand(id);
+  async poll(scope: Scope, id: string, sinceSeq = 0): Promise<{ session?: ShellSessionRow; command?: ShellCommandRow; logs: Awaited<ReturnType<typeof store.getShellCommandLogs>> }> {
+    const command = await store.getShellCommand(scope, id);
     if (command) {
-      return { command, logs: await store.getShellCommandLogs(id, sinceSeq, 200) };
+      return { command, logs: await store.getShellCommandLogs(scope, id, sinceSeq, 200) };
     }
-    const session = await store.getShellSession(id);
+    const session = await store.getShellSession(scope, id);
     if (!session) throw new Error(`shell session/command 不存在：${id}`);
-    const commands = await store.listShellCommandsBySession(session.id, 1);
+    const commands = await store.listShellCommandsBySession(scope, session.id, 1);
     const latest = commands[0];
-    return { session, command: latest, logs: latest ? await store.getShellCommandLogs(latest.id, sinceSeq, 200) : [] };
+    return { session, command: latest, logs: latest ? await store.getShellCommandLogs(scope, latest.id, sinceSeq, 200) : [] };
   }
 
-  async kill(commandId: string, reason = 'user_requested_kill', signal: NodeJS.Signals = 'SIGTERM'): Promise<ShellCommandRow> {
-    const command = await store.getShellCommand(commandId);
+  async kill(scope: Scope, commandId: string, reason = 'user_requested_kill', signal: NodeJS.Signals = 'SIGTERM'): Promise<ShellCommandRow> {
+    const command = await store.getShellCommand(scope, commandId);
     if (!command) throw new Error(`shell command 不存在：${commandId}`);
     const active = this.active.get(commandId);
     if (!active) {
       if (!commandDone(command.status)) {
-        await store.updateShellCommand(commandId, { status: 'killed', signal, attention: reason, ended_at: nowIso() });
-        await store.updateShellSession(command.session_id, { status: 'idle', lease_actor: null, lease_run_id: null });
+        await store.updateShellCommand(scope, commandId, { status: 'killed', signal, attention: reason, ended_at: nowIso() });
+        await store.updateShellSession(scope, command.session_id, { status: 'idle', lease_actor: null, lease_run_id: null });
       }
-      return (await store.getShellCommand(commandId)) ?? command;
+      return (await store.getShellCommand(scope, commandId)) ?? command;
     }
-    await store.updateShellCommand(commandId, { attention: reason, signal });
+    await store.updateShellCommand(scope, commandId, { attention: reason, signal });
     await this.emitCommandEvent(active, { type: 'shell_command_killed', step: active.step, sessionId: active.sessionId, commandId, signal, reason });
     active.killRequested = true;
     this.killProcess(active, signal);
@@ -338,31 +342,31 @@ export class ShellManager {
     }, KILL_GRACE_MS).unref();
     const completed = await Promise.race([active.done, sleep(1_000)]);
     if (completed !== 'timeout') return completed;
-    return (await store.getShellCommand(commandId)) ?? command;
+    return (await store.getShellCommand(scope, commandId)) ?? command;
   }
 
-  async killRunCommands(runId: string, reason = 'run_cancel'): Promise<void> {
-    for (const command of await store.listRunningShellCommandsByRun(runId)) {
-      await this.kill(command.id, reason);
+  async killRunCommands(scope: Scope, runId: string, reason = 'run_cancel'): Promise<void> {
+    for (const command of await store.listRunningShellCommandsByRun(scope, runId)) {
+      await this.kill(scope, command.id, reason);
     }
   }
 
   async markInterruptedCommandsOrphaned(): Promise<number> {
-    const running = await store.listRunningShellCommands();
+    const running = await store.listRunningShellCommandsUnscoped();
     for (const command of running) {
-      await store.updateShellCommand(command.id, {
+      await store.updateShellCommandUnscoped(command.id, {
         status: 'orphaned',
         attention: 'server_restarted',
         error: '服务重启后无法重新连接本地 shell 进程。',
         ended_at: nowIso(),
       });
-      await store.updateShellSession(command.session_id, { status: 'idle', lease_actor: null, lease_run_id: null });
+      await store.updateShellSessionUnscoped(command.session_id, { status: 'idle', lease_actor: null, lease_run_id: null });
     }
     return running.length;
   }
 
-  private async nextSessionName(threadId: string, workspaceRoot: string, owner: ShellSessionRow['owner'], requested?: string): Promise<string> {
-    const sessions = await store.listShellSessions(threadId, workspaceRoot);
+  private async nextSessionName(scope: Scope, threadId: string, workspaceRoot: string, owner: ShellSessionRow['owner'], requested?: string): Promise<string> {
+    const sessions = await store.listShellSessions(scope, threadId, workspaceRoot);
     const used = new Set(sessions.map((session) => session.name));
     const trimmed = requested?.trim();
     if (owner === 'system') return 'Default';
@@ -374,6 +378,7 @@ export class ShellManager {
   }
 
   private async spawnCommand(input: {
+    scope: Scope;
     command: ShellCommandRow;
     session: ShellSessionRow;
     cwdFile: string;
@@ -394,7 +399,7 @@ export class ShellManager {
       env: input.env,
     };
     const spec = buildShellSpawnSpec(input.commandText, shellCfg);
-    await store.updateShellCommand(input.command.id, { status: 'running' });
+    await store.updateShellCommand(input.scope, input.command.id, { status: 'running' });
     const child = spawn(spec.file, spec.args, {
       cwd: spec.cwd,
       env: spec.env,
@@ -405,6 +410,7 @@ export class ShellManager {
     const active: ActiveCommand = {
       ...deferredCommand(),
       process: child,
+      scope: input.scope,
       threadId: input.session.thread_id,
       sessionId: input.session.id,
       commandId: input.command.id,
@@ -420,7 +426,7 @@ export class ShellManager {
     };
     this.active.set(input.command.id, active);
 
-    void store.updateShellCommand(input.command.id, { host_pid: child.pid ?? null }).catch((err) => {
+    void store.updateShellCommand(input.scope, input.command.id, { host_pid: child.pid ?? null }).catch((err) => {
       console.warn(`shell host pid update failed for ${input.command.id}: ${(err as Error).message}`);
     });
     child.stdout?.on('data', (chunk) => this.enqueueOutput(active, 'stdout', chunk));
@@ -464,8 +470,8 @@ export class ShellManager {
     const text = redactShellOutput(String(raw)).replace(/\u0000/g, '');
     if (!text) return;
     active.outputBytes += Buffer.byteLength(text);
-    const log = await store.appendShellCommandLog(active.commandId, stream, text);
-    await store.updateShellCommand(active.commandId, { output_bytes: active.outputBytes, last_output_at: nowIso() });
+    const log = await store.appendShellCommandLog(active.scope, active.commandId, stream, text);
+    await store.updateShellCommand(active.scope, active.commandId, { output_bytes: active.outputBytes, last_output_at: nowIso() });
     await this.emitCommandEvent(active, {
       type: 'shell_command_output',
       step: active.step,
@@ -480,7 +486,7 @@ export class ShellManager {
   private async softTimeout(active: ActiveCommand): Promise<void> {
     if (!this.active.has(active.commandId)) return;
     const runtimeMs = Date.now() - active.startedAt;
-    await store.updateShellCommand(active.commandId, { attention: 'soft_timeout' });
+    await store.updateShellCommand(active.scope, active.commandId, { attention: 'soft_timeout' });
     await this.emitCommandEvent(active, {
       type: 'shell_command_timeout',
       step: active.step,
@@ -494,7 +500,7 @@ export class ShellManager {
 
   private async hardTimeout(active: ActiveCommand): Promise<void> {
     if (!this.active.has(active.commandId)) return;
-    await store.updateShellCommand(active.commandId, { attention: 'hard_timeout' });
+    await store.updateShellCommand(active.scope, active.commandId, { attention: 'hard_timeout' });
     await this.emitCommandEvent(active, {
       type: 'shell_command_timeout',
       step: active.step,
@@ -528,9 +534,9 @@ export class ShellManager {
     this.active.delete(active.commandId);
     await Promise.all(active.cleanupPaths.map((path) => rm(path, { recursive: true, force: true }).catch(() => undefined)));
 
-    const rowBefore = await store.getShellCommand(active.commandId);
+    const rowBefore = await store.getShellCommand(active.scope, active.commandId);
     const finalStatus = rowBefore?.attention === 'hard_timeout' ? 'timed_out' : active.killRequested ? 'killed' : status;
-    await store.updateShellCommand(active.commandId, {
+    await store.updateShellCommand(active.scope, active.commandId, {
       status: finalStatus,
       exit_code: code,
       signal,
@@ -538,16 +544,16 @@ export class ShellManager {
       ended_at: nowIso(),
     });
     const finalCwd = await readCapturedCwd(active.workspaceRoot, active.cwdFile);
-    const session = await store.getShellSession(active.sessionId);
+    const session = await store.getShellSession(active.scope, active.sessionId);
     const terminalSession = !!session?.deleted_at || session?.status === 'closed' || session?.status === 'closing' || session?.status === 'orphaned';
-    await store.updateShellSession(active.sessionId, {
+    await store.updateShellSession(active.scope, active.sessionId, {
       // 关闭/孤儿化是 session 的终态；迟到的进程退出事件不能把它改回 idle。
       ...(terminalSession ? {} : { status: 'idle' }),
       lease_actor: null,
       lease_run_id: null,
       ...(finalCwd ? { cwd: finalCwd } : {}),
     });
-    const row = (await store.getShellCommand(active.commandId)) ?? rowBefore;
+    const row = (await store.getShellCommand(active.scope, active.commandId)) ?? rowBefore;
     await this.emitCommandEvent(active, {
       type: 'shell_command_finished',
       step: active.step,
@@ -577,13 +583,13 @@ export class ShellManager {
   }
 
   private async emitCommandEvent(active: ActiveCommand, event: AgentEvent): Promise<void> {
-    await this.emit(active.threadId, active.runId, active.stepId ?? null, event);
+    await this.emit(active.scope, active.threadId, active.runId, active.stepId ?? null, event);
   }
 
-  private async emit(threadId: string, runId: string | undefined, stepId: string | null, event: AgentEvent): Promise<void> {
+  private async emit(scope: Scope, threadId: string, runId: string | undefined, stepId: string | null, event: AgentEvent): Promise<void> {
     shellBus.publish(threadId, event);
     if (runId) {
-      await store.addEvent(runId, stepId, event);
+      await store.addEvent(scope, runId, stepId, event);
       runBus.publish(runId, event);
     }
   }

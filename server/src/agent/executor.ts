@@ -12,7 +12,7 @@ import { finishGoal, initGoal, mergeGoal, parseGoalPatch, renderGoal } from './g
 import { runBus } from './bus.js';
 import type { AgentEvent, FinishReason } from './types.js';
 import { store as defaultStore } from '../store/index.js';
-import type { Store } from '../store/types.js';
+import { scopeForThread, type Scope, type Store } from '../store/types.js';
 import { getMcpSettings, getToolSettings } from '../settings.js';
 import type { McpSettings, ToolSettings } from '../settings.js';
 import { withSpan } from '../telemetry.js';
@@ -77,7 +77,7 @@ export interface ExecutorDeps {
   resume: boolean;
   toolSettings?: ToolSettings;
   mcpSettings?: McpSettings;
-  databaseRuntimeEnv?: (runId: string) => Promise<DatabaseRuntimeEnv>;
+  databaseRuntimeEnv?: (scope: Scope, runId: string) => Promise<DatabaseRuntimeEnv>;
   generateThreadTitle: boolean;
 }
 
@@ -183,8 +183,8 @@ class StreamStatsTracker {
   }
 }
 
-async function defaultDeps(overrides: Partial<ExecutorDeps>, modelRef?: string | null): Promise<ExecutorDeps> {
-  const configured = overrides.provider ? null : await getConfiguredProvider(modelRef ?? undefined);
+async function defaultDeps(scope: Scope, overrides: Partial<ExecutorDeps>, modelRef?: string | null): Promise<ExecutorDeps> {
+  const configured = overrides.provider ? null : await getConfiguredProvider(scope, modelRef ?? undefined);
   return {
     provider: overrides.provider ?? configured!.provider,
     store: overrides.store ?? defaultStore,
@@ -313,10 +313,10 @@ function addUsage(total: LlmUsage | undefined, next: LlmUsage | undefined): LlmU
   };
 }
 
-async function createDefaultDatabaseRuntimeEnv(runId: string): Promise<DatabaseRuntimeEnv> {
-  const activeDatasources = (await listDatasources()).filter((datasource) => datasource.enabled && datasource.status === 'active');
+async function createDefaultDatabaseRuntimeEnv(scope: Scope, runId: string): Promise<DatabaseRuntimeEnv> {
+  const activeDatasources = (await listDatasources(scope)).filter((datasource) => datasource.enabled && datasource.status === 'active');
   const allowedDatasourceIds = activeDatasources.map((datasource) => datasource.id);
-  const created = await createWorkloadToken({
+  const created = await createWorkloadToken(scope, {
     runId,
     skillId: 'runtime:run',
     allowedDatasourceIds,
@@ -332,7 +332,7 @@ async function createDefaultDatabaseRuntimeEnv(runId: string): Promise<DatabaseR
   if (activeDatasources.length === 1) {
     const datasource = activeDatasources[0];
     env.DATASOURCE_ID = datasource.id;
-    const profiles = await listPermissionProfiles(datasource.id);
+    const profiles = await listPermissionProfiles(scope, datasource.id);
     const readonly = profiles.find((profile) => profile.name === 'readonly');
     env.DATASOURCE_PROFILE = readonly?.name ?? profiles[0]?.name ?? 'readonly';
   }
@@ -430,26 +430,34 @@ function runtimeApiBase(): string {
  * 运行前会加载同一 thread 的历史消息，让 agent 具备多轮记忆。
  * 所有依赖都可注入，便于在没有 PG/网络的情况下做单元测试。
  */
-export async function executeRun(runId: string, overrides: Partial<ExecutorDeps> = {}): Promise<void> {
-  const usesDefaultStore = overrides.store === undefined;
-  const store = overrides.store ?? defaultStore;
-  const run = await store.getRun(runId);
+export async function executeRun(runId: string, overrides: Partial<ExecutorDeps> & { scope?: Scope } = {}): Promise<void> {
+  const { scope: scopeOverride, ...depOverrides } = overrides;
+  const usesDefaultStore = depOverrides.store === undefined;
+  const store = depOverrides.store ?? defaultStore;
+  // executeRun 自己从 runId 反推 scope，不依赖 AsyncLocalStorage——recovery.ts 等后台任务
+  // 调用它时完全没有请求身份，ALS 也不保证穿透 EventEmitter 回调
+  // (docs/multi-tenancy-design.md §7、auth/context.ts 的注释)。这个 id 在 HTTP 路由里已经
+  // 被身份校验过，这里只是重新推导同一个已证明过的归属，不是信任一个未经验证的外部 id。
+  const run = await store.getRunUnscoped(runId);
   if (!run) throw new Error(`run 不存在：${runId}`);
+  const owningThread = await store.getThreadUnscoped(run.thread_id);
+  if (!owningThread) throw new Error(`thread 不存在：${run.thread_id}`);
+  const scope: Scope = scopeOverride ?? scopeForThread(owningThread);
   let deps: ExecutorDeps;
   try {
-    deps = await defaultDeps({
-      ...overrides,
+    deps = await defaultDeps(scope, {
+      ...depOverrides,
       store,
-      generateThreadTitle: overrides.generateThreadTitle ?? usesDefaultStore,
+      generateThreadTitle: depOverrides.generateThreadTitle ?? usesDefaultStore,
     }, run.model_ref);
   } catch (err) {
     const message = (err as Error).message;
     console.warn(`[agent] run ${runId} failed before start: ${errorStack(err)}`);
-    const publish = overrides.publish ?? ((targetRunId, event) => runBus.publish(targetRunId, event));
+    const publish = depOverrides.publish ?? ((targetRunId, event) => runBus.publish(targetRunId, event));
     const event: AgentEvent = { type: 'error', step: 0, message };
     publish(runId, event);
-    await store.addEvent(runId, null, event);
-    await store.setRunStatus(runId, 'error', { error: message });
+    await store.addEvent(scope, runId, null, event);
+    await store.setRunStatus(scope, runId, 'error', { error: message });
     return;
   }
   const { provider, publish, hardStepCap, stream, resume } = deps;
@@ -459,7 +467,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
 
   const emit = async (stepId: string | null, event: AgentEvent) => {
     publish(runId, event);
-    await store.addEvent(runId, stepId, event);
+    await store.addEvent(scope, runId, stepId, event);
   };
   const emitUsageUpdate = async (stepId: string, step: number, usage?: LlmUsage) => {
     await emit(stepId, {
@@ -477,6 +485,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     if (!compaction) return;
     if (compaction.summaryMessage && compaction.summarizedIds.length) {
       const summaryId = await store.addSummaryMessage(
+        scope,
         threadId,
         runId,
         stepId,
@@ -485,12 +494,12 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       );
       // L3 摘要在工作上下文中不是最后一条，需要按对象引用回填 DB id。
       currentCtx?.setSummaryDbId(compaction.summaryMessage, summaryId);
-      await store.markMessagesCollapsed(compaction.summarizedIds, 'summarized');
+      await store.markMessagesCollapsed(scope, compaction.summarizedIds, 'summarized');
     }
     const summarized = new Set(compaction.summarizedIds);
     const maskedIds = compaction.collapsedIds.filter((id) => !summarized.has(id));
     if (maskedIds.length) {
-      await store.markMessagesCollapsed(maskedIds, 'masked');
+      await store.markMessagesCollapsed(scope, maskedIds, 'masked');
     }
     await emit(stepId, { type: 'compaction', step: currentStepIdx, ...compaction.info });
   };
@@ -498,7 +507,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
   let currentCtx: ContextManager | null = null;
   let currentStepIdx = 0;
 
-  await store.setRunStatus(runId, 'running');
+  await store.setRunStatus(scope, runId, 'running');
 
   try {
     await withSpan(
@@ -510,16 +519,16 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     const message = (err as Error).message;
     console.warn(`[agent] run ${runId} step ${currentStepIdx || 0} provider ${provider.name} failed: ${errorStack(err)}`);
     await emit(null, { type: 'error', step: 0, message });
-    await store.setRunStatus(runId, 'error', { error: message });
+    await store.setRunStatus(scope, runId, 'error', { error: message });
   }
 
   // agent 主循环保持为闭包，让 invoke_agent span 包住内部的模型调用和工具执行 span。
   async function runLoop(): Promise<void> {
-    const existingMessageCount = await store.countRunMessages(runId);
+    const existingMessageCount = await store.countRunMessages(scope, runId);
     const hasPersistedMessages = existingMessageCount > 0;
     const shouldRecover = resume || hasPersistedMessages;
-    let prior = await store.loadThreadMessages(threadId, { runId });
-    let nextStepIdx = (await store.getLastStepIndex(runId)) + 1;
+    let prior = await store.loadThreadMessages(scope, threadId, { runId });
+    let nextStepIdx = (await store.getLastStepIndex(scope, runId)) + 1;
 
     // 恢复时如果进程死在工具执行中间，库里可能只有 assistant tool_call，
     // 没有对应 tool_result。这里补一条中断结果，保证 provider 消息配对完整。
@@ -529,23 +538,23 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         const content =
           `Tool call "${call.name}" was interrupted before producing a result; continue from the latest durable state or rerun it if still needed.\n` +
           `工具调用 "${call.name}" 在返回结果前被中断；请基于已持久化状态继续，必要时重新执行。`;
-        await store.addMessage(threadId, runId, null, { role: 'tool', content, toolCallId: call.id });
+        await store.addMessage(scope, threadId, runId, null, { role: 'tool', content, toolCallId: call.id });
         await emit(null, { type: 'recovery', step: Math.max(1, nextStepIdx), message: content });
       }
-      if (missing.length) prior = await store.loadThreadMessages(threadId, { runId });
+      if (missing.length) prior = await store.loadThreadMessages(scope, threadId, { runId });
     }
 
     // Goal 锚点每步重新注入；恢复时优先使用已落库状态，避免目标回退。
     let goal = initialRun.goal_state ?? initGoal(userInput);
-    if (!initialRun.goal_state) await store.setGoalState(runId, goal);
-    const toolSettings = deps.toolSettings ?? (await getToolSettings());
-    const mcpSettings = deps.mcpSettings ?? (deps.store === defaultStore ? await getMcpSettings() : { servers: [] });
+    if (!initialRun.goal_state) await store.setGoalState(scope, runId, goal);
+    const toolSettings = deps.toolSettings ?? (await getToolSettings(scope));
+    const mcpSettings = deps.mcpSettings ?? (deps.store === defaultStore ? await getMcpSettings(scope) : { servers: [] });
     const toolEnv: Record<string, string> = {};
     const databaseRuntimeEnvProvider = deps.databaseRuntimeEnv ?? (deps.store === defaultStore ? createDefaultDatabaseRuntimeEnv : null);
     let databaseRuntimeSummary = '';
     if (databaseRuntimeEnvProvider) {
       try {
-        const runtime = await databaseRuntimeEnvProvider(runId);
+        const runtime = await databaseRuntimeEnvProvider(scope, runId);
         Object.assign(toolEnv, runtime.env);
         databaseRuntimeSummary = runtime.summary;
       } catch (err) {
@@ -565,7 +574,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     currentCtx = ctx;
     if (!hasPersistedMessages) {
       // 新 run 或尚未写入任何消息的 pending run，必须先落用户输入。
-      await store.addMessage(threadId, runId, null, { role: 'user', content: userInput });
+      await store.addMessage(scope, threadId, runId, null, { role: 'user', content: userInput });
     }
 
     const activeSkills: SkillIndexItem[] = [];
@@ -574,7 +583,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     const persistLiveEvent = (event: AgentEvent) => {
       const stepId = 'step' in event ? stepIds.get(event.step) ?? null : null;
       // 流式事件需要实时落库，刷新/切换会话时才能从 DB 恢复当前状态。
-      livePersistQueue = livePersistQueue.then(() => store.addEvent(runId, stepId, event)).catch((err) => {
+      livePersistQueue = livePersistQueue.then(() => store.addEvent(scope, runId, stepId, event)).catch((err) => {
         console.warn(`persist live event failed for ${runId}: ${(err as Error).message}`);
       });
     };
@@ -590,9 +599,9 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     const ensureDatabaseToolEnv = async (activation: SkillActivation): Promise<string> => {
       if (toolEnv.DB_WORKLOAD_TOKEN) return '数据库访问运行环境已在 run 初始化时注入；database-access skill 只提供脚本和操作规范。';
 
-      const activeDatasources = (await listDatasources()).filter((datasource) => datasource.enabled && datasource.status === 'active');
+      const activeDatasources = (await listDatasources(scope)).filter((datasource) => datasource.enabled && datasource.status === 'active');
       const allowedDatasourceIds = activeDatasources.map((datasource) => datasource.id);
-      const created = await createWorkloadToken({
+      const created = await createWorkloadToken(scope, {
         runId,
         skillId: activation.skill.id,
         allowedDatasourceIds,
@@ -606,7 +615,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       if (activeDatasources.length === 1) {
         const datasource = activeDatasources[0];
         toolEnv.DATASOURCE_ID = datasource.id;
-        const profiles = await listPermissionProfiles(datasource.id);
+        const profiles = await listPermissionProfiles(scope, datasource.id);
         const readonly = profiles.find((profile) => profile.name === 'readonly');
         toolEnv.DATASOURCE_PROFILE = readonly?.name ?? profiles[0]?.name ?? 'readonly';
       }
@@ -714,7 +723,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           },
         ];
 
-        const subagentProvider = modelRef ? (await getConfiguredProvider(modelRef)).provider : provider;
+        const subagentProvider = modelRef ? (await getConfiguredProvider(scope, modelRef)).provider : provider;
         const toolTrace: string[] = [];
         let output = '';
         let usage: LlmUsage | undefined;
@@ -743,6 +752,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
                 text = 'subagent 需要数据库访问时必须先由主 agent 激活 database-access skill；本次未执行数据库命令。';
               } else {
                 const resultText = await runTool(call.name, parsedArgs.args, {
+                  scope,
                   settings: toolSettings,
                   env: toolEnv,
                   threadId,
@@ -763,7 +773,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           output = `${output}\n\n工具执行摘要 / Tool execution summary:\n${toolTrace.join('\n')}`;
         }
         const endedAt = new Date().toISOString();
-        await store.finishSubagentRun(row.id, {
+        await store.finishSubagentRun(scope, row.id, {
           status: 'done',
           output,
           usage: usage ? { ...usage } : null,
@@ -782,7 +792,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       } catch (err) {
         const error = (err as Error).message;
         const endedAt = new Date().toISOString();
-        await store.finishSubagentRun(row.id, { status: 'error', error });
+        await store.finishSubagentRun(scope, row.id, { status: 'error', error });
         await emit(stepId, {
           type: 'subagent_failed',
           step: stepIdx,
@@ -820,7 +830,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         modelRef,
       };
 
-      const row = await store.createSubagentRun({
+      const row = await store.createSubagentRun(scope, {
         parentRunId: runId,
         parentStepId: stepId,
         workflowId,
@@ -862,16 +872,16 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       if (!subagentRunId) return { text: 'subagent_poll 缺少必填 subagentRunId。' };
       const waitSeconds = Math.min(Math.max(numericArg(args.waitSeconds ?? args.timeoutSeconds, 0), 0), SUBAGENT_POLL_MAX_WAIT_SECONDS);
       const deadline = Date.now() + waitSeconds * 1000;
-      let row = await store.getSubagentRun(subagentRunId);
+      let row = await store.getSubagentRun(scope, subagentRunId);
       if (!row) return { text: `没有找到 subagentRunId: ${subagentRunId}` };
       const rowId = row.id;
-      const visibleRows = await store.listSubagentRunsByThread(threadId);
+      const visibleRows = await store.listSubagentRunsByThread(scope, threadId);
       if (!visibleRows.some((item) => item.id === rowId)) {
         return { text: `当前 thread 无权读取 subagentRunId: ${subagentRunId}` };
       }
       while (row.status === 'running' && Date.now() < deadline) {
         await waitMs(Math.min(1000, Math.max(100, deadline - Date.now())));
-        row = (await store.getSubagentRun(subagentRunId)) ?? row;
+        row = (await store.getSubagentRun(scope, subagentRunId)) ?? row;
       }
       if (row.status === 'running' && waitSeconds > 0) {
         return { text: `${renderSubagentRow(row, false)}\n\n等待 ${waitSeconds} 秒后仍未完成，返回当前状态。` };
@@ -884,7 +894,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       const status = rawStatus === 'running' || rawStatus === 'done' || rawStatus === 'error' ? rawStatus : null;
       const rawLimit = typeof args.limit === 'number' && Number.isFinite(args.limit) ? Math.floor(args.limit) : 20;
       const limit = Math.min(Math.max(rawLimit, 1), 50);
-      let rows = await store.listSubagentRunsByThread(threadId);
+      let rows = await store.listSubagentRunsByThread(scope, threadId);
       if (status) rows = rows.filter((row) => row.status === status);
       rows = rows.slice(-limit);
       if (!rows.length) return { text: status ? `当前 thread 没有 ${status} 状态的 subagent。` : '当前 thread 还没有 subagent。' };
@@ -899,10 +909,10 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     for (let stepIdx = nextStepIdx; stepIdx < nextStepIdx + hardStepCap; stepIdx++) {
       currentStepIdx = stepIdx;
       // 取消接口会把状态改成 canceling；每步开头检查后干净退出。
-      const current = await store.getRun(runId);
+      const current = await store.getRun(scope, runId);
       if (current?.status === 'canceling') {
         try {
-          await shellManager.killRunCommands(runId, 'run_cancel');
+          await shellManager.killRunCommands(scope, runId, 'run_cancel');
         } catch (err) {
           const message = (err as Error).message;
           if (!message.includes('relation "shell_commands" does not exist')) {
@@ -910,11 +920,11 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           }
         }
         await emit(null, { type: 'error', step: stepIdx, message: '用户已取消 run。' });
-        await store.setRunStatus(runId, 'canceled');
+        await store.setRunStatus(scope, runId, 'canceled');
         return;
       }
 
-      const step = await store.createStep(runId, stepIdx);
+      const step = await store.createStep(scope, runId, stepIdx);
       stepIds.set(stepIdx, step.id);
       await emit(step.id, { type: 'step_start', step: stepIdx });
       streamStats.mark(stepIdx, 'llm_waiting', undefined, true);
@@ -1022,7 +1032,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         if (liveStreamed && persistedLiveReasoning) {
           await emit(step.id, { type: 'reasoning_timing', step: stepIdx, ...timing });
         } else if (liveStreamed) {
-          await store.addEvent(runId, step.id, ev);
+          await store.addEvent(scope, runId, step.id, ev);
           await emit(step.id, { type: 'reasoning_timing', step: stepIdx, ...timing });
         } else {
           await emit(step.id, ev);
@@ -1031,7 +1041,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
 
       const assistantMsg = { role: 'assistant' as const, content, toolCalls: redactToolCalls(toolCalls.length ? toolCalls : undefined) };
       ctx.add(assistantMsg);
-      ctx.setLastDbId(await store.addMessage(threadId, runId, step.id, assistantMsg));
+      ctx.setLastDbId(await store.addMessage(scope, threadId, runId, step.id, assistantMsg));
 
       if (toolCalls.length && result.finishReason && result.finishReason !== 'tool-calls') {
         const message = renderAbnormalFinishMessage(result.finishReason, result.rawFinishReason, Boolean(content?.trim()));
@@ -1048,13 +1058,13 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           finishReason: result.finishReason,
           rawFinishReason: result.rawFinishReason,
         });
-        await store.setRunStatus(runId, 'error', { error: message });
+        await store.setRunStatus(scope, runId, 'error', { error: message });
         return;
       }
 
       if (content && (toolCalls.length || liveStreamed) && !persistedLiveContent) {
         const ev = { type: 'llm_delta' as const, step: stepIdx, text: content };
-        if (liveStreamed) await store.addEvent(runId, step.id, ev);
+        if (liveStreamed) await store.addEvent(scope, runId, step.id, ev);
         else await emit(step.id, ev);
       }
 
@@ -1071,26 +1081,26 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           streamStats.mark(stepIdx, 'error', undefined, true);
           await livePersistQueue;
           await emit(step.id, { type: 'error', step: stepIdx, message, finishReason, rawFinishReason });
-          await store.setRunStatus(runId, 'error', { error: message });
+          await store.setRunStatus(scope, runId, 'error', { error: message });
           return;
         }
         if (finalText) {
           // 无工具的可见正文就是本轮对话的终点。计划状态只做收敛记录，
           // 不能再反向驱动模型补跑一轮，否则会用后续短摘要覆盖真实最终输出。
           goal = finishGoal(goal);
-          await store.setGoalState(runId, goal);
+          await store.setGoalState(scope, runId, goal);
           ctx.setGoal(renderGoal(goal));
           if (goal.plan.length) await emit(step.id, { type: 'plan_update', step: stepIdx, goal });
           await persistCompaction(step.id, ctx.compactForHistory());
           streamStats.mark(stepIdx, 'done', undefined, true);
           await livePersistQueue;
           await emit(step.id, { type: 'final', step: stepIdx, output: finalText, finishReason, rawFinishReason });
-          await store.setRunStatus(runId, 'done', { output: finalText });
+          await store.setRunStatus(scope, runId, 'done', { output: finalText });
           if (usesDefaultStore) {
-            void notifyRunCompleted(runId, { store, output: finalText })
+            void notifyRunCompleted(scope, runId, { store, output: finalText })
               .catch((err) => console.warn(`对话完成通知推送失败：${(err as Error).message}`));
           }
-          if (deps.generateThreadTitle) scheduleThreadTitleGeneration(runId, { store, provider });
+          if (deps.generateThreadTitle) scheduleThreadTitleGeneration(scope, runId, { store, provider });
           return;
         }
 
@@ -1100,7 +1110,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           const question = blockedQuestion(reason);
           await emit(step.id, { type: 'progress_stalled', step: stepIdx, reason, question });
           await emit(step.id, { type: 'user_question', step: stepIdx, question });
-          await store.setRunStatus(runId, 'waiting_for_user');
+          await store.setRunStatus(scope, runId, 'waiting_for_user');
           return;
         }
         ctx.add({
@@ -1171,7 +1181,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           });
           const toolMsg = { role: 'tool' as const, content: text, toolCallId: call.id };
           ctx.add(toolMsg);
-          ctx.setLastDbId(await store.addMessage(threadId, runId, step.id, toolMsg));
+          ctx.setLastDbId(await store.addMessage(scope, threadId, runId, step.id, toolMsg));
           const signature = toolSignature(call.name, { _invalidArgs: call.arguments.slice(0, 240) });
           recentToolSignatures.push(signature);
           if (recentToolSignatures.length > 6) recentToolSignatures.shift();
@@ -1201,11 +1211,11 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           await emit(step.id, { type: 'user_question', step: stepIdx, question: spec.question, toolCallId: call.id, spec });
           const toolMsg = { role: 'tool' as const, content: text, toolCallId: call.id };
           ctx.add(toolMsg);
-          ctx.setLastDbId(await store.addMessage(threadId, runId, step.id, toolMsg));
+          ctx.setLastDbId(await store.addMessage(scope, threadId, runId, step.id, toolMsg));
           for (const msg of pendingSkillSystemMessages) {
             ctx.add(msg);
           }
-          await store.setRunStatus(runId, 'waiting_for_user');
+          await store.setRunStatus(scope, runId, 'waiting_for_user');
           return;
         }
 
@@ -1260,6 +1270,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
                 }
               }
               const out = await runTool(call.name, args, {
+                scope,
                 settings: toolSettings,
                 env: toolEnv,
                 threadId,
@@ -1294,7 +1305,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
 
         const toolMsg = { role: 'tool' as const, content: result.text, toolCallId: call.id };
         ctx.add(toolMsg);
-        ctx.setLastDbId(await store.addMessage(threadId, runId, step.id, toolMsg));
+        ctx.setLastDbId(await store.addMessage(scope, threadId, runId, step.id, toolMsg));
 
         const activation = activatedSkill.value;
         if (activation) await applySkillActivation(activation);
@@ -1315,7 +1326,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         // update_plan 会刷新已落库目标锚点，并同步重新注入上下文。
         if (call.name === 'update_plan') {
           goal = mergeGoal(goal, parseGoalPatch(args));
-          await store.setGoalState(runId, goal);
+          await store.setGoalState(scope, runId, goal);
           ctx.setGoal(renderGoal(goal));
           if (goal.plan.length) await emit(step.id, { type: 'plan_update', step: stepIdx, goal });
         }
@@ -1332,13 +1343,13 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       if (guardHit) {
         await emit(step.id, { type: 'progress_stalled', step: stepIdx, reason: guardHit.reason, question: guardHit.question });
         await emit(step.id, { type: 'user_question', step: stepIdx, question: guardHit.question });
-        await store.setRunStatus(runId, 'waiting_for_user');
+        await store.setRunStatus(scope, runId, 'waiting_for_user');
         return;
       }
     }
 
     const message = `Reached hard step cap (${hardStepCap}) without a final answer.`;
     await emit(null, { type: 'error', step: hardStepCap, message });
-    await store.setRunStatus(runId, 'error', { error: message });
+    await store.setRunStatus(scope, runId, 'error', { error: message });
   }
 }

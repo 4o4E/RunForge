@@ -11,6 +11,9 @@ import { config } from '../config.js';
 import { maskPlaceholder } from './compaction.js';
 import type { ToolSettings } from '../settings.js';
 import { maybeGenerateThreadTitleAfterFirstRun } from './threadTitle.js';
+import type { Scope } from '../store/types.js';
+
+const scope: Scope = { tenantId: 'default', userId: 'us_test' };
 
 let testWorkspace = '';
 
@@ -107,8 +110,8 @@ function truncatedStreamProvider(state: { retryMessages: string[] }): Provider {
 
 test('executeRun: runs the loop across steps and finalizes', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'find json files');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'find json files');
 
   const published: AgentEvent[] = [];
   await executeRun(run.id, {
@@ -119,7 +122,7 @@ test('executeRun: runs the loop across steps and finalizes', async () => {
     toolSettings: testToolSettings(),
   });
 
-  const finished = await store.getRun(run.id);
+  const finished = await store.getRun(scope, run.id);
   assert.equal(finished?.status, 'done');
   assert.equal(finished?.output, 'all done');
 
@@ -143,18 +146,18 @@ test('executeRun: runs the loop across steps and finalizes', async () => {
   assert.ok(stats.some((e) => e.totals.toolOutputChars > 0));
 
   // 对话会持久化为：用户消息、glob 的 assistant/tool 消息、最终 assistant 消息。
-  const msgs = await store.loadThreadMessages(thread.id);
+  const msgs = await store.loadThreadMessages(scope, thread.id);
   assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'tool', 'assistant']);
 });
 
 test('thread title: uses first input as fallback and generates for an empty-title branch', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, '修复登录页提交后没有响应的问题');
-  assert.equal((await store.listThreads())[0]?.fallback_title, '修复登录页提交后没有响应的问题');
-  await store.setRunStatus(run.id, 'done', { output: '已经从表单提交链路修复根因。' });
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, '修复登录页提交后没有响应的问题');
+  assert.equal((await store.listThreads(scope))[0]?.fallback_title, '修复登录页提交后没有响应的问题');
+  await store.setRunStatus(scope, run.id, 'done', { output: '已经从表单提交链路修复根因。' });
 
-  const updated = await maybeGenerateThreadTitleAfterFirstRun(run.id, {
+  const updated = await maybeGenerateThreadTitleAfterFirstRun(scope, run.id, {
     store,
     provider: {
       name: 'title-provider',
@@ -166,9 +169,9 @@ test('thread title: uses first input as fallback and generates for an empty-titl
 
   assert.equal(updated?.title, '登录提交无响应修复');
 
-  const titledRun = await store.createRun(thread.id, '继续优化样式');
-  await store.setRunStatus(titledRun.id, 'done', { output: 'done' });
-  const skipped = await maybeGenerateThreadTitleAfterFirstRun(titledRun.id, {
+  const titledRun = await store.createRun(scope, thread.id, '继续优化样式');
+  await store.setRunStatus(scope, titledRun.id, 'done', { output: 'done' });
+  const skipped = await maybeGenerateThreadTitleAfterFirstRun(scope, titledRun.id, {
     store,
     provider: {
       name: 'unused-title-provider',
@@ -178,15 +181,15 @@ test('thread title: uses first input as fallback and generates for an empty-titl
     },
   });
   assert.equal(skipped, null);
-  assert.equal((await store.getThread(thread.id))?.title, '登录提交无响应修复');
+  assert.equal((await store.getThread(scope, thread.id))?.title, '登录提交无响应修复');
 
-  const untitledThread = await store.createThread();
-  const firstRun = await store.createRun(untitledThread.id, '杭州到余姚这一块，夏天玩水或者漂流都有哪些地方可以玩');
-  await store.setRunStatus(firstRun.id, 'done', { output: '沿线有多个玩水点。' });
-  const secondRun = await store.createRun(untitledThread.id, '我的意思是这一块找一个地方玩，而不是一路玩过去');
-  assert.equal((await store.getThread(untitledThread.id))?.fallback_title, '杭州到余姚这一块，夏天玩水或者漂流都有哪些地方可以玩');
-  await store.setRunStatus(secondRun.id, 'done', { output: '更适合选余姚四明山一带。' });
-  const backfilled = await maybeGenerateThreadTitleAfterFirstRun(secondRun.id, {
+  const untitledThread = await store.createThread(scope);
+  const firstRun = await store.createRun(scope, untitledThread.id, '杭州到余姚这一块，夏天玩水或者漂流都有哪些地方可以玩');
+  await store.setRunStatus(scope, firstRun.id, 'done', { output: '沿线有多个玩水点。' });
+  const secondRun = await store.createRun(scope, untitledThread.id, '我的意思是这一块找一个地方玩，而不是一路玩过去');
+  assert.equal((await store.getThread(scope, untitledThread.id))?.fallback_title, '杭州到余姚这一块，夏天玩水或者漂流都有哪些地方可以玩');
+  await store.setRunStatus(scope, secondRun.id, 'done', { output: '更适合选余姚四明山一带。' });
+  const backfilled = await maybeGenerateThreadTitleAfterFirstRun(scope, secondRun.id, {
     store,
     provider: {
       name: 'branch-title-provider',
@@ -201,11 +204,11 @@ test('thread title: uses first input as fallback and generates for an empty-titl
 
 test('thread title: keeps generated title and fallback concise for the sidebar', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, '请帮我分析跨平台对话模型优化方案，以及后续落地建议');
-  await store.setRunStatus(run.id, 'done', { output: '建议从上下文、路由和评估三个方向优化。' });
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, '请帮我分析跨平台对话模型优化方案，以及后续落地建议');
+  await store.setRunStatus(scope, run.id, 'done', { output: '建议从上下文、路由和评估三个方向优化。' });
 
-  const updated = await maybeGenerateThreadTitleAfterFirstRun(run.id, {
+  const updated = await maybeGenerateThreadTitleAfterFirstRun(scope, run.id, {
     store,
     provider: {
       name: 'verbose-title-provider',
@@ -217,11 +220,11 @@ test('thread title: keeps generated title and fallback concise for the sidebar',
 
   assert.equal(updated?.title, '跨平台对话模型优化方案');
 
-  const fallbackThread = await store.createThread();
-  const fallbackRun = await store.createRun(fallbackThread.id, '楼下50米洗车，建议直接开车还是走路');
-  await store.setRunStatus(fallbackRun.id, 'done', { output: '建议直接走路。' });
+  const fallbackThread = await store.createThread(scope);
+  const fallbackRun = await store.createRun(scope, fallbackThread.id, '楼下50米洗车，建议直接开车还是走路');
+  await store.setRunStatus(scope, fallbackRun.id, 'done', { output: '建议直接走路。' });
 
-  const fallback = await maybeGenerateThreadTitleAfterFirstRun(fallbackRun.id, {
+  const fallback = await maybeGenerateThreadTitleAfterFirstRun(scope, fallbackRun.id, {
     store,
     provider: {
       name: 'empty-title-provider',
@@ -236,11 +239,11 @@ test('thread title: keeps generated title and fallback concise for the sidebar',
 
 test('thread title: extracts concise title from json-like provider output', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, '整理Ubuntu 24安装NVIDIA驱动的步骤');
-  await store.setRunStatus(run.id, 'done', { output: '按驱动版本和安全启动状态拆分步骤。' });
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, '整理Ubuntu 24安装NVIDIA驱动的步骤');
+  await store.setRunStatus(scope, run.id, 'done', { output: '按驱动版本和安全启动状态拆分步骤。' });
 
-  const updated = await maybeGenerateThreadTitleAfterFirstRun(run.id, {
+  const updated = await maybeGenerateThreadTitleAfterFirstRun(scope, run.id, {
     store,
     provider: {
       name: 'json-title-provider',
@@ -255,8 +258,8 @@ test('thread title: extracts concise title from json-like provider output', asyn
 
 test('executeRun: generates a thread title after completion when enabled', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, '规划一次杭州周边漂流');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, '规划一次杭州周边漂流');
   let calls = 0;
 
   await executeRun(run.id, {
@@ -277,15 +280,15 @@ test('executeRun: generates a thread title after completion when enabled', async
     generateThreadTitle: true,
   });
 
-  await waitUntil(async () => (await store.getThread(thread.id))?.title === '杭州周边漂流规划');
-  assert.equal((await store.getThread(thread.id))?.title, '杭州周边漂流规划');
+  await waitUntil(async () => (await store.getThread(scope, thread.id))?.title === '杭州周边漂流规划');
+  assert.equal((await store.getThread(scope, thread.id))?.title, '杭州周边漂流规划');
   assert.equal(calls, 2);
 });
 
 test('executeRun: persists streamed text and terminal stream status for replay', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'stream a final answer');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'stream a final answer');
   const published: AgentEvent[] = [];
 
   await executeRun(run.id, {
@@ -308,7 +311,7 @@ test('executeRun: persists streamed text and terminal stream status for replay',
     toolSettings: testToolSettings(),
   });
 
-  const events = await store.getEvents(run.id);
+  const events = await store.getEvents(scope, run.id);
   const textEvents = events.filter((e): e is Extract<AgentEvent, { type: 'llm_delta' }> => e.type === 'llm_delta');
   assert.deepEqual(textEvents.map((e) => e.text), ['he', 'llo']);
   assert.equal(textEvents.map((e) => e.text).join(''), 'hello');
@@ -321,8 +324,8 @@ test('executeRun: persists streamed text and terminal stream status for replay',
 
 test('executeRun: injects the current workspace root into the LLM context', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'clone a repo');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'clone a repo');
   let systemText = '';
 
   await executeRun(run.id, {
@@ -348,8 +351,8 @@ test('executeRun: injects the current workspace root into the LLM context', asyn
 
 test('executeRun: injects database workload token at run startup', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'check datasource env');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'check datasource env');
   let sawRuntimeContext = false;
   let sawSkillReusedRunEnv = false;
   let turn = 0;
@@ -424,8 +427,8 @@ test('executeRun: activates a skill without trimming main-agent tools to allowed
   );
 
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'use a skill');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'use a skill');
   const published: AgentEvent[] = [];
   const toolNamesByTurn: string[][] = [];
   let firstSystemText = '';
@@ -476,13 +479,13 @@ test('executeRun: activates a skill without trimming main-agent tools to allowed
   assert.equal(activated?.type, 'skill_activated');
   assert.equal(activated?.type === 'skill_activated' ? activated.name : '', 'sample-skill');
   assert.deepEqual(activated?.type === 'skill_activated' ? activated.allowedTools : [], ['file_read']);
-  const msgs = await store.loadThreadMessages(thread.id);
+  const msgs = await store.loadThreadMessages(scope, thread.id);
   assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'tool', 'tool', 'assistant']);
   assert.equal(msgs[0].content, 'use a skill');
   assert.equal(msgs[2].toolCallId, 'skill_1');
   assert.equal(msgs[3].toolCallId, 'read_1');
   assert.equal(msgs.some((m) => m.role === 'system' && (m.content ?? '').includes('已激活 Skill')), false);
-  assert.equal((await store.getRun(run.id))?.status, 'done');
+  assert.equal((await store.getRun(scope, run.id))?.status, 'done');
 });
 
 test('executeRun: skill catalog uses folded YAML descriptions in user prompt without persisting them', async () => {
@@ -505,8 +508,8 @@ test('executeRun: skill catalog uses folded YAML descriptions in user prompt wit
   );
 
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, '测试：做一个example ppt');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, '测试：做一个example ppt');
   let userText = '';
 
   await executeRun(run.id, {
@@ -527,7 +530,7 @@ test('executeRun: skill catalog uses folded YAML descriptions in user prompt wit
   assert.match(userText, /生成PPT/);
   assert.doesNotMatch(userText, /ppt-master: >/);
   assert.match(userText, /用户请求 \/ User request:\n测试：做一个example ppt/);
-  const msgs = await store.loadThreadMessages(thread.id);
+  const msgs = await store.loadThreadMessages(scope, thread.id);
   assert.equal(msgs[0].content, '测试：做一个example ppt');
 });
 
@@ -541,9 +544,9 @@ test('executeRun: resumed runs still expose the skill catalog before the persist
   );
 
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'resume needs skill list');
-  await store.addMessage(thread.id, run.id, null, { role: 'user', content: 'resume needs skill list' });
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'resume needs skill list');
+  await store.addMessage(scope, thread.id, run.id, null, { role: 'user', content: 'resume needs skill list' });
   let userText = '';
 
   await executeRun(run.id, {
@@ -562,7 +565,7 @@ test('executeRun: resumed runs still expose the skill catalog before the persist
 
   assert.match(userText, /resume-skill: Use when checking resumed prompt context/);
   assert.match(userText, /用户请求 \/ User request:\nresume needs skill list/);
-  const msgs = await store.loadThreadMessages(thread.id);
+  const msgs = await store.loadThreadMessages(scope, thread.id);
   assert.equal(msgs[0].content, 'resume needs skill list');
 });
 
@@ -576,8 +579,8 @@ test('executeRun: skill activation instructions do not leak into the next run hi
   );
 
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run1 = await store.createRun(thread.id, 'activate skill');
+  const thread = await store.createThread(scope);
+  const run1 = await store.createRun(scope, thread.id, 'activate skill');
   let turn = 0;
   await executeRun(run1.id, {
     store,
@@ -594,7 +597,7 @@ test('executeRun: skill activation instructions do not leak into the next run hi
     toolSettings: testToolSettings(),
   });
 
-  const run2 = await store.createRun(thread.id, 'new run');
+  const run2 = await store.createRun(scope, thread.id, 'new run');
   let secondRunSystemText = '';
   await executeRun(run2.id, {
     store,
@@ -624,8 +627,8 @@ test('executeRun: starts async subagents and allows cross-run polling', async ()
   );
 
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'delegate review');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'delegate review');
   const published: AgentEvent[] = [];
   const subagentPrompts: string[] = [];
   let parentTurn = 0;
@@ -684,9 +687,9 @@ test('executeRun: starts async subagents and allows cross-run polling', async ()
   assert.equal(started?.type, 'subagent_started');
   assert.equal(started?.type === 'subagent_started' ? started.stageId : '', 'review');
   assert.deepEqual(started?.type === 'subagent_started' ? started.skillNames : [], ['review-skill']);
-  assert.equal((await store.getRun(run.id))?.status, 'done');
+  assert.equal((await store.getRun(scope, run.id))?.status, 'done');
 
-  let msgs = await store.loadThreadMessages(thread.id);
+  let msgs = await store.loadThreadMessages(scope, thread.id);
   const subagentStartResult = msgs.find((m) => m.role === 'tool' && m.toolCallId === 'sub_1')?.content ?? '';
   assert.match(subagentStartResult, /subagentRunId: sr_/);
   assert.match(subagentStartResult, /status: running/);
@@ -694,12 +697,12 @@ test('executeRun: starts async subagents and allows cross-run polling', async ()
 
   await waitUntil(() => published.filter((e) => e.type === 'subagent_finished').length === 2);
   assert.match(subagentPrompts.join('\n'), /# Review Skill/);
-  const rows = await store.listSubagentRunsByThread(thread.id);
+  const rows = await store.listSubagentRunsByThread(scope, thread.id);
   assert.equal(rows.length, 2);
   assert.equal(rows.every((row) => row.status === 'done'), true);
   assert.match(rows[0].output ?? '', /没有发现阻塞风险/);
 
-  const run2 = await store.createRun(thread.id, 'poll previous subagent');
+  const run2 = await store.createRun(scope, thread.id, 'poll previous subagent');
   let pollTurn = 0;
   await executeRun(run2.id, {
     store,
@@ -723,8 +726,8 @@ test('executeRun: starts async subagents and allows cross-run polling', async ()
     toolSettings: testToolSettings(),
   });
 
-  assert.equal((await store.getRun(run2.id))?.status, 'done');
-  msgs = await store.loadThreadMessages(thread.id);
+  assert.equal((await store.getRun(scope, run2.id))?.status, 'done');
+  msgs = await store.loadThreadMessages(scope, thread.id);
   const pollResult = msgs.find((m) => m.role === 'tool' && m.toolCallId === 'poll_1')?.content ?? '';
   assert.match(pollResult, /status: done/);
   assert.match(pollResult, /没有发现阻塞风险/);
@@ -732,8 +735,8 @@ test('executeRun: starts async subagents and allows cross-run polling', async ()
 
 test('executeRun: writer subagent can use scheduled write tools and poll waits for completion', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'delegate writer');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'delegate writer');
   const outputPath = join(testWorkspace, 'writer-subagent.txt');
   let parentTurn = 0;
   let writerTurn = 0;
@@ -792,16 +795,16 @@ test('executeRun: writer subagent can use scheduled write tools and poll waits f
     toolSettings: testToolSettings(),
   });
 
-  assert.equal((await store.getRun(run.id))?.status, 'done');
+  assert.equal((await store.getRun(scope, run.id))?.status, 'done');
   assert.equal(await readFile(outputPath, 'utf8'), 'writer subagent output\n');
-  const rows = await store.listSubagentRunsByThread(thread.id);
+  const rows = await store.listSubagentRunsByThread(scope, thread.id);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].runtime_profile_id, 'writer');
   assert.equal(rows[0].status, 'done');
   assert.match(rows[0].output ?? '', /工具执行摘要 \/ Tool execution summary:/);
   assert.match(rows[0].output ?? '', /file_write/);
 
-  const msgs = await store.loadThreadMessages(thread.id);
+  const msgs = await store.loadThreadMessages(scope, thread.id);
   const pollResult = msgs.find((m) => m.role === 'tool' && m.toolCallId === 'poll_1')?.content ?? '';
   assert.match(pollResult, /status: done/);
   assert.match(pollResult, /writer file done:/);
@@ -810,8 +813,8 @@ test('executeRun: writer subagent can use scheduled write tools and poll waits f
 
 test('executeRun: repeated running subagent polls do not trigger loop guard', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'wait for slow subagent');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'wait for slow subagent');
   const published: AgentEvent[] = [];
   let parentTurn = 0;
 
@@ -849,17 +852,17 @@ test('executeRun: repeated running subagent polls do not trigger loop guard', as
     toolSettings: testToolSettings(),
   });
 
-  assert.equal((await store.getRun(run.id))?.status, 'done');
+  assert.equal((await store.getRun(scope, run.id))?.status, 'done');
   assert.equal(published.some((event) => event.type === 'progress_stalled'), false);
-  const pollResults = (await store.loadThreadMessages(thread.id)).filter((msg) => msg.role === 'tool' && msg.toolCallId?.startsWith('poll_'));
+  const pollResults = (await store.loadThreadMessages(scope, thread.id)).filter((msg) => msg.role === 'tool' && msg.toolCallId?.startsWith('poll_'));
   assert.equal(pollResults.some((msg) => /\bstatus: running\b/.test(msg.content ?? '')), true);
   assert.equal(pollResults.some((msg) => /\bstatus: done\b/.test(msg.content ?? '')), true);
 });
 
 test('executeRun: streams tool input stats without double counting final tool args', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'update plan via streamed tool args');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'update plan via streamed tool args');
   const args = JSON.stringify({ phase: 'reporting', next: '汇报结果' });
   const published: AgentEvent[] = [];
   let turn = 0;
@@ -892,8 +895,8 @@ test('executeRun: streams tool input stats without double counting final tool ar
 
 test('executeRun: update_plan turn does not finalize until a no-tool final answer', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'write a final report and close the plan');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'write a final report and close the plan');
   const sameTurnText = '计划已收口，下一轮输出最终报告。';
   const finalText = '完整分析报告\n\n结论：所有步骤已经完成。';
   const published: AgentEvent[] = [];
@@ -927,7 +930,7 @@ test('executeRun: update_plan turn does not finalize until a no-tool final answe
     toolSettings: testToolSettings(),
   });
 
-  const finished = await store.getRun(run.id);
+  const finished = await store.getRun(scope, run.id);
   assert.equal(turns, 2);
   assert.equal(finished?.status, 'done');
   assert.equal(finished?.output, finalText);
@@ -935,7 +938,7 @@ test('executeRun: update_plan turn does not finalize until a no-tool final answe
   assert.equal(published.some((event) => event.type === 'final' && event.output === finalText), true);
   assert.equal(published.some((event) => event.type === 'final' && event.output === sameTurnText), false);
 
-  const msgs = await store.loadThreadMessages(thread.id);
+  const msgs = await store.loadThreadMessages(scope, thread.id);
   assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'tool', 'assistant']);
   assert.equal(msgs[1]?.content, sameTurnText);
   assert.equal(msgs[2]?.toolCallId, 'plan_done');
@@ -944,8 +947,8 @@ test('executeRun: update_plan turn does not finalize until a no-tool final answe
 
 test('executeRun: auto-completes the final report plan item without a second summary turn', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'produce a report');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'produce a report');
   const finalText = '## 完整报告\n\n这里是完整可见的最终内容。';
   const published: AgentEvent[] = [];
   let turns = 0;
@@ -983,7 +986,7 @@ test('executeRun: auto-completes the final report plan item without a second sum
     toolSettings: testToolSettings(),
   });
 
-  const finished = await store.getRun(run.id);
+  const finished = await store.getRun(scope, run.id);
   assert.equal(turns, 2);
   assert.equal(finished?.status, 'done');
   assert.equal(finished?.output, finalText);
@@ -993,8 +996,8 @@ test('executeRun: auto-completes the final report plan item without a second sum
 
 test('executeRun: final text closes the run even when plan is still open', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'produce then close plan');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'produce then close plan');
   const finalText = '## 完整报告\n\n这是先输出、后被计划状态挡住的完整报告。';
   const published: AgentEvent[] = [];
   let turns = 0;
@@ -1032,7 +1035,7 @@ test('executeRun: final text closes the run even when plan is still open', async
     toolSettings: testToolSettings(),
   });
 
-  const finished = await store.getRun(run.id);
+  const finished = await store.getRun(scope, run.id);
   assert.equal(turns, 2);
   assert.equal(finished?.status, 'done');
   assert.equal(finished?.output, finalText);
@@ -1045,9 +1048,9 @@ test('executeRun: final text closes the run even when plan is still open', async
 
 test('executeRun: keeps multi-turn memory within a thread', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
+  const thread = await store.createThread(scope);
 
-  const run1 = await store.createRun(thread.id, 'first');
+  const run1 = await store.createRun(scope, thread.id, 'first');
   await executeRun(run1.id, {
     store,
     provider: { name: 's', async complete() { return { content: 'ok1', toolCalls: [] }; } },
@@ -1058,7 +1061,7 @@ test('executeRun: keeps multi-turn memory within a thread', async () => {
 
   // Second run should see the first run's messages as prior context.
   let seenPriorCount = 0;
-  const run2 = await store.createRun(thread.id, 'second');
+  const run2 = await store.createRun(scope, thread.id, 'second');
   await executeRun(run2.id, {
     store,
     provider: {
@@ -1082,17 +1085,17 @@ test('executeRun: compacts bulky old history when finishing a run', async () => 
   config.agent.keepRecentMessages = 2;
   try {
     const store = new MemoryStore();
-    const thread = await store.createThread();
-    const oldRun = await store.createRun(thread.id, 'old');
+    const thread = await store.createThread(scope);
+    const oldRun = await store.createRun(scope, thread.id, 'old');
     const bigArgs = JSON.stringify({ path: 'generated/old.txt', content: 'r'.repeat(3000) });
-    await store.addMessage(thread.id, oldRun.id, null, {
+    await store.addMessage(scope, thread.id, oldRun.id, null, {
       role: 'assistant',
       content: null,
       toolCalls: [{ id: 'file-old', name: 'file_write', arguments: bigArgs }],
     });
-    await store.addMessage(thread.id, oldRun.id, null, { role: 'tool', content: 'x'.repeat(4000), toolCallId: 'file-old' });
+    await store.addMessage(scope, thread.id, oldRun.id, null, { role: 'tool', content: 'x'.repeat(4000), toolCallId: 'file-old' });
 
-    const run = await store.createRun(thread.id, 'new');
+    const run = await store.createRun(scope, thread.id, 'new');
     const published: AgentEvent[] = [];
     await executeRun(run.id, {
       store,
@@ -1102,7 +1105,7 @@ test('executeRun: compacts bulky old history when finishing a run', async () => 
       toolSettings: testToolSettings(),
     });
 
-    const msgs = await store.loadThreadMessages(thread.id);
+    const msgs = await store.loadThreadMessages(scope, thread.id);
     const oldAssistant = msgs.find((m) => m.toolCalls?.[0]?.id === 'file-old');
     const oldTool = msgs.find((m) => m.toolCallId === 'file-old');
     assert.equal(oldAssistant?.collapsed, 'masked');
@@ -1119,8 +1122,8 @@ test('executeRun: compacts bulky old history when finishing a run', async () => 
 
 test('executeRun: text without tools completes when no plan is open', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'answer directly');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'answer directly');
 
   await executeRun(run.id, {
     store,
@@ -1135,15 +1138,15 @@ test('executeRun: text without tools completes when no plan is open', async () =
     toolSettings: testToolSettings(),
   });
 
-  const finished = await store.getRun(run.id);
+  const finished = await store.getRun(scope, run.id);
   assert.equal(finished?.status, 'done');
   assert.equal(finished?.output, 'premature final answer');
 });
 
 test('executeRun: non-stop finish reason is surfaced as run error instead of final', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'write a long report');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'write a long report');
   const published: AgentEvent[] = [];
 
   const warnings = await captureWarnings(async () => {
@@ -1166,7 +1169,7 @@ test('executeRun: non-stop finish reason is surfaced as run error instead of fin
     });
   });
 
-  const finished = await store.getRun(run.id);
+  const finished = await store.getRun(scope, run.id);
   assert.equal(finished?.status, 'error');
   assert.match(finished?.error ?? '', /模型输出达到上限/);
   assert.equal(published.some((event) => event.type === 'final'), false);
@@ -1174,14 +1177,14 @@ test('executeRun: non-stop finish reason is surfaced as run error instead of fin
   assert.equal(error?.finishReason, 'length');
   assert.equal(error?.rawFinishReason, 'max_output_tokens');
   assert.equal(warnings.some((line) => line.includes('finishReason=length') && line.includes('rawFinishReason=max_output_tokens')), true);
-  const msgs = await store.loadThreadMessages(thread.id);
+  const msgs = await store.loadThreadMessages(scope, thread.id);
   assert.equal(msgs.at(-1)?.content, '这是一段被截断的输出');
 });
 
 test('executeRun: truncated tool-call turn does not execute tools', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'write file');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'write file');
   const published: AgentEvent[] = [];
 
   const warnings = await captureWarnings(async () => {
@@ -1204,7 +1207,7 @@ test('executeRun: truncated tool-call turn does not execute tools', async () => 
     });
   });
 
-  const finished = await store.getRun(run.id);
+  const finished = await store.getRun(scope, run.id);
   assert.equal(finished?.status, 'error');
   assert.equal(published.some((event) => event.type === 'tool_call'), false);
   assert.equal(published.some((event) => event.type === 'tool_result'), false);
@@ -1214,8 +1217,8 @@ test('executeRun: truncated tool-call turn does not execute tools', async () => 
 
 test('executeRun: streaming length finish is persisted as resumable error', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, '请生成一段长总结');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, '请生成一段长总结');
   const published: AgentEvent[] = [];
   const providerState = { retryMessages: [] as string[] };
   const provider = truncatedStreamProvider(providerState);
@@ -1231,16 +1234,16 @@ test('executeRun: streaming length finish is persisted as resumable error', asyn
     });
   });
 
-  const failed = await store.getRun(run.id);
+  const failed = await store.getRun(scope, run.id);
   assert.equal(failed?.status, 'error');
   assert.match(failed?.error ?? '', /模型输出达到上限/);
   assert.equal(published.some((event) => event.type === 'final'), false);
   assert.equal(published.some((event) => event.type === 'llm_delta' && event.text === '第一段半截'), true);
   assert.equal(published.some((event) => event.type === 'error' && event.finishReason === 'length'), true);
-  assert.equal(await store.getLastCompletedStepIndex(run.id), 1);
+  assert.equal(await store.getLastCompletedStepIndex(scope, run.id), 1);
   assert.equal(warnings.some((line) => line.includes('fake-truncated-stream') && line.includes('finishReason=length')), true);
 
-  await store.setRunStatus(run.id, 'pending', { error: null });
+  await store.setRunStatus(scope, run.id, 'pending', { error: null });
   await executeRun(run.id, {
     store,
     provider,
@@ -1251,7 +1254,7 @@ test('executeRun: streaming length finish is persisted as resumable error', asyn
     toolSettings: testToolSettings(),
   });
 
-  const finished = await store.getRun(run.id);
+  const finished = await store.getRun(scope, run.id);
   assert.equal(finished?.status, 'done');
   assert.equal(finished?.output, '继续后的完整收尾');
   assert.ok(providerState.retryMessages.some((message) => message.includes('第一段半截，停在这里')));
@@ -1260,8 +1263,8 @@ test('executeRun: streaming length finish is persisted as resumable error', asyn
 
 test('executeRun: stops and errors at the hard step cap', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'loop forever');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'loop forever');
 
   await executeRun(run.id, {
     store,
@@ -1277,15 +1280,15 @@ test('executeRun: stops and errors at the hard step cap', async () => {
     toolSettings: testToolSettings(),
   });
 
-  const finished = await store.getRun(run.id);
+  const finished = await store.getRun(scope, run.id);
   assert.equal(finished?.status, 'error');
   assert.match(finished?.error ?? '', /hard step cap/);
 });
 
 test('executeRun: cancels cooperatively at a step boundary', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'long task');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'long task');
 
   // Flip the run to 'canceling' the moment the loop starts its first step, so the
   // top-of-step check observes it and stops before finalizing.
@@ -1296,7 +1299,7 @@ test('executeRun: cancels cooperatively at a step boundary', async () => {
       name: 'looper',
       async complete() {
         turn += 1;
-        if (turn === 1) await store.setRunStatus(run.id, 'canceling');
+        if (turn === 1) await store.setRunStatus(scope, run.id, 'canceling');
         return { content: null, toolCalls: [{ id: 'c', name: 'glob', arguments: '{"pattern":"*"}' }] };
       },
     },
@@ -1305,14 +1308,14 @@ test('executeRun: cancels cooperatively at a step boundary', async () => {
     toolSettings: testToolSettings(),
   });
 
-  const finished = await store.getRun(run.id);
+  const finished = await store.getRun(scope, run.id);
   assert.equal(finished?.status, 'canceled');
 });
 
 test('executeRun: ask_user pauses the run and keeps tool pairing intact', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'needs clarification');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'needs clarification');
   const published: AgentEvent[] = [];
 
   await executeRun(run.id, {
@@ -1338,7 +1341,7 @@ test('executeRun: ask_user pauses the run and keeps tool pairing intact', async 
     toolSettings: testToolSettings(),
   });
 
-  const paused = await store.getRun(run.id);
+  const paused = await store.getRun(scope, run.id);
   assert.equal(paused?.status, 'waiting_for_user');
   assert.ok(published.some((e) => e.type === 'user_question' && e.question === '继续吗？'));
   const question = published.find((e) => e.type === 'user_question');
@@ -1348,15 +1351,15 @@ test('executeRun: ask_user pauses the run and keeps tool pairing intact', async 
   assert.equal(question?.type === 'user_question' ? question.spec?.options[0]?.recommended : undefined, true);
   assert.equal(question?.type === 'user_question' ? question.spec?.options[0]?.required : undefined, true);
 
-  const msgs = await store.loadThreadMessages(thread.id);
+  const msgs = await store.loadThreadMessages(scope, thread.id);
   assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'tool']);
   assert.equal(msgs[2].toolCallId, 'ask_1');
 });
 
 test('executeRun: rejects malformed string-wrapped tool args without running the tool', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'write a file');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'write a file');
   const published: AgentEvent[] = [];
   let turn = 0;
 
@@ -1389,13 +1392,13 @@ test('executeRun: rejects malformed string-wrapped tool args without running the
   const failedTool = published.find((e) => e.type === 'tool_result' && e.id === 'write_1');
   assert.equal(failedTool?.type, 'tool_result');
   assert.match(failedTool?.type === 'tool_result' ? failedTool.result : '', /工具参数无效，未执行 file_write/);
-  assert.equal((await store.getRun(run.id))?.output, 'done');
+  assert.equal((await store.getRun(scope, run.id))?.output, 'done');
 });
 
 test('executeRun: resumes the same run after a user answer without duplicating input', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'needs answer');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'needs answer');
   let turn = 0;
   const provider: Provider = {
     name: 'resume',
@@ -1412,22 +1415,22 @@ test('executeRun: resumes the same run after a user answer without duplicating i
   };
 
   await executeRun(run.id, { store, provider, publish: () => {}, hardStepCap: 3, toolSettings: testToolSettings() });
-  await store.addMessage(thread.id, run.id, null, { role: 'user', content: '用户回答：\nA' });
-  await store.setRunStatus(run.id, 'pending');
+  await store.addMessage(scope, thread.id, run.id, null, { role: 'user', content: '用户回答：\nA' });
+  await store.setRunStatus(scope, run.id, 'pending');
   await executeRun(run.id, { store, provider, publish: () => {}, hardStepCap: 3, resume: true, toolSettings: testToolSettings() });
 
-  const finished = await store.getRun(run.id);
+  const finished = await store.getRun(scope, run.id);
   assert.equal(finished?.status, 'done');
   assert.equal(finished?.output, 'ok');
-  const msgs = await store.loadThreadMessages(thread.id);
+  const msgs = await store.loadThreadMessages(scope, thread.id);
   assert.equal(msgs.filter((m) => m.role === 'user' && m.content === 'needs answer').length, 1);
   assert.ok(msgs.some((m) => m.role === 'user' && m.content?.includes('用户回答')));
 });
 
 test('executeRun: retries after interrupted streaming output from durable messages only', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, '请生成一段总结');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, '请生成一段总结');
   let calls = 0;
   let retryMessages: string[] = [];
 
@@ -1451,32 +1454,32 @@ test('executeRun: retries after interrupted streaming output from durable messag
     await executeRun(run.id, { store, provider, publish: () => {}, hardStepCap: 3, stream: true, toolSettings: testToolSettings() });
   });
 
-  const failed = await store.getRun(run.id);
+  const failed = await store.getRun(scope, run.id);
   assert.equal(failed?.status, 'error');
-  assert.equal(await store.getLastStepIndex(run.id), 1);
-  assert.equal(await store.getLastCompletedStepIndex(run.id), 0);
+  assert.equal(await store.getLastStepIndex(scope, run.id), 1);
+  assert.equal(await store.getLastCompletedStepIndex(scope, run.id), 0);
   assert.equal(warnings.some((line) => line.includes('interrupted-stream') && line.includes('network disconnected')), true);
 
-  await store.setRunStatus(run.id, 'pending', { error: null });
+  await store.setRunStatus(scope, run.id, 'pending', { error: null });
   await executeRun(run.id, { store, provider, publish: () => {}, hardStepCap: 3, stream: true, resume: true, toolSettings: testToolSettings() });
 
-  const finished = await store.getRun(run.id);
+  const finished = await store.getRun(scope, run.id);
   assert.equal(finished?.status, 'done');
   assert.equal(finished?.output, '继续后的完整结果');
   assert.deepEqual(retryMessages.filter((message) => message.includes('半截输出')), []);
-  const msgs = await store.loadThreadMessages(thread.id);
+  const msgs = await store.loadThreadMessages(scope, thread.id);
   assert.equal(msgs.filter((message) => message.role === 'user' && message.content === '请生成一段总结').length, 1);
   assert.equal(msgs.at(-1)?.content, '继续后的完整结果');
 });
 
 test('memory store: deleteThread removes dependent run data', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'delete me');
-  await store.addMessage(thread.id, run.id, null, { role: 'user', content: 'delete me' });
-  await store.addEvent(run.id, null, { type: 'final', step: 1, output: 'done' });
-  const session = await store.createShellSession({ threadId: thread.id, name: 'Default', owner: 'system', workspaceRoot: '/tmp/ws', backend: 'none' });
-  const command = await store.createShellCommand({
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'delete me');
+  await store.addMessage(scope, thread.id, run.id, null, { role: 'user', content: 'delete me' });
+  await store.addEvent(scope, run.id, null, { type: 'final', step: 1, output: 'done' });
+  const session = await store.createShellSession(scope, { threadId: thread.id, name: 'Default', owner: 'system', workspaceRoot: '/tmp/ws', backend: 'none' });
+  const command = await store.createShellCommand(scope, {
     sessionId: session.id,
     runId: run.id,
     actor: 'agent',
@@ -1484,14 +1487,14 @@ test('memory store: deleteThread removes dependent run data', async () => {
     cwd: '/tmp/ws',
     waitMode: 'foreground',
   });
-  await store.appendShellCommandLog(command.id, 'stdout', 'ok');
+  await store.appendShellCommandLog(scope, command.id, 'stdout', 'ok');
 
-  assert.equal(await store.deleteThread(thread.id), true);
-  assert.equal(await store.getThread(thread.id), null);
-  assert.deepEqual(await store.listRuns(thread.id), []);
-  assert.deepEqual(await store.loadThreadMessages(thread.id), []);
-  assert.deepEqual(await store.getEvents(run.id), []);
-  assert.deepEqual(await store.listShellSessions(thread.id), []);
-  assert.deepEqual(await store.getShellCommand(command.id), null);
-  assert.deepEqual(await store.getShellCommandLogs(command.id), []);
+  assert.equal(await store.deleteThread(scope, thread.id), true);
+  assert.equal(await store.getThread(scope, thread.id), null);
+  assert.deepEqual(await store.listRuns(scope, thread.id), []);
+  assert.deepEqual(await store.loadThreadMessages(scope, thread.id), []);
+  assert.deepEqual(await store.getEvents(scope, run.id), []);
+  assert.deepEqual(await store.listShellSessions(scope, thread.id), []);
+  assert.deepEqual(await store.getShellCommand(scope, command.id), null);
+  assert.deepEqual(await store.getShellCommandLogs(scope, command.id), []);
 });

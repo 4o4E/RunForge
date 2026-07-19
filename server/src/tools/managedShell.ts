@@ -2,11 +2,13 @@ import type { Tool, ToolRunContext } from './types.js';
 import { formatCommandResult, parseShellActor, parseWaitMode, shellManager } from '../shell/manager.js';
 import { shellBus } from '../shell/bus.js';
 import { store } from '../store/index.js';
+import type { Scope } from '../store/types.js';
 import { requiresDatabaseAccess, usesDatabaseAccessHelper, usesDatabaseCli } from './databaseAccessGuard.js';
 
-function requireShellContext(ctx: ToolRunContext | undefined): { threadId: string; runId?: string; stepId?: string; step?: number } {
+function requireShellContext(ctx: ToolRunContext | undefined): { scope: Scope; threadId: string; runId?: string; stepId?: string; step?: number } {
+  if (!ctx?.scope) throw new Error('托管 shell 需要当前身份 scope，上下文缺失。');
   if (!ctx?.threadId) throw new Error('托管 shell 需要当前 threadId，上下文缺失。');
-  return { threadId: ctx.threadId, runId: ctx.runId, stepId: ctx.stepId, step: ctx.step };
+  return { scope: ctx.scope, threadId: ctx.threadId, runId: ctx.runId, stepId: ctx.stepId, step: ctx.step };
 }
 
 function numberArg(value: unknown, fallback: number | null = null): number | null {
@@ -29,6 +31,7 @@ export const shellSessionOpenTool: Tool = {
     if (!settings) throw new Error('缺少工具配置');
     const shellCtx = requireShellContext(ctx);
     const session = await shellManager.openSession({
+      scope: shellCtx.scope,
       threadId: shellCtx.threadId,
       settings,
       runId: shellCtx.runId,
@@ -54,6 +57,7 @@ export const shellSessionReuseTool: Tool = {
     if (!settings) throw new Error('缺少工具配置');
     const shellCtx = requireShellContext(ctx);
     const session = await shellManager.reuseSession({
+      scope: shellCtx.scope,
       threadId: shellCtx.threadId,
       settings,
       runId: shellCtx.runId,
@@ -72,11 +76,11 @@ export const shellSessionListTool: Tool = {
     const settings = ctx?.settings;
     if (!settings) throw new Error('缺少工具配置');
     const shellCtx = requireShellContext(ctx);
-    const sessions = await shellManager.listSessions(shellCtx.threadId, settings);
+    const sessions = await shellManager.listSessions(shellCtx.scope, shellCtx.threadId, settings);
     if (!sessions.length) return '当前 thread 没有可用 shell session。';
     const lines: string[] = [];
     for (const session of sessions) {
-      const commands = await store.listShellCommandsBySession(session.id, 3);
+      const commands = await store.listShellCommandsBySession(shellCtx.scope, session.id, 3);
       lines.push(`- ${session.name} (${session.id}) owner=${session.owner} status=${session.status}`);
       for (const cmd of commands) lines.push(`  - ${cmd.id} ${cmd.status} ${cmd.command.slice(0, 120)}`);
     }
@@ -112,6 +116,7 @@ export const shellExecTool: Tool = {
     }
     const shellCtx = requireShellContext(ctx);
     const result = await shellManager.exec({
+      scope: shellCtx.scope,
       sessionId: String(args.sessionId ?? '').trim(),
       command,
       settings,
@@ -138,10 +143,11 @@ export const shellPollTool: Tool = {
     },
     required: ['id'],
   },
-  async run(args) {
+  async run(args, ctx) {
+    if (!ctx?.scope) throw new Error('托管 shell 需要当前身份 scope，上下文缺失。');
     const id = String(args.id ?? '').trim();
     const sinceSeq = numberArg(args.sinceSeq, 0) ?? 0;
-    const result = await shellManager.poll(id, sinceSeq);
+    const result = await shellManager.poll(ctx.scope, id, sinceSeq);
     if (!result.command) {
       return `shell session: ${result.session?.id}\nstatus: ${result.session?.status}\n暂无命令。`;
     }
@@ -160,8 +166,9 @@ export const shellKillTool: Tool = {
     },
     required: ['commandId'],
   },
-  async run(args) {
-    const command = await shellManager.kill(String(args.commandId ?? '').trim(), String(args.reason ?? 'agent_requested_kill'));
+  async run(args, ctx) {
+    if (!ctx?.scope) throw new Error('托管 shell 需要当前身份 scope，上下文缺失。');
+    const command = await shellManager.kill(ctx.scope, String(args.commandId ?? '').trim(), String(args.reason ?? 'agent_requested_kill'));
     return `已请求终止 shell command：${command.id}\nstatus: ${command.status}`;
   },
 };
@@ -179,16 +186,16 @@ export const shellSessionCloseTool: Tool = {
   async run(args, ctx) {
     const shellCtx = requireShellContext(ctx);
     const sessionId = String(args.sessionId ?? '').trim();
-    const session = await store.getShellSession(sessionId);
+    const session = await store.getShellSession(shellCtx.scope, sessionId);
     if (!session) throw new Error(`shell session 不存在：${sessionId}`);
     if (session.thread_id !== shellCtx.threadId) throw new Error('shell session 不属于当前 thread');
     if (session.name === 'Default' || session.owner === 'system') return 'Default shell 不支持删除。';
     if (session.owner !== 'agent') return '只能删除 agent 创建的 shell，不能删除用户创建的 shell。';
-    const commands = await store.listShellCommandsBySession(sessionId, 20);
+    const commands = await store.listShellCommandsBySession(shellCtx.scope, sessionId, 20);
     const running = commands.filter((cmd) => cmd.status === 'running' || cmd.status === 'queued');
     if (running.length) return `shell session 仍有运行中命令，请先 shell_kill：${running.map((cmd) => cmd.id).join(', ')}`;
-    await store.updateShellSession(sessionId, { status: 'closed', lease_actor: null, lease_run_id: null, deleted_at: new Date().toISOString() });
-    await store.addShellSessionEvent(sessionId, 'agent', 'deleted', { runId: shellCtx.runId ?? null });
+    await store.updateShellSession(shellCtx.scope, sessionId, { status: 'closed', lease_actor: null, lease_run_id: null, deleted_at: new Date().toISOString() });
+    await store.addShellSessionEvent(shellCtx.scope, sessionId, 'agent', 'deleted', { runId: shellCtx.runId ?? null });
     shellBus.publish(shellCtx.threadId, { type: 'shell_session_closed', step: shellCtx.step ?? 0, sessionId });
     return `已删除 shell：${session.name} (${sessionId})`;
   },

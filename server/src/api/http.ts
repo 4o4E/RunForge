@@ -14,6 +14,8 @@ import { systemAuthApi } from './systemAuth.js';
 import { tenantsApi } from './tenants.js';
 import { systemApi } from './system.js';
 import { requireSystemScope, requireTenantScope } from '../auth/guards.js';
+import { requireScope } from '../auth/context.js';
+import type { Scope } from '../store/types.js';
 import { releaseRunLeases } from '../datasources/accountPool.js';
 import type { AskUserAnswer, AskUserOption, AskUserSpec } from '../agent/types.js';
 import { shellManager } from '../shell/manager.js';
@@ -21,8 +23,18 @@ import { shellBus } from '../shell/bus.js';
 import { getLlmSettings, getToolSettings, llmModelOptions } from '../settings.js';
 import { createPolicy } from '../tools/policy.js';
 import { isWithin } from '../tools/policy.js';
+import type { Response } from 'express';
 
 export const api = Router();
+
+function scopeOrReject(res: Response): Scope | null {
+  const scope = requireScope();
+  if (!scope) {
+    res.status(403).json({ error: '需要租户身份' });
+    return null;
+  }
+  return scope;
+}
 
 // 登录/刷新/登出不需要已建立的身份，必须挂在 requireApiAccess 之前
 // (docs/multi-tenancy-design.md §4"请求校验路径")。
@@ -31,11 +43,14 @@ api.use('/system/auth', systemAuthApi);
 
 api.use(requireApiAccess);
 
-// /system 和 /files 各自单独处理 scope:/system 本身就要求 system 身份；/files 还要
-// 兼容"免身份的签名分享链接"这个例外(见 files.ts 的 requireFileAccess)，所以两者都要
-// 挂在下面这条"租户身份"总闸之前，否则会被总闸挡在门外。
+// /system、/files、/runtime 各自单独处理 scope,不吃下面这条"租户身份"总闸:
+// /system 本身就要求 system 身份;/files 要兼容"免身份的签名分享链接"这个例外
+// (见 files.ts 的 requireFileAccess);/runtime 是容器脚本用 workload token 调用的
+// 内部接口,不是 JWT,也不该建立任何租户身份(见 auth.ts 的 isRuntimeRequest)。
+// 三个都要挂在总闸之前,否则会被总闸挡在门外。
 api.use('/system', requireSystemScope, systemApi);
 api.use('/files', filesApi);
+api.use('/runtime', runtimeApi);
 
 // 总闸:下面全部路由都是面向租户用户的接口，系统管理员 JWT 不能冒充租户用户调用
 // (docs/multi-tenancy-design.md §4)。注意这只堵住了"系统管理员访问租户接口"这个越权，
@@ -46,12 +61,11 @@ api.use(requireTenantScope);
 api.use('/tenants', tenantsApi);
 api.use('/settings', settingsApi);
 api.use('/datasources', datasourcesApi);
-api.use('/runtime', runtimeApi);
 api.use('/notifications', notificationsApi);
 
-async function killRunShellCommands(runId: string): Promise<void> {
+async function killRunShellCommands(scope: Scope, runId: string): Promise<void> {
   try {
-    await shellManager.killRunCommands(runId, 'run_cancel');
+    await shellManager.killRunCommands(scope, runId, 'run_cancel');
   } catch (err) {
     const message = (err as Error).message;
     if (!message.includes('relation "shell_commands" does not exist')) {
@@ -82,11 +96,11 @@ function renderShellLogs(logs: Awaited<ReturnType<typeof store.getShellCommandLo
   return chunks.join('').trim();
 }
 
-async function readAllShellCommandLogs(commandId: string): Promise<Awaited<ReturnType<typeof store.getShellCommandLogs>>> {
+async function readAllShellCommandLogs(scope: Scope, commandId: string): Promise<Awaited<ReturnType<typeof store.getShellCommandLogs>>> {
   const logs: Awaited<ReturnType<typeof store.getShellCommandLogs>> = [];
   let sinceSeq = 0;
   for (;;) {
-    const page = await store.getShellCommandLogs(commandId, sinceSeq, 1000);
+    const page = await store.getShellCommandLogs(scope, commandId, sinceSeq, 1000);
     if (!page.length) return logs;
     logs.push(...page);
     sinceSeq = page[page.length - 1].seq;
@@ -111,9 +125,9 @@ function optionalBoolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
 }
 
-async function validateRunModelRef(modelRef: string | null): Promise<string | null> {
+async function validateRunModelRef(scope: Scope, modelRef: string | null): Promise<string | null> {
   if (!modelRef) return null;
-  const settings = await getLlmSettings();
+  const settings = await getLlmSettings(scope);
   const options = llmModelOptions(settings);
   if (!options.some((option) => option.ref === modelRef)) {
     throw new Error(`模型未启用：${modelRef}`);
@@ -124,37 +138,47 @@ async function validateRunModelRef(modelRef: string | null): Promise<string | nu
 // --- Threads ---
 
 api.get('/search', async (req, res) => {
+  const scope = scopeOrReject(res);
+  if (!scope) return;
   const q = String(req.query.q ?? '').trim();
   const limit = Math.min(100, Math.max(1, Number(req.query.limit ?? 50) || 50));
-  res.json({ query: q, results: await store.searchThreadMessages(q, limit) });
+  res.json({ query: q, results: await store.searchThreadMessages(scope, q, limit) });
 });
 
 // 创建 thread。
 api.post('/threads', async (req, res) => {
+  const scope = scopeOrReject(res);
+  if (!scope) return;
   const title = req.body?.title ? String(req.body.title) : undefined;
-  const thread = await store.createThread(title);
+  const thread = await store.createThread(scope, title);
   res.status(201).json(thread);
 });
 
 // 列出 thread。默认只返回未归档列表；设置页通过 archived=1 查看归档列表。
 api.get('/threads', async (req, res) => {
+  const scope = scopeOrReject(res);
+  if (!scope) return;
   const archived = req.query.archived === '1' || req.query.archived === 'true';
-  res.json(await store.listThreads(50, { archived }));
+  res.json(await store.listThreads(scope, 50, { archived }));
 });
 
 // thread 详情：包含 run 和事件，用于恢复对话。
 api.get('/threads/:id', async (req, res) => {
-  const thread = await store.getThread(req.params.id);
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  const thread = await store.getThread(scope, req.params.id);
   if (!thread) return res.status(404).json({ error: 'thread 不存在' });
-  const runs = await store.listRuns(thread.id);
+  const runs = await store.listRuns(scope, thread.id);
   const withEvents = await Promise.all(
-    runs.map(async (run) => ({ ...run, events: await store.getEvents(run.id) })),
+    runs.map(async (run) => ({ ...run, events: await store.getEvents(scope, run.id) })),
   );
-  res.json({ thread, runs: withEvents, notices: await store.listThreadNotices(thread.id) });
+  res.json({ thread, runs: withEvents, notices: await store.listThreadNotices(scope, thread.id) });
 });
 
 // 更新 thread 元信息：重命名、置顶/取消置顶、归档/取消归档。
 api.patch('/threads/:id', async (req, res) => {
+  const scope = scopeOrReject(res);
+  if (!scope) return;
   const fields: { title?: string | null; pinned?: boolean; archived?: boolean; activeRunId?: string | null } = {};
   if (Object.prototype.hasOwnProperty.call(req.body ?? {}, 'title')) {
     const title = typeof req.body.title === 'string' ? req.body.title.trim() : '';
@@ -168,46 +192,52 @@ api.patch('/threads/:id', async (req, res) => {
     fields.activeRunId = optionalText(req.body.activeRunId);
   }
   if (!Object.keys(fields).length) return res.status(400).json({ error: '缺少可更新字段' });
-  const thread = await store.updateThread(req.params.id, fields);
+  const thread = await store.updateThread(scope, req.params.id, fields);
   if (!thread) return res.status(404).json({ error: 'thread 不存在' });
   res.json(thread);
 });
 
 // thread 下的 subagent 子任务列表。右侧资源栏用它恢复和打开历史 subagent。
 api.get('/threads/:id/subagents', async (req, res) => {
-  const thread = await store.getThread(req.params.id);
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  const thread = await store.getThread(scope, req.params.id);
   if (!thread) return res.status(404).json({ error: 'thread 不存在' });
-  res.json({ subagents: await store.listSubagentRunsByThread(thread.id) });
+  res.json({ subagents: await store.listSubagentRunsByThread(scope, thread.id) });
 });
 
 // 删除 thread 及关联 run 数据，级联删除由 PostgreSQL 负责。
 api.delete('/threads/:id', async (req, res) => {
-  const deleted = await store.deleteThread(req.params.id);
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  const deleted = await store.deleteThread(scope, req.params.id);
   if (!deleted) return res.status(404).json({ error: 'thread 不存在' });
   res.status(204).send();
 });
 
 // 在 thread 内启动一次 run。
 api.post('/threads/:id/runs', async (req, res) => {
-  const thread = await store.getThread(req.params.id);
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  const thread = await store.getThread(scope, req.params.id);
   if (!thread) return res.status(404).json({ error: 'thread 不存在' });
   const input = String(req.body?.input ?? '').trim();
   if (!input) return res.status(400).json({ error: 'input 为必填' });
   let modelRef: string | null = null;
   try {
-    modelRef = await validateRunModelRef(optionalText(req.body?.modelRef));
+    modelRef = await validateRunModelRef(scope, optionalText(req.body?.modelRef));
   } catch (err) {
     return res.status(400).json({ error: (err as Error).message });
   }
 
   let run;
   try {
-    run = await store.createRun(thread.id, input, { modelRef, parentRunId: optionalText(req.body?.parentRunId) ?? undefined });
+    run = await store.createRun(scope, thread.id, input, { modelRef, parentRunId: optionalText(req.body?.parentRunId) ?? undefined });
   } catch (err) {
     return res.status(400).json({ error: (err as Error).message });
   }
   // 后台执行：agent 循环在当前进程内运行，并通过 WebSocket 推送事件。
-  void executeRun(run.id);
+  void executeRun(run.id, { scope });
   res.status(201).json({ id: run.id, threadId: thread.id, status: run.status });
 });
 
@@ -215,17 +245,21 @@ api.post('/threads/:id/runs', async (req, res) => {
 
 // run 详情：包含事件，前端按 step 分组展示。
 api.get('/runs/:id', async (req, res) => {
-  const run = await store.getRun(req.params.id);
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  const run = await store.getRun(scope, req.params.id);
   if (!run) return res.status(404).json({ error: 'run 不存在' });
-  const events = await store.getEvents(run.id);
+  const events = await store.getEvents(scope, run.id);
   res.json({ run, events });
 });
 
 // 从某条历史 run 的父节点创建新分支。旧 run 和其后续分支都保留，但不会进入新 run 上下文。
 api.post('/runs/:id/branch', async (req, res) => {
-  const source = await store.getRun(req.params.id);
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  const source = await store.getRun(scope, req.params.id);
   if (!source) return res.status(404).json({ error: 'run 不存在' });
-  const thread = await store.getThread(source.thread_id);
+  const thread = await store.getThread(scope, source.thread_id);
   if (!thread) return res.status(404).json({ error: 'thread 不存在' });
   if (thread.active_run_id !== source.id) {
     return res.status(409).json({ error: '只能修改当前分支最后一条用户消息' });
@@ -240,42 +274,46 @@ api.post('/runs/:id/branch', async (req, res) => {
   let modelRef: string | null = source.model_ref;
   try {
     if (Object.prototype.hasOwnProperty.call(req.body ?? {}, 'modelRef')) {
-      modelRef = await validateRunModelRef(optionalText(req.body?.modelRef));
+      modelRef = await validateRunModelRef(scope, optionalText(req.body?.modelRef));
     }
   } catch (err) {
     return res.status(400).json({ error: (err as Error).message });
   }
-  const run = await store.createRun(source.thread_id, input, { modelRef, parentRunId: source.parent_run_id });
-  void executeRun(run.id);
+  const run = await store.createRun(scope, source.thread_id, input, { modelRef, parentRunId: source.parent_run_id });
+  void executeRun(run.id, { scope });
   res.status(201).json({ id: run.id, threadId: source.thread_id, status: run.status });
 });
 
 // 从指定用户消息 fork 出新对话：复制当前分支从开头到该用户消息，关联提示只用于 UI 展示。
 api.post('/runs/:id/fork', async (req, res) => {
-  const fork = await store.forkThreadAtRun(req.params.id);
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  const fork = await store.forkThreadAtRun(scope, req.params.id);
   if (!fork) return res.status(404).json({ error: 'run 不存在' });
   res.status(201).json({
     thread: fork.thread,
-    activeRun: { ...fork.activeRun, events: await store.getEvents(fork.activeRun.id) },
+    activeRun: { ...fork.activeRun, events: await store.getEvents(scope, fork.activeRun.id) },
   });
 });
 
 // 取消 run。运行中的 run 走协作式取消；等待用户回答时 executor 已暂停，
 // 需要直接落成 canceled，避免刷新后继续卡在 ask_user。
 api.post('/runs/:id/cancel', async (req, res) => {
-  const run = await store.getRun(req.params.id);
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  const run = await store.getRun(scope, req.params.id);
   if (!run) return res.status(404).json({ error: 'run 不存在' });
   if (run.status === 'waiting_for_user') {
-    const step = (await store.getLastStepIndex(run.id)) + 1;
-    await killRunShellCommands(run.id);
-    await store.addEvent(run.id, null, { type: 'user_cancel', step, reason: '用户已取消 run。' });
-    await store.setRunStatus(run.id, 'canceled', { error: '用户已取消 run。' });
+    const step = (await store.getLastStepIndex(scope, run.id)) + 1;
+    await killRunShellCommands(scope, run.id);
+    await store.addEvent(scope, run.id, null, { type: 'user_cancel', step, reason: '用户已取消 run。' });
+    await store.setRunStatus(scope, run.id, 'canceled', { error: '用户已取消 run。' });
     await releaseRunLeases(run.id);
     return res.json({ id: run.id, status: 'canceled' });
   }
   if (run.status === 'pending' || run.status === 'running') {
-    await killRunShellCommands(run.id);
-    await store.setRunStatus(run.id, 'canceling');
+    await killRunShellCommands(scope, run.id);
+    await store.setRunStatus(scope, run.id, 'canceling');
     return res.json({ id: run.id, status: 'canceling' });
   }
   res.json({ id: run.id, status: run.status });
@@ -284,9 +322,11 @@ api.post('/runs/:id/cancel', async (req, res) => {
 // 继续同一个 run：用于网络错误、服务重启后恢复失败等场景。
 // 模型上下文只使用已完整落库的 messages；半截流式事件保留审计，不作为续跑输入。
 api.post('/runs/:id/continue', async (req, res) => {
-  const run = await store.getRun(req.params.id);
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  const run = await store.getRun(scope, req.params.id);
   if (!run) return res.status(404).json({ error: 'run 不存在' });
-  const thread = await store.getThread(run.thread_id);
+  const thread = await store.getThread(scope, run.thread_id);
   if (!thread) return res.status(404).json({ error: 'thread 不存在' });
   if (thread.active_run_id !== run.id) {
     return res.status(409).json({ error: '只能继续当前分支最后一条 run' });
@@ -295,64 +335,71 @@ api.post('/runs/:id/continue', async (req, res) => {
     return res.status(409).json({ error: `run 当前状态为 ${run.status}，不能继续生成` });
   }
 
-  const lastStep = await store.getLastStepIndex(run.id);
-  const lastCompletedStep = await store.getLastCompletedStepIndex(run.id);
+  const lastStep = await store.getLastStepIndex(scope, run.id);
+  const lastCompletedStep = await store.getLastCompletedStepIndex(scope, run.id);
   const message = lastStep > lastCompletedStep
     ? `正在继续生成：从第 ${lastCompletedStep} 个完整 step 后恢复；未完整落库的 step 只保留为事件审计，不进入模型上下文。`
     : '正在继续生成：从最近的持久化检查点恢复。';
-  await store.addEvent(run.id, null, { type: 'recovery', step: lastStep + 1, message });
-  await store.setRunStatus(run.id, 'pending', { output: null, error: null });
-  void executeRun(run.id, { resume: true });
+  await store.addEvent(scope, run.id, null, { type: 'recovery', step: lastStep + 1, message });
+  await store.setRunStatus(scope, run.id, 'pending', { output: null, error: null });
+  void executeRun(run.id, { resume: true, scope });
   res.json({ id: run.id, threadId: run.thread_id, status: 'running' });
 });
 
 // 回答暂停中的 run，并恢复同一个 run。空回答表示“按默认假设继续”。
 api.post('/runs/:id/answer', async (req, res) => {
-  const run = await store.getRun(req.params.id);
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  const run = await store.getRun(scope, req.params.id);
   if (!run) return res.status(404).json({ error: 'run 不存在' });
   if (run.status !== 'waiting_for_user') return res.status(409).json({ error: `run 当前状态为 ${run.status}，不是 waiting_for_user` });
 
-  const spec = latestAskUserSpec(await store.getEvents(run.id));
+  const spec = latestAskUserSpec(await store.getEvents(scope, run.id));
   const answer = normalizeAnswer(req.body?.answer, spec);
   const invalid = validateAnswer(answer, spec);
   if (invalid) return res.status(400).json({ error: invalid });
-  await store.addMessage(run.thread_id, run.id, null, {
+  await store.addMessage(scope, run.thread_id, run.id, null, {
     role: 'user',
     content: `用户回答：\n${formatAnswerForModel(answer)}`,
   });
-  await store.addEvent(run.id, null, { type: 'user_answer', step: (await store.getLastStepIndex(run.id)) + 1, answer });
-  await store.setRunStatus(run.id, 'pending');
-  void executeRun(run.id, { resume: true });
+  await store.addEvent(scope, run.id, null, { type: 'user_answer', step: (await store.getLastStepIndex(scope, run.id)) + 1, answer });
+  await store.setRunStatus(scope, run.id, 'pending');
+  void executeRun(run.id, { resume: true, scope });
   res.json({ id: run.id, threadId: run.thread_id, status: 'running' });
 });
 
 // --- Managed shell ---
 
 api.get('/shell-sessions', async (req, res) => {
+  const scope = scopeOrReject(res);
+  if (!scope) return;
   const threadId = String(req.query.threadId ?? '').trim();
   if (!threadId) return res.status(400).json({ error: 'threadId 为必填' });
-  const thread = await store.getThread(threadId);
+  const thread = await store.getThread(scope, threadId);
   if (!thread) return res.status(404).json({ error: 'thread 不存在' });
-  const settings = await getToolSettings();
-  const sessions = await shellManager.listSessions(threadId, settings);
+  const settings = await getToolSettings(scope);
+  const sessions = await shellManager.listSessions(scope, threadId, settings);
   const result = await Promise.all(
     sessions.map(async (session) => ({
       ...session,
-      commands: await store.listShellCommandsBySession(session.id, 50),
+      commands: await store.listShellCommandsBySession(scope, session.id, 50),
     })),
   );
   res.json({ sessions: result });
 });
 
 api.post('/shell-sessions', async (req, res) => {
+  const scope = scopeOrReject(res);
+  if (!scope) return;
   const threadId = String(req.body?.threadId ?? '').trim();
   if (!threadId) return res.status(400).json({ error: 'threadId 为必填' });
-  const thread = await store.getThread(threadId);
+  const thread = await store.getThread(scope, threadId);
   if (!thread) return res.status(404).json({ error: 'thread 不存在' });
-  const settings = await getToolSettings();
+  const settings = await getToolSettings(scope);
   const decision = createPolicy(settings).check('shell_session_open', { command: '' });
   if (!decision.ok) return res.status(403).json({ error: decision.reason });
   const session = await shellManager.openSession({
+    scope,
     threadId,
     settings,
     owner: 'user',
@@ -362,7 +409,9 @@ api.post('/shell-sessions', async (req, res) => {
 });
 
 api.patch('/shell-sessions/:id', async (req, res) => {
-  const session = await store.getShellSession(req.params.id);
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  const session = await store.getShellSession(scope, req.params.id);
   if (!session) return res.status(404).json({ error: 'shell session 不存在' });
   if (session.deleted_at) return res.status(404).json({ error: 'shell session 已删除' });
   if (session.name === 'Default' || session.owner === 'system') return res.status(403).json({ error: 'Default shell 不支持改名' });
@@ -370,51 +419,58 @@ api.patch('/shell-sessions/:id', async (req, res) => {
   const name = String(req.body?.name ?? '').trim();
   if (!name) return res.status(400).json({ error: 'name 为必填' });
   if (name === 'Default') return res.status(400).json({ error: 'Default 是系统保留名称' });
-  const siblings = await store.listShellSessions(session.thread_id, session.workspace_root);
+  const siblings = await store.listShellSessions(scope, session.thread_id, session.workspace_root);
   if (siblings.some((item) => item.id !== session.id && item.name === name)) {
     return res.status(409).json({ error: `shell 名称已存在：${name}` });
   }
-  await store.updateShellSession(session.id, { name });
-  await store.addShellSessionEvent(session.id, 'user', 'renamed', { name });
-  res.json({ session: await store.getShellSession(session.id) });
+  await store.updateShellSession(scope, session.id, { name });
+  await store.addShellSessionEvent(scope, session.id, 'user', 'renamed', { name });
+  res.json({ session: await store.getShellSession(scope, session.id) });
 });
 
 api.get('/shell-sessions/:id/commands', async (req, res) => {
-  const session = await store.getShellSession(req.params.id);
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  const session = await store.getShellSession(scope, req.params.id);
   if (!session) return res.status(404).json({ error: 'shell session 不存在' });
   const limit = Math.min(100, Math.max(1, Number(req.query.limit ?? 20)));
-  res.json({ session, commands: await store.listShellCommandsBySession(session.id, limit) });
+  res.json({ session, commands: await store.listShellCommandsBySession(scope, session.id, limit) });
 });
 
 api.post('/shell-sessions/:id/close', async (req, res) => {
-  const session = await store.getShellSession(req.params.id);
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  const session = await store.getShellSession(scope, req.params.id);
   if (!session) return res.status(404).json({ error: 'shell session 不存在' });
   if (session.name === 'Default' || session.owner === 'system') return res.status(403).json({ error: 'Default shell 不支持删除' });
   if (session.owner !== 'user') return res.status(403).json({ error: '用户不能删除 agent 创建的 shell' });
-  const commands = await store.listShellCommandsBySession(session.id, 50);
+  const commands = await store.listShellCommandsBySession(scope, session.id, 50);
   const running = commands.filter((cmd) => cmd.status === 'queued' || cmd.status === 'running');
   if (running.length && req.body?.force !== true) {
     return res.status(409).json({ error: `shell session 仍有运行中命令：${running.map((cmd) => cmd.id).join(', ')}` });
   }
   for (const command of running) {
-    await shellManager.kill(command.id, 'session_close', 'SIGTERM');
+    await shellManager.kill(scope, command.id, 'session_close', 'SIGTERM');
   }
-  await store.updateShellSession(session.id, { status: 'closed', lease_actor: null, lease_run_id: null, deleted_at: new Date().toISOString() });
-  await store.addShellSessionEvent(session.id, 'user', 'deleted', { force: req.body?.force === true });
+  await store.updateShellSession(scope, session.id, { status: 'closed', lease_actor: null, lease_run_id: null, deleted_at: new Date().toISOString() });
+  await store.addShellSessionEvent(scope, session.id, 'user', 'deleted', { force: req.body?.force === true });
   shellBus.publish(session.thread_id, { type: 'shell_session_closed', step: 0, sessionId: session.id, reason: '用户关闭 session。' });
-  res.json({ session: await store.getShellSession(session.id) });
+  res.json({ session: await store.getShellSession(scope, session.id) });
 });
 
 api.post('/shell-sessions/:id/commands', async (req, res) => {
-  const session = await store.getShellSession(req.params.id);
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  const session = await store.getShellSession(scope, req.params.id);
   if (!session) return res.status(404).json({ error: 'shell session 不存在' });
   const command = String(req.body?.command ?? '').trim();
   if (!command) return res.status(400).json({ error: 'command 为必填' });
-  const settings = await getToolSettings();
+  const settings = await getToolSettings(scope);
   const policy = createPolicy(settings);
   const decision = policy.check('shell_exec', { command });
   if (!decision.ok) return res.status(403).json({ error: decision.reason });
   const result = await shellManager.exec({
+    scope,
     sessionId: session.id,
     command,
     settings,
@@ -429,27 +485,31 @@ api.post('/shell-sessions/:id/commands', async (req, res) => {
 });
 
 api.get('/shell-commands/:id/logs', async (req, res) => {
-  const command = await store.getShellCommand(req.params.id);
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  const command = await store.getShellCommand(scope, req.params.id);
   if (!command) return res.status(404).json({ error: 'shell command 不存在' });
   const sinceSeq = Math.max(0, Number(req.query.sinceSeq ?? 0));
   const limit = Math.min(1000, Math.max(1, Number(req.query.limit ?? 200)));
-  res.json({ command, logs: await store.getShellCommandLogs(command.id, sinceSeq, limit) });
+  res.json({ command, logs: await store.getShellCommandLogs(scope, command.id, sinceSeq, limit) });
 });
 
 api.post('/shell-commands/:id/mark', async (req, res) => {
-  const command = await store.getShellCommand(req.params.id);
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  const command = await store.getShellCommand(scope, req.params.id);
   if (!command) return res.status(404).json({ error: 'shell command 不存在' });
   if (command.status === 'queued' || command.status === 'running') {
     return res.status(409).json({ error: 'shell command 仍在运行，结束后才能标记' });
   }
-  const session = await store.getShellSession(command.session_id);
+  const session = await store.getShellSession(scope, command.session_id);
   if (!session) return res.status(404).json({ error: 'shell session 不存在' });
-  const settings = await getToolSettings();
+  const settings = await getToolSettings(scope);
   if (!isWithin(settings.workspaceRoot, session.workspace_root)) {
     return res.status(403).json({ error: 'shell session 不属于当前 workspace' });
   }
 
-  const logs = await readAllShellCommandLogs(command.id);
+  const logs = await readAllShellCommandLogs(scope, command.id);
   const output = renderShellLogs(logs);
   const maxInline = settings.maxOutput;
   let outputPath: string | null = null;
@@ -492,8 +552,10 @@ api.post('/shell-commands/:id/mark', async (req, res) => {
 });
 
 api.post('/shell-commands/:id/kill', async (req, res) => {
+  const scope = scopeOrReject(res);
+  if (!scope) return;
   const signal = normalizeShellSignal(req.body?.signal, 'SIGTERM');
-  const command = await shellManager.kill(req.params.id, String(req.body?.reason ?? 'user_requested_kill'), signal);
+  const command = await shellManager.kill(scope, req.params.id, String(req.body?.reason ?? 'user_requested_kill'), signal);
   res.json({ command });
 });
 

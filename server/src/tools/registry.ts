@@ -3,6 +3,7 @@ import { toLlmTool } from './types.js';
 import type { LlmTool } from '../llm/types.js';
 import { createPolicy } from './policy.js';
 import { getToolSettings, type McpSettings } from '../settings.js';
+import type { Scope } from '../store/types.js';
 import { callMcpTool, mcpToolSchemas, parseMcpToolName } from '../mcp/client.js';
 import { shellTool } from './shell.js';
 import { fileReadTool } from './fileRead.js';
@@ -76,6 +77,7 @@ export async function runTool(
   name: string,
   args: Record<string, unknown>,
   ctx: {
+    scope: Scope;
     settings?: Awaited<ReturnType<typeof getToolSettings>>;
     env?: Record<string, string>;
     threadId?: string;
@@ -83,13 +85,13 @@ export async function runTool(
     stepId?: string;
     step?: number;
     mcpSettings?: McpSettings;
-  } = {},
+  },
 ): Promise<ToolResult> {
   const mcpTool = parseMcpToolName(name);
   const tool = byName.get(name);
   if (!tool && !mcpTool) return { text: `未知工具：${name}` };
   // 所有工具调用先经过沙箱/权限策略。
-  const settings = ctx.settings ?? (await getToolSettings());
+  const settings = ctx.settings ?? (await getToolSettings(ctx.scope));
   const policy = createPolicy(settings);
   const decision = policy.check(name, args);
   if (!decision.ok) return { text: `工具策略已阻止：${decision.reason}` };

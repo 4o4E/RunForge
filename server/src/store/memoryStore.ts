@@ -7,6 +7,7 @@ import type {
   AuthTokenRow,
   PushSubscriptionRow,
   RunRow,
+  Scope,
   ShellActor,
   ShellCommandLogRow,
   ShellCommandRow,
@@ -74,6 +75,28 @@ export class MemoryStore implements Store {
   private shellLogSeq = 0;
   private now = () => new Date().toISOString();
 
+  // 多租户改造 Phase 2(docs/multi-tenancy-design.md §5)。这几个私有归属判断函数
+  // 镜像 pgStore.ts 里对应的 JOIN 链,保持两个实现的过滤逻辑一致。
+  private threadOwnedBy(thread: ThreadRow | undefined, scope: Scope): thread is ThreadRow {
+    return Boolean(thread) && thread!.tenant_id === scope.tenantId && thread!.user_id === scope.userId;
+  }
+  private runOwnedBy(run: RunRow | undefined, scope: Scope): run is RunRow {
+    if (!run) return false;
+    return this.threadOwnedBy(this.threads.get(run.thread_id), scope);
+  }
+  private shellSessionOwnedBy(session: ShellSessionRow | undefined, scope: Scope): session is ShellSessionRow {
+    if (!session) return false;
+    return this.threadOwnedBy(this.threads.get(session.thread_id), scope);
+  }
+  private shellCommandOwnedBy(command: ShellCommandRow | undefined, scope: Scope): command is ShellCommandRow {
+    if (!command) return false;
+    return this.shellSessionOwnedBy(this.shellSessions.get(command.session_id), scope);
+  }
+  private subagentRunOwnedBy(row: SubagentRunRow | undefined, scope: Scope): row is SubagentRunRow {
+    if (!row) return false;
+    return this.runOwnedBy(this.runs.get(row.parent_run_id), scope);
+  }
+
   private threadWithFallbackTitle(thread: ThreadRow): ThreadRow {
     const firstRun = [...this.runs.values()]
       .filter((run) => run.thread_id === thread.id)
@@ -81,9 +104,11 @@ export class MemoryStore implements Store {
     return { ...thread, fallback_title: firstRun?.input ?? null };
   }
 
-  async createThread(title?: string): Promise<ThreadRow> {
+  async createThread(scope: Scope, title?: string): Promise<ThreadRow> {
     const row: ThreadRow = {
       id: newThreadId(),
+      tenant_id: scope.tenantId,
+      user_id: scope.userId,
       title: title ?? null,
       active_run_id: null,
       pinned_at: null,
@@ -94,13 +119,15 @@ export class MemoryStore implements Store {
     this.threads.set(row.id, row);
     return row;
   }
-  async getThread(id: string) {
+  async getThread(scope: Scope, id: string) {
     const thread = this.threads.get(id);
-    return thread ? this.threadWithFallbackTitle(thread) : null;
+    if (!this.threadOwnedBy(thread, scope)) return null;
+    return this.threadWithFallbackTitle(thread);
   }
-  async listThreads(limit = 50, options: { archived?: boolean } = {}) {
+  async listThreads(scope: Scope, limit = 50, options: { archived?: boolean } = {}) {
     const archived = options.archived === true;
     return [...this.threads.values()]
+      .filter((thread) => thread.tenant_id === scope.tenantId && thread.user_id === scope.userId)
       .filter((thread) => archived ? Boolean(thread.archived_at) : !thread.archived_at)
       .sort((a, b) => {
         if (a.pinned_at && !b.pinned_at) return -1;
@@ -113,9 +140,9 @@ export class MemoryStore implements Store {
       .map((thread) => this.threadWithFallbackTitle(thread))
       .slice(0, limit);
   }
-  async updateThread(id: string, fields: { title?: string | null; pinned?: boolean; archived?: boolean; activeRunId?: string | null }) {
+  async updateThread(scope: Scope, id: string, fields: { title?: string | null; pinned?: boolean; archived?: boolean; activeRunId?: string | null }) {
     const thread = this.threads.get(id);
-    if (!thread) return null;
+    if (!this.threadOwnedBy(thread, scope)) return null;
     let activeRunId = fields.activeRunId ?? null;
     if (fields.activeRunId) {
       activeRunId = this.resolveBranchLeafRunId(id, fields.activeRunId);
@@ -133,16 +160,17 @@ export class MemoryStore implements Store {
     this.threads.set(id, next);
     return next;
   }
-  async setThreadTitleIfEmpty(id: string, title: string) {
+  async setThreadTitleIfEmpty(scope: Scope, id: string, title: string) {
     const thread = this.threads.get(id);
-    if (!thread || thread.title?.trim()) return null;
+    if (!this.threadOwnedBy(thread, scope) || thread.title?.trim()) return null;
     const next: ThreadRow = { ...thread, title, updated_at: this.now() };
     this.threads.set(id, next);
     return next;
   }
-  async deleteThread(id: string) {
-    const existed = this.threads.delete(id);
-    if (!existed) return false;
+  async deleteThread(scope: Scope, id: string) {
+    const thread = this.threads.get(id);
+    if (!this.threadOwnedBy(thread, scope)) return false;
+    this.threads.delete(id);
     const runIds = new Set([...this.runs.values()].filter((r) => r.thread_id === id).map((r) => r.id));
     for (const runId of runIds) {
       this.runs.delete(runId);
@@ -164,10 +192,11 @@ export class MemoryStore implements Store {
     return true;
   }
 
-  async searchThreadMessages(searchText: string, limit = 50): Promise<ThreadSearchResultRow[]> {
+  async searchThreadMessages(scope: Scope, searchText: string, limit = 50): Promise<ThreadSearchResultRow[]> {
     const q = searchText.trim().toLowerCase();
     if (!q) return [];
     return this.messages
+      .filter((message) => this.threadOwnedBy(this.threads.get(message.thread_id), scope))
       .filter((message) => (
         (message.role === 'user' || message.role === 'assistant')
         && typeof message.content === 'string'
@@ -186,11 +215,12 @@ export class MemoryStore implements Store {
       }));
   }
 
-  async listThreadNotices(threadId: string): Promise<ThreadNoticeRow[]> {
+  async listThreadNotices(scope: Scope, threadId: string): Promise<ThreadNoticeRow[]> {
+    if (!this.threadOwnedBy(this.threads.get(threadId), scope)) return [];
     return [...(this.threadNotices.get(threadId) ?? [])];
   }
 
-  async addThreadNotice(input: {
+  async addThreadNotice(scope: Scope, input: {
     threadId: string;
     kind?: string;
     message: string;
@@ -198,6 +228,7 @@ export class MemoryStore implements Store {
     linkedThreadId?: string | null;
     linkedRunId?: string | null;
   }): Promise<ThreadNoticeRow> {
+    if (!this.threadOwnedBy(this.threads.get(input.threadId), scope)) throw new Error('threadId 不存在或不属于当前用户');
     const row: ThreadNoticeRow = {
       id: this.seq++,
       thread_id: input.threadId,
@@ -212,9 +243,9 @@ export class MemoryStore implements Store {
     return row;
   }
 
-  async forkThreadAtRun(sourceRunId: string): Promise<{ thread: ThreadRow; activeRun: RunRow } | null> {
+  async forkThreadAtRun(scope: Scope, sourceRunId: string): Promise<{ thread: ThreadRow; activeRun: RunRow } | null> {
     const source = this.runs.get(sourceRunId);
-    if (!source) return null;
+    if (!this.runOwnedBy(source, scope)) return null;
     const sourceThread = this.threads.get(source.thread_id);
     if (!sourceThread) return null;
 
@@ -231,7 +262,9 @@ export class MemoryStore implements Store {
     }
     path.reverse();
 
-    const newThread = await this.createThread(sourceThread.title ? `${sourceThread.title} 的 fork` : 'Fork 对话');
+    // fork 出的新 thread 归属发起 fork 的 scope,不是复制源 thread 的归属——
+    // 能走到这里说明 sourceRunId 已经属于 scope 了,两者本来就是同一个 tenant/user。
+    const newThread = await this.createThread(scope, sourceThread.title ? `${sourceThread.title} 的 fork` : 'Fork 对话');
     const runIdMap = new Map<string, string>();
     const stepIdMap = new Map<string, string>();
     const messageIdMap = new Map<number, number>();
@@ -240,7 +273,7 @@ export class MemoryStore implements Store {
     for (const oldRun of path) {
       const parentRunId = oldRun.parent_run_id ? runIdMap.get(oldRun.parent_run_id) ?? null : null;
       const isSourceRun = oldRun.id === source.id;
-      const newRun = await this.createRun(newThread.id, oldRun.input, { modelRef: oldRun.model_ref, parentRunId });
+      const newRun = await this.createRun(scope, newThread.id, oldRun.input, { modelRef: oldRun.model_ref, parentRunId });
       newRun.status = isSourceRun ? 'done' : oldRun.status;
       newRun.output = isSourceRun ? null : oldRun.output;
       newRun.error = isSourceRun ? null : oldRun.error;
@@ -287,7 +320,7 @@ export class MemoryStore implements Store {
     if (!activeRun) return null;
     newThread.active_run_id = activeRun.id;
     newThread.updated_at = this.now();
-    await this.addThreadNotice({
+    await this.addThreadNotice(scope, {
       threadId: source.thread_id,
       kind: 'fork_to',
       message: '已从本消息 fork 到新对话。',
@@ -295,7 +328,7 @@ export class MemoryStore implements Store {
       linkedThreadId: newThread.id,
       linkedRunId: source.id,
     });
-    await this.addThreadNotice({
+    await this.addThreadNotice(scope, {
       threadId: newThread.id,
       kind: 'fork_from',
       message: '此对话 fork 自原对话。',
@@ -306,8 +339,9 @@ export class MemoryStore implements Store {
     return { thread: newThread, activeRun };
   }
 
-  async createRun(threadId: string, input: string, options: { modelRef?: string | null; parentRunId?: string | null } = {}): Promise<RunRow> {
+  async createRun(scope: Scope, threadId: string, input: string, options: { modelRef?: string | null; parentRunId?: string | null } = {}): Promise<RunRow> {
     const thread = this.threads.get(threadId);
+    if (!this.threadOwnedBy(thread, scope)) throw new Error('threadId 不存在或不属于当前用户');
     const threadRuns = [...this.runs.values()].filter((r) => r.thread_id === threadId);
     const parentRunId = options.parentRunId === undefined
       ? thread?.active_run_id ?? threadRuns[threadRuns.length - 1]?.id ?? null
@@ -358,41 +392,51 @@ export class MemoryStore implements Store {
       .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.id.localeCompare(a.id))[0]?.id ?? selectedRunId;
   }
 
-  async getRun(id: string) {
-    return this.runs.get(id) ?? null;
+  async getRun(scope: Scope, id: string) {
+    const run = this.runs.get(id);
+    return this.runOwnedBy(run, scope) ? run : null;
   }
-  async listRuns(threadId: string) {
+  async listRuns(scope: Scope, threadId: string) {
+    if (!this.threadOwnedBy(this.threads.get(threadId), scope)) return [];
     return [...this.runs.values()].filter((r) => r.thread_id === threadId).sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
   }
-  async listRunsByStatus(statuses: RunStatus[]) {
+  async listRunsByStatusUnscoped(statuses: RunStatus[]) {
     const set = new Set(statuses);
     return [...this.runs.values()].filter((r) => set.has(r.status));
   }
-  async setRunStatus(id: string, status: RunStatus, fields: { output?: string | null; error?: string | null } = {}) {
+  async setRunStatus(scope: Scope, id: string, status: RunStatus, fields: { output?: string | null; error?: string | null } = {}) {
     const run = this.runs.get(id);
-    if (!run) return;
+    if (!this.runOwnedBy(run, scope)) return;
     run.status = status;
     if (fields.output !== undefined) run.output = fields.output;
     if (fields.error !== undefined) run.error = fields.error;
     run.updated_at = this.now();
   }
-  async setGoalState(runId: string, goal: GoalState) {
+  async setGoalState(scope: Scope, runId: string, goal: GoalState) {
     const run = this.runs.get(runId);
-    if (run) {
-      run.goal_state = goal;
-      run.updated_at = this.now();
-    }
+    if (!this.runOwnedBy(run, scope)) return;
+    run.goal_state = goal;
+    run.updated_at = this.now();
+  }
+  async getRunUnscoped(id: string): Promise<RunRow | null> {
+    return this.runs.get(id) ?? null;
+  }
+  async getThreadUnscoped(id: string): Promise<ThreadRow | null> {
+    return this.threads.get(id) ?? null;
   }
 
-  async createStep(runId: string, idx: number): Promise<StepRow> {
+  async createStep(scope: Scope, runId: string, idx: number): Promise<StepRow> {
+    if (!this.runOwnedBy(this.runs.get(runId), scope)) throw new Error('runId 不存在或不属于当前用户');
     const row: StepRow = { id: newStepId(), run_id: runId, idx, created_at: this.now() };
     this.steps.push(row);
     return row;
   }
-  async getLastStepIndex(runId: string): Promise<number> {
+  async getLastStepIndex(scope: Scope, runId: string): Promise<number> {
+    if (!this.runOwnedBy(this.runs.get(runId), scope)) return 0;
     return this.steps.filter((s) => s.run_id === runId).reduce((max, s) => Math.max(max, s.idx), 0);
   }
-  async getLastCompletedStepIndex(runId: string): Promise<number> {
+  async getLastCompletedStepIndex(scope: Scope, runId: string): Promise<number> {
+    if (!this.runOwnedBy(this.runs.get(runId), scope)) return 0;
     let last = 0;
     for (const step of this.steps.filter((s) => s.run_id === runId).sort((a, b) => a.idx - b.idx)) {
       const stepMessages = this.messages.filter((m) => m.step_id === step.id);
@@ -421,7 +465,8 @@ export class MemoryStore implements Store {
     return ids;
   }
 
-  async loadThreadMessages(threadId: string, options: { runId?: string | null } = {}): Promise<ThreadMessage[]> {
+  async loadThreadMessages(scope: Scope, threadId: string, options: { runId?: string | null } = {}): Promise<ThreadMessage[]> {
+    if (!this.threadOwnedBy(this.threads.get(threadId), scope)) return [];
     const branchRunIds = this.branchRunIds(threadId, options.runId);
     const messages = this.messages
       .filter((m) => branchRunIds.has(m.run_id) && m.thread_id === threadId && m.collapsed !== 'summarized' && !isEphemeralSystemMessage(m.role, m.content))
@@ -439,10 +484,12 @@ export class MemoryStore implements Store {
       }));
     return sanitizeThreadMessagesForModel(messages);
   }
-  async countRunMessages(runId: string): Promise<number> {
+  async countRunMessages(scope: Scope, runId: string): Promise<number> {
+    if (!this.runOwnedBy(this.runs.get(runId), scope)) return 0;
     return this.messages.filter((m) => m.run_id === runId).length;
   }
-  async addMessage(threadId: string, runId: string, stepId: string | null, msg: LlmMessage): Promise<number> {
+  async addMessage(scope: Scope, threadId: string, runId: string, stepId: string | null, msg: LlmMessage): Promise<number> {
+    if (!this.threadOwnedBy(this.threads.get(threadId), scope)) throw new Error('threadId 不存在或不属于当前用户');
     const seq = this.seq++;
     this.messages.push({
       thread_id: threadId,
@@ -457,33 +504,38 @@ export class MemoryStore implements Store {
     return seq;
   }
   async addSummaryMessage(
+    scope: Scope,
     threadId: string,
     runId: string,
     stepId: string | null,
     msg: LlmMessage,
     summaryOf: number[],
   ): Promise<number> {
-    const id = await this.addMessage(threadId, runId, stepId, msg);
+    const id = await this.addMessage(scope, threadId, runId, stepId, msg);
     const row = this.messages.find((m) => m.seq === id);
     if (row) row.summaryOf = summaryOf;
     return id;
   }
 
-  async markMessagesCollapsed(ids: number[], kind: 'masked' | 'summarized'): Promise<void> {
+  async markMessagesCollapsed(scope: Scope, ids: number[], kind: 'masked' | 'summarized'): Promise<void> {
     const set = new Set(ids);
-    for (const m of this.messages) if (set.has(m.seq)) m.collapsed = kind;
+    for (const m of this.messages) {
+      if (set.has(m.seq) && this.threadOwnedBy(this.threads.get(m.thread_id), scope)) m.collapsed = kind;
+    }
   }
 
-  async addEvent(runId: string, _stepId: string | null, event: AgentEvent) {
+  async addEvent(scope: Scope, runId: string, _stepId: string | null, event: AgentEvent) {
+    if (!this.runOwnedBy(this.runs.get(runId), scope)) return;
     const list = this.events.get(runId) ?? [];
     list.push(event);
     this.events.set(runId, list);
   }
-  async getEvents(runId: string) {
+  async getEvents(scope: Scope, runId: string) {
+    if (!this.runOwnedBy(this.runs.get(runId), scope)) return [];
     return this.events.get(runId) ?? [];
   }
 
-  async createSubagentRun(input: {
+  async createSubagentRun(scope: Scope, input: {
     parentRunId: string;
     parentStepId?: string | null;
     workflowId?: string | null;
@@ -492,9 +544,11 @@ export class MemoryStore implements Store {
     taskAssignment: Record<string, unknown>;
     skillNames?: string[];
   }): Promise<SubagentRunRow> {
+    if (!this.runOwnedBy(this.runs.get(input.parentRunId), scope)) throw new Error('parentRunId 不存在或不属于当前用户');
     const now = this.now();
     const row: SubagentRunRow = {
       id: newSubagentRunId(),
+      tenant_id: scope.tenantId,
       parent_run_id: input.parentRunId,
       parent_step_id: input.parentStepId ?? null,
       workflow_id: input.workflowId ?? null,
@@ -515,11 +569,12 @@ export class MemoryStore implements Store {
   }
 
   async finishSubagentRun(
+    scope: Scope,
     id: string,
     fields: { status: 'done' | 'error'; output?: string | null; error?: string | null; usage?: Record<string, unknown> | null },
   ): Promise<void> {
     const row = this.subagentRuns.get(id);
-    if (!row) return;
+    if (!this.subagentRunOwnedBy(row, scope)) return;
     row.status = fields.status;
     if (fields.output !== undefined) row.output = fields.output;
     if (fields.error !== undefined) row.error = fields.error;
@@ -528,18 +583,20 @@ export class MemoryStore implements Store {
     row.finished_at = row.updated_at;
   }
 
-  async getSubagentRun(id: string): Promise<SubagentRunRow | null> {
-    return this.subagentRuns.get(id) ?? null;
+  async getSubagentRun(scope: Scope, id: string): Promise<SubagentRunRow | null> {
+    const row = this.subagentRuns.get(id);
+    return this.subagentRunOwnedBy(row, scope) ? row : null;
   }
 
-  async listSubagentRunsByThread(threadId: string): Promise<SubagentRunRow[]> {
+  async listSubagentRunsByThread(scope: Scope, threadId: string): Promise<SubagentRunRow[]> {
+    if (!this.threadOwnedBy(this.threads.get(threadId), scope)) return [];
     const runIds = new Set([...this.runs.values()].filter((run) => run.thread_id === threadId).map((run) => run.id));
     return [...this.subagentRuns.values()]
       .filter((row) => runIds.has(row.parent_run_id))
       .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
   }
 
-  async createShellSession(input: {
+  async createShellSession(scope: Scope, input: {
     threadId: string;
     name: string;
     owner: ShellSessionRow['owner'];
@@ -548,8 +605,10 @@ export class MemoryStore implements Store {
     backend: string;
     configSnapshot?: Record<string, unknown> | null;
   }): Promise<ShellSessionRow> {
+    if (!this.threadOwnedBy(this.threads.get(input.threadId), scope)) throw new Error('threadId 不存在或不属于当前用户');
     const row: ShellSessionRow = {
       id: newShellSessionId(),
+      tenant_id: scope.tenantId,
       thread_id: input.threadId,
       name: input.name,
       owner: input.owner,
@@ -568,26 +627,29 @@ export class MemoryStore implements Store {
     return row;
   }
 
-  async getShellSession(id: string): Promise<ShellSessionRow | null> {
-    return this.shellSessions.get(id) ?? null;
+  async getShellSession(scope: Scope, id: string): Promise<ShellSessionRow | null> {
+    const row = this.shellSessions.get(id);
+    return this.shellSessionOwnedBy(row, scope) ? row : null;
   }
 
-  async listShellSessions(threadId: string, workspaceRoot?: string): Promise<ShellSessionRow[]> {
+  async listShellSessions(scope: Scope, threadId: string, workspaceRoot?: string): Promise<ShellSessionRow[]> {
+    if (!this.threadOwnedBy(this.threads.get(threadId), scope)) return [];
     return [...this.shellSessions.values()]
       .filter((session) => !session.deleted_at && session.thread_id === threadId && (!workspaceRoot || session.workspace_root === workspaceRoot))
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   }
 
   async updateShellSession(
+    scope: Scope,
     id: string,
     fields: Partial<Pick<ShellSessionRow, 'name' | 'status' | 'lease_actor' | 'lease_run_id' | 'cwd' | 'config_snapshot' | 'deleted_at'>>,
   ): Promise<void> {
     const row = this.shellSessions.get(id);
-    if (!row) return;
+    if (!this.shellSessionOwnedBy(row, scope)) return;
     Object.assign(row, fields, { updated_at: this.now() });
   }
 
-  async createShellCommand(input: {
+  async createShellCommand(scope: Scope, input: {
     sessionId: string;
     runId?: string | null;
     stepId?: string | null;
@@ -600,6 +662,7 @@ export class MemoryStore implements Store {
     softTimeoutAt?: string | null;
     hardTimeoutAt?: string | null;
   }): Promise<ShellCommandRow> {
+    if (!this.shellSessionOwnedBy(this.shellSessions.get(input.sessionId), scope)) throw new Error('sessionId 不存在或不属于当前用户');
     const alreadyRunning = [...this.shellCommands.values()].find(
       (cmd) => cmd.session_id === input.sessionId && (cmd.status === 'queued' || cmd.status === 'running'),
     );
@@ -634,26 +697,29 @@ export class MemoryStore implements Store {
     return row;
   }
 
-  async getShellCommand(id: string): Promise<ShellCommandRow | null> {
-    return this.shellCommands.get(id) ?? null;
+  async getShellCommand(scope: Scope, id: string): Promise<ShellCommandRow | null> {
+    const row = this.shellCommands.get(id);
+    return this.shellCommandOwnedBy(row, scope) ? row : null;
   }
 
-  async listShellCommandsBySession(sessionId: string, limit = 20): Promise<ShellCommandRow[]> {
+  async listShellCommandsBySession(scope: Scope, sessionId: string, limit = 20): Promise<ShellCommandRow[]> {
+    if (!this.shellSessionOwnedBy(this.shellSessions.get(sessionId), scope)) return [];
     return [...this.shellCommands.values()]
       .filter((cmd) => cmd.session_id === sessionId)
       .sort((a, b) => b.started_at.localeCompare(a.started_at))
       .slice(0, limit);
   }
 
-  async listRunningShellCommandsByRun(runId: string): Promise<ShellCommandRow[]> {
+  async listRunningShellCommandsByRun(scope: Scope, runId: string): Promise<ShellCommandRow[]> {
+    if (!this.runOwnedBy(this.runs.get(runId), scope)) return [];
     return [...this.shellCommands.values()].filter((cmd) => cmd.run_id === runId && cmd.status === 'running');
   }
 
-  async listRunningShellCommands(): Promise<ShellCommandRow[]> {
+  async listRunningShellCommandsUnscoped(): Promise<ShellCommandRow[]> {
     return [...this.shellCommands.values()].filter((cmd) => cmd.status === 'queued' || cmd.status === 'running');
   }
 
-  async updateShellCommand(
+  async updateShellCommandUnscoped(
     id: string,
     fields: Partial<
       Pick<
@@ -676,7 +742,41 @@ export class MemoryStore implements Store {
     Object.assign(row, fields, { updated_at: this.now() });
   }
 
-  async appendShellCommandLog(commandId: string, stream: ShellLogStream, chunk: string): Promise<ShellCommandLogRow> {
+  async updateShellSessionUnscoped(
+    id: string,
+    fields: Partial<Pick<ShellSessionRow, 'name' | 'status' | 'lease_actor' | 'lease_run_id' | 'cwd' | 'config_snapshot' | 'deleted_at'>>,
+  ): Promise<void> {
+    const row = this.shellSessions.get(id);
+    if (!row) return;
+    Object.assign(row, fields, { updated_at: this.now() });
+  }
+
+  async updateShellCommand(
+    scope: Scope,
+    id: string,
+    fields: Partial<
+      Pick<
+        ShellCommandRow,
+        | 'status'
+        | 'attention'
+        | 'host_pid'
+        | 'child_pid'
+        | 'exit_code'
+        | 'signal'
+        | 'last_output_at'
+        | 'output_bytes'
+        | 'error'
+        | 'ended_at'
+      >
+    >,
+  ): Promise<void> {
+    const row = this.shellCommands.get(id);
+    if (!this.shellCommandOwnedBy(row, scope)) return;
+    Object.assign(row, fields, { updated_at: this.now() });
+  }
+
+  async appendShellCommandLog(scope: Scope, commandId: string, stream: ShellLogStream, chunk: string): Promise<ShellCommandLogRow> {
+    if (!this.shellCommandOwnedBy(this.shellCommands.get(commandId), scope)) throw new Error('commandId 不存在或不属于当前用户');
     const list = this.shellLogs.get(commandId) ?? [];
     const row: ShellCommandLogRow = {
       id: ++this.shellLogSeq,
@@ -691,19 +791,24 @@ export class MemoryStore implements Store {
     return row;
   }
 
-  async getShellCommandLogs(commandId: string, sinceSeq = 0, limit = 200): Promise<ShellCommandLogRow[]> {
+  async getShellCommandLogs(scope: Scope, commandId: string, sinceSeq = 0, limit = 200): Promise<ShellCommandLogRow[]> {
+    if (!this.shellCommandOwnedBy(this.shellCommands.get(commandId), scope)) return [];
     return (this.shellLogs.get(commandId) ?? []).filter((row) => row.seq > sinceSeq).slice(0, limit);
   }
 
-  async addShellSessionEvent(_sessionId: string, _actor: ShellActor, _kind: string, _data: unknown): Promise<void> {
+  async addShellSessionEvent(scope: Scope, sessionId: string, _actor: ShellActor, _kind: string, _data: unknown): Promise<void> {
     // 内存 Store 只服务单测和离线演示；session 事件的可视化依赖 AgentEvent。
+    // 仍然校验归属,保持和 pgStore 一致的行为(非本租户/用户的 session 静默无效果)。
+    void this.shellSessionOwnedBy(this.shellSessions.get(sessionId), scope);
   }
 
-  async upsertPushSubscription(input: WebPushSubscriptionInput, userAgent?: string | null): Promise<PushSubscriptionRow> {
+  async upsertPushSubscription(scope: Scope, input: WebPushSubscriptionInput, userAgent?: string | null): Promise<PushSubscriptionRow> {
     const existing = this.pushSubscriptions.get(input.endpoint);
     const now = this.now();
     const row: PushSubscriptionRow = {
       endpoint: input.endpoint,
+      tenant_id: scope.tenantId,
+      user_id: scope.userId,
       p256dh: input.keys.p256dh,
       auth: input.keys.auth,
       expiration_time: input.expirationTime ? new Date(input.expirationTime).toISOString() : null,
@@ -717,8 +822,8 @@ export class MemoryStore implements Store {
     return row;
   }
 
-  async listEnabledPushSubscriptions(): Promise<PushSubscriptionRow[]> {
-    return [...this.pushSubscriptions.values()].filter((row) => row.enabled);
+  async listEnabledPushSubscriptionsByScope(scope: Scope): Promise<PushSubscriptionRow[]> {
+    return [...this.pushSubscriptions.values()].filter((row) => row.enabled && row.tenant_id === scope.tenantId && row.user_id === scope.userId);
   }
 
   async disablePushSubscription(endpoint: string, error?: string | null): Promise<void> {

@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { DatasourceError, getDatasource } from './accountPool.js';
 import type { DatasourceRow, DatasourceTestResult, DatasourceType } from './types.js';
+import type { TenantScope } from '../store/types.js';
 
 function jsonObject(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -19,6 +20,7 @@ function draftDatasource(input: unknown): DatasourceRow {
   const body = jsonObject(input);
   return {
     id: 'draft',
+    tenant_id: 'draft',
     name: stringValue(body.name, 'draft'),
     type: datasourceType(body.type),
     status: body.status === 'disabled' ? 'disabled' : 'active',
@@ -100,8 +102,8 @@ export async function testDatasourceDraft(input: unknown): Promise<DatasourceTes
   return testDatasource(draftDatasource(input));
 }
 
-export async function testDatasourceById(id: string, input: unknown = {}): Promise<DatasourceTestResult> {
-  const datasource = await getDatasource(id);
+export async function testDatasourceById(scope: TenantScope, id: string, input: unknown = {}): Promise<DatasourceTestResult> {
+  const datasource = await getDatasource(scope, id);
   if (!datasource) throw new DatasourceError(404, '数据源不存在');
   const body = jsonObject(input);
   const adminConfig = jsonObject(body.adminConfig);

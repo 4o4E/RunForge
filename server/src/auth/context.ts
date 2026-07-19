@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { TenantUserRole } from '@runforge/contracts';
 import type { JwtClaims } from './jwt.js';
+import type { Scope } from '../store/types.js';
 
 export type IdentityContext =
   | { scope: 'tenant'; tenantId: string; userId: string; role: TenantUserRole }
@@ -25,4 +26,12 @@ export function identityFromClaims(claims: JwtClaims): IdentityContext {
     return { scope: 'system', systemAdminId: claims.sub };
   }
   return { scope: 'tenant', tenantId: claims.tenant_id, userId: claims.sub, role: claims.role };
+}
+
+/** 从当前身份上下文取出 Store 查询用的 {tenantId, userId};不是租户身份时返回 null。
+ *  路由 handler 用这个而不是自己拼 getIdentity() 的字段,统一取值方式
+ *  (docs/multi-tenancy-design.md §5)。 */
+export function requireScope(): Scope | null {
+  const identity = getIdentity();
+  return identity && identity.scope === 'tenant' ? { tenantId: identity.tenantId, userId: identity.userId } : null;
 }

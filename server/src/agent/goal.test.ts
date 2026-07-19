@@ -8,6 +8,9 @@ import { executeRun } from './executor.js';
 import { MemoryStore } from '../store/memoryStore.js';
 import type { Provider } from '../llm/types.js';
 import type { ToolSettings } from '../settings.js';
+import type { Scope } from '../store/types.js';
+
+const scope: Scope = { tenantId: 'default', userId: 'us_test' };
 
 let testWorkspace = '';
 
@@ -118,8 +121,8 @@ test('canReportGoal: plan tasks must settle and enter reporting phase', () => {
 
 test('executeRun: update_plan persists the goal anchor on the run', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'analyze the project');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'analyze the project');
 
   let turn = 0;
   const provider: Provider = {
@@ -162,7 +165,7 @@ test('executeRun: update_plan persists the goal anchor on the run', async () => 
 
   await executeRun(run.id, { store, provider, publish: () => {}, hardStepCap: 5, toolSettings: testToolSettings() });
 
-  const finished = await store.getRun(run.id);
+  const finished = await store.getRun(scope, run.id);
   assert.equal(finished?.status, 'done');
   const goal = finished?.goal_state;
   assert.ok(goal, 'goal_state should be persisted');
@@ -175,8 +178,8 @@ test('executeRun: update_plan persists the goal anchor on the run', async () => 
 
 test('executeRun: final report wins over an unsettled plan', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'build safely');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'build safely');
 
   let turn = 0;
   const provider: Provider = {
@@ -202,13 +205,13 @@ test('executeRun: final report wins over an unsettled plan', async () => {
 
   await executeRun(run.id, { store, provider, publish: () => {}, hardStepCap: 5, toolSettings: testToolSettings() });
 
-  const finished = await store.getRun(run.id);
+  const finished = await store.getRun(scope, run.id);
   assert.equal(finished?.status, 'done');
   assert.equal(finished?.output, 'premature');
   assert.equal(finished?.goal_state?.phase, 'completed');
   assert.equal(finished?.goal_state?.plan[0]?.status, 'doing');
   assert.equal(finished?.goal_state?.next, '已结束（存在未完成项）');
-  const events = await store.getEvents(run.id);
+  const events = await store.getEvents(scope, run.id);
   assert.ok(events.some((event) => event.type === 'final' && event.output === 'premature'));
   assert.ok(events.some((event) => event.type === 'plan_update'));
 });

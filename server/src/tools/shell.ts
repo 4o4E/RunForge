@@ -26,7 +26,8 @@ export const shellTool: Tool = {
   async run(args, ctx) {
     const command = String(args.command ?? '');
     const timeout = Number(args.timeout_ms ?? 60000);
-    const settings = ctx?.settings ?? (await getToolSettings());
+    if (!ctx?.scope) throw new Error('shell 需要当前身份 scope，上下文缺失。');
+    const settings = ctx?.settings ?? (await getToolSettings(ctx.scope));
     if (requiresDatabaseAccess(command) && !ctx?.env?.DB_WORKLOAD_TOKEN) {
       return '数据库 CLI 需要先激活 database-access skill，由本次 run 的 workload token 换取短期凭证；不要使用宿主 DATABASE_URL 或本机默认数据库账号直连。';
     }
@@ -36,12 +37,14 @@ export const shellTool: Tool = {
     try {
       if (ctx?.threadId && ctx.settings) {
         const session = await shellManager.reuseSession({
+          scope: ctx.scope,
           threadId: ctx.threadId,
           settings,
           runId: ctx.runId,
           step: ctx.step,
         });
         const result = await shellManager.exec({
+          scope: ctx.scope,
           sessionId: session.id,
           command,
           settings,

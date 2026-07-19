@@ -6,6 +6,7 @@ import { createOpenAIChatProvider } from './providers/openaiChat.js';
 import { createAnthropicProvider } from './providers/anthropic.js';
 import { createMockProvider } from './providers/mock.js';
 import { getLlmSettings, type LlmProviderSettings } from '../settings.js';
+import type { TenantScope } from '../store/types.js';
 
 // `aisdk` is the default (Phase 2). The legacy hand-written providers are kept
 // selectable as a rollback path until the AI SDK path is validated in real use.
@@ -60,8 +61,8 @@ export function createProviderFromSettings(provider: LlmProviderSettings, model:
   });
 }
 
-export async function getConfiguredProvider(modelRef?: string): Promise<{ provider: Provider; modelRef: string; stream: boolean }> {
-  const settings = await getLlmSettings();
+export async function getConfiguredProvider(scope: TenantScope, modelRef?: string): Promise<{ provider: Provider; modelRef: string; stream: boolean }> {
+  const settings = await getLlmSettings(scope);
   const ref = modelRef?.trim() || settings.defaultModelRef;
   const parsed = parseModelRef(ref);
   if (!parsed) throw new Error(`模型引用格式无效：${ref}。请使用 provider:model，例如 default:${config.llm.model}`);

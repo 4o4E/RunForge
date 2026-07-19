@@ -40,12 +40,13 @@ test('file share signature binds path and expiry', () => {
   config.auth.shareSecret = 'test-share-secret';
   try {
     const expires = 2000;
-    const sig = signFileShare('artifacts/report.html', expires);
+    const sig = signFileShare('artifacts/report.html', 'default', expires);
 
-    assert.equal(verifyFileShare('artifacts/report.html', String(expires), sig, 1000), true);
-    assert.equal(verifyFileShare('artifacts/other.html', String(expires), sig, 1000), false);
-    assert.equal(verifyFileShare('artifacts/report.html', String(expires + 1), sig, 1000), false);
-    assert.equal(verifyFileShare('artifacts/report.html', String(expires), sig, 2001), false);
+    assert.equal(verifyFileShare('artifacts/report.html', 'default', String(expires), sig, 1000), true);
+    assert.equal(verifyFileShare('artifacts/other.html', 'default', String(expires), sig, 1000), false);
+    assert.equal(verifyFileShare('artifacts/report.html', 'default', String(expires + 1), sig, 1000), false);
+    assert.equal(verifyFileShare('artifacts/report.html', 'default', String(expires), sig, 2001), false);
+    assert.equal(verifyFileShare('artifacts/report.html', 'other-tenant', String(expires), sig, 1000), false);
   } finally {
     config.auth.accessToken = previousAccessToken;
     config.auth.shareSecret = previousShareSecret;
@@ -60,8 +61,9 @@ test('office pdf preview only accepts office documents', () => {
 });
 
 test('office pdf cache key changes when source metadata changes', () => {
-  const base = { remotePath: 'artifacts/demo.pptx', size: 10, mtimeMs: 100, converterUrl: 'http://converter:3000' };
+  const base = { tenantId: 'default', remotePath: 'artifacts/demo.pptx', size: 10, mtimeMs: 100, converterUrl: 'http://converter:3000' };
   assert.equal(officePdfCacheKey(base), officePdfCacheKey(base));
   assert.notEqual(officePdfCacheKey(base), officePdfCacheKey({ ...base, mtimeMs: 101 }));
   assert.notEqual(officePdfCacheKey(base), officePdfCacheKey({ ...base, cacheVersion: 'fonts-v2' }));
+  assert.notEqual(officePdfCacheKey(base), officePdfCacheKey({ ...base, tenantId: 'other-tenant' }));
 });

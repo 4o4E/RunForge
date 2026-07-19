@@ -6,8 +6,20 @@ import { findExecutable, scanExecutableNames } from '../tools/sandbox.js';
 import { config } from '../config.js';
 import { pingLlmProvider, probeLlmProviderModels, testLlmProviderChat } from '../llm/probe.js';
 import { listMcpTools, probeMcpServer } from '../mcp/client.js';
+import { requireScope } from '../auth/context.js';
+import type { TenantScope } from '../store/types.js';
+import type { Response } from 'express';
 
 export const settingsApi = Router();
+
+function scopeOrReject(res: Response): TenantScope | null {
+  const scope = requireScope();
+  if (!scope) {
+    res.status(403).json({ error: '需要租户身份' });
+    return null;
+  }
+  return scope;
+}
 
 function uniq(items: string[]): string[] {
   return [...new Set(items.map((item) => item.trim()).filter(Boolean))];
@@ -35,23 +47,24 @@ function llmProviderFromBody(body: unknown): LlmProviderSettings {
   return settings.providers[0];
 }
 
-export async function getToolSettingsOptions(): Promise<ToolSettingsOptions> {
-  const settings = await getToolSettings();
+export async function getToolSettingsOptions(scope: TenantScope): Promise<ToolSettingsOptions> {
+  const settings = await getToolSettings(scope);
   const envPath = shellPathForSettings(settings);
+  const mcpSettings = await getMcpSettings(scope);
   return {
-    tools: await toolOptions(),
+    tools: await toolOptions(mcpSettings),
     shellCommands: shellCommandOptions([...config.tools.shellAllowCommands, ...settings.shellAllowCommands], envPath),
     systemPath: process.env.PATH ?? '',
   };
 }
 
-export async function getLlmSettingsOptions(): Promise<LlmSettingsOptions> {
-  const settings = await getLlmSettings();
+export async function getLlmSettingsOptions(scope: TenantScope): Promise<LlmSettingsOptions> {
+  const settings = await getLlmSettings(scope);
   return { models: llmModelOptions(settings) };
 }
 
-export async function getMcpSettingsOptions(): Promise<McpSettingsOptions> {
-  const settings = await getMcpSettings();
+export async function getMcpSettingsOptions(scope: TenantScope): Promise<McpSettingsOptions> {
+  const settings = await getMcpSettings(scope);
   const tools = await listMcpTools(settings);
   return {
     tools: tools.map((tool) => ({
@@ -66,15 +79,21 @@ export async function getMcpSettingsOptions(): Promise<McpSettingsOptions> {
 }
 
 settingsApi.get('/tools', async (_req, res) => {
-  res.json(await getToolSettings());
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  res.json(await getToolSettings(scope));
 });
 
 settingsApi.get('/tools/options', async (_req, res) => {
-  res.json(await getToolSettingsOptions());
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  res.json(await getToolSettingsOptions(scope));
 });
 
 settingsApi.post('/tools/shell-commands/scan', async (req, res) => {
-  const settings = await getToolSettings();
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  const settings = await getToolSettings(scope);
   const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {};
   const shellPathMode = body.shellPathMode === 'custom' ? 'custom' : 'system';
   const shellPath = typeof body.shellPath === 'string' ? body.shellPath : settings.shellPath;
@@ -87,24 +106,32 @@ settingsApi.post('/tools/shell-commands/scan', async (req, res) => {
 });
 
 settingsApi.put('/tools', async (req, res) => {
+  const scope = scopeOrReject(res);
+  if (!scope) return;
   try {
-    res.json(await saveToolSettings(req.body));
+    res.json(await saveToolSettings(scope, req.body));
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }
 });
 
 settingsApi.get('/mcp', async (_req, res) => {
-  res.json(await getMcpSettings());
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  res.json(await getMcpSettings(scope));
 });
 
 settingsApi.get('/mcp/options', async (_req, res) => {
-  res.json(await getMcpSettingsOptions());
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  res.json(await getMcpSettingsOptions(scope));
 });
 
 settingsApi.put('/mcp', async (req, res) => {
+  const scope = scopeOrReject(res);
+  if (!scope) return;
   try {
-    res.json(await saveMcpSettings(req.body));
+    res.json(await saveMcpSettings(scope, req.body));
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }
@@ -136,16 +163,22 @@ settingsApi.post('/mcp/server/probe', async (req, res) => {
 });
 
 settingsApi.get('/llm', async (_req, res) => {
-  res.json(await getLlmSettings());
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  res.json(await getLlmSettings(scope));
 });
 
 settingsApi.get('/llm/options', async (_req, res) => {
-  res.json(await getLlmSettingsOptions());
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  res.json(await getLlmSettingsOptions(scope));
 });
 
 settingsApi.put('/llm', async (req, res) => {
+  const scope = scopeOrReject(res);
+  if (!scope) return;
   try {
-    res.json(await saveLlmSettings(req.body));
+    res.json(await saveLlmSettings(scope, req.body));
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }
@@ -176,12 +209,16 @@ settingsApi.post('/llm/provider/chat-test', async (req, res) => {
 });
 
 settingsApi.get('/page-state', async (_req, res) => {
-  res.json(await getPageState());
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  res.json(await getPageState(scope));
 });
 
 settingsApi.put('/page-state', async (req, res) => {
+  const scope = scopeOrReject(res);
+  if (!scope) return;
   try {
-    res.json(await savePageState(req.body));
+    res.json(await savePageState(scope, req.body));
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }

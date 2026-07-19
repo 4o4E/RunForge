@@ -9,13 +9,14 @@ import { pool, query } from '../db/pool.js';
 import { PgStore } from '../store/pgStore.js';
 import type { AgentEvent } from '../agent/types.js';
 import type { LlmMessage } from '../llm/types.js';
-import type { Store, ThreadRow } from '../store/types.js';
+import type { Scope, Store, ThreadRow } from '../store/types.js';
 import { getToolSettings, type ToolSettings } from '../settings.js';
 
 const execFileAsync = promisify(execFile);
 
 const TOOL_ALLOW = ['file_read', 'file_write', 'file_edit', 'glob', 'grep', 'shell', 'update_plan'];
 const VERIFY_ROOT = resolve(process.cwd(), '../workspace/agent-core-verification');
+const VERIFY_SCOPE: Scope = { tenantId: 'default', userId: 'us_agent_core_verification' };
 
 interface VerifyContext {
   store: Store;
@@ -138,14 +139,14 @@ async function rawMessagesForThread(threadId: string): Promise<RawMessage[]> {
 }
 
 async function loadRunResult(store: Store, threadId: string, runId: string): Promise<ScenarioRunResult> {
-  const run = await store.getRun(runId);
+  const run = await store.getRun(VERIFY_SCOPE, runId);
   if (!run) throw new Error(`run 不存在：${runId}`);
   return {
     runId,
     status: run.status,
     error: run.error,
     output: run.output,
-    events: await store.getEvents(runId),
+    events: await store.getEvents(VERIFY_SCOPE, runId),
     rawMessages: await rawMessagesForThread(threadId),
   };
 }
@@ -167,22 +168,22 @@ function verificationToolSettings(base: ToolSettings, workspaceRoot: string): To
 }
 
 async function createPriorCompactionHistory(ctx: VerifyContext): Promise<void> {
-  const prior = await ctx.store.createRun(ctx.thread.id, '最早用户消息：锚点短语是 RFG-COMPACTION-ANCHOR。请在后续任务中保留它。');
-  await ctx.store.addMessage(ctx.thread.id, prior.id, null, {
+  const prior = await ctx.store.createRun(VERIFY_SCOPE, ctx.thread.id, '最早用户消息：锚点短语是 RFG-COMPACTION-ANCHOR。请在后续任务中保留它。');
+  await ctx.store.addMessage(VERIFY_SCOPE, ctx.thread.id, prior.id, null, {
     role: 'user',
     content: '最早用户消息：锚点短语是 RFG-COMPACTION-ANCHOR。请在后续任务中保留它。',
   });
-  await ctx.store.addMessage(ctx.thread.id, prior.id, null, {
+  await ctx.store.addMessage(VERIFY_SCOPE, ctx.thread.id, prior.id, null, {
     role: 'assistant',
     content: null,
     toolCalls: [{ id: 'verify_big_tool_1', name: 'file_read', arguments: JSON.stringify({ path: ctx.paths.big }) }],
   });
-  await ctx.store.addMessage(ctx.thread.id, prior.id, null, {
+  await ctx.store.addMessage(VERIFY_SCOPE, ctx.thread.id, prior.id, null, {
     role: 'tool',
     content: `历史大工具输出\n${'x'.repeat(18_000)}`,
     toolCallId: 'verify_big_tool_1',
   });
-  await ctx.store.setRunStatus(prior.id, 'done', { output: '预置历史完成。' });
+  await ctx.store.setRunStatus(VERIFY_SCOPE, prior.id, 'done', { output: '预置历史完成。' });
 }
 
 const scenarios: Scenario[] = [
@@ -232,7 +233,7 @@ const scenarios: Scenario[] = [
       ].join('\n');
     },
     async assert(ctx, result) {
-      const run = await ctx.store.getRun(result.runId);
+      const run = await ctx.store.getRun(VERIFY_SCOPE, result.runId);
       const content = existsSync(ctx.paths.done) ? (await readText(ctx.paths.done)).trim() : '';
       return [
         assertRunDone(result),
@@ -369,14 +370,15 @@ function applyContextOverride(override: Partial<typeof config.agent> | undefined
 async function runScenario(store: Store, baseToolSettings: ToolSettings, root: string, scenario: Scenario): Promise<ScenarioReport> {
   const workspaceRoot = resolve(root, scenario.id);
   await mkdir(workspaceRoot, { recursive: true });
-  const thread = await store.createThread(`[verify] ${scenario.id}`);
+  const thread = await store.createThread(VERIFY_SCOPE, `[verify] ${scenario.id}`);
   const ctx: VerifyContext = { store, thread, workspaceRoot, paths: {} };
   const restoreContext = applyContextOverride(scenario.context);
   try {
     await scenario.prepare(ctx);
-    const run = await store.createRun(thread.id, scenario.input(ctx));
+    const run = await store.createRun(VERIFY_SCOPE, thread.id, scenario.input(ctx));
     await executeRun(run.id, {
       store,
+      scope: VERIFY_SCOPE,
       hardStepCap: scenario.hardStepCap ?? 16,
       stream: false,
       generateThreadTitle: false,
@@ -460,7 +462,7 @@ async function main(): Promise<void> {
   await mkdir(runRoot, { recursive: true });
 
   const store = new PgStore();
-  const baseToolSettings = await getToolSettings();
+  const baseToolSettings = await getToolSettings(VERIFY_SCOPE);
   const reports: ScenarioReport[] = [];
   for (const scenario of targets) {
     console.log(`▶ ${scenario.id}`);

@@ -287,6 +287,8 @@ CREATE INDEX idx_auth_tokens_user ON auth_tokens(user_id, kind, revoked_at);
 
 改造原则:**加列,不拆库**。所有业务表加 `tenant_id`,应用层查询强制带过滤条件,数据库层用 Row Level Security(RLS)兜底,双保险防止漏写 `WHERE` 导致跨租户读取。
 
+**Phase 2 现状**:加列 + 应用层过滤(`Store` 接口每个方法强制带 scope 参数)已经落地。**RLS 策略、`audit_access_log` 表和管理员审计功能本节下面描述的都还只是设计,尚未实现**——明确跳过的原因和影响见 §11 的"数据库层"残留风险条目。本节保留完整设计是为了让后续要补 RLS/审计时有现成的策略草案可参照,阅读时不要把下面的 SQL 当成"已经在库里"。
+
 以现有 `server/src/db/schema.sql` 为基准,改造方式(风格与现有的幂等 `ALTER TABLE ADD COLUMN IF NOT EXISTS` 迁移一致):
 
 ```sql
@@ -372,9 +374,10 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 ${TOOL_WORKSPACE_ROOT_BASE}/tenants/<tenant_id>/workspace
 ```
 
-- `getToolSettings()` 返回值里的 `workspaceRoot` 字段改为函数调用 `resolveWorkspaceRoot(tenantId)`,而不是读一个全局常量。
+- `getToolSettings(scope)` 返回值里的 `workspaceRoot` 字段改为函数调用 `resolveWorkspaceRoot(tenantId)`,而不是读一个全局常量;**且始终用计算值覆盖 `app_settings` 里存的字符串,不信任存储值**——`PUT /api/settings/tools` 允许调用方写入任意 `workspaceRoot`,如果只按 `(tenant_id, key)` 隔离行但原样返回存储值,租户管理员就能把自己的 `workspaceRoot` 设成指向另一个租户目录的路径,变成一个真实的越权读写洞。这是 Phase 2 落地时发现的、设计文档最初没写到的缺口,已在 `settings.ts` 的 `getToolSettings`/`saveToolSettings` 里修复。
 - `normalizeRemotePath`/`isWithin`(`server/src/files/workspace.ts`)的围栏逻辑不需要改——它们已经是"给定一个 root,判断路径是否在 root 内",只要传入的 root 换成租户专属路径即可。
-- Office 预览缓存(`server/src/files/officePreview.ts`)的 `officeCacheDir` 同理按租户分目录:`${officeCacheDir}/tenants/<tenant_id>/`,避免不同租户上传同路径同名文件时缓存 key 冲突或产生侧信道。
+- Office 预览缓存(`server/src/files/officePreview.ts`)的 `officeCacheDir` 同理按租户分目录:`${officeCacheDir}/tenants/<tenant_id>/`,`officePdfCacheKey` 的哈希输入也带 `tenantId`(目录隔离和哈希隔离是两个独立的加固点,防止未来目录结构变化时退化成只靠哈希去重)。
+- 签名文件分享链接(`/api/files/{raw,preview,hex,pdf-preview}` 的免身份分支)本身不带身份,匿名访问时的 `tenantId` 只能来自请求方自己在 query 里声明的 `tenant` 参数——`signFileShare`/`verifyFileShare` 把 `tenantId` 一起签进 HMAC,防止篡改 `query.tenant` 让同一个签名在另一个租户的 workspaceRoot 下"重放"。
 - 单租户部署:`tenant_id = 'default'` 时,`resolveWorkspaceRoot('default')` 直接返回原来的 `TOOL_WORKSPACE_ROOT`(不额外套 `tenants/default/` 前缀),保证现有部署的文件路径不因升级而漂移。
 
 ---
@@ -391,9 +394,9 @@ ${TOOL_WORKSPACE_ROOT_BASE}/tenants/<tenant_id>/workspace
 
 | 单例 | 现状 | 改造方式 |
 |---|---|---|
-| `runBus`(`server/src/agent/bus.ts`) | 一个进程级 `EventEmitter`,按 `runId` 发布 | 事件 payload 里带 `tenant_id`;WebSocket 订阅时按 `tenant_id` 过滤,防止拿到别的租户 run 的事件(即使 runId 猜不到,也不依赖"猜不到"作为唯一防线) |
-| `shellManager`(`server/src/shell/manager.ts`) | 单例,`active: Map<string, ActiveCommand>` 覆盖所有租户所有 run | 保持单例(它管理的是同进程内的子进程句柄,天然是进程级资源),但每条 `ActiveCommand` record 带 `tenant_id`,查询/清理逻辑按 tenant 过滤;`shell_sessions.workspace_root` 已经是租户专属路径,间接保证了同一 session 不会跨租户复用 |
-| `officePreview.ts` 的 `inflight` Map | key = `{path, size, mtime, converterUrl}` 的 hash,全局去重 | key 里加入 `tenant_id`,因为 §6 之后 path 已经是租户专属路径,天然不会跨租户碰撞,这里只是显式保证 |
+| `runBus`/`shellBus`(`server/src/agent/bus.ts`、`server/src/shell/bus.ts`) | 一个进程级 `EventEmitter`,按 `runId`/`threadId` 发布,不携带 `tenant_id` | **实际实现方式和本节最初设计有偏离,记录在此**:没有给 `AgentEvent`(30+ 个变体的大 union)和 `executor.ts`/`shell/manager.ts` 里约 40 处 `emit`/`publish` 调用点都加 `tenant_id`——那样改动面大,收益却和更简单的方案一样。改为在 `ws.ts` 订阅前先查一次归属:`runBus.subscribe(runId,...)`/`shellBus.subscribe(threadId,...)` 之前,先用已经加了 scope 过滤的 `store.getRun(scope, runId)`/`store.getThread(scope, threadId)` 查一次,查不到就直接以 1008 拒绝连接,根本不会走到 `subscribe`。这比"事件打 tenant_id 标签"更强(执行的是完整的 `{tenantId, userId}` 私有性规则,不只是租户边界),且零改动 `AgentEvent`/`bus.ts`/所有 emit 调用点 |
+| `shellManager`(`server/src/shell/manager.ts`) | 单例,`active: Map<string, ActiveCommand>` 覆盖所有租户所有 run | 保持单例(它管理的是同进程内的子进程句柄,天然是进程级资源),`ActiveCommand`/公开方法都带 `scope: Scope`,查询/清理逻辑按 scope 过滤;`markInterruptedCommandsOrphaned`(启动期孤儿命令清扫)保持跨租户扫描,用 `Unscoped` 后缀的 Store 方法,不在路由里暴露 |
+| `officePreview.ts` 的 `inflight` Map | key = `{path, size, mtime, converterUrl}` 的 hash,全局去重 | key 里加入 `tenantId`,因为 §6 之后 path 已经是租户专属路径,天然不会跨租户碰撞,这里只是显式保证 |
 
 **执行强隔离(容器化)是下一阶段,不在本次范围内**:上述改造把"数据/文件隔离"做到位,但 shell 工具仍然是"同进程 spawn 子进程 + bwrap namespace",不是"每个租户/每个 run 一个独立容器"。如果未来需要防御"租户能自定义/上传恶意二进制并诱导 bwrap 白名单外执行"这类更强的威胁模型,才需要升级到每 run 一个容器/microVM(gVisor、Firecracker),并配 CPU/内存/进程数配额。这是 [工具沙箱设计](tool-sandbox.md) §5"何时该做强隔离"里已经讨论过的优先级判断——多租户本身不强制要求这一步,只是让"是否需要"这个信号从"要不要对外" 变成了明确的"是"。
 
@@ -433,16 +436,18 @@ ${TOOL_WORKSPACE_ROOT_BASE}/tenants/<tenant_id>/workspace
 
 改造完成后(即 §5-§9 都实施完)的隔离强度:
 
-- ⏳ 数据库层:应用层查询过滤 + RLS 双保险,跨租户读写数据库需要绕过两层防御。**Phase 1 现状**:`threads`/`runs` 等业务表还没加 `tenant_id`/`user_id` 列,这一条尚未实现。
-- ⏳ 文件系统层:不同租户 workspace 是磁盘上完全不同的目录树,应用层路径围栏 + bwrap bind mount 双保险。**Phase 1 现状**:`workspaceRoot` 还是全局单值,尚未按租户派生。
-- ⏳ 事件流:WebSocket 按 tenant_id 过滤 run bus 事件,不依赖 runId 不可猜测。**Phase 1 现状**:`runBus`/`shellBus` 还是纯 `runId`/`threadId` 键控,没有 `tenant_id` 过滤——`ws.ts` 目前只做到了"系统管理员 JWT 连不上这些频道"(scope 校验),**没有**做到"租户 A 连不上租户 B 的 run/thread 事件"。后者需要业务表先有 `tenant_id` 才能实现,是 §5 完成后才补的能力,当前是已知、未缓解的残留风险,不要误以为这一条已经完成。
-- ✅ 用户可见性:default 查询按 `(tenant_id, user_id)` 双重过滤 + RLS 兜底,同租户内的普通用户看不到彼此的 thread;唯一的例外(管理员审计)是独立代码路径 + 独立 RLS 策略 + 强制留痕,不是默认路径的隐式行为。
+- ⚠️ 数据库层:**只有应用层查询过滤,没有 Postgres RLS 兜底**。Phase 2 已经给 `threads`/`subagent_runs`/`shell_sessions`/`datasources`/`push_subscriptions` 等业务表加了 `tenant_id`/`user_id` 列,Store 层(`pgStore.ts`/`memoryStore.ts`)每个方法自己做 `WHERE tenant_id=$1 [AND user_id=$2]` 过滤,是当前唯一的强制边界。**明确跳过 RLS 的原因**:`server/src/db/pool.ts` 是裸 `pg.Pool`,`query()` 每次调用可能落在不同连接上,RLS 依赖的 `SET LOCAL app.tenant_id` 需要"同一个请求全程用同一个 client + 事务"才能保证生效,现在做需要先把 `pool.query()` 重构成"每请求 checkout client",范围超出本阶段。**这意味着**:任何绕过 Store 接口、直接用 `query()`/`pool` 手写 SQL 的新代码,如果忘记加 `tenant_id` 过滤,就是一个完整的跨租户数据泄露,且没有数据库层兜底会拦住它——`accountPool.ts` 里 `datasources`/`workload_tokens`/`datasource_account_leases` 等表目前就是这种"裸 query,自己在应用层小心过滤"的模式,新增/修改这些查询时必须手动核对 `tenant_id`/scope 校验,不能依赖数据库替你兜底。这是本阶段接受的已知残留风险,留给以后需要更高保证级别时再补 RLS。
+- ✅ 文件系统层:不同租户 workspace 是磁盘上完全不同的目录树(`resolveWorkspaceRoot`),应用层路径围栏 + bwrap bind mount 双保险;`workspaceRoot` 无论是从 `app_settings` 读出来还是调用方在请求体里塞进来的,`getToolSettings`/`saveToolSettings` 都强制用计算值覆盖,不信任存储值(见 §6)。
+- ✅ 事件流:WebSocket 订阅前按 `{tenantId, userId}` 查一次归属(`store.getRun`/`store.getThread`),查不到直接 1008 拒绝,不会走到 `subscribe`——实现方式和最初设想的"事件打 tenant_id 标签"不同,记录在 §7,但达到的隔离粒度更细(连 user_id 都校验了,不只是 tenant 边界)。
+- ✅ 用户可见性:所有 Tier 1 查询按 `(tenant_id, user_id)` 双重过滤,同租户内的普通用户看不到彼此的 thread;Tier 2 表(`runs`/`messages`/`events`/`shell_commands` 等)通过 JOIN 父表间接过滤(见 §5)。唯一的例外(管理员审计)目前还没实现,仍是设计态,不是已落地的旁路。
 - ⚠️ 管理员审计本身是一个需要被信任的高权限能力:tenant owner/admin 能看到本租户任意成员的对话,system admin 能看到任意租户任意成员的对话——这不是"漏洞",而是设计如此(见 §1/§4),但意味着这两类身份的账号安全(密码强度、是否启用后续可能加的 2FA)比普通 member 更值得重视,一旦这两类账号被盗,影响面是"审计范围内的所有对话",需要在运营上对这两类账号的登录/密码策略从紧要求,这一版设计不包含强制 2FA,留作后续加固项。
 - ⚠️ JWT 吊销延迟:access JWT 一旦签发,在过期前无法撤销(§4),用户被禁用/踢出后仍可能有一个短窗口(access token 的过期时长)内继续使用旧 token;通过把过期时间设短(30~60 分钟)把风险窗口控制在可接受范围,而不是引入一张"已吊销 access token 黑名单"表把 JWT 又变回每请求查库。
 - ⚠️ refresh token / API token 是长期有效的不透明凭证,一旦泄露且未及时吊销,可以一直用到 `expires_at`/手动吊销为止——依赖 §4 的"只存 hash、创建时一次性显示明文"降低泄露概率,吊销响应速度取决于运营是否及时。
 - ⚠️ 执行层:shell 工具仍是同进程 + namespace 隔离,不是容器级强隔离;理论上如果 bwrap 配置有疏漏(如白名单命令本身有越权能力,例如白名单里的 `psql` 如果连接串配置不当),仍可能造成跨租户影响。这是 §7 提到的"下一阶段"要解决的问题,当前设计里作为已知风险记录,而不是假装已经解决。
 - ⚠️ 资源配额:CPU/内存/磁盘配额目前仍未实现(与单租户现状一致),多租户下"一个租户跑满资源影响其他租户"(noisy neighbor)问题需要额外的 cgroup/rlimit 工作,不在本次范围。
 - ⚠️ 引导账号默认密码是固定值(`1234.RunForge.5678`),不是随运行环境随机生成的秘密——只要读过这份文档或代码就知道默认密码,生产/公网环境**必须**通过 `RUNFORGE_BOOTSTRAP_ADMIN_PASSWORD`/`RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD` 覆盖,或登录后立刻改密,否则默认密码本身就是一个公开的后门。
+- ⚠️ `mcp/client.ts`(`listMcpTools`/`callMcpTool`)在调用方没有显式传入 `mcpSettings` 时,会回退到查询 `default` 租户的 MCP 配置。当前所有生产调用路径(`executor.ts`/`tools/registry.ts`)都会显式传入按 scope 取到的 `mcpSettings`,这条回退分支实际不会被触发;但如果未来新增一个不传 `mcpSettings` 的调用点,会悄悄用错租户的 MCP server 配置,而不是报错。记录为已知的、影响面很小的技术债,不是当前生效的漏洞。
+- ⚠️ 数据源账号池(`server/src/datasources/accountPool.ts`)的 workload-token 鉴权路径(`acquireCredential`)本身没有请求身份,唯一的租户边界校验是"反查 token 对应 run 所在的 tenant_id,和数据源的 tenant_id 必须一致"——这个校验依赖 `runs`/`threads` 表已经有 `tenant_id`(Phase 2 完成),如果以后有代码绕开 `createWorkloadToken`/`acquireCredential` 直接操作 `workload_tokens`/`datasource_account_leases` 表,不会自动获得这层保护。
 
 ---
 

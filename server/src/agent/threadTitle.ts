@@ -1,5 +1,5 @@
 import type { Provider } from '../llm/types.js';
-import type { Store, ThreadRow } from '../store/types.js';
+import type { Scope, Store, ThreadRow } from '../store/types.js';
 
 const MAX_TITLE_DISPLAY_WIDTH = 24;
 const MAX_TRANSCRIPT_CHARS = 6000;
@@ -89,12 +89,12 @@ function branchRunsEndingAt(runs: Awaited<ReturnType<Store['listRuns']>>, runId:
   return path.reverse();
 }
 
-async function titleTarget(runId: string, store: Store) {
-  const run = await store.getRun(runId);
+async function titleTarget(scope: Scope, runId: string, store: Store) {
+  const run = await store.getRun(scope, runId);
   if (!run || run.status !== 'done') return null;
-  const thread = await store.getThread(run.thread_id);
+  const thread = await store.getThread(scope, run.thread_id);
   if (!thread || thread.title?.trim()) return null;
-  const runs = await store.listRuns(run.thread_id);
+  const runs = await store.listRuns(scope, run.thread_id);
   const branchRuns = branchRunsEndingAt(runs, run.id).filter((item) => item.status === 'done');
   if (!branchRuns.length) return null;
   return { run, thread, branchRuns };
@@ -111,8 +111,8 @@ function renderTitleTranscript(runs: Awaited<ReturnType<Store['listRuns']>>): st
   return truncateChars(blocks.join('\n\n---\n\n'), MAX_TRANSCRIPT_CHARS);
 }
 
-export async function maybeGenerateThreadTitleAfterFirstRun(runId: string, deps: ThreadTitleDeps): Promise<ThreadRow | null> {
-  const target = await titleTarget(runId, deps.store);
+export async function maybeGenerateThreadTitleAfterFirstRun(scope: Scope, runId: string, deps: ThreadTitleDeps): Promise<ThreadRow | null> {
+  const target = await titleTarget(scope, runId, deps.store);
   if (!target) return null;
 
   const result = await deps.provider.complete(
@@ -145,11 +145,11 @@ export async function maybeGenerateThreadTitleAfterFirstRun(runId: string, deps:
 
   const title = cleanGeneratedTitle(result.content) || fallbackTitle(target.run.input);
   if (!title) return null;
-  return deps.store.setThreadTitleIfEmpty(target.thread.id, title);
+  return deps.store.setThreadTitleIfEmpty(scope, target.thread.id, title);
 }
 
-export function scheduleThreadTitleGeneration(runId: string, deps: ThreadTitleDeps): void {
-  void maybeGenerateThreadTitleAfterFirstRun(runId, deps).catch((err) => {
+export function scheduleThreadTitleGeneration(scope: Scope, runId: string, deps: ThreadTitleDeps): void {
+  void maybeGenerateThreadTitleAfterFirstRun(scope, runId, deps).catch((err) => {
     console.warn(`thread title generation skipped for ${runId}: ${(err as Error).message}`);
   });
 }

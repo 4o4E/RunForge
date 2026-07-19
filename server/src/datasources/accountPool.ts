@@ -8,6 +8,7 @@ import {
   newWorkloadTokenId,
 } from '../id.js';
 import { store } from '../store/index.js';
+import type { Scope, TenantScope } from '../store/types.js';
 import { disablePostgresAccount, ensurePostgresAccount, ensurePostgresReadonlyTemplateRole } from './postgresAdapter.js';
 import { generateWorkloadToken, hashWorkloadToken, iso, randomPassword, secondsFromNow } from './token.js';
 import type {
@@ -100,7 +101,7 @@ async function withTx<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
   }
 }
 
-export async function createDatasource(input: unknown): Promise<DatasourceRow> {
+export async function createDatasource(scope: TenantScope, input: unknown): Promise<DatasourceRow> {
   const body = jsonObject(input);
   const id = newDatasourceId();
   const name = stringValue(body.name);
@@ -108,11 +109,12 @@ export async function createDatasource(input: unknown): Promise<DatasourceRow> {
   const type = datasourceType(body.type);
   const enabled = boolValue(body.enabled, true);
   const { rows } = await query<DatasourceRow>(
-    `INSERT INTO datasources (id, name, type, enabled, connection, admin_config, pool_config)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb)
+    `INSERT INTO datasources (id, tenant_id, name, type, enabled, connection, admin_config, pool_config)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb)
      RETURNING *`,
     [
       id,
+      scope.tenantId,
       name,
       type,
       enabled,
@@ -124,18 +126,18 @@ export async function createDatasource(input: unknown): Promise<DatasourceRow> {
   return rows[0];
 }
 
-export async function listDatasources(): Promise<DatasourceRow[]> {
-  const { rows } = await query<DatasourceRow>(`SELECT * FROM datasources ORDER BY created_at DESC`);
+export async function listDatasources(scope: TenantScope): Promise<DatasourceRow[]> {
+  const { rows } = await query<DatasourceRow>(`SELECT * FROM datasources WHERE tenant_id = $1 ORDER BY created_at DESC`, [scope.tenantId]);
   return rows;
 }
 
-export async function getDatasource(id: string): Promise<DatasourceRow | null> {
-  const { rows } = await query<DatasourceRow>(`SELECT * FROM datasources WHERE id = $1`, [id]);
+export async function getDatasource(scope: TenantScope, id: string): Promise<DatasourceRow | null> {
+  const { rows } = await query<DatasourceRow>(`SELECT * FROM datasources WHERE id = $1 AND tenant_id = $2`, [id, scope.tenantId]);
   return rows[0] ?? null;
 }
 
-export async function updateDatasource(id: string, input: unknown): Promise<DatasourceRow> {
-  const current = await getDatasource(id);
+export async function updateDatasource(scope: TenantScope, id: string, input: unknown): Promise<DatasourceRow> {
+  const current = await getDatasource(scope, id);
   if (!current) throw new DatasourceError(404, '数据源不存在');
   const body = jsonObject(input);
   const name = stringValue(body.name, current.name);
@@ -143,17 +145,18 @@ export async function updateDatasource(id: string, input: unknown): Promise<Data
   const enabled = boolValue(body.enabled, current.enabled);
   const { rows } = await query<DatasourceRow>(
     `UPDATE datasources
-     SET name = $2,
-         status = $3,
-         enabled = $4,
-         connection = $5::jsonb,
-         admin_config = $6::jsonb,
-         pool_config = $7::jsonb,
+     SET name = $3,
+         status = $4,
+         enabled = $5,
+         connection = $6::jsonb,
+         admin_config = $7::jsonb,
+         pool_config = $8::jsonb,
          updated_at = now()
-     WHERE id = $1
+     WHERE id = $1 AND tenant_id = $2
      RETURNING *`,
     [
       id,
+      scope.tenantId,
       name,
       status,
       enabled,
@@ -165,8 +168,8 @@ export async function updateDatasource(id: string, input: unknown): Promise<Data
   return rows[0];
 }
 
-export async function createPermissionProfile(datasourceId: string, input: unknown): Promise<PermissionProfileRow> {
-  const datasource = await getDatasource(datasourceId);
+export async function createPermissionProfile(scope: TenantScope, datasourceId: string, input: unknown): Promise<PermissionProfileRow> {
+  const datasource = await getDatasource(scope, datasourceId);
   if (!datasource) throw new DatasourceError(404, '数据源不存在');
   const body = jsonObject(input);
   const name = stringValue(body.name);
@@ -190,7 +193,9 @@ export async function createPermissionProfile(datasourceId: string, input: unkno
   return rows[0];
 }
 
-export async function listPermissionProfiles(datasourceId: string): Promise<PermissionProfileRow[]> {
+export async function listPermissionProfiles(scope: TenantScope, datasourceId: string): Promise<PermissionProfileRow[]> {
+  const datasource = await getDatasource(scope, datasourceId);
+  if (!datasource) throw new DatasourceError(404, '数据源不存在');
   const { rows } = await query<PermissionProfileRow>(
     `SELECT * FROM datasource_permission_profiles WHERE datasource_id = $1 ORDER BY created_at`,
     [datasourceId],
@@ -199,10 +204,13 @@ export async function listPermissionProfiles(datasourceId: string): Promise<Perm
 }
 
 export async function updatePermissionProfile(
+  scope: TenantScope,
   datasourceId: string,
   profileId: string,
   input: unknown,
 ): Promise<PermissionProfileRow> {
+  const datasourceExists = await getDatasource(scope, datasourceId);
+  if (!datasourceExists) throw new DatasourceError(404, '数据源不存在');
   const body = jsonObject(input);
   const { rows: currentRows } = await query<PermissionProfileRow>(
     `SELECT * FROM datasource_permission_profiles WHERE id = $1 AND datasource_id = $2`,
@@ -234,8 +242,8 @@ export async function updatePermissionProfile(
   return rows[0];
 }
 
-export async function ensureReadonlyPermissionProfile(datasourceId: string): Promise<PermissionProfileRow> {
-  const datasource = await getDatasource(datasourceId);
+export async function ensureReadonlyPermissionProfile(scope: TenantScope, datasourceId: string): Promise<PermissionProfileRow> {
+  const datasource = await getDatasource(scope, datasourceId);
   if (!datasource) throw new DatasourceError(404, '数据源不存在');
   if (datasource.status !== 'active') throw new DatasourceError(409, '数据源已禁用');
   if (datasource.type !== 'postgres') throw new DatasourceError(501, `暂未实现 ${datasource.type} 的只读档位初始化`);
@@ -259,7 +267,7 @@ export async function ensureReadonlyPermissionProfile(datasourceId: string): Pro
     return rows[0];
   }
 
-  return createPermissionProfile(datasourceId, {
+  return createPermissionProfile(scope, datasourceId, {
     name: 'readonly',
     mode: 'readonly',
     templateRole,
@@ -268,7 +276,9 @@ export async function ensureReadonlyPermissionProfile(datasourceId: string): Pro
   });
 }
 
-export async function listDatasourceAccounts(datasourceId: string): Promise<DatasourceAccountRow[]> {
+export async function listDatasourceAccounts(scope: TenantScope, datasourceId: string): Promise<DatasourceAccountRow[]> {
+  const datasource = await getDatasource(scope, datasourceId);
+  if (!datasource) throw new DatasourceError(404, '数据源不存在');
   const { rows } = await query<DatasourceAccountRow>(
     `SELECT *
      FROM datasource_accounts
@@ -279,7 +289,9 @@ export async function listDatasourceAccounts(datasourceId: string): Promise<Data
   return rows;
 }
 
-export async function listDatasourceLeases(datasourceId: string, limit = 50): Promise<DatasourceLeaseRow[]> {
+export async function listDatasourceLeases(scope: TenantScope, datasourceId: string, limit = 50): Promise<DatasourceLeaseRow[]> {
+  const datasource = await getDatasource(scope, datasourceId);
+  if (!datasource) throw new DatasourceError(404, '数据源不存在');
   const { rows } = await query<DatasourceLeaseRow>(
     `SELECT *
      FROM datasource_account_leases
@@ -291,11 +303,19 @@ export async function listDatasourceLeases(datasourceId: string, limit = 50): Pr
   return rows;
 }
 
-export async function createWorkloadToken(input: unknown): Promise<{ token: string; row: WorkloadTokenRow }> {
+async function tenantIdForRun(runId: string): Promise<string> {
+  const run = await store.getRunUnscoped(runId);
+  if (!run) throw new DatasourceError(404, 'run 不存在');
+  const thread = await store.getThreadUnscoped(run.thread_id);
+  if (!thread) throw new DatasourceError(404, 'thread 不存在');
+  return thread.tenant_id;
+}
+
+export async function createWorkloadToken(scope: Scope, input: unknown): Promise<{ token: string; row: WorkloadTokenRow }> {
   const body = jsonObject(input);
   const runId = stringValue(body.runId);
   if (!runId) throw new DatasourceError(400, 'runId 为必填');
-  const run = await store.getRun(runId);
+  const run = await store.getRun(scope, runId);
   if (!run) throw new DatasourceError(404, 'run 不存在');
   if (TERMINAL_RUN_STATUSES.has(run.status)) throw new DatasourceError(409, `run 当前状态为 ${run.status}，不能签发 token`);
 
@@ -368,6 +388,7 @@ async function loadDatasourceAndProfile(datasourceId: string, profileName: strin
   return {
     datasource: {
       id: row.id,
+      tenant_id: row.tenant_id,
       name: row.name,
       type: row.type,
       status: row.status,
@@ -510,6 +531,11 @@ export async function acquireCredential(rawToken: string, datasourceId: string, 
   if (!tokenAllowedDatasource(validated.token, datasourceId)) throw new DatasourceError(403, 'workload token 无权访问该数据源');
 
   const { datasource, profile } = await loadDatasourceAndProfile(datasourceId, profileName);
+  // workload token 本身没有请求身份，这里是唯一的强制边界:反查 token 对应 run 所在的
+  // 租户，和数据源的 tenant_id 必须一致，否则即便 token 的 allowedDatasourceIds
+  // 意外带了别的租户的数据源 id，也不能真的换到凭证(docs/multi-tenancy-design.md §9)。
+  const runTenantId = await tenantIdForRun(validated.token.run_id);
+  if (runTenantId !== datasource.tenant_id) throw new DatasourceError(403, '数据源不属于该 run 所在租户');
   const leaseTtl = poolNumber(profile, datasource, 'leaseTtlSeconds', DEFAULT_LEASE_TTL_SECONDS);
   const expiresAt = secondsFromNow(leaseTtl);
   const password = randomPassword();
@@ -548,6 +574,7 @@ async function loadLease(id: string): Promise<{
   const { rows } = await query<DatasourceLeaseRow & {
     account_username: string;
     account_status: string;
+    datasource_tenant_id: string;
     datasource_name: string;
     datasource_type: DatasourceType;
     datasource_status: string;
@@ -559,6 +586,7 @@ async function loadLease(id: string): Promise<{
     `SELECT l.*,
             a.username AS account_username,
             a.status AS account_status,
+            ds.tenant_id AS datasource_tenant_id,
             ds.name AS datasource_name,
             ds.type AS datasource_type,
             ds.status AS datasource_status,
@@ -593,6 +621,7 @@ async function loadLease(id: string): Promise<{
     },
     datasource: {
       id: row.datasource_id,
+      tenant_id: row.datasource_tenant_id,
       name: row.datasource_name,
       type: row.datasource_type,
       status: row.datasource_status as DatasourceRow['status'],

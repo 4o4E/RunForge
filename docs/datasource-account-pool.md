@@ -50,10 +50,12 @@ curl -X POST http://localhost:8080/api/datasources/<datasource_id>/profiles \
   }'
 ```
 
-为 run 签发 workload token：
+为 run 签发 workload token(需要该 run 所属租户的登录 JWT——这个接口是在铸造 token，本身没有
+已签发的 token 可以校验，所以走普通租户身份而不是 workload token)：
 
 ```bash
 curl -X POST http://localhost:8080/api/runtime/workload-tokens \
+  -H "Authorization: Bearer $TENANT_ACCESS_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
     "runId": "<run_id>",
@@ -78,10 +80,11 @@ curl -X POST http://localhost:8080/api/runtime/datasources/<datasource_id>/crede
 psql "postgresql://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME"
 ```
 
-run 结束主动释放：
+run 结束主动释放(同样需要该 run 所属租户的登录 JWT)：
 
 ```bash
-curl -X POST http://localhost:8080/api/runtime/runs/<run_id>/release-datasource-leases
+curl -X POST http://localhost:8080/api/runtime/runs/<run_id>/release-datasource-leases \
+  -H "Authorization: Bearer $TENANT_ACCESS_TOKEN"
 ```
 
 ## PostgreSQL 业务方准备

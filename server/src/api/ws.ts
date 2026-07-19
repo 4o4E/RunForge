@@ -6,6 +6,7 @@ import { store } from '../store/index.js';
 import { tokenFromWebSocketProtocols } from './auth.js';
 import { looksLikeJwt, verifyAccessToken } from '../auth/jwt.js';
 import type { AgentEvent } from '../agent/types.js';
+import type { Scope } from '../store/types.js';
 
 /**
  * WebSocket 端点:
@@ -30,6 +31,7 @@ export function attachWebSocket(server: Server): void {
       socket.close(1008, '访问 token 无效');
       return;
     }
+    const scope: Scope = { tenantId: claims.tenant_id, userId: claims.sub };
 
     const url = new URL(req.url ?? '', 'http://localhost');
     const channel = url.searchParams.get('channel');
@@ -40,6 +42,13 @@ export function attachWebSocket(server: Server): void {
     if (channel === 'shell') {
       if (!threadId) {
         socket.close(1008, '缺少 threadId 查询参数');
+        return;
+      }
+      // 订阅前先按 scope 查一次归属，查不到就直接拒绝——这是完整的 {tenantId, userId}
+      // 私有性规则，不只是租户边界(docs/multi-tenancy-design.md §7 的偏离记录)。
+      const thread = await store.getThread(scope, threadId);
+      if (!thread) {
+        socket.close(1008, '无权订阅该 thread');
         return;
       }
 
@@ -57,6 +66,12 @@ export function attachWebSocket(server: Server): void {
       return;
     }
 
+    const run = await store.getRun(scope, runId);
+    if (!run) {
+      socket.close(1008, '无权订阅该 run');
+      return;
+    }
+
     const send = (event: AgentEvent) => {
       if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(event));
     };
@@ -65,7 +80,7 @@ export function attachWebSocket(server: Server): void {
     // 此时只订阅后续 live 事件，避免完成 step 被重复播放。
     if (replay !== 'none') {
       try {
-        for (const e of await store.getEvents(runId)) send(e);
+        for (const e of await store.getEvents(scope, runId)) send(e);
       } catch {
         /* 忽略回放失败 */
       }

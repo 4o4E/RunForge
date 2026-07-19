@@ -24,6 +24,7 @@ export type {
 
 export interface DatasourceRow {
   id: string;
+  tenant_id: string;
   name: string;
   type: DatasourceType;
   status: DatasourceStatus;

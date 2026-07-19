@@ -1,5 +1,6 @@
 import type { LlmTool } from '../llm/types.js';
 import type { ToolSettings } from '../settings.js';
+import type { Scope } from '../store/types.js';
 
 /** 工具返回给 LLM 的标准文本结果。复杂展示应写入 Markdown/HTML artifact，而不是返回 UI JSON。 */
 export interface ToolResult {
@@ -8,6 +9,7 @@ export interface ToolResult {
 
 export interface ToolRunContext {
   settings: ToolSettings;
+  scope: Scope;
   env?: Record<string, string>;
   threadId?: string;
   runId?: string;

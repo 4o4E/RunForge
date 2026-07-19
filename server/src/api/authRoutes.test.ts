@@ -230,3 +230,63 @@ test('system auth: login + cross-scope rejection between tenant and system JWTs'
     close();
   }
 });
+
+test('Phase 2: 两个租户各自的 thread 互相不可见（tenant_id 半边隔离）', async () => {
+  const ownerA = await seedOwner('tn_iso_a', 'owner@iso-a.test', 'pw');
+  const ownerB = await seedOwner('tn_iso_b', 'owner@iso-b.test', 'pw');
+  const jwtA = signTenantAccessToken({ id: ownerA.id, tenantId: 'tn_iso_a', role: 'owner' });
+  const jwtB = signTenantAccessToken({ id: ownerB.id, tenantId: 'tn_iso_b', role: 'owner' });
+  const { port, close } = await listen(buildApp());
+  try {
+    const base = `http://127.0.0.1:${port}/api`;
+
+    const created = await fetch(`${base}/threads`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwtA}` },
+      body: JSON.stringify({ title: 'tenant-a-private-thread' }),
+    });
+    assert.equal(created.status, 201);
+    const thread = (await created.json()) as { id: string };
+
+    // tenant B 看不到 tenant A 的 thread：既不在列表里，直接按 id 取也是 404。
+    const listAsB = await fetch(`${base}/threads`, { headers: { Authorization: `Bearer ${jwtB}` } });
+    const listBody = (await listAsB.json()) as Array<{ id: string }>;
+    assert.equal(listBody.some((item) => item.id === thread.id), false);
+
+    const getAsB = await fetch(`${base}/threads/${thread.id}`, { headers: { Authorization: `Bearer ${jwtB}` } });
+    assert.equal(getAsB.status, 404);
+
+    // tenant A 自己能正常看到。
+    const getAsA = await fetch(`${base}/threads/${thread.id}`, { headers: { Authorization: `Bearer ${jwtA}` } });
+    assert.equal(getAsA.status, 200);
+  } finally {
+    close();
+  }
+});
+
+test('Phase 2: 同一租户下不同用户互相看不到对方的 thread（user_id 半边隔离）', async () => {
+  const owner = await seedOwner('tn_iso_users', 'owner@iso-users.test', 'pw');
+  const member = await store.createUser({ tenantId: 'tn_iso_users', email: 'member@iso-users.test', passwordHash: hashPassword('pw'), role: 'member' });
+  const ownerJwt = signTenantAccessToken({ id: owner.id, tenantId: 'tn_iso_users', role: 'owner' });
+  const memberJwt = signTenantAccessToken({ id: member.id, tenantId: 'tn_iso_users', role: 'member' });
+  const { port, close } = await listen(buildApp());
+  try {
+    const base = `http://127.0.0.1:${port}/api`;
+
+    const created = await fetch(`${base}/threads`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ownerJwt}` },
+      body: JSON.stringify({ title: 'owner-private-thread' }),
+    });
+    const thread = (await created.json()) as { id: string };
+
+    const listAsMember = await fetch(`${base}/threads`, { headers: { Authorization: `Bearer ${memberJwt}` } });
+    const listBody = (await listAsMember.json()) as Array<{ id: string }>;
+    assert.equal(listBody.some((item) => item.id === thread.id), false);
+
+    const getAsMember = await fetch(`${base}/threads/${thread.id}`, { headers: { Authorization: `Bearer ${memberJwt}` } });
+    assert.equal(getAsMember.status, 404);
+  } finally {
+    close();
+  }
+});

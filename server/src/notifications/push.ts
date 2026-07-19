@@ -3,7 +3,7 @@ import type { PushSubscription } from 'web-push';
 import { config } from '../config.js';
 import { query } from '../db/pool.js';
 import { store as defaultStore } from '../store/index.js';
-import type { PushSubscriptionRow, Store } from '../store/types.js';
+import type { PushSubscriptionRow, Scope, Store } from '../store/types.js';
 
 const VAPID_SETTING_KEY = 'web_push_vapid';
 
@@ -56,8 +56,10 @@ async function readOrCreateVapidSetting(): Promise<VapidSetting> {
     return { publicKey: config.webPush.publicKey, privateKey: config.webPush.privateKey };
   }
 
+  // VAPID 密钥是这一个部署实例的 Web Push 身份,不是租户策略——固定放在 default
+  // 租户分区下,不管调用方是哪个租户(docs/multi-tenancy-design.md §9)。
   const { rows } = await query<{ value: VapidSetting }>(
-    `SELECT value FROM app_settings WHERE key = $1`,
+    `SELECT value FROM app_settings WHERE tenant_id = 'default' AND key = $1`,
     [VAPID_SETTING_KEY],
   );
   const stored = rows[0]?.value;
@@ -65,13 +67,13 @@ async function readOrCreateVapidSetting(): Promise<VapidSetting> {
 
   const generated = webPush.generateVAPIDKeys();
   await query(
-    `INSERT INTO app_settings (key, value, updated_at)
-     VALUES ($1, $2::jsonb, now())
-     ON CONFLICT (key) DO NOTHING`,
+    `INSERT INTO app_settings (tenant_id, key, value, updated_at)
+     VALUES ('default', $1, $2::jsonb, now())
+     ON CONFLICT (tenant_id, key) DO NOTHING`,
     [VAPID_SETTING_KEY, JSON.stringify(generated)],
   );
   const { rows: afterInsert } = await query<{ value: VapidSetting }>(
-    `SELECT value FROM app_settings WHERE key = $1`,
+    `SELECT value FROM app_settings WHERE tenant_id = 'default' AND key = $1`,
     [VAPID_SETTING_KEY],
   );
   return afterInsert[0]?.value ?? generated;
@@ -113,14 +115,16 @@ async function sendPayload(row: PushSubscriptionRow, payload: PushPayload, store
   }
 }
 
-export async function notifyRunCompleted(runId: string, options: { store?: Store; output?: string } = {}): Promise<void> {
+export async function notifyRunCompleted(scope: Scope, runId: string, options: { store?: Store; output?: string } = {}): Promise<void> {
   const store = options.store ?? defaultStore;
   if (!await ensureWebPushEnabled()) return;
 
-  const run = await store.getRun(runId);
+  const run = await store.getRun(scope, runId);
   if (!run || run.status !== 'done') return;
-  const thread = await store.getThread(run.thread_id);
-  const subscriptions = await store.listEnabledPushSubscriptions();
+  const thread = await store.getThread(scope, run.thread_id);
+  // 只推给这个 run 归属用户自己的设备——只按 tenant_id 过滤会把同租户其他人的
+  // 私有对话完成通知推到自己设备上，违反 thread 私有性(docs/multi-tenancy-design.md §2)。
+  const subscriptions = await store.listEnabledPushSubscriptionsByScope(scope);
   if (!subscriptions.length) return;
 
   const threadTitle = thread?.title?.trim() || thread?.fallback_title?.trim() || '对话';

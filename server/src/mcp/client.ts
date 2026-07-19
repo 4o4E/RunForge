@@ -119,7 +119,7 @@ async function listServerTools(server: McpServerSettings): Promise<McpMappedTool
 }
 
 export async function listMcpTools(settings?: McpSettings): Promise<McpMappedTool[]> {
-  const mcpSettings = settings ?? await getMcpSettings();
+  const mcpSettings = settings ?? await getMcpSettings({ tenantId: 'default' });
   const settled = await Promise.allSettled(mcpSettings.servers.map((server) => listServerTools(server)));
   return settled.flatMap((item) => item.status === 'fulfilled' ? item.value : []);
 }
@@ -247,7 +247,7 @@ export async function callMcpTool(
 ): Promise<{ text: string; serverId: string; toolName: string }> {
   const parsed = parseMcpToolName(mappedName);
   if (!parsed) throw new Error(`不是 MCP 工具名：${mappedName}`);
-  const mcpSettings = settings ?? await getMcpSettings();
+  const mcpSettings = settings ?? await getMcpSettings({ tenantId: 'default' });
   const server = mcpSettings.servers.find((item) => item.id === parsed.serverId);
   if (!server || !server.enabled) throw new Error(`MCP server 未启用：${parsed.serverId}`);
   if (!server.allowedTools.includes(parsed.toolName)) throw new Error(`MCP 工具未允许：${parsed.serverId}/${parsed.toolName}`);

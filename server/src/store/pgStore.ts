@@ -8,6 +8,7 @@ import type {
   AuthTokenRow,
   PushSubscriptionRow,
   RunRow,
+  Scope,
   ShellActor,
   ShellCommandLogRow,
   ShellCommandRow,
@@ -42,16 +43,36 @@ function isEphemeralSystemMessage(role: LlmMessage['role'], content: string | nu
 }
 
 export class PgStore implements Store {
-  async createThread(title?: string): Promise<ThreadRow> {
+  // 多租户改造 Phase 2(docs/multi-tenancy-design.md §5)。这两个私有帮助方法只给
+  // 结构复杂、不方便直接把 scope 塞进查询本身的方法用(递归 CTE、多步聚合)——
+  // 先校验归属,查不到就让调用方按"空结果"处理,再跑原来没改动过的查询逻辑,
+  // 降低在复杂 SQL 里手改引入 bug 的风险。其余简单查询直接把 scope 折进 WHERE/JOIN。
+  private async threadBelongsToScope(scope: Scope, threadId: string): Promise<boolean> {
+    const { rows } = await query(
+      `SELECT 1 FROM threads WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
+      [threadId, scope.tenantId, scope.userId],
+    );
+    return rows.length > 0;
+  }
+
+  private async runBelongsToScope(scope: Scope, runId: string): Promise<boolean> {
+    const { rows } = await query(
+      `SELECT 1 FROM runs r JOIN threads t ON t.id = r.thread_id WHERE r.id = $1 AND t.tenant_id = $2 AND t.user_id = $3`,
+      [runId, scope.tenantId, scope.userId],
+    );
+    return rows.length > 0;
+  }
+
+  async createThread(scope: Scope, title?: string): Promise<ThreadRow> {
     const id = newThreadId();
     const { rows } = await query<ThreadRow>(
-      `INSERT INTO threads (id, title) VALUES ($1, $2) RETURNING *`,
-      [id, title ?? null],
+      `INSERT INTO threads (id, tenant_id, user_id, title) VALUES ($1, $2, $3, $4) RETURNING *`,
+      [id, scope.tenantId, scope.userId, title ?? null],
     );
     return rows[0];
   }
 
-  async getThread(id: string): Promise<ThreadRow | null> {
+  async getThread(scope: Scope, id: string): Promise<ThreadRow | null> {
     const { rows } = await query<ThreadRow>(
       `SELECT t.*, fallback.input AS fallback_title
        FROM threads t
@@ -62,13 +83,13 @@ export class PgStore implements Store {
          ORDER BY created_at, id
          LIMIT 1
        ) fallback ON true
-       WHERE t.id = $1`,
-      [id],
+       WHERE t.id = $1 AND t.tenant_id = $2 AND t.user_id = $3`,
+      [id, scope.tenantId, scope.userId],
     );
     return rows[0] ?? null;
   }
 
-  async listThreads(limit = 50, options: { archived?: boolean } = {}): Promise<ThreadRow[]> {
+  async listThreads(scope: Scope, limit = 50, options: { archived?: boolean } = {}): Promise<ThreadRow[]> {
     const { rows } = await query<ThreadRow>(
       `SELECT t.*, fallback.input AS fallback_title
        FROM threads t
@@ -79,17 +100,24 @@ export class PgStore implements Store {
          ORDER BY created_at, id
          LIMIT 1
        ) fallback ON true
-       WHERE (($2::boolean AND t.archived_at IS NOT NULL) OR (NOT $2::boolean AND t.archived_at IS NULL))
+       WHERE t.tenant_id = $2 AND t.user_id = $3
+         AND (($4::boolean AND t.archived_at IS NOT NULL) OR (NOT $4::boolean AND t.archived_at IS NULL))
        ORDER BY t.pinned_at DESC NULLS LAST, t.updated_at DESC, t.created_at DESC
        LIMIT $1`,
-      [limit, options.archived === true],
+      [limit, scope.tenantId, scope.userId, options.archived === true],
     );
     return rows;
   }
 
-  async updateThread(id: string, fields: { title?: string | null; pinned?: boolean; archived?: boolean; activeRunId?: string | null }): Promise<ThreadRow | null> {
+  async updateThread(
+    scope: Scope,
+    id: string,
+    fields: { title?: string | null; pinned?: boolean; archived?: boolean; activeRunId?: string | null },
+  ): Promise<ThreadRow | null> {
     let activeRunId = fields.activeRunId ?? null;
     if (fields.activeRunId) {
+      // 这个 CTE 只在给定 thread_id 下找叶子 run,不需要单独加 scope——归属校验
+      // 由下面主 UPDATE 的 WHERE tenant_id/user_id 兜底,查不到就返回 null。
       const { rows: runRows } = await query<{ id: string }>(
         `WITH RECURSIVE subtree AS (
            SELECT id, parent_run_id, created_at
@@ -123,7 +151,7 @@ export class PgStore implements Store {
            archived_at = CASE WHEN $5::boolean IS NULL THEN archived_at WHEN $5 THEN COALESCE(archived_at, now()) ELSE NULL END,
            active_run_id = CASE WHEN $6 THEN $7 ELSE active_run_id END,
            updated_at = now()
-       WHERE id = $1
+       WHERE id = $1 AND tenant_id = $8 AND user_id = $9
        RETURNING *`,
       [
         id,
@@ -133,28 +161,33 @@ export class PgStore implements Store {
         fields.archived ?? null,
         Object.prototype.hasOwnProperty.call(fields, 'activeRunId'),
         activeRunId,
+        scope.tenantId,
+        scope.userId,
       ],
     );
     return rows[0] ?? null;
   }
 
-  async setThreadTitleIfEmpty(id: string, title: string): Promise<ThreadRow | null> {
+  async setThreadTitleIfEmpty(scope: Scope, id: string, title: string): Promise<ThreadRow | null> {
     const { rows } = await query<ThreadRow>(
       `UPDATE threads
        SET title = $2, updated_at = now()
-       WHERE id = $1 AND (title IS NULL OR btrim(title) = '')
+       WHERE id = $1 AND tenant_id = $3 AND user_id = $4 AND (title IS NULL OR btrim(title) = '')
        RETURNING *`,
-      [id, title],
+      [id, title, scope.tenantId, scope.userId],
     );
     return rows[0] ?? null;
   }
 
-  async deleteThread(id: string): Promise<boolean> {
-    const result = await query(`DELETE FROM threads WHERE id = $1`, [id]);
+  async deleteThread(scope: Scope, id: string): Promise<boolean> {
+    const result = await query(
+      `DELETE FROM threads WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
+      [id, scope.tenantId, scope.userId],
+    );
     return (result.rowCount ?? 0) > 0;
   }
 
-  async searchThreadMessages(searchText: string, limit = 50): Promise<ThreadSearchResultRow[]> {
+  async searchThreadMessages(scope: Scope, searchText: string, limit = 50): Promise<ThreadSearchResultRow[]> {
     const q = searchText.trim();
     if (!q) return [];
     const { rows } = await query<{
@@ -176,25 +209,29 @@ export class PgStore implements Store {
          m.created_at
       FROM messages m
       JOIN threads t ON t.id = m.thread_id
-      WHERE m.content IS NOT NULL
+      WHERE t.tenant_id = $3 AND t.user_id = $4
+        AND m.content IS NOT NULL
         AND m.role IN ('user', 'assistant')
         AND m.content ILIKE '%' || $1 || '%'
       ORDER BY m.created_at DESC, m.id DESC
       LIMIT $2`,
-      [q, Math.min(Math.max(limit, 1), 100)],
+      [q, Math.min(Math.max(limit, 1), 100), scope.tenantId, scope.userId],
     );
     return rows.map((row) => ({ ...row, message_id: Number(row.message_id) }));
   }
 
-  async listThreadNotices(threadId: string): Promise<ThreadNoticeRow[]> {
+  async listThreadNotices(scope: Scope, threadId: string): Promise<ThreadNoticeRow[]> {
     const { rows } = await query<ThreadNoticeRow>(
-      `SELECT * FROM thread_notices WHERE thread_id = $1 ORDER BY created_at, id`,
-      [threadId],
+      `SELECT tn.* FROM thread_notices tn
+       JOIN threads t ON t.id = tn.thread_id
+       WHERE tn.thread_id = $1 AND t.tenant_id = $2 AND t.user_id = $3
+       ORDER BY tn.created_at, tn.id`,
+      [threadId, scope.tenantId, scope.userId],
     );
     return rows;
   }
 
-  async addThreadNotice(input: {
+  async addThreadNotice(scope: Scope, input: {
     threadId: string;
     kind?: string;
     message: string;
@@ -204,20 +241,23 @@ export class PgStore implements Store {
   }): Promise<ThreadNoticeRow> {
     const { rows } = await query<ThreadNoticeRow>(
       `INSERT INTO thread_notices (thread_id, kind, message, title, linked_thread_id, linked_run_id)
-       VALUES ($1, $2, $3, $4, $5, $6)
+       SELECT $1, $2, $3, $4, $5, $6
+       WHERE EXISTS (SELECT 1 FROM threads WHERE id = $1 AND tenant_id = $7 AND user_id = $8)
        RETURNING *`,
-      [input.threadId, input.kind ?? 'info', input.message, input.title ?? null, input.linkedThreadId ?? null, input.linkedRunId ?? null],
+      [input.threadId, input.kind ?? 'info', input.message, input.title ?? null, input.linkedThreadId ?? null, input.linkedRunId ?? null, scope.tenantId, scope.userId],
     );
+    if (!rows[0]) throw new Error('threadId 不存在或不属于当前用户');
     return rows[0];
   }
 
-  async forkThreadAtRun(sourceRunId: string): Promise<{ thread: ThreadRow; activeRun: RunRow } | null> {
+  async forkThreadAtRun(scope: Scope, sourceRunId: string): Promise<{ thread: ThreadRow; activeRun: RunRow } | null> {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
       const { rows: sourceRows } = await client.query<RunRow>(
-        `SELECT * FROM runs WHERE id = $1`,
-        [sourceRunId],
+        `SELECT r.* FROM runs r JOIN threads t ON t.id = r.thread_id
+         WHERE r.id = $1 AND t.tenant_id = $2 AND t.user_id = $3`,
+        [sourceRunId, scope.tenantId, scope.userId],
       );
       const source = sourceRows[0];
       if (!source) {
@@ -253,9 +293,11 @@ export class PgStore implements Store {
 
       const forkThreadId = newThreadId();
       const forkTitle = sourceThread.title ? `${sourceThread.title} 的 fork` : 'Fork 对话';
+      // fork 出的新 thread 归属发起 fork 的用户(scope),不是复制源 thread 的归属——
+      // 能走到这里说明 sourceRunId 已经属于 scope 了,两者本来就是同一个 tenant/user。
       const { rows: newThreadRows } = await client.query<ThreadRow>(
-        `INSERT INTO threads (id, title) VALUES ($1, $2) RETURNING *`,
-        [forkThreadId, forkTitle],
+        `INSERT INTO threads (id, tenant_id, user_id, title) VALUES ($1, $2, $3, $4) RETURNING *`,
+        [forkThreadId, scope.tenantId, scope.userId, forkTitle],
       );
       const newThread = newThreadRows[0];
       const runIdMap = new Map<string, string>();
@@ -398,7 +440,7 @@ export class PgStore implements Store {
         ],
       );
       await client.query('COMMIT');
-      const refreshedThread = await this.getThread(forkThreadId);
+      const refreshedThread = await this.getThread(scope, forkThreadId);
       return refreshedThread ? { thread: refreshedThread, activeRun } : { thread: newThread, activeRun };
     } catch (err) {
       await client.query('ROLLBACK');
@@ -408,12 +450,16 @@ export class PgStore implements Store {
     }
   }
 
-  async createRun(threadId: string, input: string, options: { modelRef?: string | null; parentRunId?: string | null } = {}): Promise<RunRow> {
+  async createRun(scope: Scope, threadId: string, input: string, options: { modelRef?: string | null; parentRunId?: string | null } = {}): Promise<RunRow> {
+    const { rows: threadRows } = await query<{ active_run_id: string | null }>(
+      `SELECT active_run_id FROM threads WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
+      [threadId, scope.tenantId, scope.userId],
+    );
+    if (!threadRows.length) throw new Error('threadId 不存在或不属于当前用户');
     const id = newRunId();
     let parentRunId = options.parentRunId;
     if (parentRunId === undefined) {
-      const { rows } = await query<{ active_run_id: string | null }>(`SELECT active_run_id FROM threads WHERE id = $1`, [threadId]);
-      parentRunId = rows[0]?.active_run_id ?? null;
+      parentRunId = threadRows[0]?.active_run_id ?? null;
       if (!parentRunId) {
         const legacy = await query<{ id: string }>(
           `SELECT id FROM runs WHERE thread_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`,
@@ -436,20 +482,26 @@ export class PgStore implements Store {
     return rows[0];
   }
 
-  async getRun(id: string): Promise<RunRow | null> {
-    const { rows } = await query<RunRow>(`SELECT * FROM runs WHERE id = $1`, [id]);
+  async getRun(scope: Scope, id: string): Promise<RunRow | null> {
+    const { rows } = await query<RunRow>(
+      `SELECT r.* FROM runs r JOIN threads t ON t.id = r.thread_id
+       WHERE r.id = $1 AND t.tenant_id = $2 AND t.user_id = $3`,
+      [id, scope.tenantId, scope.userId],
+    );
     return rows[0] ?? null;
   }
 
-  async listRuns(threadId: string): Promise<RunRow[]> {
+  async listRuns(scope: Scope, threadId: string): Promise<RunRow[]> {
     const { rows } = await query<RunRow>(
-      `SELECT * FROM runs WHERE thread_id = $1 ORDER BY created_at`,
-      [threadId],
+      `SELECT r.* FROM runs r JOIN threads t ON t.id = r.thread_id
+       WHERE r.thread_id = $1 AND t.tenant_id = $2 AND t.user_id = $3
+       ORDER BY r.created_at`,
+      [threadId, scope.tenantId, scope.userId],
     );
     return rows;
   }
 
-  async listRunsByStatus(statuses: RunStatus[]): Promise<RunRow[]> {
+  async listRunsByStatusUnscoped(statuses: RunStatus[]): Promise<RunRow[]> {
     if (!statuses.length) return [];
     const { rows } = await query<RunRow>(
       `SELECT * FROM runs WHERE status = ANY($1::text[]) ORDER BY updated_at, created_at`,
@@ -458,14 +510,14 @@ export class PgStore implements Store {
     return rows;
   }
 
-  async setRunStatus(id: string, status: RunStatus, fields: { output?: string | null; error?: string | null } = {}): Promise<void> {
+  async setRunStatus(scope: Scope, id: string, status: RunStatus, fields: { output?: string | null; error?: string | null } = {}): Promise<void> {
     await query(
       `UPDATE runs
        SET status = $2,
            output = CASE WHEN $3 THEN $4 ELSE output END,
            error = CASE WHEN $5 THEN $6 ELSE error END,
            updated_at = now()
-       WHERE id = $1`,
+       WHERE id = $1 AND thread_id IN (SELECT id FROM threads WHERE tenant_id = $7 AND user_id = $8)`,
       [
         id,
         status,
@@ -473,29 +525,56 @@ export class PgStore implements Store {
         fields.output ?? null,
         Object.prototype.hasOwnProperty.call(fields, 'error'),
         fields.error ?? null,
+        scope.tenantId,
+        scope.userId,
       ],
     );
   }
 
-  async setGoalState(runId: string, goal: GoalState): Promise<void> {
-    await query(`UPDATE runs SET goal_state = $2, updated_at = now() WHERE id = $1`, [runId, JSON.stringify(goal)]);
+  async setGoalState(scope: Scope, runId: string, goal: GoalState): Promise<void> {
+    await query(
+      `UPDATE runs SET goal_state = $2, updated_at = now()
+       WHERE id = $1 AND thread_id IN (SELECT id FROM threads WHERE tenant_id = $3 AND user_id = $4)`,
+      [runId, JSON.stringify(goal), scope.tenantId, scope.userId],
+    );
   }
 
-  async createStep(runId: string, idx: number): Promise<StepRow> {
+  async getRunUnscoped(id: string): Promise<RunRow | null> {
+    const { rows } = await query<RunRow>(`SELECT * FROM runs WHERE id = $1`, [id]);
+    return rows[0] ?? null;
+  }
+
+  async getThreadUnscoped(id: string): Promise<ThreadRow | null> {
+    const { rows } = await query<ThreadRow>(`SELECT * FROM threads WHERE id = $1`, [id]);
+    return rows[0] ?? null;
+  }
+
+  async createStep(scope: Scope, runId: string, idx: number): Promise<StepRow> {
     const id = newStepId();
     const { rows } = await query<StepRow>(
-      `INSERT INTO steps (id, run_id, idx) VALUES ($1, $2, $3) RETURNING *`,
-      [id, runId, idx],
+      `INSERT INTO steps (id, run_id, idx)
+       SELECT $1, $2, $3
+       WHERE EXISTS (SELECT 1 FROM runs r JOIN threads t ON t.id = r.thread_id WHERE r.id = $2 AND t.tenant_id = $4 AND t.user_id = $5)
+       RETURNING *`,
+      [id, runId, idx, scope.tenantId, scope.userId],
     );
+    if (!rows.length) throw new Error('runId 不存在或不属于当前用户');
     return rows[0];
   }
 
-  async getLastStepIndex(runId: string): Promise<number> {
-    const { rows } = await query<{ idx: number | null }>(`SELECT max(idx) AS idx FROM steps WHERE run_id = $1`, [runId]);
+  async getLastStepIndex(scope: Scope, runId: string): Promise<number> {
+    const { rows } = await query<{ idx: number | null }>(
+      `SELECT max(s.idx) AS idx FROM steps s
+       JOIN runs r ON r.id = s.run_id JOIN threads t ON t.id = r.thread_id
+       WHERE s.run_id = $1 AND t.tenant_id = $2 AND t.user_id = $3`,
+      [runId, scope.tenantId, scope.userId],
+    );
     return rows[0]?.idx ?? 0;
   }
 
-  async getLastCompletedStepIndex(runId: string): Promise<number> {
+  async getLastCompletedStepIndex(scope: Scope, runId: string): Promise<number> {
+    const owns = await this.runBelongsToScope(scope, runId);
+    if (!owns) return 0;
     const { rows } = await query<{
       step_id: string;
       idx: number;
@@ -527,7 +606,9 @@ export class PgStore implements Store {
     return last;
   }
 
-  async loadThreadMessages(threadId: string, options: { runId?: string | null } = {}): Promise<ThreadMessage[]> {
+  async loadThreadMessages(scope: Scope, threadId: string, options: { runId?: string | null } = {}): Promise<ThreadMessage[]> {
+    const owns = await this.threadBelongsToScope(scope, threadId);
+    if (!owns) return [];
     const targetRunId = options.runId ?? null;
     const { rows } = await query<{
       id: string;
@@ -593,10 +674,12 @@ export class PgStore implements Store {
     return sanitizeThreadMessagesForModel(messages);
   }
 
-  async addMessage(threadId: string, runId: string, stepId: string | null, msg: LlmMessage): Promise<number> {
+  async addMessage(scope: Scope, threadId: string, runId: string, stepId: string | null, msg: LlmMessage): Promise<number> {
     const { rows } = await query<{ id: string }>(
       `INSERT INTO messages (thread_id, run_id, step_id, role, content, tool_calls, tool_call_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+       SELECT $1, $2, $3, $4, $5, $6, $7
+       WHERE EXISTS (SELECT 1 FROM threads WHERE id = $1 AND tenant_id = $8 AND user_id = $9)
+       RETURNING id`,
       [
         threadId,
         runId,
@@ -605,17 +688,25 @@ export class PgStore implements Store {
         msg.content,
         msg.toolCalls ? JSON.stringify(msg.toolCalls) : null,
         msg.toolCallId ?? null,
+        scope.tenantId,
+        scope.userId,
       ],
     );
+    if (!rows.length) throw new Error('threadId 不存在或不属于当前用户');
     return Number(rows[0].id);
   }
 
-  async countRunMessages(runId: string): Promise<number> {
-    const { rows } = await query<{ count: string }>(`SELECT count(*)::text AS count FROM messages WHERE run_id = $1`, [runId]);
+  async countRunMessages(scope: Scope, runId: string): Promise<number> {
+    const { rows } = await query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM messages m JOIN threads t ON t.id = m.thread_id
+       WHERE m.run_id = $1 AND t.tenant_id = $2 AND t.user_id = $3`,
+      [runId, scope.tenantId, scope.userId],
+    );
     return Number(rows[0]?.count ?? 0);
   }
 
   async addSummaryMessage(
+    scope: Scope,
     threadId: string,
     runId: string,
     stepId: string | null,
@@ -624,7 +715,9 @@ export class PgStore implements Store {
   ): Promise<number> {
     const { rows } = await query<{ id: string }>(
       `INSERT INTO messages (thread_id, run_id, step_id, role, content, tool_calls, tool_call_id, summary_of)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::bigint[]) RETURNING id`,
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8::bigint[]
+       WHERE EXISTS (SELECT 1 FROM threads WHERE id = $1 AND tenant_id = $9 AND user_id = $10)
+       RETURNING id`,
       [
         threadId,
         runId,
@@ -634,33 +727,48 @@ export class PgStore implements Store {
         msg.toolCalls ? JSON.stringify(msg.toolCalls) : null,
         msg.toolCallId ?? null,
         summaryOf,
+        scope.tenantId,
+        scope.userId,
       ],
     );
+    if (!rows.length) throw new Error('threadId 不存在或不属于当前用户');
     return Number(rows[0].id);
   }
 
-  async markMessagesCollapsed(ids: number[], kind: 'masked' | 'summarized'): Promise<void> {
+  async markMessagesCollapsed(scope: Scope, ids: number[], kind: 'masked' | 'summarized'): Promise<void> {
     if (!ids.length) return;
-    await query(`UPDATE messages SET collapsed = $2 WHERE id = ANY($1::bigint[])`, [ids, kind]);
-  }
-
-  async addEvent(runId: string, stepId: string | null, event: AgentEvent): Promise<void> {
-    const idx = 'step' in event ? event.step : 0;
     await query(
-      `INSERT INTO events (run_id, step_id, idx, type, data) VALUES ($1, $2, $3, $4, $5)`,
-      [runId, stepId, idx, event.type, JSON.stringify(event)],
+      `UPDATE messages SET collapsed = $2
+       WHERE id = ANY($1::bigint[]) AND thread_id IN (SELECT id FROM threads WHERE tenant_id = $3 AND user_id = $4)`,
+      [ids, kind, scope.tenantId, scope.userId],
     );
   }
 
-  async getEvents(runId: string): Promise<AgentEvent[]> {
+  async addEvent(scope: Scope, runId: string, stepId: string | null, event: AgentEvent): Promise<void> {
+    const idx = 'step' in event ? event.step : 0;
+    await query(
+      `INSERT INTO events (run_id, step_id, idx, type, data)
+       SELECT $1, $2, $3, $4, $5
+       WHERE EXISTS (
+         SELECT 1 FROM runs r JOIN threads t ON t.id = r.thread_id
+         WHERE r.id = $1 AND t.tenant_id = $6 AND t.user_id = $7
+       )`,
+      [runId, stepId, idx, event.type, JSON.stringify(event), scope.tenantId, scope.userId],
+    );
+  }
+
+  async getEvents(scope: Scope, runId: string): Promise<AgentEvent[]> {
     const { rows } = await query<{ data: AgentEvent }>(
-      `SELECT data FROM events WHERE run_id = $1 ORDER BY id`,
-      [runId],
+      `SELECT e.data FROM events e
+       JOIN runs r ON r.id = e.run_id JOIN threads t ON t.id = r.thread_id
+       WHERE e.run_id = $1 AND t.tenant_id = $2 AND t.user_id = $3
+       ORDER BY e.id`,
+      [runId, scope.tenantId, scope.userId],
     );
     return rows.map((r) => r.data);
   }
 
-  async createSubagentRun(input: {
+  async createSubagentRun(scope: Scope, input: {
     parentRunId: string;
     parentStepId?: string | null;
     workflowId?: string | null;
@@ -672,13 +780,18 @@ export class PgStore implements Store {
     const id = newSubagentRunId();
     const { rows } = await query<SubagentRunRow>(
       `INSERT INTO subagent_runs (
-         id, parent_run_id, parent_step_id, workflow_id, stage_id, runtime_profile_id,
+         id, tenant_id, parent_run_id, parent_step_id, workflow_id, stage_id, runtime_profile_id,
          status, task_assignment, skill_names
        )
-       VALUES ($1, $2, $3, $4, $5, $6, 'running', $7::jsonb, $8::text[])
+       SELECT $1, $2, $3, $4, $5, $6, $7, 'running', $8::jsonb, $9::text[]
+       WHERE EXISTS (
+         SELECT 1 FROM runs r JOIN threads t ON t.id = r.thread_id
+         WHERE r.id = $3 AND t.tenant_id = $2 AND t.user_id = $10
+       )
        RETURNING *`,
       [
         id,
+        scope.tenantId,
         input.parentRunId,
         input.parentStepId ?? null,
         input.workflowId ?? null,
@@ -686,47 +799,61 @@ export class PgStore implements Store {
         input.runtimeProfileId ?? null,
         JSON.stringify(input.taskAssignment),
         input.skillNames ?? [],
+        scope.userId,
       ],
     );
+    if (!rows.length) throw new Error('parentRunId 不存在或不属于当前用户');
     return rows[0];
   }
 
   async finishSubagentRun(
+    scope: Scope,
     id: string,
     fields: { status: 'done' | 'error'; output?: string | null; error?: string | null; usage?: Record<string, unknown> | null },
   ): Promise<void> {
     await query(
-      `UPDATE subagent_runs
+      `UPDATE subagent_runs sr
        SET status = $2, output = $3, error = $4, usage = $5::jsonb, updated_at = now(), finished_at = now()
-       WHERE id = $1`,
+       WHERE sr.id = $1
+         AND sr.parent_run_id IN (
+           SELECT r.id FROM runs r JOIN threads t ON t.id = r.thread_id WHERE t.tenant_id = $6 AND t.user_id = $7
+         )`,
       [
         id,
         fields.status,
         fields.output ?? null,
         fields.error ?? null,
         fields.usage ? JSON.stringify(fields.usage) : null,
+        scope.tenantId,
+        scope.userId,
       ],
     );
   }
 
-  async getSubagentRun(id: string): Promise<SubagentRunRow | null> {
-    const { rows } = await query<SubagentRunRow>(`SELECT * FROM subagent_runs WHERE id = $1`, [id]);
+  async getSubagentRun(scope: Scope, id: string): Promise<SubagentRunRow | null> {
+    const { rows } = await query<SubagentRunRow>(
+      `SELECT sr.* FROM subagent_runs sr
+       JOIN runs r ON r.id = sr.parent_run_id JOIN threads t ON t.id = r.thread_id
+       WHERE sr.id = $1 AND t.tenant_id = $2 AND t.user_id = $3`,
+      [id, scope.tenantId, scope.userId],
+    );
     return rows[0] ?? null;
   }
 
-  async listSubagentRunsByThread(threadId: string): Promise<SubagentRunRow[]> {
+  async listSubagentRunsByThread(scope: Scope, threadId: string): Promise<SubagentRunRow[]> {
     const { rows } = await query<SubagentRunRow>(
       `SELECT sr.*
        FROM subagent_runs sr
        JOIN runs r ON r.id = sr.parent_run_id
-       WHERE r.thread_id = $1
+       JOIN threads t ON t.id = r.thread_id
+       WHERE r.thread_id = $1 AND t.tenant_id = $2 AND t.user_id = $3
        ORDER BY sr.created_at`,
-      [threadId],
+      [threadId, scope.tenantId, scope.userId],
     );
     return rows;
   }
 
-  async createShellSession(input: {
+  async createShellSession(scope: Scope, input: {
     threadId: string;
     name: string;
     owner: ShellSessionRow['owner'];
@@ -737,10 +864,13 @@ export class PgStore implements Store {
   }): Promise<ShellSessionRow> {
     const id = newShellSessionId();
     const { rows } = await query<ShellSessionRow>(
-      `INSERT INTO shell_sessions (id, thread_id, name, owner, workspace_root, cwd, backend, status, config_snapshot)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'idle', $8::jsonb) RETURNING *`,
+      `INSERT INTO shell_sessions (id, tenant_id, thread_id, name, owner, workspace_root, cwd, backend, status, config_snapshot)
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8, 'idle', $9::jsonb
+       WHERE EXISTS (SELECT 1 FROM threads WHERE id = $3 AND tenant_id = $2 AND user_id = $10)
+       RETURNING *`,
       [
         id,
+        scope.tenantId,
         input.threadId,
         input.name,
         input.owner,
@@ -748,43 +878,59 @@ export class PgStore implements Store {
         input.cwd ?? input.workspaceRoot,
         input.backend,
         input.configSnapshot ? JSON.stringify(input.configSnapshot) : null,
+        scope.userId,
       ],
     );
+    if (!rows.length) throw new Error('threadId 不存在或不属于当前用户');
     return rows[0];
   }
 
-  async getShellSession(id: string): Promise<ShellSessionRow | null> {
-    const { rows } = await query<ShellSessionRow>(`SELECT * FROM shell_sessions WHERE id = $1`, [id]);
+  async getShellSession(scope: Scope, id: string): Promise<ShellSessionRow | null> {
+    const { rows } = await query<ShellSessionRow>(
+      `SELECT ss.* FROM shell_sessions ss JOIN threads t ON t.id = ss.thread_id
+       WHERE ss.id = $1 AND t.tenant_id = $2 AND t.user_id = $3`,
+      [id, scope.tenantId, scope.userId],
+    );
     return rows[0] ?? null;
   }
 
-  async listShellSessions(threadId: string, workspaceRoot?: string): Promise<ShellSessionRow[]> {
+  async listShellSessions(scope: Scope, threadId: string, workspaceRoot?: string): Promise<ShellSessionRow[]> {
+    const base = `SELECT ss.* FROM shell_sessions ss JOIN threads t ON t.id = ss.thread_id
+      WHERE ss.thread_id = $1 AND t.tenant_id = $2 AND t.user_id = $3 AND ss.deleted_at IS NULL`;
     const { rows } = workspaceRoot
       ? await query<ShellSessionRow>(
-          `SELECT * FROM shell_sessions WHERE thread_id = $1 AND workspace_root = $2 AND deleted_at IS NULL ORDER BY updated_at DESC, created_at DESC`,
-          [threadId, workspaceRoot],
+          `${base} AND ss.workspace_root = $4 ORDER BY ss.updated_at DESC, ss.created_at DESC`,
+          [threadId, scope.tenantId, scope.userId, workspaceRoot],
         )
       : await query<ShellSessionRow>(
-          `SELECT * FROM shell_sessions WHERE thread_id = $1 AND deleted_at IS NULL ORDER BY updated_at DESC, created_at DESC`,
-          [threadId],
+          `${base} ORDER BY ss.updated_at DESC, ss.created_at DESC`,
+          [threadId, scope.tenantId, scope.userId],
         );
     return rows;
   }
 
   async updateShellSession(
+    scope: Scope,
     id: string,
     fields: Partial<Pick<ShellSessionRow, 'name' | 'status' | 'lease_actor' | 'lease_run_id' | 'cwd' | 'config_snapshot' | 'deleted_at'>>,
   ): Promise<void> {
     const entries = Object.entries(fields).filter(([, value]) => value !== undefined);
     if (!entries.length) return;
     const sets = entries.map(([key], i) => `${key} = $${i + 2}${key === 'config_snapshot' ? '::jsonb' : ''}`);
-    await query(`UPDATE shell_sessions SET ${sets.join(', ')}, updated_at = now() WHERE id = $1`, [
-      id,
-      ...entries.map(([key, value]) => key === 'config_snapshot' && value != null ? JSON.stringify(value) : value),
-    ]);
+    const scopeParamStart = entries.length + 2;
+    await query(
+      `UPDATE shell_sessions SET ${sets.join(', ')}, updated_at = now()
+       WHERE id = $1 AND thread_id IN (SELECT id FROM threads WHERE tenant_id = $${scopeParamStart} AND user_id = $${scopeParamStart + 1})`,
+      [
+        id,
+        ...entries.map(([key, value]) => key === 'config_snapshot' && value != null ? JSON.stringify(value) : value),
+        scope.tenantId,
+        scope.userId,
+      ],
+    );
   }
 
-  async createShellCommand(input: {
+  async createShellCommand(scope: Scope, input: {
     sessionId: string;
     runId?: string | null;
     stepId?: string | null;
@@ -803,7 +949,11 @@ export class PgStore implements Store {
          id, session_id, run_id, step_id, actor, command, cwd, wait_mode, status,
          soft_timeout_ms, hard_timeout_ms, soft_timeout_at, hard_timeout_at
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'queued', $9, $10, $11, $12)
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8, 'queued', $9, $10, $11, $12
+       WHERE EXISTS (
+         SELECT 1 FROM shell_sessions ss JOIN threads t ON t.id = ss.thread_id
+         WHERE ss.id = $2 AND t.tenant_id = $13 AND t.user_id = $14
+       )
        RETURNING *`,
       [
         id,
@@ -818,40 +968,54 @@ export class PgStore implements Store {
         input.hardTimeoutMs ?? null,
         input.softTimeoutAt ?? null,
         input.hardTimeoutAt ?? null,
+        scope.tenantId,
+        scope.userId,
       ],
     );
+    if (!rows.length) throw new Error('sessionId 不存在或不属于当前用户');
     return rows[0];
   }
 
-  async getShellCommand(id: string): Promise<ShellCommandRow | null> {
-    const { rows } = await query<ShellCommandRow>(`SELECT * FROM shell_commands WHERE id = $1`, [id]);
+  async getShellCommand(scope: Scope, id: string): Promise<ShellCommandRow | null> {
+    const { rows } = await query<ShellCommandRow>(
+      `SELECT sc.* FROM shell_commands sc
+       JOIN shell_sessions ss ON ss.id = sc.session_id JOIN threads t ON t.id = ss.thread_id
+       WHERE sc.id = $1 AND t.tenant_id = $2 AND t.user_id = $3`,
+      [id, scope.tenantId, scope.userId],
+    );
     return rows[0] ?? null;
   }
 
-  async listShellCommandsBySession(sessionId: string, limit = 20): Promise<ShellCommandRow[]> {
+  async listShellCommandsBySession(scope: Scope, sessionId: string, limit = 20): Promise<ShellCommandRow[]> {
     const { rows } = await query<ShellCommandRow>(
-      `SELECT * FROM shell_commands WHERE session_id = $1 ORDER BY started_at DESC LIMIT $2`,
-      [sessionId, limit],
+      `SELECT sc.* FROM shell_commands sc
+       JOIN shell_sessions ss ON ss.id = sc.session_id JOIN threads t ON t.id = ss.thread_id
+       WHERE sc.session_id = $1 AND t.tenant_id = $2 AND t.user_id = $3
+       ORDER BY sc.started_at DESC LIMIT $4`,
+      [sessionId, scope.tenantId, scope.userId, limit],
     );
     return rows;
   }
 
-  async listRunningShellCommandsByRun(runId: string): Promise<ShellCommandRow[]> {
+  async listRunningShellCommandsByRun(scope: Scope, runId: string): Promise<ShellCommandRow[]> {
     const { rows } = await query<ShellCommandRow>(
-      `SELECT * FROM shell_commands WHERE run_id = $1 AND status = 'running' ORDER BY started_at`,
-      [runId],
+      `SELECT sc.* FROM shell_commands sc
+       JOIN runs r ON r.id = sc.run_id JOIN threads t ON t.id = r.thread_id
+       WHERE sc.run_id = $1 AND sc.status = 'running' AND t.tenant_id = $2 AND t.user_id = $3
+       ORDER BY sc.started_at`,
+      [runId, scope.tenantId, scope.userId],
     );
     return rows;
   }
 
-  async listRunningShellCommands(): Promise<ShellCommandRow[]> {
+  async listRunningShellCommandsUnscoped(): Promise<ShellCommandRow[]> {
     const { rows } = await query<ShellCommandRow>(
       `SELECT * FROM shell_commands WHERE status IN ('queued', 'running') ORDER BY updated_at`,
     );
     return rows;
   }
 
-  async updateShellCommand(
+  async updateShellCommandUnscoped(
     id: string,
     fields: Partial<
       Pick<
@@ -878,41 +1042,104 @@ export class PgStore implements Store {
     ]);
   }
 
-  async appendShellCommandLog(commandId: string, stream: ShellLogStream, chunk: string): Promise<ShellCommandLogRow> {
+  async updateShellSessionUnscoped(
+    id: string,
+    fields: Partial<Pick<ShellSessionRow, 'name' | 'status' | 'lease_actor' | 'lease_run_id' | 'cwd' | 'config_snapshot' | 'deleted_at'>>,
+  ): Promise<void> {
+    const entries = Object.entries(fields).filter(([, value]) => value !== undefined);
+    if (!entries.length) return;
+    const sets = entries.map(([key], i) => `${key} = $${i + 2}${key === 'config_snapshot' ? '::jsonb' : ''}`);
+    await query(`UPDATE shell_sessions SET ${sets.join(', ')}, updated_at = now() WHERE id = $1`, [
+      id,
+      ...entries.map(([key, value]) => key === 'config_snapshot' && value != null ? JSON.stringify(value) : value),
+    ]);
+  }
+
+  async updateShellCommand(
+    scope: Scope,
+    id: string,
+    fields: Partial<
+      Pick<
+        ShellCommandRow,
+        | 'status'
+        | 'attention'
+        | 'host_pid'
+        | 'child_pid'
+        | 'exit_code'
+        | 'signal'
+        | 'last_output_at'
+        | 'output_bytes'
+        | 'error'
+        | 'ended_at'
+      >
+    >,
+  ): Promise<void> {
+    const entries = Object.entries(fields).filter(([, value]) => value !== undefined);
+    if (!entries.length) return;
+    const sets = entries.map(([key], i) => `${key} = $${i + 2}`);
+    const scopeParamStart = entries.length + 2;
+    await query(
+      `UPDATE shell_commands SET ${sets.join(', ')}, updated_at = now()
+       WHERE id = $1 AND session_id IN (
+         SELECT ss.id FROM shell_sessions ss JOIN threads t ON t.id = ss.thread_id
+         WHERE t.tenant_id = $${scopeParamStart} AND t.user_id = $${scopeParamStart + 1}
+       )`,
+      [id, ...entries.map(([, value]) => value), scope.tenantId, scope.userId],
+    );
+  }
+
+  async appendShellCommandLog(scope: Scope, commandId: string, stream: ShellLogStream, chunk: string): Promise<ShellCommandLogRow> {
     const { rows } = await query<ShellCommandLogRow>(
       `WITH next_seq AS (
          SELECT COALESCE(max(seq), 0) + 1 AS seq FROM shell_command_logs WHERE command_id = $1
        )
        INSERT INTO shell_command_logs (command_id, seq, stream, chunk)
        SELECT $1, seq, $2, $3 FROM next_seq
+       WHERE EXISTS (
+         SELECT 1 FROM shell_commands sc
+         JOIN shell_sessions ss ON ss.id = sc.session_id JOIN threads t ON t.id = ss.thread_id
+         WHERE sc.id = $1 AND t.tenant_id = $4 AND t.user_id = $5
+       )
        RETURNING *`,
-      [commandId, stream, chunk],
+      [commandId, stream, chunk, scope.tenantId, scope.userId],
     );
+    if (!rows.length) throw new Error('commandId 不存在或不属于当前用户');
     return rows[0];
   }
 
-  async getShellCommandLogs(commandId: string, sinceSeq = 0, limit = 200): Promise<ShellCommandLogRow[]> {
+  async getShellCommandLogs(scope: Scope, commandId: string, sinceSeq = 0, limit = 200): Promise<ShellCommandLogRow[]> {
     const { rows } = await query<ShellCommandLogRow>(
-      `SELECT * FROM shell_command_logs WHERE command_id = $1 AND seq > $2 ORDER BY seq LIMIT $3`,
-      [commandId, sinceSeq, limit],
+      `SELECT scl.* FROM shell_command_logs scl
+       JOIN shell_commands sc ON sc.id = scl.command_id
+       JOIN shell_sessions ss ON ss.id = sc.session_id JOIN threads t ON t.id = ss.thread_id
+       WHERE scl.command_id = $1 AND scl.seq > $2 AND t.tenant_id = $4 AND t.user_id = $5
+       ORDER BY scl.seq LIMIT $3`,
+      [commandId, sinceSeq, limit, scope.tenantId, scope.userId],
     );
     return rows;
   }
 
-  async addShellSessionEvent(sessionId: string, actor: ShellActor, kind: string, data: unknown): Promise<void> {
+  async addShellSessionEvent(scope: Scope, sessionId: string, actor: ShellActor, kind: string, data: unknown): Promise<void> {
     await query(
-      `INSERT INTO shell_session_events (session_id, actor, kind, data) VALUES ($1, $2, $3, $4)`,
-      [sessionId, actor, kind, JSON.stringify(data ?? {})],
+      `INSERT INTO shell_session_events (session_id, actor, kind, data)
+       SELECT $1, $2, $3, $4
+       WHERE EXISTS (
+         SELECT 1 FROM shell_sessions ss JOIN threads t ON t.id = ss.thread_id
+         WHERE ss.id = $1 AND t.tenant_id = $5 AND t.user_id = $6
+       )`,
+      [sessionId, actor, kind, JSON.stringify(data ?? {}), scope.tenantId, scope.userId],
     );
   }
 
-  async upsertPushSubscription(input: WebPushSubscriptionInput, userAgent?: string | null): Promise<PushSubscriptionRow> {
+  async upsertPushSubscription(scope: Scope, input: WebPushSubscriptionInput, userAgent?: string | null): Promise<PushSubscriptionRow> {
     const expiresAt = input.expirationTime ? new Date(input.expirationTime).toISOString() : null;
     const { rows } = await query<PushSubscriptionRow>(
-      `INSERT INTO push_subscriptions (endpoint, p256dh, auth, expiration_time, user_agent, enabled, last_error)
-       VALUES ($1, $2, $3, $4, $5, true, NULL)
+      `INSERT INTO push_subscriptions (endpoint, tenant_id, user_id, p256dh, auth, expiration_time, user_agent, enabled, last_error)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, true, NULL)
        ON CONFLICT (endpoint) DO UPDATE
-       SET p256dh = EXCLUDED.p256dh,
+       SET tenant_id = EXCLUDED.tenant_id,
+           user_id = EXCLUDED.user_id,
+           p256dh = EXCLUDED.p256dh,
            auth = EXCLUDED.auth,
            expiration_time = EXCLUDED.expiration_time,
            user_agent = EXCLUDED.user_agent,
@@ -920,14 +1147,15 @@ export class PgStore implements Store {
            last_error = NULL,
            updated_at = now()
        RETURNING *`,
-      [input.endpoint, input.keys.p256dh, input.keys.auth, expiresAt, userAgent ?? null],
+      [input.endpoint, scope.tenantId, scope.userId, input.keys.p256dh, input.keys.auth, expiresAt, userAgent ?? null],
     );
     return rows[0];
   }
 
-  async listEnabledPushSubscriptions(): Promise<PushSubscriptionRow[]> {
+  async listEnabledPushSubscriptionsByScope(scope: Scope): Promise<PushSubscriptionRow[]> {
     const { rows } = await query<PushSubscriptionRow>(
-      `SELECT * FROM push_subscriptions WHERE enabled = true ORDER BY updated_at DESC`,
+      `SELECT * FROM push_subscriptions WHERE enabled = true AND tenant_id = $1 AND user_id = $2 ORDER BY updated_at DESC`,
+      [scope.tenantId, scope.userId],
     );
     return rows;
   }

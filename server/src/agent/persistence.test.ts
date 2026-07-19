@@ -4,9 +4,11 @@ import { ContextManager } from './context.js';
 import { config } from '../config.js';
 import { MemoryStore } from '../store/memoryStore.js';
 import { maskPlaceholder } from './compaction.js';
-import type { ThreadMessage } from '../store/types.js';
+import type { Scope, ThreadMessage } from '../store/types.js';
 
 // 持久压缩：mask 决策会落库，重载时 store 返回压缩视图，重启也不会丢原始数据。
+
+const scope: Scope = { tenantId: 'default', userId: 'us_test' };
 
 test('maybeCompact reports the DB ids of newly-masked tool results', async () => {
   const { contextBudget, keepRecentMessages } = config.agent;
@@ -57,26 +59,26 @@ test('compactForHistory masks old bulky payloads even below live threshold', () 
 
 test('store persists collapsed flag and returns the masked view on reload', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'task');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'task');
 
-  await store.addMessage(thread.id, run.id, null, { role: 'user', content: 'do it' });
-  await store.addMessage(thread.id, run.id, null, {
+  await store.addMessage(scope, thread.id, run.id, null, { role: 'user', content: 'do it' });
+  await store.addMessage(scope, thread.id, run.id, null, {
     role: 'assistant',
     content: null,
     toolCalls: [{ id: 'c1', name: 'read_file', arguments: '{}' }],
   });
-  const toolId = await store.addMessage(thread.id, run.id, null, {
+  const toolId = await store.addMessage(scope, thread.id, run.id, null, {
     role: 'tool',
     content: 'y'.repeat(3000),
     toolCallId: 'c1',
   });
 
   // 压缩会把工具结果标记为 masked，executor 持久化的就是这个决策。
-  await store.markMessagesCollapsed([toolId], 'masked');
+  await store.markMessagesCollapsed(scope, [toolId], 'masked');
 
   // 重载后得到 masked 视图，工具配对仍完整，原文不会被销毁。
-  const reloaded = await store.loadThreadMessages(thread.id);
+  const reloaded = await store.loadThreadMessages(scope, thread.id);
   assert.deepEqual(reloaded.map((m) => m.role), ['user', 'assistant', 'tool']);
   const toolMsg = reloaded.find((m) => m.role === 'tool')!;
   assert.equal(toolMsg.collapsed, 'masked');
@@ -90,9 +92,9 @@ test('store persists collapsed flag and returns the masked view on reload', asyn
 
 test('store uses typed prefixes for thread, run and step ids', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'task');
-  const step = await store.createStep(run.id, 1);
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'task');
+  const step = await store.createStep(scope, run.id, 1);
 
   assert.match(thread.id, /^th_[0-9A-Za-z]+$/);
   assert.match(run.id, /^ru_[0-9A-Za-z]+$/);
@@ -101,19 +103,19 @@ test('store uses typed prefixes for thread, run and step ids', async () => {
 
 test('store returns masked assistant tool-call args on reload', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'task');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'task');
   const args = JSON.stringify({ path: 'generated/report.txt', content: 'u'.repeat(3000) });
 
-  const assistantId = await store.addMessage(thread.id, run.id, null, {
+  const assistantId = await store.addMessage(scope, thread.id, run.id, null, {
     role: 'assistant',
     content: null,
     toolCalls: [{ id: 'file1', name: 'file_write', arguments: args }],
   });
-  await store.addMessage(thread.id, run.id, null, { role: 'tool', content: '文件已写入。', toolCallId: 'file1' });
-  await store.markMessagesCollapsed([assistantId], 'masked');
+  await store.addMessage(scope, thread.id, run.id, null, { role: 'tool', content: '文件已写入。', toolCallId: 'file1' });
+  await store.markMessagesCollapsed(scope, [assistantId], 'masked');
 
-  const reloaded = await store.loadThreadMessages(thread.id);
+  const reloaded = await store.loadThreadMessages(scope, thread.id);
   const call = reloaded[0].toolCalls?.[0];
   assert.equal(reloaded[0].collapsed, 'masked');
   assert.equal(call?.id, 'file1');
@@ -128,114 +130,114 @@ test('store returns masked assistant tool-call args on reload', async () => {
 
 test('summarized rows are omitted from the reloaded view', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'task');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'task');
 
-  const a = await store.addMessage(thread.id, run.id, null, { role: 'user', content: 'old turn' });
-  await store.addMessage(thread.id, run.id, null, { role: 'assistant', content: 'kept' });
-  await store.markMessagesCollapsed([a], 'summarized');
+  const a = await store.addMessage(scope, thread.id, run.id, null, { role: 'user', content: 'old turn' });
+  await store.addMessage(scope, thread.id, run.id, null, { role: 'assistant', content: 'kept' });
+  await store.markMessagesCollapsed(scope, [a], 'summarized');
 
-  const reloaded = await store.loadThreadMessages(thread.id);
+  const reloaded = await store.loadThreadMessages(scope, thread.id);
   assert.deepEqual(reloaded.map((m) => m.content), ['kept']);
 });
 
 test('summary messages reload at the position of the folded rows', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'task');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'task');
 
-  const old = await store.addMessage(thread.id, run.id, null, { role: 'assistant', content: 'old detail' });
-  await store.addMessage(thread.id, run.id, null, { role: 'assistant', content: 'recent detail' });
-  await store.addSummaryMessage(thread.id, run.id, null, { role: 'system', content: 'summary of old detail' }, [old]);
-  await store.markMessagesCollapsed([old], 'summarized');
+  const old = await store.addMessage(scope, thread.id, run.id, null, { role: 'assistant', content: 'old detail' });
+  await store.addMessage(scope, thread.id, run.id, null, { role: 'assistant', content: 'recent detail' });
+  await store.addSummaryMessage(scope, thread.id, run.id, null, { role: 'system', content: 'summary of old detail' }, [old]);
+  await store.markMessagesCollapsed(scope, [old], 'summarized');
 
-  const reloaded = await store.loadThreadMessages(thread.id);
+  const reloaded = await store.loadThreadMessages(scope, thread.id);
   assert.deepEqual(reloaded.map((m) => m.content), ['summary of old detail', 'recent detail']);
 });
 
 test('L3 summaries are promoted and orphan tool results are removed from model view', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'task');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'task');
 
-  await store.addMessage(thread.id, run.id, null, { role: 'user', content: '继续' });
-  const assistant = await store.addMessage(thread.id, run.id, null, {
+  await store.addMessage(scope, thread.id, run.id, null, { role: 'user', content: '继续' });
+  const assistant = await store.addMessage(scope, thread.id, run.id, null, {
     role: 'assistant',
     content: null,
     toolCalls: [{ id: 'search_1', name: 'web_search', arguments: '{}' }],
   });
-  await store.addMessage(thread.id, run.id, null, { role: 'tool', content: '搜索结果', toolCallId: 'search_1' });
-  await store.addSummaryMessage(thread.id, run.id, null, { role: 'system', content: 'L3 锚定摘要：\n旧上下文摘要' }, [assistant]);
-  await store.markMessagesCollapsed([assistant], 'summarized');
+  await store.addMessage(scope, thread.id, run.id, null, { role: 'tool', content: '搜索结果', toolCallId: 'search_1' });
+  await store.addSummaryMessage(scope, thread.id, run.id, null, { role: 'system', content: 'L3 锚定摘要：\n旧上下文摘要' }, [assistant]);
+  await store.markMessagesCollapsed(scope, [assistant], 'summarized');
 
-  const reloaded = await store.loadThreadMessages(thread.id);
+  const reloaded = await store.loadThreadMessages(scope, thread.id);
   assert.deepEqual(reloaded.map((m) => m.role), ['system', 'user']);
   assert.match(reloaded[0].content ?? '', /^L3 锚定摘要/);
 });
 
 test('incomplete assistant tool calls stay visible for recovery', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run = await store.createRun(thread.id, 'task');
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'task');
 
-  await store.addMessage(thread.id, run.id, null, {
+  await store.addMessage(scope, thread.id, run.id, null, {
     role: 'assistant',
     content: null,
     toolCalls: [{ id: 'interrupted_1', name: 'shell_exec', arguments: '{}' }],
   });
 
-  const reloaded = await store.loadThreadMessages(thread.id);
+  const reloaded = await store.loadThreadMessages(scope, thread.id);
   assert.equal(reloaded.length, 1);
   assert.equal(reloaded[0].toolCalls?.[0]?.id, 'interrupted_1');
 });
 
 test('thread message view follows the active run branch only', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread();
-  const run1 = await store.createRun(thread.id, 'first');
-  await store.addMessage(thread.id, run1.id, null, { role: 'user', content: 'first' });
-  await store.addMessage(thread.id, run1.id, null, { role: 'assistant', content: 'answer first' });
+  const thread = await store.createThread(scope);
+  const run1 = await store.createRun(scope, thread.id, 'first');
+  await store.addMessage(scope, thread.id, run1.id, null, { role: 'user', content: 'first' });
+  await store.addMessage(scope, thread.id, run1.id, null, { role: 'assistant', content: 'answer first' });
 
-  const oldRun = await store.createRun(thread.id, 'second old');
-  await store.addMessage(thread.id, oldRun.id, null, { role: 'user', content: 'second old' });
-  await store.addMessage(thread.id, oldRun.id, null, { role: 'assistant', content: 'answer old' });
-  const oldLeaf = await store.createRun(thread.id, 'third old');
-  await store.addMessage(thread.id, oldLeaf.id, null, { role: 'user', content: 'third old' });
+  const oldRun = await store.createRun(scope, thread.id, 'second old');
+  await store.addMessage(scope, thread.id, oldRun.id, null, { role: 'user', content: 'second old' });
+  await store.addMessage(scope, thread.id, oldRun.id, null, { role: 'assistant', content: 'answer old' });
+  const oldLeaf = await store.createRun(scope, thread.id, 'third old');
+  await store.addMessage(scope, thread.id, oldLeaf.id, null, { role: 'user', content: 'third old' });
 
-  const editedRun = await store.createRun(thread.id, 'second edited', { parentRunId: run1.id });
-  await store.addMessage(thread.id, editedRun.id, null, { role: 'user', content: 'second edited' });
+  const editedRun = await store.createRun(scope, thread.id, 'second edited', { parentRunId: run1.id });
+  await store.addMessage(scope, thread.id, editedRun.id, null, { role: 'user', content: 'second edited' });
 
-  const activeView = await store.loadThreadMessages(thread.id);
+  const activeView = await store.loadThreadMessages(scope, thread.id);
   assert.deepEqual(activeView.map((m) => m.content), ['first', 'answer first', 'second edited']);
-  assert.deepEqual((await store.listRuns(thread.id)).map((run) => run.id), [run1.id, oldRun.id, oldLeaf.id, editedRun.id]);
+  assert.deepEqual((await store.listRuns(scope, thread.id)).map((run) => run.id), [run1.id, oldRun.id, oldLeaf.id, editedRun.id]);
 
-  await store.updateThread(thread.id, { activeRunId: oldRun.id });
-  assert.equal((await store.getThread(thread.id))?.active_run_id, oldLeaf.id);
-  const oldView = await store.loadThreadMessages(thread.id);
+  await store.updateThread(scope, thread.id, { activeRunId: oldRun.id });
+  assert.equal((await store.getThread(scope, thread.id))?.active_run_id, oldLeaf.id);
+  const oldView = await store.loadThreadMessages(scope, thread.id);
   assert.deepEqual(oldView.map((m) => m.content), ['first', 'answer first', 'second old', 'answer old', 'third old']);
 });
 
 test('forkThreadAtRun copies history up to the selected user message and records linked notices', async () => {
   const store = new MemoryStore();
-  const thread = await store.createThread('原对话');
-  const run1 = await store.createRun(thread.id, 'first');
-  await store.addMessage(thread.id, run1.id, null, { role: 'user', content: 'first' });
-  await store.addMessage(thread.id, run1.id, null, { role: 'assistant', content: 'answer first' });
+  const thread = await store.createThread(scope, '原对话');
+  const run1 = await store.createRun(scope, thread.id, 'first');
+  await store.addMessage(scope, thread.id, run1.id, null, { role: 'user', content: 'first' });
+  await store.addMessage(scope, thread.id, run1.id, null, { role: 'assistant', content: 'answer first' });
 
-  const run2 = await store.createRun(thread.id, 'second');
-  await store.addMessage(thread.id, run2.id, null, { role: 'user', content: 'second' });
-  await store.addMessage(thread.id, run2.id, null, { role: 'assistant', content: 'answer second should not copy' });
+  const run2 = await store.createRun(scope, thread.id, 'second');
+  await store.addMessage(scope, thread.id, run2.id, null, { role: 'user', content: 'second' });
+  await store.addMessage(scope, thread.id, run2.id, null, { role: 'assistant', content: 'answer second should not copy' });
 
-  const fork = await store.forkThreadAtRun(run2.id);
+  const fork = await store.forkThreadAtRun(scope, run2.id);
   assert.ok(fork);
   assert.notEqual(fork.thread.id, thread.id);
 
-  const forkView = await store.loadThreadMessages(fork.thread.id);
+  const forkView = await store.loadThreadMessages(scope, fork.thread.id);
   assert.deepEqual(forkView.map((m) => m.content), ['first', 'answer first', 'second']);
   assert.ok(!forkView.some((m) => m.content?.includes('fork')));
 
-  const originalNotices = await store.listThreadNotices(thread.id);
-  const forkNotices = await store.listThreadNotices(fork.thread.id);
+  const originalNotices = await store.listThreadNotices(scope, thread.id);
+  const forkNotices = await store.listThreadNotices(scope, fork.thread.id);
   assert.equal(originalNotices.length, 1);
   assert.equal(forkNotices.length, 1);
   assert.equal(originalNotices[0].linked_thread_id, fork.thread.id);

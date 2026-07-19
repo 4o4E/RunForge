@@ -417,3 +417,75 @@ CREATE TABLE IF NOT EXISTS auth_tokens (
 );
 
 CREATE INDEX IF NOT EXISTS idx_auth_tokens_user ON auth_tokens(user_id, kind, revoked_at);
+
+-- 多租户改造 Phase 2(docs/multi-tenancy-design.md §5)。给业务表加 tenant_id/user_id,
+-- Store 层按这些列过滤实现数据隔离。本阶段不做 Postgres RLS(见设计文档 §11 的说明),
+-- 应用层过滤是唯一的强制边界。
+--
+-- threads 是唯一同时有 tenant_id 和 user_id 的表:一个 thread 私有于创建它的用户,
+-- 任何查询(包括 owner/admin)都按 (tenant_id, user_id) 过滤,没有例外路径。
+ALTER TABLE threads ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default' REFERENCES tenants(id);
+ALTER TABLE threads ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_threads_tenant_user ON threads(tenant_id, user_id, updated_at DESC);
+
+-- subagent_runs、shell_sessions 挂在某个用户私有的 thread 下,自带 tenant_id 只是
+-- 加速索引用,真正的私有性仍然要 JOIN 到 threads 校验 user_id。
+ALTER TABLE subagent_runs ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default' REFERENCES tenants(id);
+CREATE INDEX IF NOT EXISTS idx_subagent_runs_tenant ON subagent_runs(tenant_id);
+
+ALTER TABLE shell_sessions ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default' REFERENCES tenants(id);
+CREATE INDEX IF NOT EXISTS idx_shell_sessions_tenant ON shell_sessions(tenant_id);
+
+-- datasources 是租户级共享资源(设计文档 §2),没有 user_id——任何租户成员都能用,
+-- 只有 owner/admin 能新增/修改。名称原来是全局唯一,现在改成租户内唯一。
+ALTER TABLE datasources ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default' REFERENCES tenants(id);
+DROP INDEX IF EXISTS idx_datasources_name;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_datasources_name_tenant ON datasources(tenant_id, name);
+
+-- push_subscriptions 比设计文档字面描述更严格地加了 user_id:通知的是"这个用户自己的
+-- run 完成了",只按 tenant_id 隔离会导致同租户所有人的设备都收到别人的私有通知。
+ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default' REFERENCES tenants(id);
+ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_push_subscriptions_tenant_user ON push_subscriptions(tenant_id, user_id, enabled);
+
+-- 回填历史数据:上面两列刚加上时,已有的 thread/push_subscription 不知道属于哪个
+-- 用户,user_id 只能是 NULL。如果什么都不做,这些行会对所有人不可见——任何查询都要求
+-- user_id 精确匹配,NULL 不匹配任何条件——对于升级前只有一个真实用户的部署,这会让
+-- 全部历史对话在升级后"凭空消失"(实测发现的真实回归,不是设计阶段预期的行为)。
+-- 这里把每个租户下 user_id 为空的历史行,回填给该租户最早创建的 active owner
+-- (单用户部署下就是唯一那个账号)。多用户部署如果升级前已经有多个用户,这只是
+-- "猜一个合理默认值",不是"还原真实归属"——升级前的数据本来就没记录是谁创建的,
+-- 运维如果需要更精确的归属,应在这条语句跑之前手动处理。幂等:只影响
+-- user_id IS NULL 的行,重复跑不会覆盖已经手动/正常分配好的 user_id。
+DO $$
+DECLARE
+  t RECORD;
+  owner_id TEXT;
+BEGIN
+  FOR t IN SELECT id FROM tenants LOOP
+    SELECT id INTO owner_id FROM users
+      WHERE tenant_id = t.id AND role = 'owner' AND status = 'active'
+      ORDER BY created_at LIMIT 1;
+    IF owner_id IS NOT NULL THEN
+      UPDATE threads SET user_id = owner_id WHERE tenant_id = t.id AND user_id IS NULL;
+      UPDATE push_subscriptions SET user_id = owner_id WHERE tenant_id = t.id AND user_id IS NULL;
+    END IF;
+  END LOOP;
+END $$;
+
+-- app_settings 从全局 key-value 表改成按 (tenant_id, key) 隔离。守卫写法:只有当前
+-- 主键还是旧的单列版本时才 drop+recreate,重复跑迁移不会重复报错。
+ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default' REFERENCES tenants(id);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'app_settings_pkey'
+      AND conrelid = 'app_settings'::regclass
+      AND array_length(conkey, 1) = 2
+  ) THEN
+    ALTER TABLE app_settings DROP CONSTRAINT IF EXISTS app_settings_pkey;
+    ALTER TABLE app_settings ADD CONSTRAINT app_settings_pkey PRIMARY KEY (tenant_id, key);
+  END IF;
+END $$;

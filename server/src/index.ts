@@ -41,7 +41,7 @@ const displayHost = config.host.includes(':') ? `[${config.host}]` : config.host
 server.listen(config.port, config.host, () => {
   console.log(`🚀 RunForge server listening on http://${displayHost}:${config.port}`);
   console.log(`   WebSocket: ws://${displayHost}:${config.port}/ws?runId=<id>`);
-  void getToolSettings().then((settings) => {
+  void getToolSettings({ tenantId: 'default' }).then((settings) => {
     console.log(
       `   Tool sandbox: ${settings.sandbox}` +
         (settings.sandbox === 'enforce'

@@ -25,6 +25,7 @@ test('返回给容器的凭证不会包含管理连接配置', () => {
     expiresAt: '2026-06-12T12:30:00.000Z',
     datasource: {
       id: 'ds_1',
+      tenant_id: 'default',
       name: 'sales',
       type: 'postgres',
       status: 'active',

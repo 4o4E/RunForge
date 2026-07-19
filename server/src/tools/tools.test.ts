@@ -18,12 +18,14 @@ import type { ToolResult, ToolRunContext } from './types.js';
 import { normalizeMcpSettings, normalizeToolSettings } from '../settings.js';
 import { shellCommandOptions, toolOptions } from '../api/settings.js';
 import { mcpToolName, parseMcpToolName } from '../mcp/client.js';
+import type { Scope } from '../store/types.js';
 
 /** 工具可能返回 string 或 ToolResult，测试统一取文本断言。 */
 const text = (r: string | ToolResult): string => (typeof r === 'string' ? r : r.text);
 
 let dir: string;
 const emptyMcpSettings = { servers: [] };
+const TEST_SCOPE: Scope = { tenantId: 'default', userId: 'us_test' };
 
 before(async () => {
   dir = await mkdtemp(join(tmpdir(), 'runforge-test-'));
@@ -52,7 +54,7 @@ test('registry exposes neutral tool schemas and dispatches by name', async () =>
   assert.ok((await toolSchemas(['file_read'], emptyMcpSettings)).some((s) => s.name === 'workflow_read'));
   assert.ok((await toolSchemas(['datasource_list'], emptyMcpSettings)).some((s) => s.name === 'datasource_list'));
   assert.ok(getTool('glob'));
-  assert.match((await runTool('does_not_exist', {})).text, /未知工具/);
+  assert.match((await runTool('does_not_exist', {}, { scope: TEST_SCOPE })).text, /未知工具/);
 });
 
 test('tool settings options come from backend tool registry and command resolution', async () => {
@@ -105,6 +107,7 @@ test('datasource_list public view redacts secrets and admin config', () => {
   const view = publicDatasourceForTool(
     {
       id: 'ds_1',
+      tenant_id: 'default',
       name: 'sales',
       type: 'postgres',
       status: 'active',
@@ -148,6 +151,7 @@ test('registry forwards run context to tool implementations', async () => {
     };
     const settings = normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true });
     const out = await runTool('shell', { command: 'printf context-ok' }, {
+      scope: TEST_SCOPE,
       settings,
       env: { DB_WORKLOAD_TOKEN: 'wat_test' },
       threadId: 'th_test',
@@ -189,7 +193,7 @@ test('workflow_read explains same-name skill instead of reading skill workflows 
   const out = await runTool(
     'workflow_read',
     { name: 'ppt-master' },
-    { settings: normalizeToolSettings({ workspaceRoot: dir }) },
+    { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir }) },
   );
 
   assert.match(out.text, /未找到 RunForge workflow: ppt-master/);
@@ -200,12 +204,12 @@ test('workflow_read explains same-name skill instead of reading skill workflows 
 });
 
 test('shell runs a command (PowerShell on Windows, sh elsewhere)', async () => {
-  const out = text(await shellTool.run({ command: 'echo agent-shell-ok' }));
+  const out = text(await shellTool.run({ command: 'echo agent-shell-ok' }, { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir }) }));
   assert.match(out, /agent-shell-ok/);
 });
 
 test('shell redacts credential-shaped output before returning it', async () => {
-  const out = text(await shellTool.run({ command: "printf '%s\\n' '{\"password\":\"secret\",\"username\":\"agent\"}' 'DATABASE_URL=postgres://root:123456@localhost:5432/runforge'" }));
+  const out = text(await shellTool.run({ command: "printf '%s\\n' '{\"password\":\"secret\",\"username\":\"agent\"}' 'DATABASE_URL=postgres://root:123456@localhost:5432/runforge'" }, { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir }) }));
   assert.match(out, /"password":"\[redacted\]"/);
   assert.match(out, /DATABASE_URL=\[redacted\]/);
   assert.equal(out.includes('secret'), false);
@@ -218,7 +222,7 @@ test('shell inherits host PATH but not backend secret environment', async () => 
   try {
     const out = text(await shellTool.run(
       { command: 'printf "path=%s\\nhas_llm_api_key=%s\\n" "${PATH:+set}" "${LLM_API_KEY+yes}"' },
-      { settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }) },
+      { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }) },
     ));
     assert.match(out, /path=set/);
     assert.match(out, /has_llm_api_key=\s*$/);
@@ -232,14 +236,14 @@ test('shell inherits host PATH but not backend secret environment', async () => 
 test('shell blocks database CLI before database-access injects a workload token', async () => {
   const blocked = text(await shellTool.run(
     { command: 'psql "$DATABASE_URL" -c "select 1"' },
-    { settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }) },
+    { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }) },
   ));
   assert.match(blocked, /database-access/);
   assert.match(blocked, /workload token/);
 
   const allowed = text(await shellTool.run(
     { command: 'printf ok' },
-    { settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }), env: { DB_WORKLOAD_TOKEN: 'wat_test' } },
+    { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }), env: { DB_WORKLOAD_TOKEN: 'wat_test' } },
   ));
   assert.equal(allowed, 'ok');
 });
@@ -249,14 +253,14 @@ test('shell blocks database-access SDK scripts before workload token injection',
   assert.equal(requiresDatabaseAccess(command), true);
   const blockedShell = text(await shellTool.run(
     { command },
-    { settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }) },
+    { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }) },
   ));
   assert.match(blockedShell, /database-access/);
   assert.match(blockedShell, /workload token/);
 
   const blockedManaged = text(await shellExecTool.run(
     { sessionId: 'ss_test', command, wait: 'foreground' },
-    { settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }), threadId: 'th_test' },
+    { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }), threadId: 'th_test' },
   ));
   assert.match(blockedManaged, /database-access/);
   assert.match(blockedManaged, /workload token/);
@@ -266,7 +270,7 @@ test('shell blocks direct database CLI even when workload token exists', async (
   const command = 'psql -h localhost -U ag_readonly_old -d runforge -c "select 1"';
   const blocked = text(await shellTool.run(
     { command },
-    { settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }), env: { DB_WORKLOAD_TOKEN: 'wat_test' } },
+    { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }), env: { DB_WORKLOAD_TOKEN: 'wat_test' } },
   ));
   assert.match(blocked, /直接调用数据库 CLI/);
   assert.match(blocked, /短期凭证/);
