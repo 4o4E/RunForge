@@ -7,10 +7,25 @@ import { ShareFileView } from './components/ShareFileView.js';
 import { Button } from './components/ui/button.js';
 import { Input } from './components/ui/input.js';
 import { ThemeProvider } from './theme.js';
+import { AdminLoginGate } from './admin/AdminLoginGate.js';
+import { AdminApp } from './admin/AdminApp.js';
+import { SysAdminLoginGate } from './sysAdmin/SysAdminLoginGate.js';
+import { SysAdminApp } from './sysAdmin/SysAdminApp.js';
 import './index.css';
 import 'streamdown/styles.css';
 
-const shareFileRoute = window.location.pathname === '/share/file';
+// /admin、/sys-admin 是完全独立的顶层入口(整页跳转，不是 SPA 内部路由)，和现状的
+// shareFileRoute 判断同一种写法。四路分流，不引入路由库。
+type RootRoute = 'share-file' | 'admin' | 'sys-admin' | 'app';
+
+function resolveRootRoute(pathname: string): RootRoute {
+  if (pathname === '/share/file') return 'share-file';
+  if (pathname === '/admin' || pathname.startsWith('/admin/')) return 'admin';
+  if (pathname === '/sys-admin' || pathname.startsWith('/sys-admin/')) return 'sys-admin';
+  return 'app';
+}
+
+const rootRoute = resolveRootRoute(window.location.pathname);
 
 type SessionStatus = 'restoring' | 'authenticated' | 'anonymous';
 
@@ -90,9 +105,18 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ThemeProvider>
       <NotificationProvider>
-        {shareFileRoute ? (
-          <ShareFileView />
-        ) : (
+        {rootRoute === 'share-file' && <ShareFileView />}
+        {rootRoute === 'admin' && (
+          <AdminLoginGate>
+            <AdminApp />
+          </AdminLoginGate>
+        )}
+        {rootRoute === 'sys-admin' && (
+          <SysAdminLoginGate>
+            <SysAdminApp />
+          </SysAdminLoginGate>
+        )}
+        {rootRoute === 'app' && (
           <LoginGate>
             <App />
           </LoginGate>

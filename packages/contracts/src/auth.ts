@@ -44,12 +44,18 @@ export interface SystemLoginRequest {
 
 export interface SystemLoginResponse {
   accessToken: string;
+  refreshToken: string;
 }
 
 export interface CreateUserInput {
   email: string;
   password: string;
   role?: TenantUserRole;
+}
+
+export interface UpdateUserInput {
+  role?: TenantUserRole;
+  status?: 'active' | 'disabled';
 }
 
 export interface CreateApiTokenInput {
@@ -65,4 +71,32 @@ export interface TenantSummary {
   name: string;
   status: 'active' | 'suspended';
   createdAt: string;
+}
+
+export interface CreateTenantInput {
+  id: string;
+  name: string;
+  ownerEmail: string;
+  ownerPassword: string;
+}
+
+export interface CreateTenantResponse {
+  tenant: TenantSummary;
+  owner: TenantUserSummary;
+}
+
+export interface UpdateTenantStatusInput {
+  status: 'active' | 'suspended';
+}
+
+export interface SystemAdminSummary {
+  id: string;
+  email: string;
+  status: 'active' | 'disabled';
+  createdAt: string;
+}
+
+export interface CreateSystemAdminInput {
+  email: string;
+  password: string;
 }

@@ -430,6 +430,26 @@ ${TOOL_WORKSPACE_ROOT_BASE}/tenants/<tenant_id>/workspace
 - `RemoteFilesPanel.tsx` 等文件类组件操作的 `path` 字符串保持"相对当前 workspace 根"的语义不变——隔离发生在后端把 `path` 解析成实际磁盘路径这一步(§6),前端不需要知道自己在哪个租户下,也不需要感知 `tenant_id`/`user_id` 字段本身,这些完全由 JWT 隐式携带。
 - 安全权衡:access token 存内存 + 短过期时间,是为了在"前端有 XSS 风险时,被偷到的 token 影响面尽量小"和"不引入 httpOnly cookie + CSRF 防护这一整套额外机制"之间选一个够用的折中;`refreshToken` 仍是长期有效凭证,若要进一步收紧,可以把它也换成 httpOnly cookie(需要后端配合处理 CORS/CSRF),这一步作为后续加固项,不在本次范围内展开。
 
+### 管理界面(Phase 3):三层登录入口拓扑
+
+前两阶段只做了后端(身份 + 数据隔离),没有任何管理界面——租户没法自助建用户,系统管理员甚至没有登录页,只能直接调 API。Phase 3 补齐这一圈,新增三个**互相独立、真实整页跳转(不是 SPA 内部路由)**的入口,`web/src/main.tsx` 用一个 `resolveRootRoute(pathname)` 做四路分流(`share-file` / `admin` / `sys-admin` / `app`),不引入路由库:
+
+| 入口 | URL | 身份体系 | 面向 | 主要能力 |
+|---|---|---|---|---|
+| 普通用户 | `/` | `scope:'tenant'` JWT(共享) | 任意角色 | 聊天、工具、个人设置(`SettingsView`) |
+| 租户管理 | `/admin` | 与 `/` **同一套** `scope:'tenant'` JWT | owner/admin | 本租户用户管理、API Token 管理、数据源管理 |
+| 系统管理 | `/sys-admin` | 独立的 `scope:'system'` JWT + `system_admin_tokens` 表 | system admin | 租户的建/启用/禁用、系统管理员账号管理 |
+
+关键设计点:
+
+- **`/admin` 和 `/` 共用同一套 token 存储**(`web/src/api.ts`),不是两套身份——`AdminLoginGate` 复用 `login()`/`authFetch()`,登录成功后额外校验 `role` 必须是 `owner`/`admin`。这样同一账号能在两个入口之间自由跳转、不需要重复登录(`App.tsx` 在挂载时拉一次 `GET /api/tenants/me`,owner/admin 账号会在侧边栏看到"管理后台"入口,`<a href="/admin">` 真实跳转但复用内存/localStorage 里已有的 token)。
+- **角色校验失败时,`/admin` 要区分"交互式登录"和"页面刷新恢复会话"两种情况**:前者可以安全撤销刚发出的 refresh token(用户还没建立会话);后者用的是共享 refresh token,绝不能调用 `logout()`,否则会把用户在 `/` 标签页的正常会话一起顶掉——`AdminLoginGate` 为此多出一档 `'forbidden'` 状态,只展示提示,不碰 token。
+- **`/sys-admin` 是完全独立的身份体系**:`web/src/sysAdminApi.ts` 基于新抽的 `web/src/lib/authSession.ts` 工厂造一份独立会话(不同 localStorage key、不同失效事件名),和 `/`、`/admin` 的会话互不干扰,可以在同一浏览器不同标签页同时保持登录。系统管理员的 refresh token 存在新表 `system_admin_tokens`(不能复用 `auth_tokens`,那张表的 `tenant_id`/`user_id` 是 NOT NULL 外键)。
+- **新建租户必须同时建一个 owner**(`POST /api/system/tenants` 接收 `{id, name, ownerEmail, ownerPassword}`),否则新租户没人能登录管理——参照 `bootstrap.ts` "tenant + owner 一起建"的既有模式。
+- **禁用租户(`PATCH /api/system/tenants/:id`)在登录路径同步生效**:`POST /api/auth/login`、`POST /api/auth/refresh` 都新增了 `tenant.status !== 'active'` 检查,不是只改一个没人看的字段。
+- **`/admin` 的用户角色变更(`PATCH /api/tenants/:id/users/:userId`)有三条边界规则**:不能改自己;admin 只能管理 member、也不能把任何人提到 admin/owner(和创建用户的规则对称);不能把租户唯一的 active owner 降级或禁用(防止租户变成没人能管的死租户)——校验都在路由层,Store 的 `updateUserRole`/`updateUserStatus` 本身不做业务规则判断。
+- 原本挂在 `SettingsView.tsx`(个人/工具设置)里的数据源管理面板整体搬到了 `web/src/components/datasources/DatasourceSettingsPanel.tsx`,被 `/admin` 复用——"系统/租户级管理"和"个人工具偏好"是两类不同的东西,不应该混在同一个设置弹窗里。
+
 ---
 
 ## 11. 安全边界与残留风险

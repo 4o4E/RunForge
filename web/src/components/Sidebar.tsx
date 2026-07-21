@@ -1,5 +1,5 @@
 import { useState, type MouseEvent } from 'react';
-import { Archive, Bot, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, PinOff, Search, Settings, SquarePen, Trash2 } from 'lucide-react';
+import { Archive, Bot, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, PinOff, Search, Settings, ShieldCheck, SquarePen, Trash2 } from 'lucide-react';
 import type { Thread } from '../api';
 import { Button } from '@/components/ui/button';
 import {
@@ -22,6 +22,8 @@ interface Props {
   newHref: string;
   searchHref: string;
   threadHref: (id: string) => string;
+  /** 当前登录账号是本租户 owner/admin 时才显示"管理后台"入口(跳 /admin，真实整页跳转)。 */
+  showAdminEntry: boolean;
   onToggleCollapsed: () => void;
   onNew: () => void;
   onSearch: () => void;
@@ -53,6 +55,7 @@ export function Sidebar({
   newHref,
   searchHref,
   threadHref,
+  showAdminEntry,
   onToggleCollapsed,
   onNew,
   onSearch,
@@ -108,6 +111,16 @@ export function Sidebar({
           <span className="sr-only">搜索会话</span>
         </a>
         <div className="min-h-0 flex-1" />
+        {showAdminEntry && (
+          <a
+            href="/admin"
+            className="mb-2 flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+            title="管理后台"
+          >
+            <ShieldCheck className="size-4" />
+            <span className="sr-only">管理后台</span>
+          </a>
+        )}
         <button
           type="button"
           onClick={onSettings}
@@ -258,7 +271,14 @@ export function Sidebar({
 
       <div className="mt-auto">
         <Separator />
-        <div className="px-2 py-2">
+        <div className="grid gap-1 px-2 py-2">
+          {showAdminEntry && (
+            <Button asChild variant="ghost" size="sm" className="h-9 w-full justify-start pl-2 pr-3 text-sm text-muted-foreground">
+              <a href="/admin">
+                <ShieldCheck className="h-4 w-4" /> 管理后台
+              </a>
+            </Button>
+          )}
           <Button
             variant={settingsOpen ? 'secondary' : 'ghost'}
             size="sm"

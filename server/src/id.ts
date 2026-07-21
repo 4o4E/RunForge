@@ -22,6 +22,7 @@ const ID_PREFIXES = {
   user: 'us',
   authToken: 'at',
   systemAdmin: 'sa',
+  systemAdminToken: 'rt',
 } as const;
 
 export type EntityIdKind = keyof typeof ID_PREFIXES;
@@ -146,4 +147,8 @@ export function newAuthTokenId(): string {
 
 export function newSystemAdminId(): string {
   return newEntityId('systemAdmin');
+}
+
+export function newSystemAdminTokenId(): string {
+  return newEntityId('systemAdminToken');
 }

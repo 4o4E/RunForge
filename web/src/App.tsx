@@ -10,6 +10,7 @@ import {
   continueRun,
   deleteThread,
   forkThreadFromRun,
+  getCurrentUser,
   getLlmSettings,
   getPageState,
   getRemoteFileInfo,
@@ -448,6 +449,7 @@ export function App() {
   const [mobileRightPanelOpen, setMobileRightPanelOpen] = useState(false);
   const [filesPanelWidth, setFilesPanelWidth] = useState(720);
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
+  const [currentUserRole, setCurrentUserRole] = useState<'owner' | 'admin' | 'member' | null>(null);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [modelOptions, setModelOptions] = useState<LlmModelOption[]>([]);
   const [selectedModelRef, setSelectedModelRef] = useState(() => readStoredModelRef());
@@ -587,6 +589,21 @@ export function App() {
     getRemoteFileInfo().then((info) => setWorkspaceRoot(info.workspaceRoot)).catch(() => setWorkspaceRoot(null));
   }, []);
   useEffect(refreshWorkspaceRoot, [refreshWorkspaceRoot]);
+
+  // 只用来决定要不要在侧边栏显示"管理后台"入口；失败时静默保持 null(不显示入口)。
+  useEffect(() => {
+    let canceled = false;
+    getCurrentUser()
+      .then((user) => {
+        if (!canceled) setCurrentUserRole(user.role);
+      })
+      .catch(() => {
+        if (!canceled) setCurrentUserRole(null);
+      });
+    return () => {
+      canceled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let canceled = false;
@@ -1465,6 +1482,7 @@ export function App() {
           newHref={newChatHref}
           searchHref="/search"
           threadHref={threadHref}
+          showAdminEntry={currentUserRole === 'owner' || currentUserRole === 'admin'}
           onToggleCollapsed={() => setSidebarCollapsed((collapsed) => !collapsed)}
           onNew={newChat}
           onSearch={openSearch}
@@ -1609,6 +1627,7 @@ export function App() {
               newHref={newChatHref}
               searchHref="/search"
               threadHref={threadHref}
+              showAdminEntry={currentUserRole === 'owner' || currentUserRole === 'admin'}
               onToggleCollapsed={() => setMobileSidebarOpen(false)}
               onNew={newChat}
               onSearch={openSearch}
@@ -1660,7 +1679,7 @@ export function App() {
         )}>
           <DialogHeader className="border-b px-6 py-4">
             <DialogTitle>设置</DialogTitle>
-            <DialogDescription>外观、用量统计、工具策略和数据源</DialogDescription>
+            <DialogDescription>外观、用量统计和工具策略</DialogDescription>
           </DialogHeader>
           <SettingsView embedded onThreadsChanged={refreshThreads} onWorkspaceChanged={refreshWorkspaceRoot} />
         </DialogContent>

@@ -17,6 +17,7 @@ import type {
   SubagentRunRow,
   StepRow,
   SystemAdminRow,
+  SystemAdminTokenRow,
   TenantRow,
   ThreadNoticeRow,
   ThreadMessage,
@@ -33,6 +34,7 @@ import {
   newStepId,
   newSubagentRunId,
   newSystemAdminId,
+  newSystemAdminTokenId,
   newThreadId,
   newUserId,
 } from '../id.js';
@@ -71,6 +73,7 @@ export class MemoryStore implements Store {
   private users = new Map<string, UserRow>();
   private systemAdmins = new Map<string, SystemAdminRow>();
   private authTokens = new Map<string, AuthTokenRow>();
+  private systemAdminTokens = new Map<string, SystemAdminTokenRow>();
   private seq = 0;
   private shellLogSeq = 0;
   private now = () => new Date().toISOString();
@@ -847,6 +850,13 @@ export class MemoryStore implements Store {
     return [...this.tenants.values()].sort((a, b) => a.created_at.localeCompare(b.created_at));
   }
 
+  async updateTenantStatus(id: string, status: 'active' | 'suspended'): Promise<TenantRow | null> {
+    const row = this.tenants.get(id);
+    if (!row) return null;
+    row.status = status;
+    return row;
+  }
+
   async createUser(input: { tenantId: string; email: string; passwordHash: string; role: TenantUserRole }): Promise<UserRow> {
     const row: UserRow = {
       id: newUserId(),
@@ -941,7 +951,37 @@ export class MemoryStore implements Store {
     return [...this.systemAdmins.values()].find((a) => a.email === email) ?? null;
   }
 
+  async findSystemAdminById(id: string): Promise<SystemAdminRow | null> {
+    return this.systemAdmins.get(id) ?? null;
+  }
+
   async listSystemAdmins(): Promise<SystemAdminRow[]> {
     return [...this.systemAdmins.values()].sort((a, b) => a.created_at.localeCompare(b.created_at));
+  }
+
+  async createSystemAdminToken(input: {
+    systemAdminId: string;
+    tokenHash: string;
+    expiresAt?: string | null;
+  }): Promise<SystemAdminTokenRow> {
+    const row: SystemAdminTokenRow = {
+      id: newSystemAdminTokenId(),
+      system_admin_id: input.systemAdminId,
+      token_hash: input.tokenHash,
+      expires_at: input.expiresAt ?? null,
+      revoked_at: null,
+      created_at: this.now(),
+    };
+    this.systemAdminTokens.set(row.id, row);
+    return row;
+  }
+
+  async findSystemAdminTokenByHash(tokenHash: string): Promise<SystemAdminTokenRow | null> {
+    return [...this.systemAdminTokens.values()].find((t) => t.token_hash === tokenHash) ?? null;
+  }
+
+  async revokeSystemAdminToken(id: string): Promise<void> {
+    const row = this.systemAdminTokens.get(id);
+    if (row && !row.revoked_at) row.revoked_at = this.now();
   }
 }

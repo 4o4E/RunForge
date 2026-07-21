@@ -18,6 +18,7 @@ import type {
   SubagentRunRow,
   StepRow,
   SystemAdminRow,
+  SystemAdminTokenRow,
   TenantRow,
   ThreadNoticeRow,
   ThreadMessage,
@@ -34,6 +35,7 @@ import {
   newStepId,
   newSubagentRunId,
   newSystemAdminId,
+  newSystemAdminTokenId,
   newThreadId,
   newUserId,
 } from '../id.js';
@@ -1188,6 +1190,14 @@ export class PgStore implements Store {
     return rows;
   }
 
+  async updateTenantStatus(id: string, status: 'active' | 'suspended'): Promise<TenantRow | null> {
+    const { rows } = await query<TenantRow>(
+      `UPDATE tenants SET status = $2 WHERE id = $1 RETURNING *`,
+      [id, status],
+    );
+    return rows[0] ?? null;
+  }
+
   async createUser(input: { tenantId: string; email: string; passwordHash: string; role: TenantUserRole }): Promise<UserRow> {
     const { rows } = await query<UserRow>(
       `INSERT INTO users (id, tenant_id, email, password_hash, role)
@@ -1286,8 +1296,41 @@ export class PgStore implements Store {
     return rows[0] ?? null;
   }
 
+  async findSystemAdminById(id: string): Promise<SystemAdminRow | null> {
+    const { rows } = await query<SystemAdminRow>(`SELECT * FROM system_admins WHERE id = $1`, [id]);
+    return rows[0] ?? null;
+  }
+
   async listSystemAdmins(): Promise<SystemAdminRow[]> {
     const { rows } = await query<SystemAdminRow>(`SELECT * FROM system_admins ORDER BY created_at`);
     return rows;
+  }
+
+  async createSystemAdminToken(input: {
+    systemAdminId: string;
+    tokenHash: string;
+    expiresAt?: string | null;
+  }): Promise<SystemAdminTokenRow> {
+    const { rows } = await query<SystemAdminTokenRow>(
+      `INSERT INTO system_admin_tokens (id, system_admin_id, token_hash, expires_at)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [newSystemAdminTokenId(), input.systemAdminId, input.tokenHash, input.expiresAt ?? null],
+    );
+    return rows[0];
+  }
+
+  async findSystemAdminTokenByHash(tokenHash: string): Promise<SystemAdminTokenRow | null> {
+    const { rows } = await query<SystemAdminTokenRow>(
+      `SELECT * FROM system_admin_tokens WHERE token_hash = $1`,
+      [tokenHash],
+    );
+    return rows[0] ?? null;
+  }
+
+  async revokeSystemAdminToken(id: string): Promise<void> {
+    await query(
+      `UPDATE system_admin_tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL`,
+      [id],
+    );
   }
 }

@@ -238,6 +238,17 @@ export interface AuthTokenRow {
   created_at: string;
 }
 
+// 系统管理员的 refresh token,不能复用 AuthTokenRow——那张表的 tenant_id/user_id
+// 是 NOT NULL,系统管理员两边都不在(server/src/db/schema.sql 的 system_admin_tokens)。
+export interface SystemAdminTokenRow {
+  id: string;
+  system_admin_id: string;
+  token_hash: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+}
+
 /**
  * Persistence port. The executor depends on this interface, not on PG directly,
  * so it can be unit-tested with an in-memory implementation.
@@ -417,6 +428,7 @@ export interface Store {
   createTenant(input: { id: string; name: string }): Promise<TenantRow>;
   findTenant(id: string): Promise<TenantRow | null>;
   listTenants(): Promise<TenantRow[]>;
+  updateTenantStatus(id: string, status: 'active' | 'suspended'): Promise<TenantRow | null>;
 
   createUser(input: { tenantId: string; email: string; passwordHash: string; role: TenantUserRole }): Promise<UserRow>;
   findUserByEmail(tenantId: string, email: string): Promise<UserRow | null>;
@@ -439,5 +451,14 @@ export interface Store {
 
   createSystemAdmin(input: { email: string; passwordHash: string }): Promise<SystemAdminRow>;
   findSystemAdminByEmail(email: string): Promise<SystemAdminRow | null>;
+  findSystemAdminById(id: string): Promise<SystemAdminRow | null>;
   listSystemAdmins(): Promise<SystemAdminRow[]>;
+
+  createSystemAdminToken(input: {
+    systemAdminId: string;
+    tokenHash: string;
+    expiresAt?: string | null;
+  }): Promise<SystemAdminTokenRow>;
+  findSystemAdminTokenByHash(tokenHash: string): Promise<SystemAdminTokenRow | null>;
+  revokeSystemAdminToken(id: string): Promise<void>;
 }

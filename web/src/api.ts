@@ -1,6 +1,10 @@
 import type {
   AgentEvent,
+  ApiTokenSummary,
   AskUserAnswer,
+  CreateApiTokenInput,
+  CreateApiTokenResponse,
+  CreateUserInput,
   Datasource,
   DatasourceDetailResponse,
   DatasourceInput,
@@ -22,6 +26,7 @@ import type {
   PermissionProfileInput,
   RemoteFileInfo,
   RemoteFileList,
+  TenantUserRole,
   ShellCommand,
   ShellCommandAttachment,
   ShellCommandLog,
@@ -37,6 +42,7 @@ import type {
   ThreadUpdateInput,
   ToolSettings,
   ToolSettingsOptions,
+  UpdateUserInput,
   WebPushPublicKeyResponse,
   WebPushSubscriptionInput,
   WebPushSubscriptionRecord,
@@ -125,6 +131,52 @@ export async function login(email: string, password: string, tenantId?: string):
   setAccessToken(body.accessToken);
   writeRefreshToken(body.refreshToken);
   return body.user;
+}
+
+/** 给 /admin 这类"共享租户会话、但登录后要求特定角色"的入口用：只有 isAllowedRole
+ *  通过时才把 token 落进共享的内存/localStorage 存储。绝不能像 login() 那样先无条件
+ *  写入存储、角色不对再 logout()——那样会在角色校验完成前就先用这次登录签发的新
+ *  refreshToken 覆盖掉共享 localStorage 里可能属于另一个标签页正常会话的旧值，
+ *  即使随后 logout() 也只能撤销新 token，旧值已经从本地丢失，等那个标签页的
+ *  access token 过期需要静默刷新时就会失败。 */
+export async function loginWithRoleGuard(
+  email: string,
+  password: string,
+  tenantId: string | undefined,
+  isAllowedRole: (role: TenantUserRole) => boolean,
+): Promise<{ ok: true; user: TenantUserSummary } | { ok: false; user: TenantUserSummary }> {
+  const res = await globalThis.fetch('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password, tenantId }),
+  });
+  if (!res.ok) {
+    let detail = '';
+    try {
+      detail = ((await res.json()) as { error?: string }).error ?? '';
+    } catch {
+      detail = '';
+    }
+    throw new Error(detail || `${res.status} ${res.statusText}`);
+  }
+  const body = (await res.json()) as { accessToken: string; refreshToken: string; user: TenantUserSummary };
+  if (!isAllowedRole(body.user.role)) {
+    // 撤销这次登录刚签发的 token——直接用响应里拿到的 refreshToken 调 logout 接口，
+    // 不经过 writeRefreshToken/readRefreshToken，共享存储里的旧值全程不受影响。
+    try {
+      await globalThis.fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken: body.refreshToken }),
+      });
+    } catch {
+      // 撤销失败不影响本地判定结果；未持久化的 token 本来就不会被前端用到。
+    }
+    return { ok: false, user: body.user };
+  }
+  setAccessToken(body.accessToken);
+  writeRefreshToken(body.refreshToken);
+  return { ok: true, user: body.user };
 }
 
 /** 页面刷新后调用：用持久化的 refreshToken 静默换一个新的 access token。
@@ -392,6 +444,42 @@ export const updatePageState = (state: PageState) =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(state),
   }).then(json<PageState>);
+
+// --- Tenant admin (/admin 页面用：本租户用户管理 + API token 管理) ---
+
+export const getCurrentUser = () => authFetch('/api/tenants/me').then(json<TenantUserSummary>);
+
+export const listTenantUsers = (tenantId: string) =>
+  authFetch(`/api/tenants/${tenantId}/users`).then(json<{ users: TenantUserSummary[] }>);
+
+export const createTenantUser = (tenantId: string, input: CreateUserInput) =>
+  authFetch(`/api/tenants/${tenantId}/users`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  }).then(json<TenantUserSummary>);
+
+export const updateTenantUser = (tenantId: string, userId: string, input: UpdateUserInput) =>
+  authFetch(`/api/tenants/${tenantId}/users/${userId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  }).then(json<TenantUserSummary>);
+
+export const listApiTokens = (tenantId: string) =>
+  authFetch(`/api/tenants/${tenantId}/tokens`).then(json<{ tokens: ApiTokenSummary[] }>);
+
+export const createApiToken = (tenantId: string, input: CreateApiTokenInput) =>
+  authFetch(`/api/tenants/${tenantId}/tokens`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  }).then(json<CreateApiTokenResponse>);
+
+export const revokeApiToken = (tenantId: string, tokenId: string) =>
+  authFetch(`/api/tenants/${tenantId}/tokens/${tokenId}`, { method: 'DELETE' }).then((res) => {
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  });
 
 export const listDatasources = () =>
   authFetch('/api/datasources').then(json<{ datasources: Datasource[] }>);

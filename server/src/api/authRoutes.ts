@@ -26,6 +26,13 @@ authApi.post('/login', async (req, res) => {
     res.status(401).json({ error: '邮箱或密码错误' });
     return;
   }
+  // 系统管理员可以禁用整个租户(PATCH /api/system/tenants/:id);这里必须同步检查,
+  // 否则"禁用租户"只是改了一个没人看的字段,被禁用租户的用户还能正常登录。
+  const tenant = await store.findTenant(tenantId);
+  if (!tenant || tenant.status !== 'active') {
+    res.status(401).json({ error: '租户不可用' });
+    return;
+  }
 
   const accessToken = signTenantAccessToken({ id: user.id, tenantId: user.tenant_id, role: user.role });
   const refreshToken = generateOpaqueToken();
@@ -62,6 +69,11 @@ authApi.post('/refresh', async (req, res) => {
   const user = await store.findUserById(record.user_id);
   if (!user || user.status !== 'active') {
     res.status(401).json({ error: '账号不可用' });
+    return;
+  }
+  const tenant = await store.findTenant(user.tenant_id);
+  if (!tenant || tenant.status !== 'active') {
+    res.status(401).json({ error: '租户不可用' });
     return;
   }
 

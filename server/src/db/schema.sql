@@ -418,6 +418,20 @@ CREATE TABLE IF NOT EXISTS auth_tokens (
 
 CREATE INDEX IF NOT EXISTS idx_auth_tokens_user ON auth_tokens(user_id, kind, revoked_at);
 
+-- 系统管理员的 refresh token(登录续期)。不能复用 auth_tokens:该表的
+-- tenant_id/user_id 是 NOT NULL 外键指向 tenants/users,系统管理员两边都不在。
+-- 只做 refresh——系统管理员目前不需要 API token,因此不设 kind/label 列。
+CREATE TABLE IF NOT EXISTS system_admin_tokens (
+  id                TEXT PRIMARY KEY,
+  system_admin_id   TEXT NOT NULL REFERENCES system_admins(id) ON DELETE CASCADE,
+  token_hash        TEXT NOT NULL UNIQUE,
+  expires_at        TIMESTAMPTZ,
+  revoked_at        TIMESTAMPTZ,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_system_admin_tokens_admin ON system_admin_tokens(system_admin_id, revoked_at);
+
 -- 多租户改造 Phase 2(docs/multi-tenancy-design.md §5)。给业务表加 tenant_id/user_id,
 -- Store 层按这些列过滤实现数据隔离。本阶段不做 Postgres RLS(见设计文档 §11 的说明),
 -- 应用层过滤是唯一的强制边界。
