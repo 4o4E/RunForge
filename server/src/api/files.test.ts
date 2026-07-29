@@ -4,6 +4,7 @@ import { formatHexRows, parseByteRange, previewTextLines } from './files.js';
 import { signFileShare, verifyFileShare } from './auth.js';
 import { config } from '../config.js';
 import { isOfficeConvertiblePath, officePdfCacheKey } from '../files/officePreview.js';
+import { resolveWorkspaceRoot } from '../files/workspaceRoot.js';
 
 test('render preview keeps long lines intact', () => {
   const longLine = `const DATA = ${'x'.repeat(13_000)};`;
@@ -40,17 +41,26 @@ test('file share signature binds path and expiry', () => {
   config.auth.shareSecret = 'test-share-secret';
   try {
     const expires = 2000;
-    const sig = signFileShare('artifacts/report.html', 'default', expires);
+    const sig = signFileShare('artifacts/report.html', 'default', 'us_a', expires);
 
-    assert.equal(verifyFileShare('artifacts/report.html', 'default', String(expires), sig, 1000), true);
-    assert.equal(verifyFileShare('artifacts/other.html', 'default', String(expires), sig, 1000), false);
-    assert.equal(verifyFileShare('artifacts/report.html', 'default', String(expires + 1), sig, 1000), false);
-    assert.equal(verifyFileShare('artifacts/report.html', 'default', String(expires), sig, 2001), false);
-    assert.equal(verifyFileShare('artifacts/report.html', 'other-tenant', String(expires), sig, 1000), false);
+    assert.equal(verifyFileShare('artifacts/report.html', 'default', 'us_a', String(expires), sig, 1000), true);
+    assert.equal(verifyFileShare('artifacts/other.html', 'default', 'us_a', String(expires), sig, 1000), false);
+    assert.equal(verifyFileShare('artifacts/report.html', 'default', 'us_a', String(expires + 1), sig, 1000), false);
+    assert.equal(verifyFileShare('artifacts/report.html', 'default', 'us_a', String(expires), sig, 2001), false);
+    assert.equal(verifyFileShare('artifacts/report.html', 'other-tenant', 'us_a', String(expires), sig, 1000), false);
+    assert.equal(verifyFileShare('artifacts/report.html', 'default', 'us_b', String(expires), sig, 1000), false);
   } finally {
     config.auth.accessToken = previousAccessToken;
     config.auth.shareSecret = previousShareSecret;
   }
+});
+
+test('workspace root is isolated by tenant and user', () => {
+  const base = '/srv/runforge/workspace';
+  assert.equal(resolveWorkspaceRoot({ tenantId: 'default', userId: 'us_a' }, base), '/srv/runforge/workspace/users/us_a/workspace');
+  assert.equal(resolveWorkspaceRoot({ tenantId: 'default', userId: 'us_b' }, base), '/srv/runforge/workspace/users/us_b/workspace');
+  assert.equal(resolveWorkspaceRoot({ tenantId: 'tn_a', userId: 'us_a' }, base), '/srv/runforge/workspace/tenants/tn_a/users/us_a/workspace');
+  assert.notEqual(resolveWorkspaceRoot({ tenantId: 'tn_a', userId: 'us_a' }, base), resolveWorkspaceRoot({ tenantId: 'tn_a', userId: 'us_b' }, base));
 });
 
 test('office pdf preview only accepts office documents', () => {
@@ -61,9 +71,10 @@ test('office pdf preview only accepts office documents', () => {
 });
 
 test('office pdf cache key changes when source metadata changes', () => {
-  const base = { tenantId: 'default', remotePath: 'artifacts/demo.pptx', size: 10, mtimeMs: 100, converterUrl: 'http://converter:3000' };
+  const base = { tenantId: 'default', userId: 'us_a', remotePath: 'artifacts/demo.pptx', size: 10, mtimeMs: 100, converterUrl: 'http://converter:3000' };
   assert.equal(officePdfCacheKey(base), officePdfCacheKey(base));
   assert.notEqual(officePdfCacheKey(base), officePdfCacheKey({ ...base, mtimeMs: 101 }));
   assert.notEqual(officePdfCacheKey(base), officePdfCacheKey({ ...base, cacheVersion: 'fonts-v2' }));
   assert.notEqual(officePdfCacheKey(base), officePdfCacheKey({ ...base, tenantId: 'other-tenant' }));
+  assert.notEqual(officePdfCacheKey(base), officePdfCacheKey({ ...base, userId: 'us_b' }));
 });

@@ -30,8 +30,10 @@ const TEST_SCOPE: Scope = { tenantId: 'default', userId: 'us_test' };
 before(async () => {
   dir = await mkdtemp(join(tmpdir(), 'runforge-test-'));
   await mkdir(join(dir, 'sub'), { recursive: true });
+  await mkdir(join(dir, '健身'), { recursive: true });
   await writeFile(join(dir, 'a.ts'), 'export const a = 1;\n// TODO: fix\n');
   await writeFile(join(dir, 'sub', 'b.ts'), 'export const b = 2;\n');
+  await writeFile(join(dir, '健身', '背景信息.md'), '# 训练背景\n');
   await writeFile(join(dir, 'readme.md'), '# hello\n');
 });
 
@@ -279,6 +281,26 @@ test('shell blocks direct database CLI even when workload token exists', async (
 test('file_read reads content', async () => {
   const out = text(await fileReadTool.run({ path: join(dir, 'a.ts') }));
   assert.match(out, /export const a = 1/);
+});
+
+test('file tools resolve relative paths from workspaceRoot', async () => {
+  const settings = normalizeToolSettings({ workspaceRoot: dir });
+  const ctx = { scope: TEST_SCOPE, settings };
+  assert.match(text(await fileReadTool.run({ path: 'a.ts' }, ctx)), /export const a = 1/);
+
+  await fileWriteTool.run({ path: 'nested/relative.txt', content: 'relative ok' }, ctx);
+  assert.equal(await readFile(join(dir, 'nested', 'relative.txt'), 'utf8'), 'relative ok');
+
+  const edit = text(await fileEditTool.run({ path: 'nested/relative.txt', old_string: 'ok', new_string: 'done' }, ctx));
+  assert.match(edit, /已编辑/);
+  assert.equal(await readFile(join(dir, 'nested', 'relative.txt'), 'utf8'), 'relative done');
+
+  const globOut = text(await globTool.run({ pattern: 'sub/*.ts' }, ctx));
+  assert.match(globOut, /sub\/b\.ts/);
+  assert.match(text(await globTool.run({ pattern: '**/背景信息.md' }, ctx)), /健身\/背景信息\.md/);
+
+  const grepOut = text(await grepTool.run({ pattern: 'TODO' }, ctx));
+  assert.match(grepOut, /a\.ts:2/);
 });
 
 test('file_write creates file and parent dirs', async () => {

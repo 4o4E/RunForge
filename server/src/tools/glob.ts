@@ -1,6 +1,8 @@
 import { readdir } from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import type { Tool } from './types.js';
+import { resolveToolRoot } from './path.js';
 
 // Convert a simple glob (supports **, *, ?) to a RegExp.
 // `**/` matches zero or more leading directory segments (so "**/*.ts" also
@@ -25,9 +27,17 @@ function globToRegExp(pattern: string): RegExp {
   return new RegExp(`^${re}$`);
 }
 
-const IGNORE = new Set(['node_modules', '.git', 'dist', '.cache']);
+const IGNORE = new Set(['node_modules', '.git', 'dist', '.cache', '.agents', '.skills', '.venv', '.npm', '.rustup']);
 
-async function walk(dir: string, root: string, out: string[], limit: number) {
+function sortEntries(entries: Dirent[]): Dirent[] {
+  return entries.sort((a, b) => {
+    const hiddenA = a.name.startsWith('.');
+    const hiddenB = b.name.startsWith('.');
+    return Number(hiddenA) - Number(hiddenB) || a.name.localeCompare(b.name);
+  });
+}
+
+async function walkMatches(dir: string, root: string, re: RegExp, out: string[], limit: number) {
   if (out.length >= limit) return;
   let entries;
   try {
@@ -35,12 +45,16 @@ async function walk(dir: string, root: string, out: string[], limit: number) {
   } catch {
     return;
   }
-  for (const e of entries) {
+  for (const e of sortEntries(entries)) {
     if (out.length >= limit) return;
     if (IGNORE.has(e.name)) continue;
     const full = join(dir, e.name);
-    if (e.isDirectory()) await walk(full, root, out, limit);
-    else out.push(relative(root, full).split(sep).join('/'));
+    if (e.isDirectory()) {
+      await walkMatches(full, root, re, out, limit);
+      continue;
+    }
+    const rel = relative(root, full).split(sep).join('/');
+    if (re.test(rel)) out.push(rel);
   }
 }
 
@@ -55,13 +69,12 @@ export const globTool: Tool = {
     },
     required: ['pattern'],
   },
-  async run(args) {
+  async run(args, ctx) {
     const pattern = String(args.pattern ?? '');
-    const root = String(args.path ?? process.cwd());
-    const all: string[] = [];
-    await walk(root, root, all, 5000);
+    const root = resolveToolRoot(args.path, ctx);
     const re = globToRegExp(pattern);
-    const matches = all.filter((p) => re.test(p)).slice(0, 200);
+    const matches: string[] = [];
+    await walkMatches(root, root, re, matches, 200);
     return matches.length ? matches.join('\n') : '（没有匹配项）';
   },
 };

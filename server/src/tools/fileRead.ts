@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import type { Tool } from './types.js';
+import { resolveToolPath } from './path.js';
 
 export const fileReadTool: Tool = {
   name: 'file_read',
@@ -11,13 +12,14 @@ export const fileReadTool: Tool = {
     },
     required: ['path'],
   },
-  async run(args) {
-    const path = String(args.path ?? '');
+  async run(args, ctx) {
+    const inputPath = String(args.path ?? '');
+    const path = resolveToolPath(inputPath, ctx);
     try {
       const content = await readFile(path, 'utf8');
       return content || '（空文件）';
     } catch (err) {
-      return `读取文件失败 ${path}: ${(err as Error).message}`;
+      return `读取文件失败 ${inputPath}: ${(err as Error).message}`;
     }
   },
 };

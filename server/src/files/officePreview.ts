@@ -25,7 +25,7 @@ export function isOfficeConvertiblePath(path: string): boolean {
   return OFFICE_EXTENSIONS.has(ext);
 }
 
-export function officePdfCacheKey(input: { tenantId: string; remotePath: string; size: number; mtimeMs: number; converterUrl: string; cacheVersion?: string }): string {
+export function officePdfCacheKey(input: { tenantId: string; userId: string; remotePath: string; size: number; mtimeMs: number; converterUrl: string; cacheVersion?: string }): string {
   return createHash('sha256')
     .update(JSON.stringify({ version: 1, ...input, cacheVersion: input.cacheVersion ?? '' }))
     .digest('hex');
@@ -35,10 +35,11 @@ function converterUrl(): string {
   return config.preview.officeConverterUrl.trim().replace(/\/+$/, '');
 }
 
-// tenantId 既进哈希输入(防跨租户缓存碰撞)，也单独分目录(docs/multi-tenancy-design.md §7)。
-function cacheRoot(tenantId: string): string {
+// tenantId/userId 既进哈希输入，也单独分目录，避免同租户不同用户的同名文件复用缓存。
+function cacheRoot(tenantId: string, userId: string): string {
   const base = config.preview.officeCacheDir.trim() || join(tmpdir(), 'runforge-office-previews');
-  return tenantId === 'default' ? base : join(base, 'tenants', tenantId);
+  const tenantRoot = tenantId === 'default' ? base : join(base, 'tenants', tenantId);
+  return join(tenantRoot, 'users', userId);
 }
 
 async function convertWithLibreOffice(file: string, signal: AbortSignal): Promise<Buffer> {
@@ -61,18 +62,19 @@ async function convertWithLibreOffice(file: string, signal: AbortSignal): Promis
   return Buffer.from(await res.arrayBuffer());
 }
 
-export async function ensureOfficePdfPreview(input: { tenantId: string; file: string; remotePath: string; size: number; mtimeMs: number }): Promise<string> {
+export async function ensureOfficePdfPreview(input: { tenantId: string; userId: string; file: string; remotePath: string; size: number; mtimeMs: number }): Promise<string> {
   if (!isOfficeConvertiblePath(input.file)) throw new Error('当前文件类型不支持 Office PDF 预览');
 
   const key = officePdfCacheKey({
     tenantId: input.tenantId,
+    userId: input.userId,
     remotePath: input.remotePath,
     size: input.size,
     mtimeMs: input.mtimeMs,
     converterUrl: converterUrl(),
     cacheVersion: config.preview.officeCacheVersion,
   });
-  const dir = join(cacheRoot(input.tenantId), key);
+  const dir = join(cacheRoot(input.tenantId, input.userId), key);
   const pdfPath = join(dir, 'preview.pdf');
 
   try {

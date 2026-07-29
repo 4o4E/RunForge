@@ -1,8 +1,18 @@
 import { readdir, readFile } from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import type { Tool } from './types.js';
+import { resolveToolRoot } from './path.js';
 
-const IGNORE = new Set(['node_modules', '.git', 'dist', '.cache']);
+const IGNORE = new Set(['node_modules', '.git', 'dist', '.cache', '.agents', '.skills', '.venv', '.npm', '.rustup']);
+
+function sortEntries(entries: Dirent[]): Dirent[] {
+  return entries.sort((a, b) => {
+    const hiddenA = a.name.startsWith('.');
+    const hiddenB = b.name.startsWith('.');
+    return Number(hiddenA) - Number(hiddenB) || a.name.localeCompare(b.name);
+  });
+}
 
 async function* walkFiles(dir: string): AsyncGenerator<string> {
   let entries;
@@ -11,7 +21,7 @@ async function* walkFiles(dir: string): AsyncGenerator<string> {
   } catch {
     return;
   }
-  for (const e of entries) {
+  for (const e of sortEntries(entries)) {
     if (IGNORE.has(e.name)) continue;
     const full = join(dir, e.name);
     if (e.isDirectory()) yield* walkFiles(full);
@@ -31,8 +41,8 @@ export const grepTool: Tool = {
     },
     required: ['pattern'],
   },
-  async run(args) {
-    const root = String(args.path ?? process.cwd());
+  async run(args, ctx) {
+    const root = resolveToolRoot(args.path, ctx);
     let re: RegExp;
     try {
       re = new RegExp(String(args.pattern ?? ''), args.ignore_case ? 'i' : undefined);

@@ -37,7 +37,7 @@
 
 - 一组 **用户(user)**,每个用户有独立的登录身份,归属这一个 tenant。
 - 独立的一组 thread / run / subagent / shell session / datasource 数据。
-- 独立的 workspace 文件树。
+- 每个用户独立的 workspace 文件树；租户只作为上层目录边界,同租户用户默认不共享文件。
 - 独立的运行时配置(LLM provider、工具沙箱策略、MCP servers)。
 
 `tenant_id` 是贯穿改造的主键,取值为短字符串(如 `tnt_xxx`),不对外暴露内部自增 id。单租户部署使用一个固定的 `default` tenant,行为与今天完全一致(不管是迁移还是全新部署,启动时都会自动确保这个 tenant 和一个默认管理员账号存在,见 §4 的 bootstrap 逻辑)。
@@ -110,8 +110,8 @@ Server (Node.js / TypeScript 单体)
   |     |-- PgStore:所有查询强制带 tenant_id(+ user_id,见 §2 可见性规则)过滤 + RLS 兜底
   |     `-- MemoryStore:测试用,按 tenant_id 分 Map
   |
-  |-- Workspace 根:tenants/<tenant_id>/workspace
-  |-- Sandbox:bwrap bind mount 只挂载该租户的 workspace
+  |-- Workspace 根:tenants/<tenant_id>/users/<user_id>/workspace
+  |-- Sandbox:bwrap bind mount 只挂载该用户的 workspace
   |
   v
 PostgreSQL(单库,行级按 tenant_id / user_id 隔离)
@@ -125,7 +125,7 @@ Web 带 JWT access token 发起请求
 -> 后续所有 API handler、executeRun、tool registry、store 查询
    都从 AsyncLocalStorage 取 {tenant_id, user_id, role},不需要显式在每层传参
 -> Store 层查询自动带上 tenant_id(+ 按 §2 规则的 user_id)条件(应用层 + 数据库 RLS 双保险)
--> 文件工具/沙箱按 tenant_id 派生的 workspaceRoot 执行
+-> 文件工具/沙箱按 tenant_id + user_id 派生的 workspaceRoot 执行
 -> 事件经 run bus 按 tenant_id 过滤后推送给对应租户的 WebSocket 连接
 ```
 
@@ -368,17 +368,19 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 
 ## 6. 文件系统与 workspace 隔离
 
-`workspaceRoot` 从 `config.tools.workspaceRoot` 这个全局单值,变成按租户派生:
+`workspaceRoot` 从 `config.tools.workspaceRoot` 这个全局单值,变成按租户 + 用户派生:
 
 ```text
-${TOOL_WORKSPACE_ROOT_BASE}/tenants/<tenant_id>/workspace
+default tenant: ${TOOL_WORKSPACE_ROOT_BASE}/users/<user_id>/workspace
+other tenants: ${TOOL_WORKSPACE_ROOT_BASE}/tenants/<tenant_id>/users/<user_id>/workspace
 ```
 
-- `getToolSettings(scope)` 返回值里的 `workspaceRoot` 字段改为函数调用 `resolveWorkspaceRoot(tenantId)`,而不是读一个全局常量;**且始终用计算值覆盖 `app_settings` 里存的字符串,不信任存储值**——`PUT /api/settings/tools` 允许调用方写入任意 `workspaceRoot`,如果只按 `(tenant_id, key)` 隔离行但原样返回存储值,租户管理员就能把自己的 `workspaceRoot` 设成指向另一个租户目录的路径,变成一个真实的越权读写洞。这是 Phase 2 落地时发现的、设计文档最初没写到的缺口,已在 `settings.ts` 的 `getToolSettings`/`saveToolSettings` 里修复。
-- `normalizeRemotePath`/`isWithin`(`server/src/files/workspace.ts`)的围栏逻辑不需要改——它们已经是"给定一个 root,判断路径是否在 root 内",只要传入的 root 换成租户专属路径即可。
-- Office 预览缓存(`server/src/files/officePreview.ts`)的 `officeCacheDir` 同理按租户分目录:`${officeCacheDir}/tenants/<tenant_id>/`,`officePdfCacheKey` 的哈希输入也带 `tenantId`(目录隔离和哈希隔离是两个独立的加固点,防止未来目录结构变化时退化成只靠哈希去重)。
-- 签名文件分享链接(`/api/files/{raw,preview,hex,pdf-preview}` 的免身份分支)本身不带身份,匿名访问时的 `tenantId` 只能来自请求方自己在 query 里声明的 `tenant` 参数——`signFileShare`/`verifyFileShare` 把 `tenantId` 一起签进 HMAC,防止篡改 `query.tenant` 让同一个签名在另一个租户的 workspaceRoot 下"重放"。
-- 单租户部署:`tenant_id = 'default'` 时,`resolveWorkspaceRoot('default')` 直接返回原来的 `TOOL_WORKSPACE_ROOT`(不额外套 `tenants/default/` 前缀),保证现有部署的文件路径不因升级而漂移。
+- `getToolSettings(scope)` 返回值里的 `workspaceRoot` 字段改为函数调用 `resolveWorkspaceRoot({ tenantId, userId })`,而不是读一个全局常量;**且始终用计算值覆盖 `app_settings` 里存的字符串,不信任存储值**——`PUT /api/settings/tools` 允许调用方写入任意 `workspaceRoot`,如果只按 `(tenant_id, key)` 隔离行但原样返回存储值,租户管理员就能把自己的 `workspaceRoot` 设成指向另一个租户或用户目录的路径,变成一个真实的越权读写洞。这是 Phase 2 落地时发现的、设计文档最初没写到的缺口,已在 `settings.ts` 的 `getToolSettings`/`saveToolSettings` 里修复。
+- 没有 `userId` 的 `resolveWorkspaceRoot({ tenantId })` 只返回租户基础目录,用于启动日志等不代表具体用户的场景;工具执行、文件 API、shell session 都必须传入完整 `{ tenantId, userId }`。
+- `normalizeRemotePath`/`isWithin`(`server/src/files/workspace.ts`)的围栏逻辑不需要改——它们已经是"给定一个 root,判断路径是否在 root 内",只要传入的 root 换成用户专属路径即可。
+- Office 预览缓存(`server/src/files/officePreview.ts`)的 `officeCacheDir` 同理按租户 + 用户分目录,`officePdfCacheKey` 的哈希输入也带 `tenantId`/`userId`(目录隔离和哈希隔离是两个独立的加固点,防止未来目录结构变化时退化成只靠哈希去重)。
+- 签名文件分享链接(`/api/files/{raw,preview,hex,pdf-preview}` 的免身份分支)本身不带身份,匿名访问时的 `tenantId`/`userId` 只能来自请求方自己在 query 里声明的 `tenant`/`user` 参数——`signFileShare`/`verifyFileShare` 把二者一起签进 HMAC,防止篡改 query 让同一个签名在另一个用户的 workspaceRoot 下"重放"。
+- 单租户部署:`tenant_id = 'default'` 时不额外套 `tenants/default/` 前缀,但仍按 `users/<user_id>/workspace` 分离同租户用户;已有全局 workspace 文件需要按用户迁移或复制到对应用户目录。
 
 ---
 
@@ -386,7 +388,7 @@ ${TOOL_WORKSPACE_ROOT_BASE}/tenants/<tenant_id>/workspace
 
 延续 [工具沙箱设计](tool-sandbox.md) 已确立的两层模型(应用层路径策略 + bwrap OS 隔离),多租户在这两层之上都要收紧:
 
-**应用层路径策略**:围栏 root 从全局 `workspaceRoot` 换成按租户派生的 root(见 §6),不需要新增机制,直接复用现有的 `none`/`workspace`/`allowlist` 三档策略。
+**应用层路径策略**:围栏 root 从全局 `workspaceRoot` 换成按租户 + 用户派生的 root(见 §6),不需要新增机制,直接复用现有的 `none`/`workspace`/`allowlist` 三档策略。
 
 **bwrap 沙箱层**:`--bind <workspaceRoot> <workspaceRoot>` 的 `workspaceRoot` 同样换成租户专属路径,天然做到"租户 A 的 shell 子进程即使命令被绕过,也 bind mount 不到租户 B 的文件"。命令白名单(`shellAllowCommands`)、网络开关(`network`)从全局 `config.tools.*` 改为按租户读取(存在 `app_settings` 里,见 §5),允许不同租户有不同的工具权限策略——例如某些租户禁用网络访问,某些租户允许更大的命令白名单。
 

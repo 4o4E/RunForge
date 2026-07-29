@@ -83,8 +83,8 @@ test('api auth middleware allows signed file raw, text preview, hex preview and 
   const port = await listen(server);
   try {
     const expires = 2_000_000_000;
-    const sig = signFileShare('artifacts/report.html', 'default', expires);
-    const query = `path=artifacts%2Freport.html&expires=${expires}&sig=${sig}`;
+    const sig = signFileShare('artifacts/report.html', 'default', 'us_share', expires);
+    const query = `path=artifacts%2Freport.html&tenant=default&user=us_share&expires=${expires}&sig=${sig}`;
     assert.equal((await fetch(`http://127.0.0.1:${port}/files/raw?${query}`)).status, 200);
     assert.equal((await fetch(`http://127.0.0.1:${port}/files/preview?${query}`)).status, 200);
     assert.equal((await fetch(`http://127.0.0.1:${port}/files/hex?${query}`)).status, 200);

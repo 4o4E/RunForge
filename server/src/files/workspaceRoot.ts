@@ -1,10 +1,28 @@
 import { join, resolve } from 'node:path';
 import { config } from '../config.js';
 
-/** 按租户派生 workspace 根目录(docs/multi-tenancy-design.md §6)。
- *  tenantId === 'default' 时直接返回原始未加后缀的路径,保证现有单租户部署的文件
- *  路径不因升级而漂移;其余租户落在 `<base>/tenants/<tenantId>/workspace`。 */
-export function resolveWorkspaceRoot(tenantId: string, base: string = config.tools.workspaceRoot): string {
+export interface WorkspaceScope {
+  tenantId: string;
+  userId?: string | null;
+}
+
+function safeSegment(value: string): string {
+  return value.replace(/[^0-9A-Za-z_.-]/g, '-');
+}
+
+function tenantBaseRoot(tenantId: string, base: string): string {
   if (tenantId === 'default') return resolve(base);
-  return resolve(join(base, 'tenants', tenantId, 'workspace'));
+  return resolve(join(base, 'tenants', safeSegment(tenantId)));
+}
+
+/** 按租户+用户派生 workspace 根目录。
+ *  旧逻辑只按 tenant 分目录,同租户用户会共享文件树；现在每个用户落在自己的
+ *  `<tenantBase>/users/<userId>/workspace` 下。调用方没有 userId 时只返回租户
+ *  基础目录,用于启动日志等不代表具体用户的场景,不能作为工具执行目录。 */
+export function resolveWorkspaceRoot(scope: WorkspaceScope | string, base: string = config.tools.workspaceRoot): string {
+  const tenantId = typeof scope === 'string' ? scope : scope.tenantId;
+  const userId = typeof scope === 'string' ? null : scope.userId;
+  const tenantRoot = tenantBaseRoot(tenantId, base);
+  if (!userId) return tenantRoot;
+  return resolve(join(tenantRoot, 'users', safeSegment(userId), 'workspace'));
 }

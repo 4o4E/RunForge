@@ -38,13 +38,13 @@ function canonicalRemotePath(abs: string, configuredRoot: string): string {
   return remotePath === '.' ? '' : remotePath;
 }
 
-function rawFileUrl(path: string, tenantId: string, expires: number, sig: string): string {
-  const params = new URLSearchParams({ path, tenant: tenantId, expires: String(expires), sig });
+function rawFileUrl(path: string, tenantId: string, userId: string, expires: number, sig: string): string {
+  const params = new URLSearchParams({ path, tenant: tenantId, user: userId, expires: String(expires), sig });
   return `/api/files/raw?${params.toString()}`;
 }
 
-function sharePageUrl(path: string, tenantId: string, expires: number, sig: string): string {
-  const params = new URLSearchParams({ path, tenant: tenantId, expires: String(expires), sig });
+function sharePageUrl(path: string, tenantId: string, userId: string, expires: number, sig: string): string {
+  const params = new URLSearchParams({ path, tenant: tenantId, user: userId, expires: String(expires), sig });
   return `/share/file?${params.toString()}`;
 }
 
@@ -53,28 +53,32 @@ function fileName(path: string): string {
   return parts.at(-1) || path || 'file';
 }
 
-/** 签名分享链接没有请求身份，tenantId 只能来自调用方自己声明的 query.tenant，
- *  且必须和签名当时绑定的 tenantId 一致(verifyFileShare 会校验)——否则改一下
- *  query.tenant 就能让同一个签名在别的租户 workspaceRoot 下"重放"
- *  (docs/multi-tenancy-design.md §7)。 */
+/** 签名分享链接没有请求身份，tenantId/userId 只能来自调用方自己声明的 query，
+ *  且必须和签名当时绑定的身份一致——否则改 query 就能把签名重放到别人的用户
+ *  workspaceRoot。 */
 async function resolveFileAccess(
   req: Request,
   res: Response,
   requestedPath: unknown,
-): Promise<{ tenantId: string; workspaceRoot: string; file: string } | null> {
+): Promise<{ tenantId: string; userId: string; workspaceRoot: string; file: string } | null> {
   const identity = await resolveIdentityFromAuthorizationHeader(req.headers.authorization);
   // 只有租户身份才能直接读工作区文件；系统管理员不能借着这条路径绕过审计去看任意租户的文件
   // (docs/multi-tenancy-design.md §4)。免身份的签名分享链接不受影响，走下面的签名校验分支。
   if (identity?.scope === 'tenant') {
-    const root = resolveWorkspaceRoot(identity.tenantId);
-    return { tenantId: identity.tenantId, workspaceRoot: root, file: normalizeRemotePath(requestedPath, root) };
+    const root = resolveWorkspaceRoot(identity);
+    return { tenantId: identity.tenantId, userId: identity.userId, workspaceRoot: root, file: normalizeRemotePath(requestedPath, root) };
   }
   const tenantId = typeof req.query.tenant === 'string' && req.query.tenant.trim() ? req.query.tenant.trim() : 'default';
-  const root = resolveWorkspaceRoot(tenantId);
+  const userId = typeof req.query.user === 'string' && req.query.user.trim() ? req.query.user.trim() : '';
+  if (!userId) {
+    res.status(403).json({ error: '文件分享缺少用户身份' });
+    return null;
+  }
+  const root = resolveWorkspaceRoot({ tenantId, userId });
   const file = normalizeRemotePath(requestedPath, root);
   const path = canonicalRemotePath(file, root);
-  if (verifyFileShare(path, tenantId, req.query.expires, req.query.sig)) {
-    return { tenantId, workspaceRoot: root, file };
+  if (verifyFileShare(path, tenantId, userId, req.query.expires, req.query.sig)) {
+    return { tenantId, userId, workspaceRoot: root, file };
   }
   res.status(403).json({ error: '文件分享签名无效或已过期' });
   return null;
@@ -189,12 +193,12 @@ filesApi.post('/share-link', requireTenantScope, async (req, res) => {
     const path = canonicalRemotePath(file, settings.workspaceRoot);
     const ttlSeconds = clampShareTtlSeconds(req.body?.ttlSeconds);
     const expires = Math.floor(Date.now() / 1000) + ttlSeconds;
-    const sig = signFileShare(path, scope.tenantId, expires);
+    const sig = signFileShare(path, scope.tenantId, scope.userId, expires);
     res.status(201).json({
       path,
       expiresAt: new Date(expires * 1000).toISOString(),
-      url: sharePageUrl(path, scope.tenantId, expires, sig),
-      rawUrl: rawFileUrl(path, scope.tenantId, expires, sig),
+      url: sharePageUrl(path, scope.tenantId, scope.userId, expires, sig),
+      rawUrl: rawFileUrl(path, scope.tenantId, scope.userId, expires, sig),
     });
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
@@ -305,13 +309,13 @@ filesApi.get('/pdf-preview', async (req, res) => {
   try {
     const access = await resolveFileAccess(req, res, req.query.path);
     if (!access) return;
-    const { file, workspaceRoot: root, tenantId } = access;
+    const { file, workspaceRoot: root, tenantId, userId } = access;
     const info = await stat(file);
     if (!info.isFile()) return res.status(400).json({ error: 'path 不是文件' });
     if (!isOfficeConvertiblePath(file)) return res.status(415).json({ error: '当前文件类型不支持 PDF 预览' });
 
     const remotePath = canonicalRemotePath(file, root);
-    const pdfPath = await ensureOfficePdfPreview({ tenantId, file, remotePath, size: info.size, mtimeMs: info.mtimeMs });
+    const pdfPath = await ensureOfficePdfPreview({ tenantId, userId, file, remotePath, size: info.size, mtimeMs: info.mtimeMs });
     const pdfInfo = await stat(pdfPath);
     const range = parseByteRange(req.headers.range, pdfInfo.size);
 

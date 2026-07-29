@@ -65,18 +65,19 @@ export function clampShareTtlSeconds(value: unknown): number {
   return Math.min(MAX_SHARE_TTL_SECONDS, Math.max(MIN_SHARE_TTL_SECONDS, Math.floor(raw)));
 }
 
-// tenantId 进签名输入:分享链接本身不带身份，匿名访问时 tenantId 只能来自请求方
-// 自己声明的 query 参数，必须和签名当时的 tenantId 绑在一起校验，否则改个 query.tenant
-// 就能让签名在另一个租户的 workspaceRoot 下"重放"(docs/multi-tenancy-design.md §7)。
-export function signFileShare(canonicalPath: string, tenantId: string, expiresEpochSeconds: number): string {
+// tenantId/userId 进签名输入:分享链接本身不带身份，匿名访问时 tenant/user 只能来自
+// 请求方自己声明的 query 参数，必须和签名当时的身份绑在一起校验，否则改 query
+// 就能让签名在另一个用户 workspaceRoot 下"重放"。
+export function signFileShare(canonicalPath: string, tenantId: string, userId: string, expiresEpochSeconds: number): string {
   return createHmac('sha256', shareSecret())
-    .update(`${tenantId}\n${canonicalPath}\n${expiresEpochSeconds}`)
+    .update(`${tenantId}\n${userId}\n${canonicalPath}\n${expiresEpochSeconds}`)
     .digest('base64url');
 }
 
 export function verifyFileShare(
   canonicalPath: string,
   tenantId: string,
+  userId: string,
   expiresRaw: unknown,
   signatureRaw: unknown,
   nowSeconds = Math.floor(Date.now() / 1000),
@@ -84,6 +85,6 @@ export function verifyFileShare(
   if (typeof expiresRaw !== 'string' || typeof signatureRaw !== 'string') return false;
   const expires = Number(expiresRaw);
   if (!Number.isInteger(expires) || expires < nowSeconds) return false;
-  const expected = signFileShare(canonicalPath, tenantId, expires);
+  const expected = signFileShare(canonicalPath, tenantId, userId, expires);
   return safeEqual(signatureRaw, expected);
 }

@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import { mkdir } from 'node:fs/promises';
 import type {
   LlmAiSdkFlavor,
   LlmModelOption,
@@ -14,7 +15,7 @@ import type {
 export type { LlmModelOption, LlmProviderSettings, LlmSettings, McpServerSettings, McpSettings, ToolSettings } from '@runforge/contracts';
 import { config } from './config.js';
 import { query } from './db/pool.js';
-import type { TenantScope } from './store/types.js';
+import type { Scope, TenantScope } from './store/types.js';
 import { resolveWorkspaceRoot } from './files/workspaceRoot.js';
 
 const DEFAULT_TENANT_ID = 'default';
@@ -220,6 +221,13 @@ function mergeToolSettings(values: Map<string, unknown>): ToolSettings {
   };
 }
 
+async function bindWorkspaceRoot(settings: ToolSettings, scope: TenantScope | Scope): Promise<ToolSettings> {
+  // 工具、文件列表和 shell 都依赖 workspaceRoot 已存在；在统一入口创建可避免各工具重复兜底。
+  settings.workspaceRoot = resolveWorkspaceRoot(scope);
+  await mkdir(settings.workspaceRoot, { recursive: true });
+  return settings;
+}
+
 async function readSettingRows(tenantId: string, keys: readonly string[]): Promise<SettingRow[]> {
   const { rows } = await query<SettingRow>(
     `SELECT key, value FROM app_settings WHERE tenant_id = $1 AND key = ANY($2::text[])`,
@@ -246,7 +254,7 @@ async function insertMissingDefaults(rows: SettingRow[]): Promise<void> {
 /** 读取当前租户的工具配置:本租户覆盖 -> default 租户覆盖 -> env 默认值三层回退
  *  (docs/multi-tenancy-design.md §5)。配置表不可用时回退到 env 默认值,避免未迁移
  *  环境直接崩溃。 */
-export async function getToolSettings(scope: TenantScope): Promise<ToolSettings> {
+export async function getToolSettings(scope: TenantScope | Scope): Promise<ToolSettings> {
   try {
     const ownRows = await readSettingRows(scope.tenantId, TOOL_SETTING_KEYS);
     let mergedMap = rowsToMap(ownRows);
@@ -261,16 +269,14 @@ export async function getToolSettings(scope: TenantScope): Promise<ToolSettings>
       }
     }
     const settings = mergeToolSettings(mergedMap);
-    // workspaceRoot 永远是按租户计算出来的值,不信任 app_settings 里存的字符串——
-    // 否则租户管理员能把自己的 workspaceRoot 设成指向另一个租户目录,变成一个真实的
-    // 越权读写洞(docs/multi-tenancy-design.md §11)。
-    settings.workspaceRoot = resolveWorkspaceRoot(scope.tenantId);
-    return settings;
+    // workspaceRoot 永远按当前身份计算,不信任 app_settings 里存的字符串。
+    // 否则租户管理员能把自己的 workspaceRoot 设到别人的目录,变成真实的越权读写洞。
+    // 这里必须包含 userId:同租户多用户的数据已按 userId 隔离,文件工作区也要一致。
+    return await bindWorkspaceRoot(settings, scope);
   } catch (err) {
     warnOnce('settings-fallback', `Tool settings fallback to env defaults: ${(err as Error).message}`);
     const fallback = defaultToolSettings();
-    fallback.workspaceRoot = resolveWorkspaceRoot(scope.tenantId);
-    return fallback;
+    return await bindWorkspaceRoot(fallback, scope);
   }
 }
 
@@ -318,8 +324,7 @@ export async function saveToolSettings(scope: TenantScope, input: unknown): Prom
   }
   // 存进去的值可能被调用方 normalize 出一个不受信任的 workspaceRoot,但返回值必须是
   // 计算出来的那个——同一个理由见 getToolSettings。
-  settings.workspaceRoot = resolveWorkspaceRoot(scope.tenantId);
-  return settings;
+  return await bindWorkspaceRoot(settings, scope);
 }
 
 function normalizeMcpServer(input: unknown, fallback: McpServerSettings, usedIds: Set<string>): McpServerSettings {
