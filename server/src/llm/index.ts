@@ -51,6 +51,7 @@ function configFromProvider(provider: LlmProviderSettings, model: string): LlmCo
     maxTokens: provider.maxTokens,
     timeoutMs: provider.timeoutMs,
     retries: provider.retries,
+    stream: provider.stream,
   };
 }
 
@@ -90,6 +91,7 @@ export function getProvider(): Provider {
       maxTokens: config.llm.maxTokens,
       timeoutMs: config.llm.timeoutMs,
       retries: config.llm.retries,
+      stream: config.llm.stream,
     });
   }
   return cached;

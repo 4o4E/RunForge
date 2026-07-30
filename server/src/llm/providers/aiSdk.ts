@@ -159,10 +159,52 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
     },
   });
 
+  async function completeByStream(messages: LlmMessage[], tools: LlmTool[], onDelta: (d: LlmDelta) => void): Promise<LlmResult> {
+    const r = streamText({
+      ...common(messages, tools, 'chat'),
+      // 错误由 fullStream 抛给调用方，统一由 agent 写入带 run/step 的诊断日志。
+      onError: () => {},
+    });
+    for await (const part of r.fullStream) {
+      if (part.type === 'text-delta') onDelta({ content: part.text });
+      else if (part.type === 'reasoning-delta') onDelta({ reasoning: part.text });
+      else if (part.type === 'tool-input-start') onDelta({ toolInputStart: { id: part.id, name: part.toolName } });
+      else if (part.type === 'tool-input-delta') onDelta({ toolInputDelta: { id: part.id, delta: part.delta } });
+      else if (part.type === 'tool-call') onDelta({ toolInputAvailable: { id: part.toolCallId, name: part.toolName, input: part.input } });
+      else if (part.type === 'error') throw part.error;
+    }
+    const [text, reasoningText, toolCalls, usage, finishReason, rawFinishReason] = await Promise.all([
+      r.text,
+      r.reasoningText,
+      r.toolCalls,
+      r.usage,
+      r.finishReason,
+      r.rawFinishReason,
+    ]);
+    return {
+      content: text || null,
+      reasoning: reasoningText ?? null,
+      toolCalls: toolCalls.map((c) => ({
+        id: c.toolCallId,
+        name: c.toolName,
+        arguments: JSON.stringify(c.input ?? {}),
+      })),
+      usage: {
+        inputTokens: usage?.inputTokens,
+        outputTokens: usage?.outputTokens,
+        cachedInputTokens: (usage as { cachedInputTokens?: number } | undefined)?.cachedInputTokens,
+      },
+      finishReason,
+      rawFinishReason,
+    };
+  }
+
   return {
     name: `aisdk:${opts.flavor}`,
 
     async complete(messages, tools): Promise<LlmResult> {
+      // 标题和压缩摘要同样必须遵守供应商的流式传输约束。
+      if (cfg.stream) return completeByStream(messages, tools, () => {});
       const r = await generateText(common(messages, tools, 'chat'));
       return {
         content: r.text || null,
@@ -183,39 +225,7 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
     },
 
     async completeStream(messages, tools, onDelta: (d: LlmDelta) => void): Promise<LlmResult> {
-      const r = streamText(common(messages, tools, 'chat'));
-      for await (const part of r.fullStream) {
-        if (part.type === 'text-delta') onDelta({ content: part.text });
-        else if (part.type === 'reasoning-delta') onDelta({ reasoning: part.text });
-        else if (part.type === 'tool-input-start') onDelta({ toolInputStart: { id: part.id, name: part.toolName } });
-        else if (part.type === 'tool-input-delta') onDelta({ toolInputDelta: { id: part.id, delta: part.delta } });
-        else if (part.type === 'tool-call') onDelta({ toolInputAvailable: { id: part.toolCallId, name: part.toolName, input: part.input } });
-        else if (part.type === 'error') throw part.error;
-      }
-      const [text, reasoningText, toolCalls, usage, finishReason, rawFinishReason] = await Promise.all([
-        r.text,
-        r.reasoningText,
-        r.toolCalls,
-        r.usage,
-        r.finishReason,
-        r.rawFinishReason,
-      ]);
-      return {
-        content: text || null,
-        reasoning: reasoningText ?? null,
-        toolCalls: toolCalls.map((c) => ({
-          id: c.toolCallId,
-          name: c.toolName,
-          arguments: JSON.stringify(c.input ?? {}),
-        })),
-        usage: {
-          inputTokens: usage?.inputTokens,
-          outputTokens: usage?.outputTokens,
-          cachedInputTokens: (usage as { cachedInputTokens?: number } | undefined)?.cachedInputTokens,
-        },
-        finishReason,
-        rawFinishReason,
-      };
+      return completeByStream(messages, tools, onDelta);
     },
   };
 }

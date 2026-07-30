@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { toModelMessages } from './providers/aiSdk.js';
+import { createAiSdkProvider, toModelMessages } from './providers/aiSdk.js';
 import type { LlmMessage } from './types.js';
 
 test('toModelMessages: maps system/user/assistant/tool roles', () => {
@@ -77,4 +77,34 @@ test('toModelMessages: malformed tool-call args stay visible to the model', () =
   // No leading text part (content was null); just the tool-call.
   assert.deepEqual(parts.map((p) => p.type), ['tool-call']);
   assert.deepEqual((parts[0].input as Record<string, unknown>)._invalidToolArguments, true);
+});
+
+test('AI SDK provider: configured streaming also applies to complete()', async () => {
+  const originalFetch = globalThis.fetch;
+  let requestBody = '';
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    requestBody = await request.text();
+    return new Response(JSON.stringify({ error: { message: 'expected test failure' } }), {
+      status: 400,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+
+  try {
+    const provider = createAiSdkProvider({
+      baseUrl: 'https://example.invalid/v1',
+      apiKey: 'test-key',
+      model: 'test-model',
+      maxTokens: 32,
+      timeoutMs: 1_000,
+      retries: 0,
+      stream: true,
+    }, { flavor: 'openai', reasoningTag: '' });
+
+    await assert.rejects(provider.complete([{ role: 'user', content: '你好' }], []));
+    assert.equal(JSON.parse(requestBody).stream, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

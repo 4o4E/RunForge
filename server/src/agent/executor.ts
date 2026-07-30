@@ -1,6 +1,6 @@
 import { config } from '../config.js';
 import { getConfiguredProvider } from '../llm/index.js';
-import type { LlmMessage, LlmUsage, Provider } from '../llm/types.js';
+import type { LlmDelta, LlmMessage, LlmUsage, Provider } from '../llm/types.js';
 import { parseToolArguments } from '../llm/toolArgs.js';
 import { hydrateImageAttachments } from '../llm/attachments.js';
 import { runTool, toolSchemas } from '../tools/registry.js';
@@ -952,59 +952,67 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         // skill 是外部能力说明，不是主 agent 的工具权限边界；工具权限由 RunForge 设置/策略统一管理。
         const tools = await toolSchemas(undefined, mcpSettings);
         const modelMessages = await hydrateImageAttachments(ctx.all(), toolSettings.workspaceRoot);
+        const onStreamDelta = (d: LlmDelta) => {
+          publishedDelta = true;
+          if (d.toolInputStart) {
+            llmStage = 'tool_call';
+            llmActiveTool = d.toolInputStart;
+            streamedToolNames.set(d.toolInputStart.id, d.toolInputStart.name);
+            streamStats.mark(stepIdx, 'tool_call', d.toolInputStart, true);
+          }
+          if (d.toolInputDelta) {
+            llmStage = 'tool_call';
+            if (d.toolInputDelta.name) streamedToolNames.set(d.toolInputDelta.id, d.toolInputDelta.name);
+            const name = streamedToolNames.get(d.toolInputDelta.id) ?? d.toolInputDelta.name ?? 'tool';
+            llmActiveTool = { id: d.toolInputDelta.id, name };
+            const chars = charCount(d.toolInputDelta.delta);
+            streamedToolInputChars.set(d.toolInputDelta.id, (streamedToolInputChars.get(d.toolInputDelta.id) ?? 0) + chars);
+            streamStats.add(stepIdx, 'tool_call', 'toolInputChars', chars, llmActiveTool);
+          }
+          if (d.toolInputAvailable) {
+            llmStage = 'tool_call';
+            llmActiveTool = { id: d.toolInputAvailable.id, name: d.toolInputAvailable.name };
+            streamedToolNames.set(d.toolInputAvailable.id, d.toolInputAvailable.name);
+            const chars = charCount(d.toolInputAvailable.input);
+            const counted = streamedToolInputChars.get(d.toolInputAvailable.id) ?? 0;
+            const remaining = Math.max(0, chars - counted);
+            if (remaining) {
+              streamedToolInputChars.set(d.toolInputAvailable.id, counted + remaining);
+              streamStats.add(stepIdx, 'tool_call', 'toolInputChars', remaining, llmActiveTool);
+            } else {
+              streamStats.mark(stepIdx, 'tool_call', llmActiveTool, true);
+            }
+          }
+          if (d.reasoning) {
+            llmStage = 'reasoning';
+            llmActiveTool = undefined;
+            reasoningStartedAt ??= new Date().toISOString();
+            streamStats.add(stepIdx, 'reasoning', 'reasoningChars', charCount(d.reasoning));
+            persistedLiveReasoning = true;
+            publishLiveEvent({ type: 'reasoning', step: stepIdx, text: d.reasoning, startedAt: reasoningStartedAt });
+          }
+          if (d.content) {
+            llmStage = 'output';
+            llmActiveTool = undefined;
+            streamStats.add(stepIdx, 'output', 'outputChars', charCount(d.content));
+            persistedLiveContent = true;
+            publishLiveEvent({ type: 'llm_delta', step: stepIdx, text: d.content });
+          }
+        };
         if (stream && provider.completeStream) {
           try {
-            result = await provider.completeStream(modelMessages, tools, (d) => {
-              publishedDelta = true;
-              if (d.toolInputStart) {
-                llmStage = 'tool_call';
-                llmActiveTool = d.toolInputStart;
-                streamedToolNames.set(d.toolInputStart.id, d.toolInputStart.name);
-                streamStats.mark(stepIdx, 'tool_call', d.toolInputStart, true);
-              }
-              if (d.toolInputDelta) {
-                llmStage = 'tool_call';
-                if (d.toolInputDelta.name) streamedToolNames.set(d.toolInputDelta.id, d.toolInputDelta.name);
-                const name = streamedToolNames.get(d.toolInputDelta.id) ?? d.toolInputDelta.name ?? 'tool';
-                llmActiveTool = { id: d.toolInputDelta.id, name };
-                const chars = charCount(d.toolInputDelta.delta);
-                streamedToolInputChars.set(d.toolInputDelta.id, (streamedToolInputChars.get(d.toolInputDelta.id) ?? 0) + chars);
-                streamStats.add(stepIdx, 'tool_call', 'toolInputChars', chars, llmActiveTool);
-              }
-              if (d.toolInputAvailable) {
-                llmStage = 'tool_call';
-                llmActiveTool = { id: d.toolInputAvailable.id, name: d.toolInputAvailable.name };
-                streamedToolNames.set(d.toolInputAvailable.id, d.toolInputAvailable.name);
-                const chars = charCount(d.toolInputAvailable.input);
-                const counted = streamedToolInputChars.get(d.toolInputAvailable.id) ?? 0;
-                const remaining = Math.max(0, chars - counted);
-                if (remaining) {
-                  streamedToolInputChars.set(d.toolInputAvailable.id, counted + remaining);
-                  streamStats.add(stepIdx, 'tool_call', 'toolInputChars', remaining, llmActiveTool);
-                } else {
-                  streamStats.mark(stepIdx, 'tool_call', llmActiveTool, true);
-                }
-              }
-              if (d.reasoning) {
-                llmStage = 'reasoning';
-                llmActiveTool = undefined;
-                reasoningStartedAt ??= new Date().toISOString();
-                streamStats.add(stepIdx, 'reasoning', 'reasoningChars', charCount(d.reasoning));
-                persistedLiveReasoning = true;
-                publishLiveEvent({ type: 'reasoning', step: stepIdx, text: d.reasoning, startedAt: reasoningStartedAt });
-              }
-              if (d.content) {
-                llmStage = 'output';
-                llmActiveTool = undefined;
-                streamStats.add(stepIdx, 'output', 'outputChars', charCount(d.content));
-                persistedLiveContent = true;
-                publishLiveEvent({ type: 'llm_delta', step: stepIdx, text: d.content });
-              }
-            });
+            result = await provider.completeStream(modelMessages, tools, onStreamDelta);
             liveStreamed = true;
           } catch (err) {
             if (publishedDelta) throw err; // 已经输出部分内容时无法干净回退。
-            // 还没输出时走非流式路径，由 provider 自己处理重试。
+            const message = err instanceof Error ? err.message : String(err);
+            console.warn(
+              `[agent] run ${runId} step ${stepIdx} provider ${provider.name} 流式请求在首个增量前失败，将保持流式协议重试：${errorStack(err)}`,
+            );
+            // 诊断事件只落库，不推给前端，避免一次可恢复重试被显示成失败。
+            await store.addEvent(scope, runId, step.id, { type: 'stream_retry', step: stepIdx, provider: provider.name, message });
+            result = await provider.completeStream(modelMessages, tools, onStreamDelta);
+            liveStreamed = true;
           }
         }
         if (!result) result = await provider.complete(modelMessages, tools);

@@ -322,6 +322,44 @@ test('executeRun: persists streamed text and terminal stream status for replay',
   assert.ok(published.some((e) => e.type === 'llm_delta' && e.text === 'he'));
 });
 
+test('executeRun: retries a pre-delta stream failure without switching to non-streaming', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, '重试流式传输');
+  const published: AgentEvent[] = [];
+  let streamCalls = 0;
+
+  const warnings = await captureWarnings(async () => {
+    await executeRun(run.id, {
+      store,
+      provider: {
+        name: 'stream-only',
+        async complete() {
+          assert.fail('流式重试不应改走非流式 complete');
+        },
+        async completeStream(_messages, _tools, onDelta) {
+          streamCalls += 1;
+          if (streamCalls === 1) throw new Error('first stream request failed');
+          onDelta({ content: 'recovered' });
+          return { content: 'recovered', toolCalls: [] };
+        },
+      },
+      publish: (_id, event) => published.push(event),
+      hardStepCap: 3,
+      stream: true,
+      toolSettings: testToolSettings(),
+    });
+  });
+
+  const events = await store.getEvents(scope, run.id);
+  assert.equal(streamCalls, 2);
+  assert.equal((await store.getRun(scope, run.id))?.status, 'done');
+  assert.ok(events.some((event) => event.type === 'stream_retry' && event.message === 'first stream request failed'));
+  assert.equal(published.some((event) => event.type === 'stream_retry'), false);
+  assert.ok(published.some((event) => event.type === 'llm_delta' && event.text === 'recovered'));
+  assert.ok(warnings.some((line) => line.includes('首个增量前失败') && line.includes('first stream request failed')));
+});
+
 test('executeRun: injects the current workspace root into the LLM context', async () => {
   const store = new MemoryStore();
   const thread = await store.createThread(scope);

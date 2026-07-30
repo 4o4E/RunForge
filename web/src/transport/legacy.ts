@@ -84,6 +84,8 @@ export function toUiEvent(e: AgentEvent): UiEvent | null {
       return { kind: 'notice', step: e.step, message: e.question ? `${e.reason}\n${e.question}` : e.reason };
     case 'recovery':
       return { kind: 'notice', step: e.step, message: e.message };
+    case 'stream_retry':
+      return null;
     case 'final':
       return { kind: 'final', step: e.step, output: e.output, finishReason: e.finishReason, rawFinishReason: e.rawFinishReason };
     case 'error':
