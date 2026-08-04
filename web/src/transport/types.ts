@@ -22,6 +22,7 @@ export type UiEvent =
   | { kind: 'text'; step: number; delta: string }
   | { kind: 'tool'; step: number; id: string; name: string; input?: unknown; output?: unknown; startedAt?: string; endedAt?: string; durationMs?: number }
   | { kind: 'plan_update'; step: number; goal: GoalState }
+  | { kind: 'compaction'; step: number; data: Extract<AgentEvent, { type: 'compaction' }> }
   | { kind: 'notice'; step: number; message: string }
   | { kind: 'ask_user_question'; step: number; runId?: string; spec: AskUserSpec }
   | { kind: 'ask_user_answer'; step: number; answer: AskUserAnswer }
@@ -39,5 +40,5 @@ export interface UiTransport {
   /** 订阅 run 的实时 UiEvent，并返回取消订阅函数。 */
   subscribe(runId: string, onEvent: (e: UiEvent) => void, onClose?: () => void): () => void;
 }
-import type { AskUserAnswer, AskUserSpec, FinishReason, GoalState } from '@/api';
+import type { AgentEvent, AskUserAnswer, AskUserSpec, FinishReason, GoalState } from '@/api';
 import type { StreamStats } from '@/api';

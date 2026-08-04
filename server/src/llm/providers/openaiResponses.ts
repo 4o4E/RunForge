@@ -13,6 +13,8 @@ interface ResponsesRequest {
   tools?: { type: 'function'; name: string; description: string; parameters: Record<string, unknown> }[];
   tool_choice?: 'auto';
   max_output_tokens?: number;
+  store: false;
+  include: ['reasoning.encrypted_content'];
 }
 
 function imageDataUrl(data: string, mimeType: string): string {
@@ -45,6 +47,18 @@ export function buildResponsesRequest(
     if (m.role === 'user') {
       input.push({ role: 'user', content: responsesUserContent(m) });
     } else if (m.role === 'assistant') {
+      for (const reasoning of m.providerState?.reasoningParts ?? []) {
+        const openai = reasoning.providerOptions?.openai ?? {};
+        const encryptedContent = openai.reasoningEncryptedContent ?? openai.encrypted_content;
+        if (typeof encryptedContent === 'string') {
+          input.push({
+            type: 'reasoning',
+            ...(typeof openai.itemId === 'string' ? { id: openai.itemId } : {}),
+            encrypted_content: encryptedContent,
+            summary: reasoning.text ? [{ type: 'summary_text', text: reasoning.text }] : [],
+          });
+        }
+      }
       if (m.content) input.push({ role: 'assistant', content: m.content });
       for (const tc of m.toolCalls ?? []) {
         input.push({ type: 'function_call', call_id: tc.id, name: tc.name, arguments: tc.arguments });
@@ -63,6 +77,9 @@ export function buildResponsesRequest(
       : undefined,
     tool_choice: tools.length ? 'auto' : undefined,
     max_output_tokens: cfg.maxTokens,
+    store: false,
+    // 新版 Responses 在 stateless 模式默认返回该字段；显式 include 同时兼容旧网关。
+    include: ['reasoning.encrypted_content'],
   };
 }
 
@@ -77,6 +94,8 @@ interface ResponsesData {
     call_id?: string;
     name?: string;
     arguments?: string;
+    id?: string;
+    encrypted_content?: string | null;
   }[];
   usage?: { input_tokens?: number; output_tokens?: number };
 }
@@ -95,6 +114,7 @@ function mapResponsesFinishReason(data: ResponsesData, toolCalls: LlmResult['too
 export function parseResponsesOutput(data: ResponsesData): LlmResult {
   let content: string | null = null;
   let reasoning: string | null = null;
+  const reasoningParts: NonNullable<LlmResult['providerState']>['reasoningParts'] = [];
   const toolCalls: LlmResult['toolCalls'] = [];
 
   for (const item of data.output ?? []) {
@@ -111,6 +131,17 @@ export function parseResponsesOutput(data: ResponsesData): LlmResult {
         .map((c) => c.text)
         .join('\n');
       if (text) reasoning = (reasoning ?? '') + text;
+      if (item.encrypted_content) {
+        reasoningParts.push({
+          text,
+          providerOptions: {
+            openai: {
+              ...(item.id ? { itemId: item.id } : {}),
+              reasoningEncryptedContent: item.encrypted_content,
+            },
+          },
+        });
+      }
     } else if (item.type === 'function_call') {
       toolCalls.push({ id: item.call_id ?? '', name: item.name ?? '', arguments: item.arguments ?? '{}' });
     }
@@ -120,6 +151,7 @@ export function parseResponsesOutput(data: ResponsesData): LlmResult {
   return {
     content,
     reasoning,
+    providerState: reasoningParts.length ? { reasoningParts } : undefined,
     toolCalls,
     usage: { inputTokens: data.usage?.input_tokens, outputTokens: data.usage?.output_tokens },
     ...finish,

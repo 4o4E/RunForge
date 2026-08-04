@@ -122,9 +122,18 @@ export function maskOldAssistantToolCalls(
     const shouldMask = i < cutoff || m.toolCalls.some((call) => force.has(call.name));
     if (!shouldMask) return m;
     const result = maskToolCallArguments(m.toolCalls);
-    if (!result.changed) return m;
+    const dropProviderState = i < cutoff && Boolean(m.providerState);
+    if (!result.changed && !dropProviderState) return m;
     masked += 1;
-    return { ...m, toolCalls: result.calls, collapsed: 'masked' as const };
+    // 旧工具轮被 mask 后不再回放同轮的加密推理状态，否则上下文看似缩短，
+    // 实际仍会把旧 reasoning item 发送给 OpenAI。近期 display payload 只裁参数，
+    // 当前进程仍保留它完成紧随其后的工具续推理。
+    return {
+      ...m,
+      toolCalls: result.calls,
+      providerState: dropProviderState ? undefined : m.providerState,
+      collapsed: 'masked' as const,
+    };
   });
   return { messages: out, masked };
 }

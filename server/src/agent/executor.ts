@@ -228,16 +228,6 @@ function redactToolArgs(value: unknown): unknown {
   return out;
 }
 
-function safeToolCallArguments(rawArguments: string): string {
-  const parsed = parseToolArguments(rawArguments || '{}');
-  if (!parsed.ok) return rawArguments;
-  return JSON.stringify(redactToolArgs(parsed.args));
-}
-
-function redactToolCalls(toolCalls: LlmMessage['toolCalls']): LlmMessage['toolCalls'] {
-  return toolCalls?.map((call) => ({ ...call, arguments: safeToolCallArguments(call.arguments) }));
-}
-
 function toolSignature(name: string, args: unknown): string {
   return `${name}:${stableJson(args)}`;
 }
@@ -501,7 +491,14 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     if (maskedIds.length) {
       await store.markMessagesCollapsed(scope, maskedIds, 'masked');
     }
-    await emit(stepId, { type: 'compaction', step: currentStepIdx, ...compaction.info });
+    await emit(stepId, {
+      type: 'compaction',
+      step: currentStepIdx,
+      occurredAt: new Date().toISOString(),
+      ...compaction.info,
+      affected: compaction.affected,
+      summary: compaction.summaryMessage?.content ?? undefined,
+    });
   };
 
   let currentCtx: ContextManager | null = null;
@@ -731,7 +728,12 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           const result = await subagentProvider.complete(messages, tools);
           usage = addUsage(usage, result.usage);
           output = result.content?.trim() || output;
-          const assistantMsg = { role: 'assistant' as const, content: result.content, toolCalls: result.toolCalls.length ? result.toolCalls : undefined };
+          const assistantMsg = {
+            role: 'assistant' as const,
+            content: result.content,
+            toolCalls: result.toolCalls.length ? result.toolCalls : undefined,
+            providerState: result.providerState,
+          };
           messages.push(assistantMsg);
           if (!result.toolCalls.length) break;
 
@@ -1047,7 +1049,14 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         }
       }
 
-      const assistantMsg = { role: 'assistant' as const, content, toolCalls: redactToolCalls(toolCalls.length ? toolCalls : undefined) };
+      // messages 是 Debug 与恢复的原始日志；普通事件仍走 redactToolArgs，避免默认 UI
+      // 暴露密钥。OpenAI 的加密推理状态只做不透明回放，应用不会尝试解密。
+      const assistantMsg = {
+        role: 'assistant' as const,
+        content,
+        toolCalls: toolCalls.length ? toolCalls : undefined,
+        providerState: result.providerState,
+      };
       ctx.add(assistantMsg);
       ctx.setLastDbId(await store.addMessage(scope, threadId, runId, step.id, assistantMsg));
 

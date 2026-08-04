@@ -6,6 +6,7 @@ import { sanitizeThreadMessagesForModel } from './messageView.js';
 import type {
   AuthTokenRow,
   PushSubscriptionRow,
+  RawThreadMessage,
   RunRow,
   Scope,
   ShellActor,
@@ -21,6 +22,7 @@ import type {
   TenantRow,
   ThreadNoticeRow,
   ThreadMessage,
+  ThreadMessageMetadata,
   ThreadSearchResultRow,
   ThreadRow,
   UserRow,
@@ -51,9 +53,11 @@ interface StoredMsg {
   content: string | null;
   toolCalls?: LlmMessage['toolCalls'];
   toolCallId?: string;
+  providerState?: LlmMessage['providerState'];
   collapsed?: 'masked' | 'summarized';
   summaryOf?: number[];
   seq: number;
+  created_at: string;
 }
 
 /** In-memory Store for unit tests and network-free local runs. */
@@ -483,9 +487,54 @@ export class MemoryStore implements Store {
             ? maskToolCallArguments(m.toolCalls).calls
             : m.toolCalls,
         toolCallId: m.toolCallId,
+        providerState: m.collapsed === 'masked' ? undefined : m.providerState,
         collapsed: m.collapsed,
       }));
     return sanitizeThreadMessagesForModel(messages);
+  }
+  async loadRawThreadMessages(scope: Scope, threadId: string, options: { runId?: string | null } = {}): Promise<RawThreadMessage[]> {
+    if (!this.threadOwnedBy(this.threads.get(threadId), scope)) return [];
+    const branchRunIds = this.branchRunIds(threadId, options.runId);
+    return this.messages
+      .filter((message) => branchRunIds.has(message.run_id) && message.thread_id === threadId && !isEphemeralSystemMessage(message.role, message.content))
+      .sort((a, b) => a.seq - b.seq)
+      .map((message) => ({
+        id: message.seq,
+        run_id: message.run_id,
+        step_id: message.step_id,
+        role: message.role,
+        content: message.content,
+        toolCalls: message.toolCalls,
+        toolCallId: message.toolCallId,
+        providerState: message.providerState,
+        collapsed: message.collapsed,
+        summaryOf: message.summaryOf ?? [],
+        created_at: message.created_at,
+      }));
+  }
+  async loadThreadMessageMetadata(scope: Scope, threadId: string, options: { runId?: string | null } = {}): Promise<ThreadMessageMetadata[]> {
+    if (!this.threadOwnedBy(this.threads.get(threadId), scope)) return [];
+    const branchRunIds = this.branchRunIds(threadId, options.runId);
+    return this.messages
+      .filter((message): message is StoredMsg & { collapsed: 'masked' | 'summarized' } => (
+        branchRunIds.has(message.run_id)
+        && message.thread_id === threadId
+        && message.collapsed != null
+        && !isEphemeralSystemMessage(message.role, message.content)
+      ))
+      .sort((a, b) => a.seq - b.seq)
+      .map((message) => ({
+        id: message.seq,
+        run_id: message.run_id,
+        step_id: message.step_id,
+        role: message.role,
+        toolCalls: (message.toolCalls ?? []).map((call) => ({ id: call.id, name: call.name, argumentChars: call.arguments.length })),
+        toolCallId: message.toolCallId ?? null,
+        collapsed: message.collapsed,
+        summaryOf: message.summaryOf ?? [],
+        contentChars: message.content?.length ?? 0,
+        created_at: message.created_at,
+      }));
   }
   async countRunMessages(scope: Scope, runId: string): Promise<number> {
     if (!this.runOwnedBy(this.runs.get(runId), scope)) return 0;
@@ -502,7 +551,9 @@ export class MemoryStore implements Store {
       content: msg.content,
       toolCalls: msg.toolCalls,
       toolCallId: msg.toolCallId,
+      providerState: msg.providerState,
       seq,
+      created_at: this.now(),
     });
     return seq;
   }

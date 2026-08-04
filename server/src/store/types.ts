@@ -174,6 +174,27 @@ export interface ThreadMessage extends LlmMessage {
   id: number;
 }
 
+/** Debug/API 使用的全保真消息行；不应用 masking，也不跳过 summarized 行。 */
+export interface RawThreadMessage extends ThreadMessage {
+  run_id: string;
+  step_id: string | null;
+  summaryOf: number[];
+  created_at: string;
+}
+
+export interface ThreadMessageMetadata {
+  id: number;
+  run_id: string;
+  step_id: string | null;
+  role: LlmMessage['role'];
+  toolCalls: Array<{ id: string; name: string; argumentChars: number }>;
+  toolCallId: string | null;
+  collapsed: 'masked' | 'summarized';
+  summaryOf: number[];
+  contentChars: number;
+  created_at: string;
+}
+
 export interface ThreadSearchResultRow {
   thread_id: string;
   thread_title: string | null;
@@ -303,6 +324,10 @@ export interface Store {
   /** Conversation history for a thread, in order, as the compacted LLM-facing view:
    *  masked tool results return their placeholder, 'summarized' rows are omitted. */
   loadThreadMessages(scope: Scope, threadId: string, options?: { runId?: string | null }): Promise<ThreadMessage[]>;
+  /** 普通 UI 只取已压缩消息的轻量元数据，不读取原始大载荷。 */
+  loadThreadMessageMetadata(scope: Scope, threadId: string, options?: { runId?: string | null }): Promise<ThreadMessageMetadata[]>;
+  /** 返回当前分支的原始持久化消息，只允许受身份校验的 Debug 接口调用。 */
+  loadRawThreadMessages(scope: Scope, threadId: string, options?: { runId?: string | null }): Promise<RawThreadMessage[]>;
   countRunMessages(scope: Scope, runId: string): Promise<number>;
   /** Append a message; returns its DB id so compaction can reference it later. */
   addMessage(scope: Scope, threadId: string, runId: string, stepId: string | null, msg: LlmMessage): Promise<number>;

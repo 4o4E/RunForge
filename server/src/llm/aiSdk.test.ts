@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createAiSdkProvider, toModelMessages } from './providers/aiSdk.js';
+import { createAiSdkProvider, providerStateFromResponseMessages, toModelMessages } from './providers/aiSdk.js';
+import type { ModelMessage } from 'ai';
 import type { LlmMessage } from './types.js';
 
 test('toModelMessages: maps system/user/assistant/tool roles', () => {
@@ -41,6 +42,32 @@ test('toModelMessages: assistant without tool calls is a plain string', () => {
   const out = toModelMessages([{ role: 'assistant', content: 'plain' }]);
   assert.equal(out[0].role, 'assistant');
   assert.equal(out[0].content, 'plain');
+});
+
+test('AI SDK provider state: encrypted reasoning survives response extraction and prompt replay', () => {
+  const providerOptions = {
+    openai: { itemId: 'rs_1', reasoningEncryptedContent: 'encrypted-reasoning' },
+  };
+  const state = providerStateFromResponseMessages([
+    {
+      role: 'assistant',
+      content: [
+        { type: 'reasoning', text: '', providerOptions },
+        { type: 'tool-call', toolCallId: 'c1', toolName: 'echo', input: { text: 'hi' } },
+      ],
+    },
+  ] as ModelMessage[]);
+  assert.equal(state?.reasoningParts?.[0].providerOptions?.openai.reasoningEncryptedContent, 'encrypted-reasoning');
+
+  const replay = toModelMessages([{
+    role: 'assistant',
+    content: null,
+    providerState: state,
+    toolCalls: [{ id: 'c1', name: 'echo', arguments: '{"text":"hi"}' }],
+  }]);
+  const parts = replay[0].content as Array<{ type: string; providerOptions?: typeof providerOptions }>;
+  assert.deepEqual(parts.map((part) => part.type), ['reasoning', 'tool-call']);
+  assert.equal(parts[0].providerOptions?.openai.reasoningEncryptedContent, 'encrypted-reasoning');
 });
 
 test('toModelMessages: maps user image parts', () => {
@@ -103,7 +130,9 @@ test('AI SDK provider: configured streaming also applies to complete()', async (
     }, { flavor: 'openai', reasoningTag: '' });
 
     await assert.rejects(provider.complete([{ role: 'user', content: '你好' }], []));
-    assert.equal(JSON.parse(requestBody).stream, true);
+    const body = JSON.parse(requestBody);
+    assert.equal(body.stream, true);
+    assert.equal(body.store, false);
   } finally {
     globalThis.fetch = originalFetch;
   }

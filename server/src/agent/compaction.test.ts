@@ -109,6 +109,29 @@ test('maskOldAssistantToolCalls keeps non-forced recent tool args', () => {
   assert.equal(messages[1].toolCalls?.[0]?.arguments, hugeArgs);
 });
 
+test('maskOldAssistantToolCalls drops old encrypted reasoning even when tool args are small', () => {
+  const messages: LlmMessage[] = [
+    {
+      role: 'assistant',
+      content: null,
+      toolCalls: [{ id: 'c1', name: 'echo', arguments: '{}' }],
+      providerState: {
+        reasoningParts: [{
+          text: '',
+          providerOptions: { openai: { reasoningEncryptedContent: 'encrypted' } },
+        }],
+      },
+    },
+    { role: 'tool', content: 'ok', toolCallId: 'c1' },
+    { role: 'user', content: 'next' },
+  ];
+  const { messages: compacted, masked } = maskOldAssistantToolCalls(messages, { keepRecent: 1 });
+  assert.equal(masked, 1);
+  assert.equal(compacted[0].collapsed, 'masked');
+  assert.equal(compacted[0].providerState, undefined);
+  assert.equal(compacted[0].toolCalls?.[0].arguments, '{}');
+});
+
 test('slidingWindow keeps system + first user anchor and cuts on a safe boundary', () => {
   const msgs: LlmMessage[] = [
     { role: 'system', content: 'sys' },

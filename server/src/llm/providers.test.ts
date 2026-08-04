@@ -32,9 +32,35 @@ test('openai-responses: builds request with instructions + function_call items',
   assert.equal(req.instructions, 'be brief');
   assert.equal(req.tools?.[0].type, 'function');
   assert.equal(req.tools?.[0].name, 'echo'); // flat, not nested under "function"
+  assert.equal(req.store, false);
+  assert.deepEqual(req.include, ['reasoning.encrypted_content']);
   // input should contain the user msg, the function_call, and the function_call_output
   const types = req.input.map((i) => (i as { type?: string; role?: string }).type ?? (i as { role?: string }).role);
   assert.deepEqual(types, ['user', 'function_call', 'function_call_output']);
+});
+
+test('openai-responses: persists and replays encrypted reasoning items', () => {
+  const parsed = parseResponsesOutput({
+    output: [{
+      type: 'reasoning',
+      id: 'rs_1',
+      encrypted_content: 'encrypted-reasoning',
+      summary: [{ type: 'summary_text', text: 'checked the inputs' }],
+    }],
+  });
+  assert.equal(parsed.reasoning, 'checked the inputs');
+  assert.equal(parsed.providerState?.reasoningParts?.[0].providerOptions?.openai.reasoningEncryptedContent, 'encrypted-reasoning');
+
+  const req = buildResponsesRequest([{
+    role: 'assistant',
+    content: null,
+    providerState: parsed.providerState,
+    toolCalls: [{ id: 'c1', name: 'echo', arguments: '{}' }],
+  }], TOOLS, { model: 'gpt-x', maxTokens: 100 });
+  const reasoning = req.input[0] as { type: string; id?: string; encrypted_content?: string };
+  assert.equal(reasoning.type, 'reasoning');
+  assert.equal(reasoning.id, 'rs_1');
+  assert.equal(reasoning.encrypted_content, 'encrypted-reasoning');
 });
 
 test('openai-responses: maps image parts to input_image content', () => {

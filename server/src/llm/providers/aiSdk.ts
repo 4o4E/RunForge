@@ -24,7 +24,7 @@ import {
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAnthropic } from '@ai-sdk/anthropic';
-import type { LlmConfig, LlmDelta, LlmMessage, LlmResult, LlmTool, Provider } from '../types.js';
+import type { LlmConfig, LlmDelta, LlmMessage, LlmProviderState, LlmResult, LlmTool, Provider } from '../types.js';
 import { config } from '../../config.js';
 import { toolArgumentsForModel } from '../toolArgs.js';
 
@@ -40,6 +40,12 @@ export interface AiSdkOptions {
    */
   reasoningTag?: string;
 }
+
+type ReasoningModelPart = {
+  type: 'reasoning';
+  text: string;
+  providerOptions?: TextPart['providerOptions'];
+};
 
 function buildModel(cfg: LlmConfig, opts: AiSdkOptions): LanguageModel {
   let model: LanguageModel;
@@ -99,10 +105,23 @@ export function toModelMessages(msgs: LlmMessage[]): ModelMessage[] {
         }
         break;
       case 'assistant': {
-        if (m.toolCalls && m.toolCalls.length) {
-          const parts: Array<TextPart | ToolCallPart> = [];
-          if (m.content) parts.push({ type: 'text', text: m.content });
-          for (const tc of m.toolCalls) {
+        if (m.toolCalls?.length || m.providerState?.reasoningParts?.length || m.providerState?.textProviderOptions) {
+          const parts: Array<TextPart | ReasoningModelPart | ToolCallPart> = [];
+          for (const reasoning of m.providerState?.reasoningParts ?? []) {
+            parts.push({
+              type: 'reasoning',
+              text: reasoning.text,
+              providerOptions: reasoning.providerOptions,
+            });
+          }
+          if (m.content) {
+            parts.push({
+              type: 'text',
+              text: m.content,
+              providerOptions: m.providerState?.textProviderOptions,
+            });
+          }
+          for (const tc of m.toolCalls ?? []) {
             const input = toolArgumentsForModel(tc.arguments || '{}');
             parts.push({ type: 'tool-call', toolCallId: tc.id, toolName: tc.name, input });
           }
@@ -130,6 +149,22 @@ export function toModelMessages(msgs: LlmMessage[]): ModelMessage[] {
   return out;
 }
 
+/** AI SDK 已把 OpenAI item id / encrypted_content 归一到 providerOptions；
+ * 这里只提取 assistant 响应里需要跨轮回放的最小状态。 */
+export function providerStateFromResponseMessages(messages: ModelMessage[]): LlmProviderState | undefined {
+  const assistant = [...messages].reverse().find((message) => message.role === 'assistant');
+  if (!assistant || !Array.isArray(assistant.content)) return undefined;
+  const reasoningParts = assistant.content.flatMap((part) =>
+    part.type === 'reasoning' ? [{ text: part.text, providerOptions: part.providerOptions }] : [],
+  );
+  const textPart = assistant.content.find((part): part is TextPart => part.type === 'text');
+  if (!reasoningParts.length && !textPart?.providerOptions) return undefined;
+  return {
+    reasoningParts: reasoningParts.length ? reasoningParts : undefined,
+    textProviderOptions: textPart?.providerOptions,
+  };
+}
+
 /** Map neutral `LlmTool[]` onto an AI SDK tool set. No `execute`: the SDK
  *  surfaces the tool call and the executor runs it. */
 function toToolSet(tools: LlmTool[]) {
@@ -151,6 +186,9 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
     maxOutputTokens: cfg.maxTokens,
     maxRetries: cfg.retries,
     abortSignal: AbortSignal.timeout(cfg.timeoutMs),
+    // OpenAI Responses 走无状态模式，确保 reasoning item 返回不可解密的
+    // encrypted_content，并由 RunForge 自己持久化；其他 flavor 不发送此选项。
+    providerOptions: opts.flavor === 'openai' ? { openai: { store: false } } : undefined,
     // OTEL GenAI spans (chat + tool calls) when telemetry is on. No-op otherwise.
     experimental_telemetry: {
       isEnabled: config.telemetry.enabled,
@@ -173,17 +211,19 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
       else if (part.type === 'tool-call') onDelta({ toolInputAvailable: { id: part.toolCallId, name: part.toolName, input: part.input } });
       else if (part.type === 'error') throw part.error;
     }
-    const [text, reasoningText, toolCalls, usage, finishReason, rawFinishReason] = await Promise.all([
+    const [text, reasoningText, toolCalls, usage, finishReason, rawFinishReason, response] = await Promise.all([
       r.text,
       r.reasoningText,
       r.toolCalls,
       r.usage,
       r.finishReason,
       r.rawFinishReason,
+      r.response,
     ]);
     return {
       content: text || null,
       reasoning: reasoningText ?? null,
+      providerState: providerStateFromResponseMessages(response.messages),
       toolCalls: toolCalls.map((c) => ({
         id: c.toolCallId,
         name: c.toolName,
@@ -209,6 +249,7 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
       return {
         content: r.text || null,
         reasoning: r.reasoningText ?? null,
+        providerState: providerStateFromResponseMessages(r.response.messages),
         toolCalls: r.toolCalls.map((c) => ({
           id: c.toolCallId,
           name: c.toolName,

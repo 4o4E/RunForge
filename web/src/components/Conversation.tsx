@@ -1,5 +1,5 @@
 import type { UIMessage } from 'ai';
-import { Activity, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Fingerprint, FileText, GitBranch, Pencil, Workflow } from 'lucide-react';
+import { Activity, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Fingerprint, FileText, GitBranch, PackageMinus, Pencil, Workflow } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import {
@@ -18,7 +18,7 @@ import { cn } from '@/lib/utils';
 import { MarkdownContent } from './MarkdownContent';
 import type { StreamdownProps } from 'streamdown';
 import { AskUserQuestionCard, emptyAskUserDraft, type AskUserDraft } from './AskUserCard';
-import type { AskUserAnswer, AskUserSpec, GoalState, StreamStats } from '@/api';
+import type { AgentEvent, AskUserAnswer, AskUserSpec, GoalState, StreamStats } from '@/api';
 import type { RunBranchInfo, ThreadNoticeData } from '../history';
 
 type Part = UIMessage['parts'][number];
@@ -70,7 +70,7 @@ function isReasoningPart(p: Part): p is Extract<Part, { type: 'reasoning' }> {
 
 function isActivityPart(p: Part): boolean {
   if (isCompletionUpdatePlan(p)) return false;
-  return isToolPart(p) || isReasoningPart(p);
+  return isToolPart(p) || isReasoningPart(p) || p.type === 'data-context-compaction';
 }
 
 function isHiddenDataPart(p: Part): boolean {
@@ -503,6 +503,10 @@ function ToolBlock({
     input?: unknown;
     output?: unknown;
     errorText?: string;
+    contextState?: {
+      inputCollapsed?: 'masked' | 'summarized' | null;
+      outputCollapsed?: 'masked' | 'summarized' | null;
+    };
   };
   const [override, setOverride] = useState<boolean | null>(null);
   const prevActive = useRef(active);
@@ -514,18 +518,84 @@ function ToolBlock({
   }, [active]);
   const open = override ?? active;
   const toolName = p.toolName ?? p.type.split('-').slice(1).join('-');
+  const contextStatus = p.contextState?.inputCollapsed === 'summarized' || p.contextState?.outputCollapsed === 'summarized'
+    ? '已摘要'
+    : p.contextState?.inputCollapsed === 'masked' || p.contextState?.outputCollapsed === 'masked'
+      ? '已动态裁剪'
+      : undefined;
   return (
     <Tool open={open} onOpenChange={setOverride}>
       {p.type === 'dynamic-tool' ? (
-        <ToolHeader type="dynamic-tool" toolName={p.toolName ?? 'tool'} state={p.state} duration={formatDuration(durationFromTiming(timing))} />
+        <ToolHeader type="dynamic-tool" toolName={p.toolName ?? 'tool'} state={p.state} duration={formatDuration(durationFromTiming(timing))} contextStatus={contextStatus} />
       ) : (
-        <ToolHeader type={p.type as ToolUIPart['type']} state={p.state} duration={formatDuration(durationFromTiming(timing))} />
+        <ToolHeader type={p.type as ToolUIPart['type']} state={p.state} duration={formatDuration(durationFromTiming(timing))} contextStatus={contextStatus} />
       )}
       <ToolContent>
         <ToolInput input={p.input} toolName={toolName} workspaceRoot={workspaceRoot} onOpenRemoteFile={onOpenRemoteFile} />
         <ToolOutput output={p.output as never} errorText={p.errorText} />
       </ToolContent>
     </Tool>
+  );
+}
+
+type CompactionEvent = Extract<AgentEvent, { type: 'compaction' }>;
+
+function compactionActionLabel(action: CompactionEvent['affected'][number]['action']): string {
+  if (action === 'masked') return '动态裁剪';
+  if (action === 'summarized') return '摘要折叠';
+  return '内存窗口移除';
+}
+
+function compactionTime(value: string): string {
+  const time = new Date(value);
+  if (!Number.isFinite(time.getTime())) return '';
+  return time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function ContextCompactionBlock({ data }: { data: CompactionEvent }) {
+  const [open, setOpen] = useState(false);
+  const affected = data.affected ?? [];
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} className="group/compaction not-prose w-full">
+      <CollapsibleTrigger className="flex h-6 w-full items-center gap-2 text-left text-sm text-muted-foreground transition-colors hover:text-foreground">
+        <PackageMinus className="size-4 shrink-0" />
+        <span className="min-w-0 truncate">上下文压缩 · Step {data.step}</span>
+        <span className="shrink-0 text-xs tabular-nums">{data.estBefore} → {data.estAfter} tokens</span>
+        {data.occurredAt && <span className="shrink-0 text-xs tabular-nums">{compactionTime(data.occurredAt)}</span>}
+        <ChevronDown className={cn('size-4 shrink-0 transition-transform', open && 'rotate-180')} />
+      </CollapsibleTrigger>
+      <CollapsibleContent className="mt-1 space-y-2 text-sm text-muted-foreground">
+        <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+          <span>裁剪 {data.masked}</span>
+          <span>摘要 {data.summarized}</span>
+          <span>窗口移除 {data.dropped}</span>
+          {data.reason && <span className="break-all">触发原因：{data.reason}</span>}
+        </div>
+        {affected.length > 0 && (
+          <div className="max-h-56 space-y-1 overflow-auto border-l border-border/60 pl-3">
+            {affected.map((item) => (
+              <div key={`${item.messageId}:${item.action}`} className="min-w-0">
+                <div className="flex flex-wrap items-center gap-x-2 text-xs">
+                  <span className="font-medium text-foreground">{compactionActionLabel(item.action)}</span>
+                  <span>消息 #{item.messageId}</span>
+                  <span>{item.toolNames.join(', ') || item.role}</span>
+                  <span>{item.originalChars} 字符</span>
+                </div>
+                {item.action === 'masked' && item.replacement && (
+                  <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/50 px-2 py-1 text-xs">{item.replacement}</pre>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {data.summary && (
+          <div>
+            <div className="mb-1 text-xs font-medium text-foreground">压缩摘要</div>
+            <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/50 px-2 py-1 text-xs">{data.summary}</pre>
+          </div>
+        )}
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 
@@ -599,6 +669,9 @@ function AssistantPart({
   }
   if (part.type === 'data-ask-user-cancel') {
     return null;
+  }
+  if (part.type === 'data-context-compaction') {
+    return <ContextCompactionBlock data={(part as { data: CompactionEvent }).data} />;
   }
   if (isToolPart(part)) {
     return (

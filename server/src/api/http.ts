@@ -24,6 +24,7 @@ import { getLlmSettings, getToolSettings, llmModelOptions } from '../settings.js
 import { createPolicy } from '../tools/policy.js';
 import { isWithin } from '../tools/policy.js';
 import type { Response } from 'express';
+import type { LlmProviderState } from '../llm/types.js';
 
 export const api = Router();
 
@@ -137,6 +138,16 @@ async function validateRunModelRef(scope: Scope, modelRef: string | null): Promi
 
 // --- Threads ---
 
+function encryptedReasoningStats(providerState: LlmProviderState | undefined): { count: number; chars: number } {
+  const encrypted = (providerState?.reasoningParts ?? []).flatMap((part) =>
+    Object.values(part.providerOptions ?? {}).flatMap((options) => {
+      const value = options.reasoningEncryptedContent ?? options.encrypted_content;
+      return typeof value === 'string' ? [value] : [];
+    }),
+  );
+  return { count: encrypted.length, chars: encrypted.reduce((sum, value) => sum + value.length, 0) };
+}
+
 api.get('/search', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
@@ -172,7 +183,50 @@ api.get('/threads/:id', async (req, res) => {
   const withEvents = await Promise.all(
     runs.map(async (run) => ({ ...run, events: await store.getEvents(scope, run.id) })),
   );
-  res.json({ thread, runs: withEvents, notices: await store.listThreadNotices(scope, thread.id) });
+  const debug = req.query.debug === '1' || req.query.debug === 'true';
+  const contextMessages = debug
+    ? (await store.loadRawThreadMessages(scope, thread.id)).map((message) => {
+        const encrypted = encryptedReasoningStats(message.providerState);
+        return {
+          id: message.id,
+          run_id: message.run_id,
+          step_id: message.step_id,
+          role: message.role,
+          tool_calls: (message.toolCalls ?? []).map((call) => ({
+            id: call.id,
+            name: call.name,
+            argumentChars: call.arguments.length,
+            arguments: call.arguments,
+          })),
+          tool_call_id: message.toolCallId ?? null,
+          collapsed: message.collapsed ?? null,
+          summary_of: message.summaryOf,
+          content_chars: message.content?.length ?? 0,
+          content: message.content,
+          encrypted_reasoning_count: encrypted.count,
+          encrypted_reasoning_chars: encrypted.chars,
+          created_at: message.created_at,
+        };
+      })
+    : (await store.loadThreadMessageMetadata(scope, thread.id)).map((message) => ({
+        id: message.id,
+        run_id: message.run_id,
+        step_id: message.step_id,
+        role: message.role,
+        tool_calls: message.toolCalls,
+        tool_call_id: message.toolCallId,
+        collapsed: message.collapsed,
+        summary_of: message.summaryOf,
+        content_chars: message.contentChars,
+        created_at: message.created_at,
+      }));
+  res.json({
+    thread,
+    runs: withEvents,
+    notices: await store.listThreadNotices(scope, thread.id),
+    context_messages: contextMessages,
+    debug,
+  });
 });
 
 // 更新 thread 元信息：重命名、置顶/取消置顶、归档/取消归档。

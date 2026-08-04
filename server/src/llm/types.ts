@@ -15,6 +15,21 @@ export type LlmContentPart =
   | { type: 'text'; text: string }
   | { type: 'image'; data: string; mimeType: string; path: string; name?: string };
 
+/** Provider 返回的推理状态。正文只用于可读摘要，providerOptions 中可能携带
+ *  OpenAI encrypted_content；应用不解密，只负责原样持久化和回放。 */
+export type LlmJsonValue = null | string | number | boolean | LlmJsonValue[] | LlmJsonObject;
+export interface LlmJsonObject { [key: string]: LlmJsonValue | undefined }
+
+export interface LlmReasoningPart {
+  text: string;
+  providerOptions?: Record<string, LlmJsonObject>;
+}
+
+export interface LlmProviderState {
+  reasoningParts?: LlmReasoningPart[];
+  textProviderOptions?: Record<string, LlmJsonObject>;
+}
+
 export interface LlmMessage {
   role: LlmRole;
   content: string | null;
@@ -24,6 +39,8 @@ export interface LlmMessage {
   toolCalls?: LlmToolCall[];
   /** tool turns only — links the result to a prior tool call */
   toolCallId?: string;
+  /** 供应商专用的可回放状态，不参与普通 UI 展示。 */
+  providerState?: LlmProviderState;
   /** Set by context compaction: 'masked' = tool output or old tool-call args
    *  elided to a placeholder, 'summarized' = folded into a summary message. */
   collapsed?: 'masked' | 'summarized';
@@ -46,6 +63,8 @@ export interface LlmResult {
   content: string | null;
   /** Chain-of-thought / thinking text, when the model exposes it (deepseek, o-series, claude thinking) */
   reasoning?: string | null;
+  /** 需要进入下一轮并跨进程恢复的供应商推理状态。 */
+  providerState?: LlmProviderState;
   toolCalls: LlmToolCall[];
   usage?: LlmUsage;
   /** 模型结束原因；用于区分正常 stop 和 max tokens 截断等非正常完成。 */

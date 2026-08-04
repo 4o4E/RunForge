@@ -25,9 +25,14 @@ test('maybeCompact reports the DB ids of newly-masked tool results', async () =>
     assert.ok(res, 'expected compaction to run');
     assert.deepEqual(res.collapsedIds, [11]); // 大工具结果对应的 DB id。
     assert.ok(res.info.masked >= 1);
+    const affectedTool = res.affected.find((item) => item.messageId === 11);
+    assert.equal(affectedTool?.action, 'masked');
+    assert.deepEqual(affectedTool?.toolCallIds, ['c1']);
     // 工作视图现在显示这条工具消息的占位内容。
     const view = ctx.all();
     assert.ok(view.some((m) => m.content === maskPlaceholder('x'.repeat(4000))));
+    ctx.setGoal('压缩后仍可刷新 Goal');
+    assert.ok(ctx.all().some((message) => message.role === 'system' && message.content === '压缩后仍可刷新 Goal'));
   } finally {
     config.agent.contextBudget = contextBudget;
     config.agent.keepRecentMessages = keepRecentMessages;
@@ -52,6 +57,9 @@ test('compactForHistory masks old bulky payloads even below live threshold', () 
     assert.equal(res.info.reason, 'post-run-history');
     assert.equal(res.info.summarized, 0);
     assert.ok(res.info.estAfter < res.info.estBefore);
+    const assistantReplacement = res.affected.find((item) => item.messageId === 20)?.replacement ?? '';
+    assert.match(assistantReplacement, /原始参数仅在 Debug 模式可见/);
+    assert.doesNotMatch(assistantReplacement, /zzzzzz/);
   } finally {
     config.agent.keepRecentMessages = keepRecentMessages;
   }
@@ -85,6 +93,11 @@ test('store persists collapsed flag and returns the masked view on reload', asyn
   assert.equal(toolMsg.content, maskPlaceholder('y'.repeat(3000)));
   assert.equal(toolMsg.toolCallId, 'c1');
 
+  const raw = await store.loadRawThreadMessages(scope, thread.id);
+  const rawTool = raw.find((message) => message.id === toolId);
+  assert.equal(rawTool?.content, 'y'.repeat(3000));
+  assert.equal(rawTool?.collapsed, 'masked');
+
   // 从重载视图重建 ContextManager 时，不会再次 mask 已经是占位符的内容。
   const ctx = new ContextManager(reloaded, 'next');
   assert.ok(ctx.all().some((m) => m.content === maskPlaceholder('y'.repeat(3000))));
@@ -111,6 +124,12 @@ test('store returns masked assistant tool-call args on reload', async () => {
     role: 'assistant',
     content: null,
     toolCalls: [{ id: 'file1', name: 'file_write', arguments: args }],
+    providerState: {
+      reasoningParts: [{
+        text: '',
+        providerOptions: { openai: { itemId: 'rs_1', reasoningEncryptedContent: 'encrypted-value' } },
+      }],
+    },
   });
   await store.addMessage(scope, thread.id, run.id, null, { role: 'tool', content: '文件已写入。', toolCallId: 'file1' });
   await store.markMessagesCollapsed(scope, [assistantId], 'masked');
@@ -126,6 +145,11 @@ test('store returns masked assistant tool-call args on reload', async () => {
   assert.equal(placeholder.not_executable, true);
   assert.equal(placeholder.tool_name, 'file_write');
   assert.equal('content' in placeholder, false);
+  assert.equal(reloaded[0].providerState, undefined);
+
+  const raw = await store.loadRawThreadMessages(scope, thread.id);
+  assert.equal(raw[0].toolCalls?.[0].arguments, args);
+  assert.equal(raw[0].providerState?.reasoningParts?.[0].providerOptions?.openai.reasoningEncryptedContent, 'encrypted-value');
 });
 
 test('summarized rows are omitted from the reloaded view', async () => {

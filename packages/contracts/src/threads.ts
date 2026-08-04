@@ -45,6 +45,31 @@ export interface RunWithEvents {
   events: AgentEvent[];
 }
 
+export interface ThreadContextToolCall {
+  id: string;
+  name: string;
+  /** 仅在显式 Debug 模式下返回。 */
+  arguments?: string;
+  argumentChars: number;
+}
+
+export interface ThreadContextMessage {
+  id: number;
+  run_id: string;
+  step_id: string | null;
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  tool_calls: ThreadContextToolCall[];
+  tool_call_id: string | null;
+  collapsed: 'masked' | 'summarized' | null;
+  summary_of: number[];
+  content_chars: number;
+  /** 仅在显式 Debug 模式下返回；默认详情接口不会携带原文。 */
+  content?: string | null;
+  encrypted_reasoning_count?: number;
+  encrypted_reasoning_chars?: number;
+  created_at: string;
+}
+
 export interface RunBranchInput {
   input?: string;
   modelRef?: string | null;
@@ -54,6 +79,8 @@ export interface ThreadDetailResponse {
   thread: Thread;
   runs: RunWithEvents[];
   notices: ThreadNotice[];
+  context_messages: ThreadContextMessage[];
+  debug: boolean;
 }
 
 export interface ThreadForkResponse {

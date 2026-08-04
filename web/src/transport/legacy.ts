@@ -13,7 +13,7 @@ function defaultAskSpec(question: string): AskUserSpec {
 }
 
 /** Map one wire `AgentEvent` onto the normalized `UiEvent` model, or `null` for
- *  events with nothing to render (e.g. `compaction` telemetry) and any future
+ *  events with nothing to render and any future
  *  server event this client doesn't model yet. Returning `null` instead of
  *  `undefined` keeps an unknown frame from crashing the fold/stream — callers
  *  filter it out. Exported so historical runs loaded over REST normalize the
@@ -64,6 +64,16 @@ export function toUiEvent(e: AgentEvent): UiEvent | null {
       };
     case 'plan_update':
       return { kind: 'plan_update', step: e.step, goal: e.goal };
+    case 'compaction':
+      return {
+        kind: 'compaction',
+        step: e.step,
+        data: {
+          ...e,
+          occurredAt: e.occurredAt ?? '',
+          affected: e.affected ?? [],
+        },
+      };
     case 'shell_session_opened':
     case 'shell_session_closed':
     case 'shell_lease_changed':
@@ -91,7 +101,7 @@ export function toUiEvent(e: AgentEvent): UiEvent | null {
     case 'error':
       return { kind: 'error', step: e.step, message: e.message, finishReason: e.finishReason, rawFinishReason: e.rawFinishReason };
     default:
-      // `compaction` and any unmodeled future event: no UI representation.
+      // 未建模的未来事件不进入 UI，避免未知帧破坏流式折叠。
       return null;
   }
 }

@@ -221,6 +221,15 @@ export function uiEventStreamToChunks(
             closeReason();
             safe({ type: 'data-plan-state', id: `plan-${e.step}`, data: e.goal } as unknown as UIMessageChunk);
             break;
+          case 'compaction':
+            closeText();
+            closeReason();
+            safe({
+              type: 'data-context-compaction',
+              id: `compaction-${e.step}-${e.data.occurredAt}`,
+              data: e.data,
+            } as unknown as UIMessageChunk);
+            break;
           case 'final': {
             // If this step produced no streamed text, surface the final output as
             // a text part; otherwise it was already streamed via 'text' deltas.

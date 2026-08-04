@@ -290,3 +290,41 @@ test('Phase 2: 同一租户下不同用户互相看不到对方的 thread（user
     close();
   }
 });
+
+test('GET /api/threads/:id: 原始工具载荷只在显式 Debug 模式返回', async () => {
+  const owner = await seedOwner('tn_debug_context', 'owner@debug-context.test', 'pw');
+  const scope = { tenantId: 'tn_debug_context', userId: owner.id };
+  const jwt = signTenantAccessToken({ id: owner.id, tenantId: scope.tenantId, role: 'owner' });
+  const thread = await store.createThread(scope, 'debug context');
+  const run = await store.createRun(scope, thread.id, 'inspect');
+  const assistantId = await store.addMessage(scope, thread.id, run.id, null, {
+    role: 'assistant',
+    content: null,
+    toolCalls: [{ id: 'call_debug', name: 'shell', arguments: '{"command":"echo raw"}' }],
+  });
+  await store.addMessage(scope, thread.id, run.id, null, {
+    role: 'tool',
+    content: 'raw output',
+    toolCallId: 'call_debug',
+  });
+  await store.markMessagesCollapsed(scope, [assistantId], 'masked');
+
+  const { port, close } = await listen(buildApp());
+  try {
+    const headers = { Authorization: `Bearer ${jwt}` };
+    const normal = await fetch(`http://127.0.0.1:${port}/api/threads/${thread.id}`, { headers });
+    const normalBody = (await normal.json()) as { debug: boolean; context_messages: Array<{ content?: string; tool_calls: Array<{ arguments?: string }> }> };
+    assert.equal(normalBody.debug, false);
+    assert.equal(normalBody.context_messages.length, 1);
+    assert.equal(normalBody.context_messages.some((message) => Object.prototype.hasOwnProperty.call(message, 'content')), false);
+    assert.equal(normalBody.context_messages.some((message) => message.tool_calls.some((call) => call.arguments !== undefined)), false);
+
+    const debug = await fetch(`http://127.0.0.1:${port}/api/threads/${thread.id}?debug=1`, { headers });
+    const debugBody = (await debug.json()) as { debug: boolean; context_messages: Array<{ content?: string; tool_calls: Array<{ arguments?: string }> }> };
+    assert.equal(debugBody.debug, true);
+    assert.equal(debugBody.context_messages.some((message) => message.content === 'raw output'), true);
+    assert.equal(debugBody.context_messages.some((message) => message.tool_calls.some((call) => call.arguments === '{"command":"echo raw"}')), true);
+  } finally {
+    close();
+  }
+});

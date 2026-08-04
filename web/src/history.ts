@@ -2,7 +2,7 @@
 // 每个 run 会变成一条用户消息和一条由事件折叠出来的 assistant 消息。
 
 import type { UIMessage } from 'ai';
-import type { RunWithEvents, StreamStats, ThreadNotice } from './api';
+import type { RunWithEvents, StreamStats, ThreadContextMessage, ThreadNotice } from './api';
 import { toUiEvent } from './transport/legacy';
 import type { UiEvent } from './transport/types';
 
@@ -188,6 +188,11 @@ export function foldUiEventsToParts(events: UiEvent[]): Part[] {
         flushText();
         parts.push({ type: 'data-plan-state', id: `plan-${e.step}`, data: e.goal } as unknown as Part);
         break;
+      case 'compaction':
+        flushReason();
+        flushText();
+        parts.push({ type: 'data-context-compaction', id: `compaction-${e.step}-${e.data.occurredAt}`, data: e.data } as unknown as Part);
+        break;
       case 'final':
         flushReason();
         if (textBuf) flushText();
@@ -213,6 +218,52 @@ export function foldUiEventsToParts(events: UiEvent[]): Part[] {
     parts.push({ type: 'data-stream-stats', id: `stats-${latestStats.updatedAt}`, data: latestStats } as unknown as Part);
   }
   return parts;
+}
+
+function debugToolInput(value: string): unknown {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
+}
+
+/** 用持久化消息元数据标记工具载荷的当前压缩状态；Debug 响应还会覆盖成原始值。 */
+function applyContextMessages(parts: Part[], messages: ThreadContextMessage[]): void {
+  const inputByCall = new Map<string, { value?: unknown; collapsed: ThreadContextMessage['collapsed']; messageId: number }>();
+  const outputByCall = new Map<string, { value?: string | null; collapsed: ThreadContextMessage['collapsed']; messageId: number }>();
+  for (const message of messages) {
+    for (const call of message.tool_calls) {
+      inputByCall.set(call.id, {
+        value: call.arguments === undefined ? undefined : debugToolInput(call.arguments),
+        collapsed: message.collapsed,
+        messageId: message.id,
+      });
+    }
+    if (message.tool_call_id) {
+      outputByCall.set(message.tool_call_id, {
+        value: Object.prototype.hasOwnProperty.call(message, 'content') ? message.content : undefined,
+        collapsed: message.collapsed,
+        messageId: message.id,
+      });
+    }
+  }
+  for (const part of parts) {
+    if (part.type !== 'dynamic-tool' && !part.type.startsWith('tool-')) continue;
+    const tool = part as unknown as Record<string, unknown> & { toolCallId?: string };
+    const id = tool.toolCallId;
+    if (!id) continue;
+    const input = inputByCall.get(id);
+    const output = outputByCall.get(id);
+    if (input?.value !== undefined) tool.input = input.value;
+    if (output?.value !== undefined) tool.output = output.value;
+    tool.contextState = {
+      inputCollapsed: input?.collapsed ?? null,
+      outputCollapsed: output?.collapsed ?? null,
+      inputMessageId: input?.messageId,
+      outputMessageId: output?.messageId,
+    };
+  }
 }
 
 function terminalStats(run: RunWithEvents): StreamStats | null {
@@ -283,7 +334,12 @@ function noticeMessage(notice: ThreadNotice): UIMessage {
 }
 
 /** 把按时间排序的持久化 runs 映射成当前分支的扁平 UIMessage 列表。 */
-export function runsToUiMessages(runs: RunWithEvents[], activeRunId?: string | null, notices: ThreadNotice[] = []): UIMessage[] {
+export function runsToUiMessages(
+  runs: RunWithEvents[],
+  activeRunId?: string | null,
+  notices: ThreadNotice[] = [],
+  contextMessages: ThreadContextMessage[] = [],
+): UIMessage[] {
   const messages: UIMessage[] = [];
   const visibleRuns = activePathRuns(runs, activeRunId);
   const editableRunId = activeRunId ?? visibleRuns[visibleRuns.length - 1]?.id ?? null;
@@ -310,6 +366,7 @@ export function runsToUiMessages(runs: RunWithEvents[], activeRunId?: string | n
     const parts = foldUiEventsToParts(
       run.events.map(toUiEvent).filter((e): e is UiEvent => e !== null),
     );
+    applyContextMessages(parts, contextMessages.filter((message) => message.run_id === run.id));
     if (run.goal_state?.plan?.length && !parts.some((part) => part.type === 'data-plan-state')) {
       parts.unshift({ type: 'data-plan-state', id: `plan-${run.id}`, data: run.goal_state } as unknown as Part);
     }

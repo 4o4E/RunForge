@@ -1,4 +1,5 @@
 import type { LlmMessage, LlmUsage } from '../llm/types.js';
+import type { CompactionAffectedMessage } from '@runforge/contracts';
 import type { ThreadMessage } from '../store/types.js';
 import type { Provider } from '../llm/types.js';
 import {
@@ -103,7 +104,14 @@ export class ContextManager {
     this.items.push(this.goalItem);
     for (const p of priorMessages) {
       this.items.push({
-        msg: { role: p.role, content: p.content, toolCalls: p.toolCalls, toolCallId: p.toolCallId, collapsed: p.collapsed },
+        msg: {
+          role: p.role,
+          content: p.content,
+          toolCalls: p.toolCalls,
+          toolCallId: p.toolCallId,
+          providerState: p.providerState,
+          collapsed: p.collapsed,
+        },
         dbId: p.id,
       });
     }
@@ -158,8 +166,9 @@ export class ContextManager {
 
   /** run 结束清理：即使本轮没触发实时压缩，也为后续轮次收缩旧的大 payload。 */
   compactForHistory(reason = 'post-run-history'): CompactionResult | null {
+    const before = this.items;
     const result = this.compactor.compactForHistory(this.compactionInput(), reason);
-    return this.applyCompactionOutput(result);
+    return this.applyCompactionOutput(result, before);
   }
 
   /**
@@ -167,13 +176,20 @@ export class ContextManager {
    * 这里会原地修改工作列表；有改动则返回新 mask 的 DB id 和压缩结果，否则返回 null。
    */
   async maybeCompact(provider?: Provider): Promise<CompactionResult | null> {
+    const before = this.items;
     const result = await this.compactor.compact(this.compactionInput(provider));
-    return this.applyCompactionOutput(result);
+    return this.applyCompactionOutput(result, before);
   }
 
   private compactionInput(provider?: Provider) {
+    const items = this.cloneItems(this.items);
+    const goalIndex = this.items.indexOf(this.goalItem);
+    // Goal 依赖稳定对象引用逐步刷新；压缩副本中仍复用这一项，确保压缩后 setGoal
+    // 修改的是当前模型上下文，而不是已经脱离列表的旧对象。
+    if (goalIndex >= 0) items[goalIndex] = this.goalItem;
     return {
-      items: this.items,
+      // 压缩策略可替换消息对象；传入副本后才能可靠比较压缩前后内容并生成审计明细。
+      items,
       goalContent: this.goalItem.msg.content ?? '',
       tokensPerChar: this.tokensPerChar,
       provider,
@@ -181,7 +197,80 @@ export class ContextManager {
     };
   }
 
-  private applyCompactionOutput(result: (CompactionResult & { items?: WorkingMessage[]; sentChars?: number }) | null): CompactionResult | null {
+  private cloneItems(items: WorkingMessage[]): WorkingMessage[] {
+    // 压缩函数只替换 WorkingMessage.msg，不会修改 LlmMessage 内部字段；复制包装器
+    // 即可隔离策略写入，同时避免每轮复制可能很大的 encrypted_content。
+    return items.map((item) => ({ ...item }));
+  }
+
+  private affectedMessages(
+    before: WorkingMessage[],
+    after: WorkingMessage[],
+    collapsedIds: number[],
+    summarizedIds: number[],
+  ): CompactionAffectedMessage[] {
+    const beforeById = new Map(before.filter((item) => item.dbId != null).map((item) => [item.dbId as number, item.msg]));
+    const afterById = new Map(after.filter((item) => item.dbId != null).map((item) => [item.dbId as number, item.msg]));
+    const summarized = new Set(summarizedIds);
+    const collapsed = new Set(collapsedIds);
+    const nameByToolCallId = new Map<string, string>();
+    for (const item of before) {
+      for (const call of item.msg.toolCalls ?? []) nameByToolCallId.set(call.id, call.name);
+    }
+
+    const ids = new Set<number>([...collapsedIds, ...summarizedIds]);
+    for (const id of beforeById.keys()) {
+      if (!afterById.has(id) && !summarized.has(id)) ids.add(id);
+    }
+
+    return [...ids].flatMap((messageId) => {
+      const original = beforeById.get(messageId);
+      if (!original) return [];
+      const compacted = afterById.get(messageId);
+      const action: CompactionAffectedMessage['action'] = summarized.has(messageId)
+        ? 'summarized'
+        : collapsed.has(messageId)
+          ? 'masked'
+          : 'dropped';
+      const toolCallIds = original.role === 'assistant'
+        ? (original.toolCalls ?? []).map((call) => call.id)
+        : original.toolCallId
+          ? [original.toolCallId]
+          : [];
+      const replacement = action === 'summarized'
+        ? undefined
+        : compacted?.role === 'tool'
+          ? compacted.content ?? undefined
+          : compacted?.role === 'assistant' && compacted.toolCalls
+            ? JSON.stringify({
+                context_elided: true,
+                tool_calls: compacted.toolCalls.map((call) => ({ id: call.id, name: call.name })),
+                note: '历史工具调用参数已动态裁剪；原始参数仅在 Debug 模式可见。',
+              })
+            : undefined;
+      return [{
+        messageId,
+        action,
+        role: original.role,
+        toolCallIds,
+        toolNames: toolCallIds.map((id) => nameByToolCallId.get(id)).filter((name): name is string => Boolean(name)),
+        originalChars: totalChars([original]),
+        replacement,
+      }];
+    });
+  }
+
+  private applyCompactionOutput(
+    result: ({
+      info: CompactionInfo;
+      collapsedIds: number[];
+      summarizedIds: number[];
+      summaryMessage?: LlmMessage;
+      items?: WorkingMessage[];
+      sentChars?: number;
+    }) | null,
+    before: WorkingMessage[],
+  ): CompactionResult | null {
     if (!result) {
       this.lastSentChars = totalChars(this.all());
       return null;
@@ -193,6 +282,12 @@ export class ContextManager {
       collapsedIds: result.collapsedIds,
       summarizedIds: result.summarizedIds,
       summaryMessage: result.summaryMessage,
+      affected: this.affectedMessages(
+        before,
+        result.items ?? this.items,
+        result.collapsedIds,
+        result.summarizedIds,
+      ),
     };
   }
 }

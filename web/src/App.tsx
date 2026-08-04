@@ -435,6 +435,8 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(() => isSettingsPath());
   const [composerDraft, setComposerDraft] = useState(route.draft);
   const [wide, setWide] = useState(false);
+  const [debugMode, setDebugMode] = useState(false);
+  const [historyRevision, setHistoryRevision] = useState(0);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [rightPanelClosing, setRightPanelClosing] = useState(false);
   const [rightPanelTabs, setRightPanelTabs] = useState<RightTabId[]>([]);
@@ -795,7 +797,11 @@ export function App() {
       onThreadCreated: (thread) => {
         setThreads((current) => [thread, ...current.filter((item) => item.id !== thread.id)]);
       },
-      onRunFinished: (threadId) => refreshThreadTitleAfterRun(threadId),
+      onRunFinished: (threadId) => {
+        refreshThreadTitleAfterRun(threadId);
+        // Debug 原始载荷和最终 collapsed 状态来自持久化消息，run 收口后重载一次。
+        setHistoryRevision((revision) => revision + 1);
+      },
       setActiveRunId,
     }),
     [navigateChatRoute, refreshThreadTitleAfterRun],
@@ -887,11 +893,11 @@ export function App() {
       };
     }
 
-    getThread(activeThreadId)
-      .then(({ thread, runs, notices }) => {
+    getThread(activeThreadId, { debug: debugMode })
+      .then(({ thread, runs, notices, context_messages }) => {
         if (!canceled) {
           const branchRuns = activeBranchRuns(runs, thread.active_run_id);
-          setMessages(runsToUiMessages(runs, thread.active_run_id, notices));
+          setMessages(runsToUiMessages(runs, thread.active_run_id, notices, context_messages));
           setWaitingRun(waitingRunFrom(branchRuns));
           const liveRun = liveRunFrom(branchRuns);
           const continuableRun = continuableRunFrom(branchRuns);
@@ -914,7 +920,7 @@ export function App() {
     return () => {
       canceled = true;
     };
-  }, [activeThreadId, setMessages]);
+  }, [activeThreadId, debugMode, historyRevision, setMessages]);
 
   useEffect(() => {
     if (!activeThreadId || !reattachedRunId) return;
@@ -926,11 +932,11 @@ export function App() {
       setMessages((current) => replaceAssistantMessage(current, reattachedRunId, reattachedEventsRef.current));
     };
     const refreshLiveRun = () => {
-      void getThread(activeThreadId)
-        .then(({ thread, runs, notices }) => {
+      void getThread(activeThreadId, { debug: debugMode })
+        .then(({ thread, runs, notices, context_messages }) => {
           if (canceled) return;
           const branchRuns = activeBranchRuns(runs, thread.active_run_id);
-          setMessages(runsToUiMessages(runs, thread.active_run_id, notices));
+          setMessages(runsToUiMessages(runs, thread.active_run_id, notices, context_messages));
           setWaitingRun(waitingRunFrom(branchRuns));
           const liveRun = liveRunFrom(branchRuns);
           const continuableRun = continuableRunFrom(branchRuns);
@@ -961,7 +967,7 @@ export function App() {
       window.clearInterval(interval);
       unsubscribe();
     };
-  }, [activeThreadId, reattachedRunId, refreshThreads, setMessages]);
+  }, [activeThreadId, debugMode, reattachedRunId, refreshThreads, setMessages]);
 
   const pushNotificationState = !pushState.supported
     ? 'unsupported'
@@ -1103,9 +1109,9 @@ export function App() {
 
   const refreshActiveThread = useCallback(() => {
     if (!activeThreadId) return;
-    void getThread(activeThreadId).then(({ thread, runs, notices }) => {
+    void getThread(activeThreadId, { debug: debugMode }).then(({ thread, runs, notices, context_messages }) => {
       const branchRuns = activeBranchRuns(runs, thread.active_run_id);
-      setMessages(runsToUiMessages(runs, thread.active_run_id, notices));
+      setMessages(runsToUiMessages(runs, thread.active_run_id, notices, context_messages));
       setWaitingRun(waitingRunFrom(branchRuns));
       const liveRun = liveRunFrom(branchRuns);
       const continuableRun = continuableRunFrom(branchRuns);
@@ -1114,7 +1120,7 @@ export function App() {
       setActiveRunId(liveRun?.id ?? null);
       setContinuableRunId(continuableRun?.id ?? null);
     });
-  }, [activeThreadId, setMessages]);
+  }, [activeThreadId, debugMode, setMessages]);
 
   const resumeWithAnswer = useCallback((runId: string, answer: AskUserAnswer) => {
     setWaitingRun(null);
@@ -1540,6 +1546,8 @@ export function App() {
           onContinueRun={continueFailedRun}
           onCancelEdit={cancelEditRunInput}
           onToggleWide={() => setWide((v) => !v)}
+          debugMode={debugMode}
+          onToggleDebug={() => setDebugMode((enabled) => !enabled)}
           onRemoveAttachment={(path) => setAttachments((current) => current.filter((a) => a.path !== path))}
           rightPanelOpen={conversationRightPanelOpen}
           statusCardOpen={isMobile ? mobileStatusCardOpen : statusCardOpen}

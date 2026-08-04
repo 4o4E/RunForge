@@ -77,6 +77,16 @@ export interface StreamStats {
   };
 }
 
+export interface CompactionAffectedMessage {
+  messageId: number;
+  action: 'masked' | 'summarized' | 'dropped';
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  toolCallIds: string[];
+  toolNames: string[];
+  originalChars: number;
+  replacement?: string;
+}
+
 /** 后端给前端推送并落库的 run 事件。 */
 export type AgentEvent =
   | { type: 'step_start'; step: number }
@@ -135,12 +145,15 @@ export type AgentEvent =
   | {
       type: 'compaction';
       step: number;
+      occurredAt: string;
       estBefore: number;
       estAfter: number;
       masked: number;
       summarized: number;
       dropped: number;
       reason?: string;
+      affected: CompactionAffectedMessage[];
+      summary?: string;
     }
   | { type: 'shell_session_opened'; step: number; sessionId: string; backend: string; workspaceRoot: string }
   | { type: 'shell_session_closed'; step: number; sessionId: string; reason?: string }

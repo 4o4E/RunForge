@@ -7,6 +7,7 @@ import { sanitizeThreadMessagesForModel } from './messageView.js';
 import type {
   AuthTokenRow,
   PushSubscriptionRow,
+  RawThreadMessage,
   RunRow,
   Scope,
   ShellActor,
@@ -22,6 +23,7 @@ import type {
   TenantRow,
   ThreadNoticeRow,
   ThreadMessage,
+  ThreadMessageMetadata,
   ThreadSearchResultRow,
   ThreadRow,
   UserRow,
@@ -359,6 +361,7 @@ export class PgStore implements Store {
           tool_call_id: string | null;
           collapsed: string | null;
           summary_of: string[] | null;
+          provider_state: LlmMessage['providerState'] | null;
           created_at: string;
         }>(
           isSourceRun
@@ -372,9 +375,9 @@ export class PgStore implements Store {
             .filter((id): id is number => id != null);
           const { rows: inserted } = await client.query<{ id: string }>(
             `INSERT INTO messages (
-               thread_id, run_id, step_id, role, content, tool_calls, tool_call_id, collapsed, summary_of, created_at
+               thread_id, run_id, step_id, role, content, tool_calls, tool_call_id, collapsed, summary_of, provider_state, created_at
              )
-             VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9::bigint[], $10)
+             VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9::bigint[], $10::jsonb, $11)
              RETURNING id`,
             [
               forkThreadId,
@@ -386,6 +389,7 @@ export class PgStore implements Store {
               oldMessage.tool_call_id,
               oldMessage.collapsed,
               mappedSummaryOf?.length ? mappedSummaryOf : null,
+              oldMessage.provider_state ? JSON.stringify(oldMessage.provider_state) : null,
               oldMessage.created_at,
             ],
           );
@@ -620,6 +624,7 @@ export class PgStore implements Store {
       tool_call_id: string | null;
       collapsed: 'masked' | 'summarized' | null;
       summary_of: string[] | null;
+      provider_state: LlmMessage['providerState'] | null;
     }>(
       `WITH RECURSIVE selected_run AS (
          SELECT COALESCE($2::text, active_run_id) AS id
@@ -650,7 +655,7 @@ export class PgStore implements Store {
          UNION
          SELECT id FROM fallback_runs
        )
-       SELECT m.id, m.role, m.content, m.tool_calls, m.tool_call_id, m.collapsed, m.summary_of
+       SELECT m.id, m.role, m.content, m.tool_calls, m.tool_call_id, m.collapsed, m.summary_of, m.provider_state
        FROM messages m
        JOIN visible_runs vr ON vr.id = m.run_id
        WHERE m.thread_id = $1
@@ -671,16 +676,134 @@ export class PgStore implements Store {
             ? maskToolCallArguments(r.tool_calls).calls
             : (r.tool_calls ?? undefined),
         toolCallId: r.tool_call_id ?? undefined,
+        providerState: r.collapsed === 'masked' ? undefined : (r.provider_state ?? undefined),
         collapsed: r.collapsed ?? undefined,
       }));
     return sanitizeThreadMessagesForModel(messages);
   }
 
+  async loadThreadMessageMetadata(scope: Scope, threadId: string, options: { runId?: string | null } = {}): Promise<ThreadMessageMetadata[]> {
+    if (!(await this.threadBelongsToScope(scope, threadId))) return [];
+    const { rows } = await query<{
+      id: string;
+      run_id: string;
+      step_id: string | null;
+      role: LlmMessage['role'];
+      tool_calls: Array<{ id: string; name: string; argumentChars: number }>;
+      tool_call_id: string | null;
+      collapsed: 'masked' | 'summarized';
+      summary_of: string[] | null;
+      content_chars: number;
+      created_at: string;
+    }>(
+      `WITH RECURSIVE selected_run AS (
+         SELECT COALESCE($2::text, active_run_id) AS id FROM threads WHERE id = $1
+       ),
+       branch_runs AS (
+         SELECT r.id, r.parent_run_id FROM runs r JOIN selected_run s ON s.id = r.id WHERE r.thread_id = $1
+         UNION ALL
+         SELECT parent.id, parent.parent_run_id
+         FROM runs parent JOIN branch_runs child ON child.parent_run_id = parent.id
+         WHERE parent.thread_id = $1
+       ),
+       fallback_runs AS (
+         SELECT id FROM runs
+         WHERE thread_id = $1 AND NOT EXISTS (SELECT 1 FROM selected_run WHERE id IS NOT NULL)
+       ),
+       visible_runs AS (
+         SELECT id FROM branch_runs UNION SELECT id FROM fallback_runs
+       )
+       SELECT m.id, m.run_id, m.step_id, m.role, m.tool_call_id, m.collapsed, m.summary_of,
+              length(COALESCE(m.content, ''))::int AS content_chars,
+              m.created_at,
+              COALESCE((
+                SELECT jsonb_agg(jsonb_build_object(
+                  'id', call->>'id',
+                  'name', call->>'name',
+                  'argumentChars', length(COALESCE(call->>'arguments', ''))
+                ))
+                FROM jsonb_array_elements(COALESCE(m.tool_calls, '[]'::jsonb)) call
+              ), '[]'::jsonb) AS tool_calls
+       FROM messages m JOIN visible_runs vr ON vr.id = m.run_id
+       WHERE m.thread_id = $1 AND m.collapsed IS NOT NULL
+       ORDER BY m.id`,
+      [threadId, options.runId ?? null],
+    );
+    return rows.map((row) => ({
+      id: Number(row.id),
+      run_id: row.run_id,
+      step_id: row.step_id,
+      role: row.role,
+      toolCalls: row.tool_calls,
+      toolCallId: row.tool_call_id,
+      collapsed: row.collapsed,
+      summaryOf: (row.summary_of ?? []).map(Number),
+      contentChars: row.content_chars,
+      created_at: row.created_at,
+    }));
+  }
+
+  async loadRawThreadMessages(scope: Scope, threadId: string, options: { runId?: string | null } = {}): Promise<RawThreadMessage[]> {
+    if (!(await this.threadBelongsToScope(scope, threadId))) return [];
+    const { rows } = await query<{
+      id: string;
+      run_id: string;
+      step_id: string | null;
+      role: LlmMessage['role'];
+      content: string | null;
+      tool_calls: LlmMessage['toolCalls'] | null;
+      tool_call_id: string | null;
+      collapsed: 'masked' | 'summarized' | null;
+      summary_of: string[] | null;
+      provider_state: LlmMessage['providerState'] | null;
+      created_at: string;
+    }>(
+      `WITH RECURSIVE selected_run AS (
+         SELECT COALESCE($2::text, active_run_id) AS id FROM threads WHERE id = $1
+       ),
+       branch_runs AS (
+         SELECT r.id, r.parent_run_id FROM runs r JOIN selected_run s ON s.id = r.id WHERE r.thread_id = $1
+         UNION ALL
+         SELECT parent.id, parent.parent_run_id
+         FROM runs parent JOIN branch_runs child ON child.parent_run_id = parent.id
+         WHERE parent.thread_id = $1
+       ),
+       fallback_runs AS (
+         SELECT id FROM runs
+         WHERE thread_id = $1 AND NOT EXISTS (SELECT 1 FROM selected_run WHERE id IS NOT NULL)
+       ),
+       visible_runs AS (
+         SELECT id FROM branch_runs UNION SELECT id FROM fallback_runs
+       )
+       SELECT m.id, m.run_id, m.step_id, m.role, m.content, m.tool_calls, m.tool_call_id,
+              m.collapsed, m.summary_of, m.provider_state, m.created_at
+       FROM messages m JOIN visible_runs vr ON vr.id = m.run_id
+       WHERE m.thread_id = $1
+       ORDER BY m.id`,
+      [threadId, options.runId ?? null],
+    );
+    return rows
+      .filter((row) => !isEphemeralSystemMessage(row.role, row.content))
+      .map((row) => ({
+        id: Number(row.id),
+        run_id: row.run_id,
+        step_id: row.step_id,
+        role: row.role,
+        content: row.content,
+        toolCalls: row.tool_calls ?? undefined,
+        toolCallId: row.tool_call_id ?? undefined,
+        providerState: row.provider_state ?? undefined,
+        collapsed: row.collapsed ?? undefined,
+        summaryOf: (row.summary_of ?? []).map(Number),
+        created_at: row.created_at,
+      }));
+  }
+
   async addMessage(scope: Scope, threadId: string, runId: string, stepId: string | null, msg: LlmMessage): Promise<number> {
     const { rows } = await query<{ id: string }>(
-      `INSERT INTO messages (thread_id, run_id, step_id, role, content, tool_calls, tool_call_id)
-       SELECT $1, $2, $3, $4, $5, $6, $7
-       WHERE EXISTS (SELECT 1 FROM threads WHERE id = $1 AND tenant_id = $8 AND user_id = $9)
+      `INSERT INTO messages (thread_id, run_id, step_id, role, content, tool_calls, tool_call_id, provider_state)
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8
+       WHERE EXISTS (SELECT 1 FROM threads WHERE id = $1 AND tenant_id = $9 AND user_id = $10)
        RETURNING id`,
       [
         threadId,
@@ -690,6 +813,7 @@ export class PgStore implements Store {
         msg.content,
         msg.toolCalls ? JSON.stringify(msg.toolCalls) : null,
         msg.toolCallId ?? null,
+        msg.providerState ? JSON.stringify(msg.providerState) : null,
         scope.tenantId,
         scope.userId,
       ],
@@ -716,9 +840,9 @@ export class PgStore implements Store {
     summaryOf: number[],
   ): Promise<number> {
     const { rows } = await query<{ id: string }>(
-      `INSERT INTO messages (thread_id, run_id, step_id, role, content, tool_calls, tool_call_id, summary_of)
-       SELECT $1, $2, $3, $4, $5, $6, $7, $8::bigint[]
-       WHERE EXISTS (SELECT 1 FROM threads WHERE id = $1 AND tenant_id = $9 AND user_id = $10)
+      `INSERT INTO messages (thread_id, run_id, step_id, role, content, tool_calls, tool_call_id, summary_of, provider_state)
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8::bigint[], $9
+       WHERE EXISTS (SELECT 1 FROM threads WHERE id = $1 AND tenant_id = $10 AND user_id = $11)
        RETURNING id`,
       [
         threadId,
@@ -729,6 +853,7 @@ export class PgStore implements Store {
         msg.toolCalls ? JSON.stringify(msg.toolCalls) : null,
         msg.toolCallId ?? null,
         summaryOf,
+        msg.providerState ? JSON.stringify(msg.providerState) : null,
         scope.tenantId,
         scope.userId,
       ],

@@ -4,7 +4,7 @@ import { Conversation, latestUsageSnapshot } from './Conversation';
 import { Composer, type ComposerAttachment } from './Composer';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Bell, BellOff, Gauge, Maximize2, Menu, Minimize2, PanelRightClose, PanelRightOpen, RotateCw } from 'lucide-react';
+import { Bell, BellOff, Bug, Gauge, Maximize2, Menu, Minimize2, PanelRightClose, PanelRightOpen, RotateCw } from 'lucide-react';
 import type { AskUserAnswer } from '@/api';
 import type { AskUserDraft } from './AskUserCard';
 import { AgentStatusCard } from './StatusCard';
@@ -44,6 +44,8 @@ interface Props {
   onContinueRun: () => void;
   onCancelEdit: () => void;
   onToggleWide: () => void;
+  debugMode: boolean;
+  onToggleDebug: () => void;
   onRemoveAttachment: (path: string) => void;
   rightPanelOpen: boolean;
   statusCardOpen: boolean;
@@ -93,6 +95,8 @@ export function ChatView({
   onContinueRun,
   onCancelEdit,
   onToggleWide,
+  debugMode,
+  onToggleDebug,
   onRemoveAttachment,
   rightPanelOpen,
   statusCardOpen,
@@ -171,6 +175,16 @@ export function ChatView({
               <span className="hidden sm:inline">继续生成</span>
             </Button>
           )}
+          <Button
+            type="button"
+            variant={debugMode ? 'secondary' : 'ghost'}
+            size="icon"
+            className="size-9"
+            onClick={onToggleDebug}
+            title={debugMode ? '关闭 Debug 原始上下文' : '开启 Debug，查看原始工具输入和输出'}
+          >
+            <Bug className="size-4" />
+          </Button>
           <Button
             type="button"
             variant={notificationState === 'enabled' ? 'secondary' : 'ghost'}

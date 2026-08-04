@@ -280,8 +280,10 @@ export const searchThreads = (query: string, limit = 50) => {
   return authFetch(`/api/search?${params.toString()}`).then(json<ThreadSearchResponse>);
 };
 
-export const getThread = (id: string) =>
-  authFetch(`/api/threads/${id}`).then(json<ThreadDetailResponse>);
+export const getThread = (id: string, options: { debug?: boolean } = {}) => {
+  const query = options.debug ? '?debug=1' : '';
+  return authFetch(`/api/threads/${id}${query}`).then(json<ThreadDetailResponse>);
+};
 
 export const createThread = (title?: string) =>
   authFetch('/api/threads', {

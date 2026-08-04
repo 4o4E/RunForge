@@ -38,6 +38,7 @@ export type ToolHeaderProps = {
   title?: string;
   className?: string;
   duration?: string;
+  contextStatus?: string;
 } & (
   | { type: ToolUIPart["type"]; state: ToolUIPart["state"]; toolName?: never }
   | {
@@ -81,6 +82,7 @@ export const ToolHeader = ({
   state,
   toolName,
   duration,
+  contextStatus,
   ...props
 }: ToolHeaderProps) => {
   const derivedName =
@@ -105,6 +107,7 @@ export const ToolHeader = ({
         </span>
       )}
       {duration && <span className="shrink-0 text-xs text-muted-foreground">{duration}</span>}
+      {contextStatus && <span className="shrink-0 text-xs text-amber-700 dark:text-amber-400">{contextStatus}</span>}
       <ChevronDownIcon className="size-4 shrink-0 transition-transform group-data-[state=open]/tool:rotate-180" />
     </CollapsibleTrigger>
   );

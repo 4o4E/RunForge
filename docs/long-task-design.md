@@ -163,16 +163,20 @@ ALTER TABLE messages ADD COLUMN summary_of INT[];      -- 若本行是摘要，�
 1. **✅ 阶段 1 — 安全网（已实现）**：取消能力 + 接住 `usage` + `hardStepCap` 替代 maxSteps 主控。解锁长任务最低安全网，改动小。
 2. **✅ 阶段 2 — 压缩级联 L1/L2（已实现）**：token 估算 + observation masking + 滑动窗口。无需额外 LLM，直接解决撞窗口硬伤。
 3. **✅ 阶段 2.5 — 压缩落库（已实现）**：masking 决策持久化到 `messages.collapsed`，`loadThreadMessages` 返回压缩视图，**中途重启零数据丢失、不重算**。
-4. **⬜ 阶段 3 — Goal 锚点**：`runs.goal_state` + 每轮注入 + `update_plan` 工具。
-5. **⬜ 阶段 4 — 压缩 L3**：锚定 LLM 摘要（`summary_of` 折叠区间）。
+4. **✅ 阶段 3 — Goal 锚点（已实现）**：`runs.goal_state` + 每轮注入 + `update_plan` 工具。
+5. **✅ 阶段 4 — 压缩 L3（已实现）**：锚定 LLM 摘要（`summary_of` 折叠区间）。
+6. **✅ 阶段 5 — 压缩可观测性与 Debug（已实现）**：压缩事件记录时间点、受影响消息与摘要；普通详情只返回压缩元数据，显式 Debug 模式才返回原始工具输入/输出。
 
 ### 落地说明
 
-**压缩落库的核心原则**：`messages` 表是**全保真 append-only 日志**（`content` 永远是原始内容，压缩从不覆盖）；压缩是一个**从全量日志派生的视图**，靠 `collapsed` 标记驱动：
+**压缩落库的核心原则**：`messages` 表是**全保真 append-only 日志**（`content/tool_calls` 永远是原始内容，压缩从不覆盖）；压缩是一个**从全量日志派生的视图**，靠 `collapsed` 标记驱动：
 
 - **masking（L1）**：决策持久化为 `collapsed='masked'`。原始 `content` 保留在库，占位符由长度在 `loadThreadMessages` 时派生（`maskPlaceholder(len)`）。重启后视图一致、不丢、不重算。
 - **滑动窗口 drop（L2）**：**仅内存安全阀**，不落库——因为 drop 会丢信息。重启后从全量日志按相同逻辑重新派生，DB 数据从不销毁。
-- **summarized（阶段 4）**：折叠行标 `collapsed='summarized'`，`loadThreadMessages` 跳过、只留摘要行。列已预留。
+- **summarized（L3）**：折叠行标 `collapsed='summarized'`，`loadThreadMessages` 跳过、只留摘要行。
+- **压缩事件**：`events.type='compaction'` 保存发生时间、token 前后值、受影响消息 id、动作和压缩后替代内容；前端按事件顺序显示时间点。
+- **Debug 原始视图**：`GET /api/threads/:id?debug=1` 才返回原始 `content/tool_calls.arguments`；默认详情只返回长度、工具名和 `collapsed` 状态。
+- **加密推理状态**：OpenAI Responses 的 `encrypted_content` 以不透明 `provider_state` 保存并回放，应用不可解密；消息被 mask、summarize 或窗口移除后，不再把对应旧推理状态发给模型。
 
 已落地文件：
 
@@ -181,7 +185,7 @@ ALTER TABLE messages ADD COLUMN summary_of INT[];      -- 若本行是摘要，�
 - [agent/context.ts](../server/src/agent/context.ts) — `Context` → `ContextManager`：`items` 跟踪 `dbId`；`maybeCompact()` 返回 `collapsedIds`；`recordUsage()` 校准
 - [agent/executor.ts](../server/src/agent/executor.ts) — 循环改 `hardStepCap`；每步顶部检查取消；每步前 `maybeCompact()` 并 `markMessagesCollapsed(collapsedIds)`；捕获 `addMessage` 返回的 id 回填 `setLastDbId`；`recordUsage(result.usage)`
 - [store/types.ts](../server/src/store/types.ts) + [pgStore.ts](../server/src/store/pgStore.ts) / [memoryStore.ts](../server/src/store/memoryStore.ts) — `ThreadMessage`(带 `id/collapsed`)；`addMessage` 返回 id；`markMessagesCollapsed`；`loadThreadMessages` 返回压缩视图
-- [db/schema.sql](../server/src/db/schema.sql) — `messages.collapsed`（`ADD COLUMN IF NOT EXISTS`，幂等迁移）
+- [db/schema.sql](../server/src/db/schema.sql) — `messages.collapsed / summary_of / provider_state`（`ADD COLUMN IF NOT EXISTS`，幂等迁移）
 - [api/http.ts](../server/src/api/http.ts) — `POST /runs/:id/cancel`
 - [agent/types.ts](../server/src/agent/types.ts) / [llm/types.ts](../server/src/llm/types.ts) — `RunStatus` 加 `canceling/canceled`；`AgentEvent` 加 `compaction`；`LlmMessage` 加 `collapsed`
 

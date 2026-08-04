@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS messages (
   tool_call_id TEXT,                             -- for role=tool
   collapsed   TEXT,                              -- null | 'masked' | 'summarized' (context compaction, durable)
   summary_of  BIGINT[],                          -- summary message folds these original message ids
+  provider_state JSONB,                          -- 供应商不透明状态，如 OpenAI 加密推理内容
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -102,6 +103,7 @@ CREATE TABLE IF NOT EXISTS messages (
 -- migrate() on an existing DB adds the column without touching data.
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS collapsed TEXT;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS summary_of BIGINT[];
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS provider_state JSONB;
 
 CREATE TABLE IF NOT EXISTS events (
   id          BIGSERIAL PRIMARY KEY,

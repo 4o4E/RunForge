@@ -9,6 +9,7 @@ import {
 import { config } from '../config.js';
 import type { LlmMessage } from '../llm/types.js';
 import type { Provider } from '../llm/types.js';
+import type { CompactionAffectedMessage } from '@runforge/contracts';
 import {
   estimateTokens,
   maskOldAssistantToolCalls,
@@ -41,6 +42,7 @@ export interface CompactionResult {
   collapsedIds: number[];
   summarizedIds: number[];
   summaryMessage?: LlmMessage;
+  affected: CompactionAffectedMessage[];
 }
 
 export interface ContextCompactionInput {
@@ -51,7 +53,7 @@ export interface ContextCompactionInput {
   forceMaskedToolNames: string[];
 }
 
-export interface ContextCompactionOutput extends CompactionResult {
+export interface ContextCompactionOutput extends Omit<CompactionResult, 'affected'> {
   items: WorkingMessage[];
   sentChars: number;
 }
