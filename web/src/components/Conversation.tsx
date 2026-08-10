@@ -361,6 +361,31 @@ function planStatusIcon(item: PlanItem) {
   return <Circle className="size-3.5 text-muted-foreground" />;
 }
 
+function PlanProgressRing({ value }: { value: number }) {
+  const radius = 8;
+  const circumference = 2 * Math.PI * radius;
+  const ratio = Math.min(1, Math.max(0, value));
+  return (
+    <span className="relative flex size-5 shrink-0 items-center justify-center text-muted-foreground" aria-hidden="true">
+      <svg className="size-5 -rotate-90" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r={radius} fill="none" stroke="currentColor" strokeWidth="2" opacity="0.2" />
+        <circle
+          cx="12"
+          cy="12"
+          r={radius}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeDasharray={circumference}
+          strokeDashoffset={circumference * (1 - ratio)}
+          className="text-foreground"
+        />
+      </svg>
+    </span>
+  );
+}
+
 function CompactSparkline({ values }: { values: number[] }) {
   const width = 92;
   const height = 24;
@@ -428,25 +453,26 @@ export function ConversationProgressBar({ messages, busy }: { messages: UIMessag
   const plan = goal?.plan ?? [];
   const currentIndex = plan.length ? planStepIndex(plan) : -1;
   const currentItem = currentIndex >= 0 ? plan[currentIndex] : null;
+  const planProgress = plan.length && currentIndex >= 0 ? (currentIndex + 1) / plan.length : 0;
   const running = !!stats && busy && stats.stage !== 'done' && stats.stage !== 'error';
   const charsPerSecond = stats ? Math.round(stats.rate.charsPerSecond) : 0;
 
   return (
-    <div className="group/plan relative mb-2">
+    <div className="group/plan relative mx-auto mb-2 table max-w-full">
       <button
         type="button"
-        className="flex min-h-9 w-full min-w-0 items-center gap-3 rounded-md border bg-background px-3 py-1.5 text-left shadow-sm transition-colors hover:bg-accent/40"
+        className="inline-flex min-h-9 max-w-full min-w-0 items-center gap-3 rounded-md border bg-background px-3 py-1.5 text-left shadow-sm transition-colors hover:bg-accent/40"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
       >
-        <span className="flex min-w-0 flex-1 items-center gap-2">
+        <span className="flex min-w-0 items-center gap-2">
           {currentItem ? (
             <>
+              <PlanProgressRing value={planProgress} />
               <span className="shrink-0 rounded border bg-muted px-2 py-0.5 text-xs font-medium tabular-nums text-foreground">
                 第 {currentIndex + 1}/{plan.length} 步
               </span>
               <span className="min-w-0 truncate text-sm font-medium">{currentItem.text}</span>
-              {goal?.next && <span className="hidden min-w-0 truncate text-xs text-muted-foreground lg:block">下一步：{goal.next}</span>}
             </>
           ) : (
             <span className="min-w-0 flex-1 text-sm text-muted-foreground">{stats ? streamStageLabel(stats) : '暂无计划'}</span>
@@ -464,7 +490,7 @@ export function ConversationProgressBar({ messages, busy }: { messages: UIMessag
       {plan.length > 0 && (
         <div
           className={cn(
-            'absolute bottom-[calc(100%+0.35rem)] left-0 right-0 z-20 hidden max-h-[45vh] overflow-y-auto rounded-md border bg-popover p-2 text-popover-foreground shadow-lg sm:group-hover/plan:block',
+            'absolute bottom-[calc(100%+0.35rem)] left-0 z-20 hidden max-h-[45vh] w-max min-w-full max-w-[calc(100vw-2rem)] overflow-y-auto rounded-md border bg-popover p-2 text-popover-foreground shadow-lg sm:max-w-2xl sm:group-hover/plan:block',
             open && 'block',
           )}
         >
@@ -484,7 +510,6 @@ export function ConversationProgressBar({ messages, busy }: { messages: UIMessag
               </div>
             ))}
           </div>
-          {goal?.next && <div className="mt-2 truncate text-xs text-muted-foreground sm:hidden">下一步：{goal.next}</div>}
         </div>
       )}
     </div>
