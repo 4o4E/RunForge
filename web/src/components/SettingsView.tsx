@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useId, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Activity, ArchiveRestore, Bot, ChevronRight, Gauge, MessageSquare, Moon, Palette, Plus, RefreshCw, Save, Shield, Sun, Trash2, Wifi, Wrench } from 'lucide-react';
+import { Activity, ArchiveRestore, Bot, ChevronRight, MessageSquare, Moon, Palette, Plus, RefreshCw, Save, Shield, Sun, Trash2, Wifi, Wrench } from 'lucide-react';
 import {
   getLlmSettings,
   getLlmSettingsOptions,
@@ -50,17 +50,9 @@ import { ModelSearchSelect, llmModelRef, llmOptionsFromSettings } from './ModelS
 import { useThemeCtx } from '@/theme';
 import { useNotifications } from './GlobalNotifications';
 import { NavGroup, SectionButton } from '@/components/ui/settings-nav';
-import {
-  DEFAULT_STATUS_FIELDS,
-  STATUS_FIELD_LABELS,
-  readStatusFields,
-  writeStatusFields,
-  type StatusField,
-} from './StatusCard';
 
 type SettingsPanel =
   | 'appearance'
-  | 'status-card'
   | 'usage-stats'
   | 'archived-threads'
   | 'llm-models'
@@ -513,52 +505,6 @@ function AppearanceSettingsPanel() {
               <span className="mt-1 block text-xs text-muted-foreground">适合低光环境，降低大面积亮度。</span>
             </span>
           </button>
-        </CardContent>
-      </Card>
-    </SettingsPanelShell>
-  );
-}
-
-function StatusCardSettingsPanel() {
-  const [fields, setFields] = useState<StatusField[]>(readStatusFields);
-
-  const toggleField = (field: StatusField) => {
-    setFields((current) => {
-      const next = current.includes(field) ? current.filter((item) => item !== field) : [...current, field];
-      return writeStatusFields(next);
-    });
-  };
-
-  return (
-    <SettingsPanelShell title="状态卡片" description="控制聊天页状态卡片展示哪些运行信息" contentClassName="grid content-start gap-4">
-      <Card className="rounded-lg shadow-sm">
-        <CardHeader>
-          <CardTitle>状态卡片字段</CardTitle>
-          <CardDescription>至少保留一项；全部取消时会自动恢复默认字段</CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-2 sm:grid-cols-2">
-          {DEFAULT_STATUS_FIELDS.map((field) => (
-            <label
-              key={field}
-              className="flex min-h-12 items-center gap-3 rounded-md border p-3 text-sm transition-colors hover:bg-accent/60"
-            >
-              <Checkbox checked={fields.includes(field)} onCheckedChange={() => toggleField(field)} />
-              <span className="min-w-0 flex-1">
-                <span className="block font-medium">{STATUS_FIELD_LABELS[field]}</span>
-                <span className="mt-0.5 block text-xs text-muted-foreground">
-                  {field === 'tokens'
-                    ? '输入、输出 token'
-                    : field === 'cache'
-                      ? '缓存命中 token 占比'
-                      : field === 'shell'
-                        ? 'Shell 和子任务资源'
-                        : field === 'plan'
-                          ? '当前计划进度'
-                          : '运行状态和消息数量'}
-                </span>
-              </span>
-            </label>
-          ))}
         </CardContent>
       </Card>
     </SettingsPanelShell>
@@ -1887,9 +1833,6 @@ export function SettingsView({
                 <SectionButton active={panel === 'appearance'} icon={<Palette className="h-4 w-4" />} onClick={() => setPanel('appearance')}>
                   外观
                 </SectionButton>
-                <SectionButton active={panel === 'status-card'} icon={<Gauge className="h-4 w-4" />} onClick={() => setPanel('status-card')}>
-                  状态卡片
-                </SectionButton>
               </NavGroup>
               <NavGroup label="用量">
                 <SectionButton active={panel === 'usage-stats'} icon={<Activity className="h-4 w-4" />} onClick={() => setPanel('usage-stats')}>
@@ -1922,7 +1865,6 @@ export function SettingsView({
 
           <div className={cn('min-w-0', embedded && 'h-full min-h-0 overflow-hidden pr-1')}>
             {panel === 'appearance' && <AppearanceSettingsPanel />}
-            {panel === 'status-card' && <StatusCardSettingsPanel />}
             {panel === 'usage-stats' && <UsageStatsSettingsPanel />}
             {panel === 'archived-threads' && <ArchivedThreadsSettingsPanel onThreadsChanged={onThreadsChanged} />}
             {panel === 'llm-models' && <LlmSettingsPanel />}

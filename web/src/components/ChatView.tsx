@@ -4,10 +4,9 @@ import { Conversation, latestUsageSnapshot } from './Conversation';
 import { Composer, type ComposerAttachment } from './Composer';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Bell, BellOff, Bug, Gauge, Maximize2, Menu, Minimize2, PanelRightClose, PanelRightOpen, RotateCw } from 'lucide-react';
+import { Bell, BellOff, Bug, Maximize2, Menu, Minimize2, PanelRightClose, PanelRightOpen, RotateCw } from 'lucide-react';
 import type { AskUserAnswer } from '@/api';
 import type { AskUserDraft } from './AskUserCard';
-import { AgentStatusCard } from './StatusCard';
 import { TableOfContents } from './TableOfContents';
 import { cn } from '@/lib/utils';
 import type { LlmModelOption } from '@/api';
@@ -28,7 +27,6 @@ interface Props {
   draft: string;
   wide: boolean;
   workspaceRoot: string | null;
-  threadId: string | null;
   contentRef: RefObject<HTMLDivElement | null>;
   askUserDrafts: Record<string, AskUserDraft>;
   attachments: ComposerAttachment[];
@@ -48,11 +46,7 @@ interface Props {
   onToggleDebug: () => void;
   onRemoveAttachment: (path: string) => void;
   rightPanelOpen: boolean;
-  statusCardOpen: boolean;
-  onToggleStatusCard: () => void;
   onToggleRightPanel: () => void;
-  onOpenShellPreview: (sessionId: string) => void;
-  onOpenSubagentPreview: (subagentId: string) => void;
   onOpenRemoteFiles: () => void;
   onUploadLocal: (file: File, path: string) => Promise<void>;
   onOpenRemoteFile: (path: string) => void;
@@ -79,7 +73,6 @@ export function ChatView({
   draft,
   wide,
   workspaceRoot,
-  threadId,
   contentRef,
   askUserDrafts,
   attachments,
@@ -99,11 +92,7 @@ export function ChatView({
   onToggleDebug,
   onRemoveAttachment,
   rightPanelOpen,
-  statusCardOpen,
-  onToggleStatusCard,
   onToggleRightPanel,
-  onOpenShellPreview,
-  onOpenSubagentPreview,
   onOpenRemoteFiles,
   onUploadLocal,
   onOpenRemoteFile,
@@ -121,18 +110,7 @@ export function ChatView({
   onOpenMobileSidebar,
   onTogglePushNotifications,
 }: Props) {
-  const showStatusCard = mobile ? statusCardOpen : rightPanelOpen ? statusCardOpen : !statusCardOpen;
   const usage = latestUsageFromMessages(messages);
-  const renderStatusCard = () => (
-    <AgentStatusCard
-      messages={messages}
-      busy={busy}
-      threadId={threadId}
-      onOpenShellPreview={onOpenShellPreview}
-      onOpenSubagentPreview={onOpenSubagentPreview}
-      className="w-full min-w-0 max-w-none"
-    />
-  );
   const notificationTitle =
     notificationState === 'enabled'
       ? '关闭后台通知'
@@ -198,16 +176,6 @@ export function ChatView({
           </Button>
           <Button
             type="button"
-            variant={showStatusCard ? 'secondary' : 'ghost'}
-            size="icon"
-            className="size-9"
-            onClick={onToggleStatusCard}
-            title={showStatusCard ? '关闭状态卡片' : '打开状态卡片'}
-          >
-            <Gauge className="size-4" />
-          </Button>
-          <Button
-            type="button"
             variant={wide ? 'secondary' : 'ghost'}
             size="icon"
             className="hidden size-9 md:inline-flex"
@@ -229,20 +197,10 @@ export function ChatView({
         </div>
       </header>
 
-      {showStatusCard && (
-        <div className={cn('shrink-0 border-b px-3 py-2', !rightPanelOpen && '2xl:hidden')}>
-          {renderStatusCard()}
-        </div>
-      )}
-
       {!rightPanelOpen && (
         <div
-          className={cn(
-            'pointer-events-none absolute bottom-28 right-6 top-16 z-30 hidden min-h-0 w-72 flex-col gap-3 2xl:flex',
-            showStatusCard ? 'justify-start' : 'justify-center',
-          )}
+          className="pointer-events-none absolute bottom-28 right-6 top-16 z-30 hidden min-h-0 w-72 flex-col justify-center 2xl:flex"
         >
-          {showStatusCard && <div className="pointer-events-auto">{renderStatusCard()}</div>}
           <TableOfContents contentRef={contentRef} floating={false} />
         </div>
       )}
@@ -268,6 +226,8 @@ export function ChatView({
       </div>
 
       <Composer
+        messages={messages}
+        busy={busy}
         disabled={busy || !!waitingQuestion}
         waitingQuestion={waitingQuestion}
         draft={draft}

@@ -4,6 +4,7 @@ import {
   PromptInputTextarea,
   type PromptInputMessage,
 } from '@/components/ai-elements/prompt-input';
+import type { UIMessage } from 'ai';
 import { Button } from '@/components/ui/button';
 import { FileUp, Folder, FolderUp, Paperclip, RefreshCw, Terminal, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -19,7 +20,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '
 import { Input } from '@/components/ui/input';
 import { listRemoteFiles, type RemoteFileEntry } from '@/api';
 import type { LlmModelOption } from '@/api';
-import type { UsageSnapshot } from './Conversation';
+import { ConversationProgressBar, type UsageSnapshot } from './Conversation';
 import { ModelSearchSelect } from './ModelSearchSelect';
 import { useNotifications } from './GlobalNotifications';
 
@@ -32,6 +33,8 @@ export interface ComposerAttachment {
 }
 
 interface Props {
+  messages: UIMessage[];
+  busy: boolean;
   disabled: boolean;
   waitingQuestion: string | null;
   draft: string;
@@ -116,8 +119,9 @@ function ContextUsageMeter({ usage }: { usage: UsageSnapshot | null }) {
     : '暂无';
   const title = [
     used != null
-      ? `上下文：${used.toLocaleString()}${budget ? ` / ${budget.toLocaleString()}` : ''} token${percent != null ? `，占比 ${percent}%` : ''}`
-      : '上下文：暂无数据',
+      ? `上下文占用 token：${used.toLocaleString()}${percent != null ? `，占比 ${percent}%` : ''}`
+      : '上下文占用 token：暂无数据',
+    `上下文大小上限：${budget ? `${budget.toLocaleString()} token` : '暂无数据'}`,
     `输入 token：${usage?.inputTokens?.toLocaleString() ?? '暂无'}`,
     `输出 token：${usage?.outputTokens?.toLocaleString() ?? '暂无'}`,
     `缓存命中：${usage?.cachedInputTokens?.toLocaleString() ?? '暂无'}，占比 ${cacheRatio}`,
@@ -149,6 +153,8 @@ function ContextUsageMeter({ usage }: { usage: UsageSnapshot | null }) {
 }
 
 export function Composer({
+  messages,
+  busy,
   disabled,
   waitingQuestion,
   draft,
@@ -357,6 +363,7 @@ export function Composer({
       <div className="flex min-w-0">
         <div className="min-w-0 flex-1">
           <div ref={promptFrameRef} className={cn('mx-auto', wide ? 'max-w-5xl' : 'max-w-3xl')}>
+            <ConversationProgressBar messages={messages} busy={busy} />
             {attachments.length > 0 && (
               <div className="mb-2 flex flex-wrap gap-2">
                 {attachments.map((att) => (

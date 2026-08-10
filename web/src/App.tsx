@@ -365,14 +365,12 @@ interface ThreadPanelState {
   rightPanelOpen: boolean;
   rightPanelTabs: RightTabId[];
   rightPanelMode: RightTabId | null;
-  statusCardOpen: boolean;
 }
 
 const EMPTY_THREAD_PANEL_STATE: ThreadPanelState = {
   rightPanelOpen: false,
   rightPanelTabs: [],
   rightPanelMode: null,
-  statusCardOpen: false,
 };
 
 function threadPanelStateValue(value: unknown): ThreadPanelState {
@@ -383,7 +381,6 @@ function threadPanelStateValue(value: unknown): ThreadPanelState {
     rightPanelOpen: typeof object.rightPanelOpen === 'boolean' ? object.rightPanelOpen && tabs.length > 0 : false,
     rightPanelTabs: tabs,
     rightPanelMode: mode,
-    statusCardOpen: typeof object.statusCardOpen === 'boolean' ? object.statusCardOpen : false,
   };
 }
 
@@ -443,8 +440,6 @@ export function App() {
   const [rightPanelMode, setRightPanelMode] = useState<RightTabId | null>(null);
   const [threadPanelStates, setThreadPanelStates] = useState<Record<string, ThreadPanelState>>({});
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
-  const [statusCardOpen, setStatusCardOpen] = useState(false);
-  const [mobileStatusCardOpen, setMobileStatusCardOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(256);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -498,8 +493,7 @@ export function App() {
     rightPanelOpen: rightPanelOpen && rightPanelTabs.length > 0,
     rightPanelTabs,
     rightPanelMode: rightPanelMode && rightPanelTabs.includes(rightPanelMode) ? rightPanelMode : rightPanelTabs[0] ?? null,
-    statusCardOpen,
-  }), [rightPanelMode, rightPanelOpen, rightPanelTabs, statusCardOpen]);
+  }), [rightPanelMode, rightPanelOpen, rightPanelTabs]);
 
   const rememberThreadPanelState = useCallback((threadId: string, state: ThreadPanelState) => {
     setThreadPanelStates((current) => {
@@ -513,7 +507,6 @@ export function App() {
     setRightPanelTabs(state.rightPanelTabs);
     setRightPanelMode(state.rightPanelMode);
     setRightPanelOpen(state.rightPanelOpen);
-    setStatusCardOpen(state.statusCardOpen);
   }, []);
 
   const rememberThreadDraft = useCallback((threadId: string, draftText: string) => {
@@ -660,7 +653,6 @@ export function App() {
     if (!isMobile) {
       setMobileSidebarOpen(false);
       setMobileRightPanelOpen(false);
-      setMobileStatusCardOpen(false);
       return;
     }
   }, [isMobile]);
@@ -747,7 +739,6 @@ export function App() {
         rightPanelOpen: activePanelState.rightPanelOpen,
         rightPanelTabs: activePanelState.rightPanelTabs,
         rightPanelMode: activePanelState.rightPanelMode,
-        statusCardOpen: activePanelState.statusCardOpen,
         threadStates: savedThreadStates,
         threadDrafts: savedThreadDrafts,
       },
@@ -1376,10 +1367,8 @@ export function App() {
     setRightPanelMode(tab);
     if (isMobile) {
       setMobileRightPanelOpen(true);
-      setMobileStatusCardOpen(false);
     } else {
       setRightPanelOpen(true);
-      setStatusCardOpen(false);
     }
   }
 
@@ -1406,11 +1395,9 @@ export function App() {
         setRightPanelMode('files');
       }
       setMobileRightPanelOpen((open) => !open);
-      setMobileStatusCardOpen(false);
       return;
     }
     setRightPanelOpen((open) => !open);
-    setStatusCardOpen(false);
   }
 
   function openRemoteFile(path: string) {
@@ -1456,7 +1443,7 @@ export function App() {
       return;
     }
 
-    // 右侧栏宽度动画结束前继续占位，避免状态卡片提前跳出来。
+    // 右侧栏宽度动画结束前继续占位，避免对话区提前横向跳动。
     setRightPanelClosing(true);
     rightPanelCloseTimerRef.current = window.setTimeout(() => {
       setRightPanelClosing(false);
@@ -1530,7 +1517,6 @@ export function App() {
           draft={composerDraft}
           wide={wide}
           workspaceRoot={workspaceRoot}
-          threadId={activeThreadId}
           contentRef={conversationContentRef}
           askUserDrafts={askUserDrafts}
           attachments={attachments}
@@ -1550,14 +1536,7 @@ export function App() {
           onToggleDebug={() => setDebugMode((enabled) => !enabled)}
           onRemoveAttachment={(path) => setAttachments((current) => current.filter((a) => a.path !== path))}
           rightPanelOpen={conversationRightPanelOpen}
-          statusCardOpen={isMobile ? mobileStatusCardOpen : statusCardOpen}
-          onToggleStatusCard={() => {
-            if (isMobile) setMobileStatusCardOpen((open) => !open);
-            else setStatusCardOpen((open) => !open);
-          }}
           onToggleRightPanel={toggleRightPanel}
-          onOpenShellPreview={(sessionId) => openRightTab(`shell:${sessionId}`)}
-          onOpenSubagentPreview={(subagentId) => openRightTab(`subagent:${subagentId}`)}
           onOpenRemoteFiles={() => openRightTab('files')}
           onUploadLocal={uploadLocalAttachment}
           onOpenRemoteFile={openRemoteFile}

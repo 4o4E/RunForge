@@ -1,5 +1,5 @@
 import type { UIMessage } from 'ai';
-import { Activity, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Fingerprint, FileText, GitBranch, PackageMinus, Pencil, Workflow } from 'lucide-react';
+import { Activity, Bot, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Circle, Copy, Fingerprint, FileText, GitBranch, LoaderCircle, PackageMinus, Pencil, Workflow, XCircle } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import {
@@ -18,7 +18,7 @@ import { cn } from '@/lib/utils';
 import { MarkdownContent } from './MarkdownContent';
 import type { StreamdownProps } from 'streamdown';
 import { AskUserQuestionCard, emptyAskUserDraft, type AskUserDraft } from './AskUserCard';
-import type { AgentEvent, AskUserAnswer, AskUserSpec, GoalState, StreamStats } from '@/api';
+import type { AgentEvent, AskUserAnswer, AskUserSpec, GoalState, PlanItem, StreamStats } from '@/api';
 import type { RunBranchInfo, ThreadNoticeData } from '../history';
 
 type Part = UIMessage['parts'][number];
@@ -111,6 +111,16 @@ function messageTime(message: UIMessage): string | null {
   return null;
 }
 
+function messageTimestamp(message: UIMessage | undefined, field: 'sentAt' | 'completedAt'): string | null {
+  if (!message) return null;
+  for (let i = message.parts.length - 1; i >= 0; i--) {
+    const part = message.parts[i] as { type: string; data?: { sentAt?: string; completedAt?: string } };
+    if (part.type !== 'data-message-time') continue;
+    return part.data?.[field] ?? null;
+  }
+  return null;
+}
+
 function durationFromTiming(t?: Timing): number | undefined {
   if (!t) return undefined;
   if (t.startedAt && t.endedAt) {
@@ -156,9 +166,25 @@ function CopyRunButton({ runId, className }: { runId: string | null; className?:
   );
 }
 
-function StreamStatusBar({ parts, active, time, runId }: { parts: Part[]; active: boolean; time: string | null; runId: string | null }) {
+function StreamStatusBar({
+  parts,
+  active,
+  time,
+  runId,
+  startedAt,
+}: {
+  parts: Part[];
+  active: boolean;
+  time: string | null;
+  runId: string | null;
+  startedAt: string | null;
+}) {
   const stats = latestStreamStats(parts);
-  if (!stats && !time && !runId) return null;
+  const completedAt = messageCompletedAtFromParts(parts);
+  const showFinalMetrics = !active && !!completedAt;
+  const usage = showFinalMetrics ? latestUsageSnapshot(parts) : null;
+  const duration = showFinalMetrics ? formatRunDuration(startedAt, completedAt) : null;
+  if (!stats && !time && !runId && !usage && !duration) return null;
   const running = !!stats && active && stats.stage !== 'done' && stats.stage !== 'error';
 
   return (
@@ -174,7 +200,55 @@ function StreamStatusBar({ parts, active, time, runId }: { parts: Part[]; active
       <span className="inline-flex items-center">
         <CopyRunButton runId={runId} className="size-6 text-muted-foreground" />
       </span>
+      <FinalRunMetrics usage={usage} duration={duration} />
     </div>
+  );
+}
+
+function formatNumber(value?: number): string {
+  return value == null ? '暂无' : value.toLocaleString();
+}
+
+function hasUsageTokens(usage: UsageSnapshot | null): usage is UsageSnapshot {
+  return !!usage && (usage.inputTokens != null || usage.outputTokens != null || usage.cachedInputTokens != null);
+}
+
+function formatRunDuration(startedAt: string | null, completedAt: string | null): string | null {
+  if (!startedAt || !completedAt) return null;
+  const start = new Date(startedAt).getTime();
+  const end = new Date(completedAt).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+  return formatDuration(end - start) ?? null;
+}
+
+function messageCompletedAtFromParts(parts: Part[]): string | null {
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const part = parts[i] as { type: string; data?: { completedAt?: string } };
+    if (part.type === 'data-message-time' && part.data?.completedAt) return part.data.completedAt;
+  }
+  return null;
+}
+
+function FinalRunMetrics({ usage, duration }: { usage: UsageSnapshot | null; duration: string | null }) {
+  if (!hasUsageTokens(usage) && !duration) return null;
+  const cacheRatio = usage?.cachedInputTokens != null && usage.inputTokens && usage.inputTokens > 0
+    ? `${((usage.cachedInputTokens / usage.inputTokens) * 100).toFixed(1)}%`
+    : '暂无';
+  const title = [
+    `输入 token：${formatNumber(usage?.inputTokens)}`,
+    `输出 token：${formatNumber(usage?.outputTokens)}`,
+    `缓存命中 token：${formatNumber(usage?.cachedInputTokens)}，占比 ${cacheRatio}`,
+    `耗时：${duration ?? '暂无'}`,
+  ].join('\n');
+  return (
+    <span className="inline-flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground" title={title}>
+      {hasUsageTokens(usage) && (
+        <span className="truncate tabular-nums">
+          Token 读 {formatNumber(usage.inputTokens)} / 写 {formatNumber(usage.outputTokens)}
+        </span>
+      )}
+      {duration && <span className="shrink-0 tabular-nums">耗时 {duration}</span>}
+    </span>
   );
 }
 
@@ -260,6 +334,161 @@ export function latestPlanState(messages: UIMessage[]): GoalState | null {
     }
   }
   return null;
+}
+
+function latestAssistantStreamStats(messages: UIMessage[]): StreamStats | null {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex--) {
+    const message = messages[messageIndex];
+    if (message.role !== 'assistant') continue;
+    const stats = latestStreamStats(message.parts);
+    if (stats) return stats;
+  }
+  return null;
+}
+
+function planStepIndex(plan: PlanItem[]): number {
+  const doing = plan.findIndex((item) => item.status === 'doing');
+  if (doing >= 0) return doing;
+  const next = plan.findIndex((item) => item.status === 'todo');
+  if (next >= 0) return next;
+  return Math.max(0, plan.length - 1);
+}
+
+function planStatusIcon(item: PlanItem) {
+  if (item.status === 'done') return <CheckCircle2 className="size-3.5 text-foreground" />;
+  if (item.status === 'doing') return <LoaderCircle className="size-3.5 animate-spin text-foreground" />;
+  if (item.status === 'failed') return <XCircle className="size-3.5 text-destructive" />;
+  return <Circle className="size-3.5 text-muted-foreground" />;
+}
+
+function CompactSparkline({ values }: { values: number[] }) {
+  const width = 92;
+  const height = 24;
+  const samples = values.length ? values.map((value) => Math.max(0, value)) : [0];
+  const max = Math.max(1, ...samples);
+  const points = samples.map((value, index) => {
+    const x = samples.length === 1 ? width : (index / (samples.length - 1)) * width;
+    const y = height - (value / max) * (height - 5) - 2.5;
+    return { value, x, y };
+  });
+  const segmentPath = (index: number) => {
+    const p0 = points[Math.max(0, index - 1)];
+    const p1 = points[index];
+    const p2 = points[index + 1];
+    const p3 = points[Math.min(points.length - 1, index + 2)];
+    if (p1.value === 0 && p2.value === 0) return `M ${p1.x.toFixed(1)} ${p1.y.toFixed(1)} L ${p2.x.toFixed(1)} ${p2.y.toFixed(1)}`;
+    const cp1x = p1.x + (p2.x - p0.x) / 6;
+    const cp1y = p1.y + (p2.y - p0.y) / 6;
+    const cp2x = p2.x - (p3.x - p1.x) / 6;
+    const cp2y = p2.y - (p3.y - p1.y) / 6;
+    return [
+      `M ${p1.x.toFixed(1)} ${p1.y.toFixed(1)}`,
+      `C ${cp1x.toFixed(1)} ${cp1y.toFixed(1)} ${cp2x.toFixed(1)} ${cp2y.toFixed(1)} ${p2.x.toFixed(1)} ${p2.y.toFixed(1)}`,
+    ].join(' ');
+  };
+
+  return (
+    <svg className="h-6 w-24 overflow-visible" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true">
+      {points.length === 1 ? (
+        <circle
+          cx={points[0].x}
+          cy={points[0].y}
+          r="1.4"
+          fill={points[0].value === 0 ? 'hsl(var(--muted-foreground))' : 'currentColor'}
+          opacity={points[0].value === 0 ? 0.45 : 1}
+        />
+      ) : (
+        points.slice(0, -1).map((point, index) => {
+          const next = points[index + 1];
+          const isZero = point.value === 0 && next.value === 0;
+          return (
+            <path
+              key={index}
+              d={segmentPath(index)}
+              fill="none"
+              stroke={isZero ? 'hsl(var(--muted-foreground))' : 'currentColor'}
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity={isZero ? 0.45 : 1}
+              vectorEffect="non-scaling-stroke"
+            />
+          );
+        })
+      )}
+    </svg>
+  );
+}
+
+export function ConversationProgressBar({ messages, busy }: { messages: UIMessage[]; busy: boolean }) {
+  const goal = latestPlanState(messages);
+  const stats = latestAssistantStreamStats(messages);
+  const [open, setOpen] = useState(false);
+  if (!goal?.plan?.length && !stats) return null;
+  const plan = goal?.plan ?? [];
+  const currentIndex = plan.length ? planStepIndex(plan) : -1;
+  const currentItem = currentIndex >= 0 ? plan[currentIndex] : null;
+  const running = !!stats && busy && stats.stage !== 'done' && stats.stage !== 'error';
+  const charsPerSecond = stats ? Math.round(stats.rate.charsPerSecond) : 0;
+
+  return (
+    <div className="group/plan relative mb-2">
+      <button
+        type="button"
+        className="flex min-h-9 w-full min-w-0 items-center gap-3 rounded-md border bg-background px-3 py-1.5 text-left shadow-sm transition-colors hover:bg-accent/40"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+      >
+        <span className="flex min-w-0 flex-1 items-center gap-2">
+          {currentItem ? (
+            <>
+              <span className="shrink-0 rounded border bg-muted px-2 py-0.5 text-xs font-medium tabular-nums text-foreground">
+                第 {currentIndex + 1}/{plan.length} 步
+              </span>
+              <span className="min-w-0 truncate text-sm font-medium">{currentItem.text}</span>
+              {goal?.next && <span className="hidden min-w-0 truncate text-xs text-muted-foreground lg:block">下一步：{goal.next}</span>}
+            </>
+          ) : (
+            <span className="min-w-0 flex-1 text-sm text-muted-foreground">{stats ? streamStageLabel(stats) : '暂无计划'}</span>
+          )}
+        </span>
+        {stats && (
+          <span className="ml-auto flex shrink-0 items-center gap-2 text-xs text-muted-foreground" title={`${streamStageLabel(stats)}\n${charsPerSecond.toLocaleString()} 字/秒`}>
+            <Activity className={cn('size-3.5', running && 'animate-pulse text-foreground')} />
+            <span className="hidden tabular-nums sm:inline">{charsPerSecond.toLocaleString()} 字/秒</span>
+            <CompactSparkline values={stats.rate.history.slice(-24)} />
+          </span>
+        )}
+        {plan.length > 0 && <ChevronDown className={cn('size-4 shrink-0 text-muted-foreground transition-transform', open && 'rotate-180')} />}
+      </button>
+      {plan.length > 0 && (
+        <div
+          className={cn(
+            'absolute bottom-[calc(100%+0.35rem)] left-0 right-0 z-20 hidden max-h-[45vh] overflow-y-auto rounded-md border bg-popover p-2 text-popover-foreground shadow-lg sm:group-hover/plan:block',
+            open && 'block',
+          )}
+        >
+          <div className="flex min-w-0 flex-col gap-1 pr-1">
+            {plan.map((item, index) => (
+              <div
+                key={`${item.text}:${index}`}
+                className={cn(
+                  'inline-flex w-full max-w-full items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] text-muted-foreground',
+                  index === currentIndex && 'border-foreground/30 bg-muted text-foreground',
+                )}
+                title={item.text}
+              >
+                {planStatusIcon(item)}
+                <span className="shrink-0 tabular-nums">{index + 1}</span>
+                <span className="min-w-0 flex-1 truncate">{item.text}</span>
+              </div>
+            ))}
+          </div>
+          {goal?.next && <div className="mt-2 truncate text-xs text-muted-foreground sm:hidden">下一步：{goal.next}</div>}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function formatDuration(ms?: number): string | undefined {
@@ -955,6 +1184,7 @@ function UserMessageFooter({
 function AssistantMessage({
   message,
   active,
+  startedAt,
   lastToolKey,
   lastActivityKey,
   workspaceRoot,
@@ -967,6 +1197,7 @@ function AssistantMessage({
 }: {
   message: UIMessage;
   active: boolean;
+  startedAt: string | null;
   lastToolKey: string | null;
   lastActivityKey: string | null;
   workspaceRoot: string | null;
@@ -1047,7 +1278,7 @@ function AssistantMessage({
   return (
     <>
       {nodes}
-      <StreamStatusBar parts={message.parts} active={active} time={messageTime(message)} runId={runId} />
+      <StreamStatusBar parts={message.parts} active={active} time={messageTime(message)} runId={runId} startedAt={startedAt} />
     </>
   );
 }
@@ -1124,49 +1355,52 @@ export function Conversation({
                 description={emptyDescription}
               />
             ) : (
-              messages.map((m, index) => (
-                <Message
-                  from={m.role}
-                  key={m.id}
-                  data-toc-message={m.role === 'user' ? 'user' : undefined}
-                  data-toc-title={m.role === 'user' ? userTocTitle(m) : undefined}
-                  data-toc-time={m.role === 'user' ? messageTime(m) ?? undefined : undefined}
-                >
-                  {m.role === 'user' ? (
-                    <>
-                      <MessageContent>
-                        <UserMessageText message={m} onOpenRemoteFile={onOpenRemoteFile} />
-                      </MessageContent>
-                      <UserMessageFooter
-                        message={m}
-                        runId={runIdForUser(messages, index)}
-                        disabled={busy}
-                        onSwitchRunBranch={onSwitchRunBranch}
-                        onEditRunInput={onEditRunInput}
-                        onForkFromRun={onForkFromRun}
-                      />
-                    </>
-                  ) : (
-                    <>
-                      <MessageContent>
-                        <AssistantMessage
+              <>
+                {messages.map((m, index) => (
+                  <Message
+                    from={m.role}
+                    key={m.id}
+                    data-toc-message={m.role === 'user' ? 'user' : undefined}
+                    data-toc-title={m.role === 'user' ? userTocTitle(m) : undefined}
+                    data-toc-time={m.role === 'user' ? messageTime(m) ?? undefined : undefined}
+                  >
+                    {m.role === 'user' ? (
+                      <>
+                        <MessageContent>
+                          <UserMessageText message={m} onOpenRemoteFile={onOpenRemoteFile} />
+                        </MessageContent>
+                        <UserMessageFooter
                           message={m}
-                          active={busy && m.id === activeAssistantId}
-                          lastToolKey={lastToolKey}
-                          lastActivityKey={lastActivityKey}
-                          workspaceRoot={workspaceRoot}
-                          onOpenRemoteFile={onOpenRemoteFile}
-                          onOpenThread={onOpenThread}
-                          askUserDrafts={askUserDrafts}
-                          onAskUserDraftChange={onAskUserDraftChange}
-                          onAskUserSubmit={onAskUserSubmit}
-                          onAskUserCancel={onAskUserCancel}
+                          runId={runIdForUser(messages, index)}
+                          disabled={busy}
+                          onSwitchRunBranch={onSwitchRunBranch}
+                          onEditRunInput={onEditRunInput}
+                          onForkFromRun={onForkFromRun}
                         />
-                      </MessageContent>
-                    </>
-                  )}
-                </Message>
-              ))
+                      </>
+                    ) : (
+                      <>
+                        <MessageContent>
+                          <AssistantMessage
+                            message={m}
+                            active={busy && m.id === activeAssistantId}
+                            startedAt={messageTimestamp(messages[index - 1], 'sentAt')}
+                            lastToolKey={lastToolKey}
+                            lastActivityKey={lastActivityKey}
+                            workspaceRoot={workspaceRoot}
+                            onOpenRemoteFile={onOpenRemoteFile}
+                            onOpenThread={onOpenThread}
+                            askUserDrafts={askUserDrafts}
+                            onAskUserDraftChange={onAskUserDraftChange}
+                            onAskUserSubmit={onAskUserSubmit}
+                            onAskUserCancel={onAskUserCancel}
+                          />
+                        </MessageContent>
+                      </>
+                    )}
+                  </Message>
+                ))}
+              </>
             )}
             {busy && messages[messages.length - 1]?.role === 'user' && (
               <div className="flex items-center gap-2 pl-1 text-sm text-muted-foreground">
