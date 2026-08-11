@@ -1,6 +1,6 @@
 import type { UIMessage } from 'ai';
 import { Activity, Bot, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Circle, Copy, Fingerprint, FileText, GitBranch, LoaderCircle, PackageMinus, Pencil, Workflow, XCircle } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import {
   Conversation as AIConversation,
@@ -449,7 +449,9 @@ export function ConversationProgressBar({ messages, busy }: { messages: UIMessag
   const goal = latestPlanState(messages);
   const stats = latestAssistantStreamStats(messages);
   const [open, setOpen] = useState(false);
-  if (!goal?.plan?.length && !stats) return null;
+  const [showPlanPreview, setShowPlanPreview] = useState(true);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const previewMeasureRef = useRef<HTMLSpanElement>(null);
   const plan = goal?.plan ?? [];
   const currentIndex = plan.length ? planStepIndex(plan) : -1;
   const currentItem = currentIndex >= 0 ? plan[currentIndex] : null;
@@ -457,9 +459,46 @@ export function ConversationProgressBar({ messages, busy }: { messages: UIMessag
   const running = !!stats && busy && stats.stage !== 'done' && stats.stage !== 'error';
   const charsPerSecond = stats ? Math.round(stats.rate.charsPerSecond) : 0;
 
+  useEffect(() => {
+    setShowPlanPreview(true);
+  }, [currentItem?.text]);
+
+  useLayoutEffect(() => {
+    const button = buttonRef.current;
+    if (!button) return undefined;
+    const update = () => {
+      const previewWidth = previewMeasureRef.current?.scrollWidth ?? 0;
+      const available = button.parentElement?.clientWidth ?? button.clientWidth;
+      const currentWidth = button.scrollWidth;
+      const expectedWidth = showPlanPreview ? currentWidth : currentWidth + previewWidth;
+      if (showPlanPreview && button.scrollWidth > button.clientWidth + 1) {
+        setShowPlanPreview(false);
+        return;
+      }
+      if (!showPlanPreview && expectedWidth <= available) setShowPlanPreview(true);
+    };
+    update();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update);
+    observer?.observe(button);
+    if (button.parentElement) observer?.observe(button.parentElement);
+    window.addEventListener('resize', update);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', update);
+    };
+  }, [currentItem?.text, showPlanPreview, stats?.rate.charsPerSecond]);
+
+  if (!plan.length && !stats) return null;
+
   return (
-    <div className="group/plan relative mx-auto mb-2 table max-w-full">
+    <div className="group/plan relative mb-2 flex max-w-full justify-center">
+      {currentItem && (
+        <span ref={previewMeasureRef} className="pointer-events-none invisible absolute whitespace-nowrap text-sm font-medium" aria-hidden="true">
+          {currentItem.text}
+        </span>
+      )}
       <button
+        ref={buttonRef}
         type="button"
         className="inline-flex min-h-9 max-w-full min-w-0 items-center gap-3 rounded-md border bg-background px-3 py-1.5 text-left shadow-sm transition-colors hover:bg-accent/40"
         onClick={() => setOpen((value) => !value)}
@@ -472,7 +511,7 @@ export function ConversationProgressBar({ messages, busy }: { messages: UIMessag
               <span className="shrink-0 rounded border bg-muted px-2 py-0.5 text-xs font-medium tabular-nums text-foreground">
                 第 {currentIndex + 1}/{plan.length} 步
               </span>
-              <span className="min-w-0 truncate text-sm font-medium">{currentItem.text}</span>
+              {showPlanPreview && <span className="min-w-0 truncate text-sm font-medium">{currentItem.text}</span>}
             </>
           ) : (
             <span className="min-w-0 flex-1 text-sm text-muted-foreground">{stats ? streamStageLabel(stats) : '暂无计划'}</span>
