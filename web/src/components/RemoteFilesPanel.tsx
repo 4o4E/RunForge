@@ -1,7 +1,7 @@
 import { Component, lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
-import { Copy, Download, Eye, ChevronRight, FileText, Folder, FolderOpen, FolderTree, Link, PanelRightClose, PanelRightOpen, Paperclip, Pencil, RefreshCw, RotateCcw, Save, X } from 'lucide-react';
+import { Copy, Download, Eye, ChevronRight, FileText, Folder, FolderOpen, FolderTree, Link, LocateFixed, PanelRightClose, PanelRightOpen, Paperclip, Pencil, RefreshCw, RotateCcw, Save, X } from 'lucide-react';
 import {
   createRemoteFileShareLink,
   getRemoteFileContent,
@@ -154,6 +154,23 @@ function fileName(path: string): string {
   return parts[parts.length - 1] ?? path;
 }
 
+function parentDirOf(path: string): string {
+  const parts = path.split('/').filter(Boolean);
+  parts.pop();
+  return parts.length ? parts.join('/') : '.';
+}
+
+function ancestorDirsForPath(path: string): string[] {
+  const parts = path.split('/').filter(Boolean);
+  const dirs = ['.'];
+  let current = '';
+  for (let index = 0; index < parts.length - 1; index += 1) {
+    current = current ? `${current}/${parts[index]}` : parts[index];
+    dirs.push(current);
+  }
+  return dirs;
+}
+
 function formatSize(size?: number): string {
   if (size == null) return '';
   if (size < 1024) return `${size} B`;
@@ -281,16 +298,22 @@ export function RemoteFilesPanel({
   const [customShareValue, setCustomShareValue] = useState('1');
   const [customShareUnit, setCustomShareUnit] = useState<typeof CUSTOM_UNITS[number]['value']>('day');
   const previewRequestRef = useRef(0);
+  const treeScrollRef = useRef<HTMLDivElement | null>(null);
   const pendingPreviewStartsRef = useRef<Set<number>>(new Set());
   const pendingHexOffsetsRef = useRef<Set<number>>(new Set());
+
+  async function loadTreeDir(path: string) {
+    const data = await listRemoteFiles(path);
+    setTreeEntries((current) => ({ ...current, [data.path]: data.entries }));
+    return data;
+  }
 
   async function loadDir(path = currentPath, select = true) {
     setLoading(true);
     setError(null);
     try {
-      const data = await listRemoteFiles(path);
+      const data = await loadTreeDir(path);
       if (select) setCurrentPath(data.path);
-      setTreeEntries((current) => ({ ...current, [data.path]: data.entries }));
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -451,6 +474,36 @@ export function RemoteFilesPanel({
     if (willOpen && !treeEntries[path]) await loadDir(path, false);
   }
 
+  async function revealSelectedInTree() {
+    if (!selectedPath || loading) return;
+    const dirs = ancestorDirsForPath(selectedPath);
+    setShowTree(true);
+    setLoading(true);
+    setError(null);
+    try {
+      for (const dir of dirs) {
+        if (!treeEntries[dir]) await loadTreeDir(dir);
+      }
+      setCurrentPath(parentDirOf(selectedPath));
+      setExpanded((current) => {
+        const next = new Set(current);
+        dirs.forEach((dir) => next.add(dir));
+        return next;
+      });
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          treeScrollRef.current
+            ?.querySelector('[data-current-open-file="true"]')
+            ?.scrollIntoView({ block: 'nearest' });
+        });
+      });
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function selectFile(entry: RemoteFileEntry) {
     if (onOpenFile && entry.path !== selectedPath) {
       onOpenFile(entry.path);
@@ -605,6 +658,7 @@ export function RemoteFilesPanel({
           style={{ paddingLeft: 8 + depth * 14 }}
           onClick={() => isDir ? void toggleDir(entry.path) : selectFile(entry)}
           title={entry.path}
+          data-current-open-file={!isDir && entry.path === selectedPath ? 'true' : undefined}
         >
           {isDir ? (
             <ChevronRight className={cn('size-3.5 shrink-0 text-muted-foreground transition-transform', isOpen && 'rotate-90')} />
@@ -631,10 +685,32 @@ export function RemoteFilesPanel({
       )}
       style={side ? { width: treeWidth } : undefined}
     >
-      <div className="flex h-9 shrink-0 items-center border-b px-2">
+      <div className="flex h-9 shrink-0 items-center gap-1 border-b px-2">
         <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">文件</span>
+        <div className="ml-auto flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => void revealSelectedInTree()}
+            disabled={!selectedPath || loading}
+            title="定位当前文件"
+            aria-label="定位当前文件"
+          >
+            <LocateFixed className="size-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => void loadDir(currentPath, false)}
+            disabled={loading}
+            title="刷新文件树"
+            aria-label="刷新文件树"
+          >
+            <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
+          </Button>
+        </div>
       </div>
-      <div className="scrollbar-thin min-h-0 flex-1 overflow-auto py-1">
+      <div ref={treeScrollRef} className="scrollbar-thin min-h-0 flex-1 overflow-auto py-1">
         <button
           className={cn(
             'flex h-7 w-full items-center gap-1.5 px-2 text-left text-[13px] hover:bg-accent/70',
@@ -662,22 +738,15 @@ export function RemoteFilesPanel({
               {selectedPath ?? currentPath}
             </div>
           </div>
-          {showBrowser && (
-            <>
-              <Button variant="ghost" size="icon" onClick={() => void loadDir(currentPath)} title="刷新">
-                <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
-              </Button>
-              {showHeaderTreeToggle && (
-                <Button
-                  variant={showTree ? 'secondary' : 'ghost'}
-                  size="icon"
-                  onClick={() => setShowTree((value) => !value)}
-                  title={showTree ? '隐藏文件树' : '显示文件树'}
-                >
-                  {showTree ? <PanelRightClose className="size-4" /> : <PanelRightOpen className="size-4" />}
-                </Button>
-              )}
-            </>
+          {showBrowser && showHeaderTreeToggle && (
+            <Button
+              variant={showTree ? 'secondary' : 'ghost'}
+              size="icon"
+              onClick={() => setShowTree((value) => !value)}
+              title={showTree ? '隐藏文件树' : '显示文件树'}
+            >
+              {showTree ? <PanelRightClose className="size-4" /> : <PanelRightOpen className="size-4" />}
+            </Button>
           )}
           {!embedded && (
             <Button variant="ghost" size="icon" onClick={onClose} title="关闭">
@@ -834,17 +903,6 @@ export function RemoteFilesPanel({
                       </div>
                     </PopoverContent>
                   </Popover>
-                )}
-                {showBrowser && (
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    onClick={() => void loadDir(currentPath)}
-                    title="刷新文件树"
-                    aria-label="刷新文件树"
-                  >
-                    <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
-                  </Button>
                 )}
                 {showBrowser && (
                   <Button

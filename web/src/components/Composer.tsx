@@ -455,7 +455,7 @@ export function Composer({
                     : 'h-8 min-h-8 max-h-8 whitespace-pre overflow-x-auto overflow-y-hidden',
                 )}
               />
-              <div className="composer-actions ml-auto flex min-w-0 shrink-0 items-center gap-1">
+              <div className="composer-actions flex min-w-0 shrink-0 items-center gap-1">
                 {modelSelect}
                 <ContextUsageMeter usage={usage} />
                 <PromptInputSubmit

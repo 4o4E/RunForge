@@ -195,6 +195,7 @@
   }
 
   .composer-multiline .composer-actions {
+    margin-left: auto;
     order: 2;
   }
 
