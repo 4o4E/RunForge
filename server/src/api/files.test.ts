@@ -1,10 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { formatHexRows, parseByteRange, previewTextLines } from './files.js';
 import { signFileShare, verifyFileShare } from './auth.js';
 import { config } from '../config.js';
 import { isOfficeConvertiblePath, officePdfCacheKey } from '../files/officePreview.js';
 import { resolveWorkspaceRoot } from '../files/workspaceRoot.js';
+import { signTenantAccessToken } from '../auth/jwt.js';
+import { buildApp, listen, seedOwner } from './testHelpers.js';
 
 test('render preview keeps long lines intact', () => {
   const longLine = `const DATA = ${'x'.repeat(13_000)};`;
@@ -77,4 +82,48 @@ test('office pdf cache key changes when source metadata changes', () => {
   assert.notEqual(officePdfCacheKey(base), officePdfCacheKey({ ...base, cacheVersion: 'fonts-v2' }));
   assert.notEqual(officePdfCacheKey(base), officePdfCacheKey({ ...base, tenantId: 'other-tenant' }));
   assert.notEqual(officePdfCacheKey(base), officePdfCacheKey({ ...base, userId: 'us_b' }));
+});
+
+test('file content API saves text with version conflict protection', async () => {
+  const previousWorkspaceRoot = config.tools.workspaceRoot;
+  const base = await mkdtemp(join(tmpdir(), 'runforge-file-content-'));
+  config.tools.workspaceRoot = base;
+  try {
+    const owner = await seedOwner('tn_file_content', 'owner@file-content.test', 'pw');
+    const token = signTenantAccessToken({ id: owner.id, tenantId: 'tn_file_content', role: 'owner' });
+    const root = resolveWorkspaceRoot({ tenantId: 'tn_file_content', userId: owner.id }, base);
+    await mkdir(join(root, 'src'), { recursive: true });
+    await writeFile(join(root, 'src/demo.ts'), 'export const value = 1;\n', 'utf8');
+
+    const { port, close } = await listen(buildApp());
+    try {
+      const headers = { Authorization: `Bearer ${token}` };
+      const loaded = await fetch(`http://127.0.0.1:${port}/api/files/content?path=src%2Fdemo.ts`, { headers });
+      assert.equal(loaded.status, 200);
+      const body = (await loaded.json()) as { content: string; version: { sha256: string } };
+      assert.equal(body.content, 'export const value = 1;\n');
+
+      const saved = await fetch(`http://127.0.0.1:${port}/api/files/content`, {
+        method: 'PUT',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: 'src/demo.ts', content: 'export const value = 2;\n', baseSha256: body.version.sha256 }),
+      });
+      assert.equal(saved.status, 200);
+      assert.equal(await readFile(join(root, 'src/demo.ts'), 'utf8'), 'export const value = 2;\n');
+
+      await writeFile(join(root, 'src/demo.ts'), 'export const value = 3;\n', 'utf8');
+      const conflict = await fetch(`http://127.0.0.1:${port}/api/files/content`, {
+        method: 'PUT',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: 'src/demo.ts', content: 'export const value = 4;\n', baseSha256: body.version.sha256 }),
+      });
+      assert.equal(conflict.status, 409);
+      assert.equal(await readFile(join(root, 'src/demo.ts'), 'utf8'), 'export const value = 3;\n');
+    } finally {
+      close();
+    }
+  } finally {
+    config.tools.workspaceRoot = previousWorkspaceRoot;
+    await rm(base, { recursive: true, force: true });
+  }
 });

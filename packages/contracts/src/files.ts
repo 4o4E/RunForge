@@ -23,6 +23,24 @@ export interface FilePreview {
   hasMore: boolean;
 }
 
+export interface FileTextVersion {
+  size: number;
+  mtimeMs: number;
+  sha256: string;
+}
+
+export interface FileTextContent {
+  path: string;
+  content: string;
+  version: FileTextVersion;
+}
+
+export interface FileTextSaveResponse {
+  path: string;
+  size: number;
+  version: FileTextVersion;
+}
+
 export interface FileHexRow {
   offset: number;
   hex: string;

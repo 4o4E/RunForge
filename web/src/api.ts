@@ -11,6 +11,8 @@ import type {
   DatasourceTestResult,
   FileHexPreview,
   FilePreview,
+  FileTextContent,
+  FileTextSaveResponse,
   LlmProviderChatTestResult,
   LlmProviderPingResult,
   LlmProviderProbeResult,
@@ -66,6 +68,8 @@ export interface FileShareLink {
 }
 
 export interface FileShareAccess {
+  tenant: string;
+  user: string;
   expires: string;
   sig: string;
 }
@@ -317,6 +321,8 @@ export const previewRemoteFile = (path: string, startLine = 1, limit = 200, opti
   });
   if (options.render) params.set('render', '1');
   if (options.share) {
+    params.set('tenant', options.share.tenant);
+    params.set('user', options.share.user);
     params.set('expires', options.share.expires);
     params.set('sig', options.share.sig);
   }
@@ -330,6 +336,8 @@ export const previewRemoteFileHex = (path: string, offset = 0, limit = 4096, opt
     limit: String(limit),
   });
   if (options.share) {
+    params.set('tenant', options.share.tenant);
+    params.set('user', options.share.user);
     params.set('expires', options.share.expires);
     params.set('sig', options.share.sig);
   }
@@ -341,6 +349,8 @@ export const remoteFileRawUrl = (path: string) => `/api/files/raw?path=${encodeU
 export const remoteFilePdfPreviewUrl = (path: string, share?: FileShareAccess) => {
   const params = new URLSearchParams({ path });
   if (share) {
+    params.set('tenant', share.tenant);
+    params.set('user', share.user);
     params.set('expires', share.expires);
     params.set('sig', share.sig);
   }
@@ -348,7 +358,7 @@ export const remoteFilePdfPreviewUrl = (path: string, share?: FileShareAccess) =
 };
 
 export const signedRemoteFileUrl = (path: string, share: FileShareAccess, options: { download?: boolean } = {}) => {
-  const params = new URLSearchParams({ path, expires: share.expires, sig: share.sig });
+  const params = new URLSearchParams({ path, tenant: share.tenant, user: share.user, expires: share.expires, sig: share.sig });
   if (options.download) params.set('download', '1');
   return `/api/files/raw?${params.toString()}`;
 };
@@ -362,6 +372,18 @@ export const createRemoteFileShareLink = (path: string, ttlSeconds: number) =>
 
 export const signedRemoteFileRawUrl = (path: string, ttlSeconds = 24 * 60 * 60) =>
   createRemoteFileShareLink(path, ttlSeconds).then((link) => link.rawUrl);
+
+export const getRemoteFileContent = (path: string) => {
+  const params = new URLSearchParams({ path });
+  return authFetch(`/api/files/content?${params.toString()}`).then(json<FileTextContent>);
+};
+
+export const saveRemoteFileContent = (path: string, content: string, baseSha256: string, options: { force?: boolean } = {}) =>
+  authFetch('/api/files/content', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path, content, baseSha256, force: options.force === true }),
+  }).then(json<FileTextSaveResponse>);
 
 export const uploadLocalFile = (path: string, contentBase64: string) =>
   authFetch('/api/files/upload', {

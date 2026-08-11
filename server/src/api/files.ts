@@ -1,6 +1,7 @@
 import { Router } from 'express';
+import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, open as openFile, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open as openFile, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Request, Response } from 'express';
@@ -15,6 +16,7 @@ import { requireTenantScope } from '../auth/guards.js';
 
 const SMALL_FILE_BYTES = 200 * 1024;
 const MAX_RENDER_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_TEXT_FILE_BYTES = 1024 * 1024;
 const DEFAULT_LINE_LIMIT = 200;
 const MAX_LINE_LIMIT = 1000;
 const MAX_PREVIEW_LINE_CHARS = 12_000;
@@ -26,6 +28,18 @@ export const filesApi = Router();
 
 type ByteRange = { start: number; end: number };
 type ByteRangeResult = ByteRange | 'invalid' | null;
+
+function sha256(buffer: Buffer | string): string {
+  return createHash('sha256').update(buffer).digest('hex');
+}
+
+function textVersion(info: { size: number; mtimeMs: number }, content: Buffer | string) {
+  return { size: info.size, mtimeMs: info.mtimeMs, sha256: sha256(content) };
+}
+
+function isLikelyBinary(buffer: Buffer): boolean {
+  return buffer.includes(0);
+}
 
 function parentRemotePath(abs: string, configuredRoot: string): string | null {
   const root = workspaceRoot(configuredRoot);
@@ -177,6 +191,60 @@ filesApi.post('/upload', requireTenantScope, async (req, res) => {
     await writeFile(targetPath, content);
     res.status(201).json({ path: toRemotePath(targetPath, settings.workspaceRoot), size: content.length });
   } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+filesApi.get('/content', requireTenantScope, async (req, res) => {
+  const scope = requireScope();
+  if (!scope) return res.status(403).json({ error: '需要租户身份' });
+  try {
+    const root = resolveWorkspaceRoot(scope);
+    const file = normalizeRemotePath(req.query.path, root);
+    const info = await stat(file);
+    if (!info.isFile()) return res.status(400).json({ error: 'path 不是文件' });
+    if (info.size > MAX_TEXT_FILE_BYTES) return res.status(413).json({ error: `文件超过文本编辑上限 ${MAX_TEXT_FILE_BYTES} 字节` });
+
+    const buffer = await readFile(file);
+    if (isLikelyBinary(buffer)) return res.status(415).json({ error: '二进制文件不支持文本编辑' });
+    const content = buffer.toString('utf8');
+    res.json({ path: toRemotePath(file, root), content, version: textVersion(info, buffer) });
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+filesApi.put('/content', requireTenantScope, async (req, res) => {
+  const scope = requireScope();
+  if (!scope) return res.status(403).json({ error: '需要租户身份' });
+  let tempPath = '';
+  try {
+    const root = resolveWorkspaceRoot(scope);
+    const file = normalizeRemotePath(req.body?.path, root);
+    const content = typeof req.body?.content === 'string' ? req.body.content : null;
+    const baseSha256 = typeof req.body?.baseSha256 === 'string' ? req.body.baseSha256 : '';
+    const force = req.body?.force === true;
+    if (content == null) return res.status(400).json({ error: 'content 为必填' });
+    if (Buffer.byteLength(content, 'utf8') > MAX_TEXT_FILE_BYTES) return res.status(413).json({ error: `文件超过编辑上限 ${MAX_TEXT_FILE_BYTES} 字节` });
+
+    const currentInfo = await stat(file);
+    if (!currentInfo.isFile()) return res.status(400).json({ error: 'path 不是文件' });
+    const currentBuffer = await readFile(file);
+    if (isLikelyBinary(currentBuffer)) return res.status(415).json({ error: '二进制文件不支持文本编辑' });
+    const currentVersion = textVersion(currentInfo, currentBuffer);
+    if (!force && baseSha256 && baseSha256 !== currentVersion.sha256) {
+      return res.status(409).json({ error: '文件已被其他进程修改，请重新加载后再保存', currentVersion });
+    }
+
+    // 写到同目录临时文件再 rename，避免保存中断时留下半截目标文件。
+    tempPath = join(dirname(file), `.${fileName(file)}.${randomUUID()}.tmp`);
+    await writeFile(tempPath, content, 'utf8');
+    await rename(tempPath, file);
+    tempPath = '';
+    const nextInfo = await stat(file);
+    res.json({ path: toRemotePath(file, root), size: nextInfo.size, version: textVersion(nextInfo, Buffer.from(content, 'utf8')) });
+  } catch (err) {
+    if (tempPath) await rm(tempPath, { force: true }).catch(() => undefined);
     res.status(400).json({ error: (err as Error).message });
   }
 });
