@@ -68,6 +68,7 @@ export interface RunRow {
   output: string | null;
   error: string | null;
   goal_state: GoalState | null;
+  runtime_capabilities_snapshot: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 }
@@ -297,7 +298,7 @@ export interface Store {
   }): Promise<ThreadNoticeRow>;
   forkThreadAtRun(scope: Scope, sourceRunId: string): Promise<{ thread: ThreadRow; activeRun: RunRow } | null>;
 
-  createRun(scope: Scope, threadId: string, input: string, options?: { modelRef?: string | null; parentRunId?: string | null }): Promise<RunRow>;
+  createRun(scope: Scope, threadId: string, input: string, options?: { modelRef?: string | null; parentRunId?: string | null; runtimeCapabilitiesSnapshot?: Record<string, unknown> | null }): Promise<RunRow>;
   getRun(scope: Scope, id: string): Promise<RunRow | null>;
   listRuns(scope: Scope, threadId: string): Promise<RunRow[]>;
   /** 跨租户扫描,只给启动期后台任务(recovery.ts)用,禁止在 api/*.ts 路由里调用。 */

@@ -71,6 +71,7 @@ runtimeApi.post('/workload-tokens', async (req, res) => {
       runId: created.row.run_id,
       skillId: created.row.skill_id,
       allowedDatasourceIds: created.row.allowed_datasources,
+      allowedCapabilities: created.row.allowed_capabilities,
       expiresAt: created.row.expires_at,
     });
   } catch (err) {

@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from db_credential import acquire_datasource_credential
+from db_credential import get_datasource_credential
 
 
 def main() -> int:
@@ -23,7 +23,7 @@ def main() -> int:
         raise SystemExit("必须且只能提供 --sql 或 --file")
 
     sql = args.sql if args.sql else Path(args.file).read_text(encoding="utf-8")
-    credential = acquire_datasource_credential()
+    credential = get_datasource_credential()
     env = {
         **os.environ,
         "PGPASSWORD": str(credential["password"]),

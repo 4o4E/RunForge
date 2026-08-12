@@ -69,7 +69,7 @@ curl -X POST http://localhost:8080/api/runtime/workload-tokens \
 
 ```bash
 curl -X POST http://localhost:8080/api/runtime/datasources/<datasource_id>/credentials \
-  -H "Authorization: Bearer $DB_WORKLOAD_TOKEN" \
+  -H "Authorization: Bearer $WORKLOAD_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{ "profile": "readonly" }'
 ```

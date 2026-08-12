@@ -113,6 +113,40 @@ export interface LlmSettingsOptions {
   models: LlmModelOption[];
 }
 
+export type RuntimeCapabilityName = 'datasource.credentials' | 'llm' | 'image' | 'video';
+
+export interface RuntimeLlmCapabilitySettings {
+  enabled: boolean;
+}
+
+export interface RuntimeImageCapabilitySettings {
+  enabled: boolean;
+  provider: 'packy-gpt-image-2';
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  timeoutMs: number;
+}
+
+export interface RuntimeVideoCapabilitySettings {
+  enabled: boolean;
+}
+
+export interface RuntimeCapabilitiesSettings {
+  llm: RuntimeLlmCapabilitySettings;
+  image: RuntimeImageCapabilitySettings;
+  video: RuntimeVideoCapabilitySettings;
+}
+
+export interface RuntimeCapabilityCredential {
+  capability: RuntimeCapabilityName;
+  baseUrl: string;
+  headers: Record<string, string>;
+  expiresAt: string;
+  endpoints: Record<string, string>;
+  defaults: Record<string, unknown>;
+}
+
 export interface LlmProviderProbeResult {
   models: string[];
   source: string;

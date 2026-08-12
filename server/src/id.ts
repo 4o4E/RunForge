@@ -15,6 +15,7 @@ const ID_PREFIXES = {
   datasourceAccount: 'da',
   datasourceLease: 'dl',
   workloadToken: 'wt',
+  runtimeCapabilityCall: 'rc',
   shellSession: 'ss',
   shellCommand: 'sc',
   subagentRun: 'sr',
@@ -119,6 +120,10 @@ export function newDatasourceLeaseId(): string {
 
 export function newWorkloadTokenId(): string {
   return newEntityId('workloadToken');
+}
+
+export function newRuntimeCapabilityCallId(): string {
+  return newEntityId('runtimeCapabilityCall');
 }
 
 export function newShellSessionId(): string {

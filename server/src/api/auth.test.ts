@@ -49,10 +49,11 @@ test('api auth middleware resolves tenant identity from a valid JWT and rejects 
   }
 });
 
-test('api auth middleware lets /runtime/* requests through without establishing identity', async () => {
+test('api auth middleware lets workload runtime requests through without establishing identity', async () => {
   const app = express();
   app.use(requireApiAccess);
   app.post('/runtime/datasources/:id/credentials', (_req, res) => res.json({ ok: true, identity: getIdentity() ?? null }));
+  app.post('/runtime-capabilities/credentials', (_req, res) => res.json({ ok: true, identity: getIdentity() ?? null }));
   const server = createServer(app);
   const port = await listen(server);
   try {
@@ -60,11 +61,18 @@ test('api auth middleware lets /runtime/* requests through without establishing 
     // /runtime 由 runtimeApi 自己校验 workload token,不建立租户身份(见 auth.ts 的 isRuntimeRequest)。
     const res = await fetch(`http://127.0.0.1:${port}/runtime/datasources/ds_1/credentials`, {
       method: 'POST',
-      headers: { Authorization: 'Bearer wat_some-workload-token' },
+      headers: { Authorization: 'Bearer wlt_some-workload-token' },
     });
     assert.equal(res.status, 200);
     const body = (await res.json()) as { identity: unknown };
     assert.equal(body.identity, null);
+    const capabilityRes = await fetch(`http://127.0.0.1:${port}/runtime-capabilities/credentials`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer wlt_some-workload-token' },
+    });
+    assert.equal(capabilityRes.status, 200);
+    const capabilityBody = (await capabilityRes.json()) as { identity: unknown };
+    assert.equal(capabilityBody.identity, null);
   } finally {
     server.close();
   }

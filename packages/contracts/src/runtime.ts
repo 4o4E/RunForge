@@ -1,4 +1,5 @@
 import type { DatasourceType } from './datasources.js';
+import type { RuntimeCapabilityCredential, RuntimeCapabilityName } from './settings.js';
 
 export interface PublicCredentialResponse {
   leaseId: string;
@@ -18,5 +19,12 @@ export interface WorkloadTokenResponse {
   runId: string;
   skillId: string | null;
   allowedDatasourceIds: string[];
+  allowedCapabilities: RuntimeCapabilityName[];
   expiresAt: string;
 }
+
+export interface RuntimeCapabilityCredentialRequest {
+  capability: RuntimeCapabilityName;
+}
+
+export interface RuntimeCapabilityCredentialResponse extends RuntimeCapabilityCredential {}

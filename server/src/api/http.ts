@@ -1,12 +1,13 @@
 import { Router } from 'express';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { executeRun } from '../agent/executor.js';
+import { createRuntimeCapabilitiesSnapshot, executeRun } from '../agent/executor.js';
 import { store } from '../store/index.js';
 import { filesApi } from './files.js';
 import { settingsApi } from './settings.js';
 import { datasourcesApi } from './datasources.js';
 import { runtimeApi } from './runtime.js';
+import { runtimeCapabilitiesApi } from './runtimeCapabilities.js';
 import { notificationsApi } from './notifications.js';
 import { requireApiAccess } from './auth.js';
 import { authApi } from './authRoutes.js';
@@ -16,7 +17,7 @@ import { systemApi } from './system.js';
 import { requireSystemScope, requireTenantScope } from '../auth/guards.js';
 import { requireScope } from '../auth/context.js';
 import type { Scope } from '../store/types.js';
-import { releaseRunLeases } from '../datasources/accountPool.js';
+import { listDatasources, releaseRunLeases } from '../datasources/accountPool.js';
 import type { AskUserAnswer, AskUserOption, AskUserSpec } from '../agent/types.js';
 import { shellManager } from '../shell/manager.js';
 import { shellBus } from '../shell/bus.js';
@@ -52,6 +53,7 @@ api.use(requireApiAccess);
 api.use('/system', requireSystemScope, systemApi);
 api.use('/files', filesApi);
 api.use('/runtime', runtimeApi);
+api.use('/runtime-capabilities', runtimeCapabilitiesApi);
 
 // 总闸:下面全部路由都是面向租户用户的接口，系统管理员 JWT 不能冒充租户用户调用
 // (docs/multi-tenancy-design.md §4)。注意这只堵住了"系统管理员访问租户接口"这个越权，
@@ -134,6 +136,11 @@ async function validateRunModelRef(scope: Scope, modelRef: string | null): Promi
     throw new Error(`模型未启用：${modelRef}`);
   }
   return modelRef;
+}
+
+async function runtimeCapabilitiesSnapshotForNewRun(scope: Scope): Promise<Record<string, unknown>> {
+  const hasDatasources = (await listDatasources(scope)).some((datasource) => datasource.enabled && datasource.status === 'active');
+  return { ...(await createRuntimeCapabilitiesSnapshot(scope, hasDatasources)) };
 }
 
 // --- Threads ---
@@ -286,7 +293,11 @@ api.post('/threads/:id/runs', async (req, res) => {
 
   let run;
   try {
-    run = await store.createRun(scope, thread.id, input, { modelRef, parentRunId: optionalText(req.body?.parentRunId) ?? undefined });
+    run = await store.createRun(scope, thread.id, input, {
+      modelRef,
+      parentRunId: optionalText(req.body?.parentRunId) ?? undefined,
+      runtimeCapabilitiesSnapshot: await runtimeCapabilitiesSnapshotForNewRun(scope),
+    });
   } catch (err) {
     return res.status(400).json({ error: (err as Error).message });
   }
@@ -333,7 +344,11 @@ api.post('/runs/:id/branch', async (req, res) => {
   } catch (err) {
     return res.status(400).json({ error: (err as Error).message });
   }
-  const run = await store.createRun(scope, source.thread_id, input, { modelRef, parentRunId: source.parent_run_id });
+  const run = await store.createRun(scope, source.thread_id, input, {
+    modelRef,
+    parentRunId: source.parent_run_id,
+    runtimeCapabilitiesSnapshot: await runtimeCapabilitiesSnapshotForNewRun(scope),
+  });
   void executeRun(run.id, { scope });
   res.status(201).json({ id: run.id, threadId: source.thread_id, status: run.status });
 });

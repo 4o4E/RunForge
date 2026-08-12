@@ -346,7 +346,7 @@ export class MemoryStore implements Store {
     return { thread: newThread, activeRun };
   }
 
-  async createRun(scope: Scope, threadId: string, input: string, options: { modelRef?: string | null; parentRunId?: string | null } = {}): Promise<RunRow> {
+  async createRun(scope: Scope, threadId: string, input: string, options: { modelRef?: string | null; parentRunId?: string | null; runtimeCapabilitiesSnapshot?: Record<string, unknown> | null } = {}): Promise<RunRow> {
     const thread = this.threads.get(threadId);
     if (!this.threadOwnedBy(thread, scope)) throw new Error('threadId 不存在或不属于当前用户');
     const threadRuns = [...this.runs.values()].filter((r) => r.thread_id === threadId);
@@ -364,6 +364,7 @@ export class MemoryStore implements Store {
       output: null,
       error: null,
       goal_state: null,
+      runtime_capabilities_snapshot: options.runtimeCapabilitiesSnapshot ?? null,
       created_at: this.now(),
       updated_at: this.now(),
     };

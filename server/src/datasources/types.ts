@@ -8,6 +8,7 @@ import type {
   LeaseStatus,
   PermissionMode,
   PublicCredentialResponse,
+  RuntimeCapabilityName,
 } from '@runforge/contracts';
 
 export type {
@@ -20,6 +21,7 @@ export type {
   LeaseStatus,
   PermissionMode,
   PublicCredentialResponse,
+  RuntimeCapabilityName,
 } from '@runforge/contracts';
 
 export interface DatasourceRow {
@@ -70,6 +72,7 @@ export interface WorkloadTokenRow {
   run_id: string;
   skill_id: string | null;
   allowed_datasources: string[];
+  allowed_capabilities: RuntimeCapabilityName[];
   expires_at: string;
   revoked_at: string | null;
   created_at: string;

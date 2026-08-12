@@ -9,10 +9,11 @@ import type {
   McpHeaderSettings,
   McpServerSettings,
   McpSettings,
+  RuntimeCapabilitiesSettings,
   SandboxBackendName,
   ToolSettings,
 } from '@runforge/contracts';
-export type { LlmModelOption, LlmProviderSettings, LlmSettings, McpServerSettings, McpSettings, ToolSettings } from '@runforge/contracts';
+export type { LlmModelOption, LlmProviderSettings, LlmSettings, McpServerSettings, McpSettings, RuntimeCapabilitiesSettings, ToolSettings } from '@runforge/contracts';
 import { config } from './config.js';
 import { query } from './db/pool.js';
 import type { Scope, TenantScope } from './store/types.js';
@@ -24,6 +25,7 @@ type SettingRow = { key: string; value: unknown };
 const PAGE_STATE_KEY = 'ui.pageState';
 const LLM_SETTINGS_KEY = 'llm.settings';
 const MCP_SETTINGS_KEY = 'mcp.settings';
+const RUNTIME_CAPABILITIES_SETTINGS_KEY = 'runtimeCapabilities.settings';
 const MAX_PAGE_STATE_BYTES = 200_000;
 
 const TOOL_SETTING_KEYS = [
@@ -193,6 +195,21 @@ function defaultLlmSettings(): LlmSettings {
 
 function defaultMcpSettings(): McpSettings {
   return { servers: [] };
+}
+
+function defaultRuntimeCapabilitiesSettings(): RuntimeCapabilitiesSettings {
+  return {
+    llm: { enabled: false },
+    image: {
+      enabled: false,
+      provider: 'packy-gpt-image-2',
+      baseUrl: 'https://cf.api.fan',
+      apiKey: '',
+      model: 'gpt-image-2',
+      timeoutMs: 180_000,
+    },
+    video: { enabled: false },
+  };
 }
 
 function rowsToMap(rows: SettingRow[]): Map<string, unknown> {
@@ -501,6 +518,58 @@ export async function getLlmSettings(scope: TenantScope): Promise<LlmSettings> {
 export async function saveLlmSettings(scope: TenantScope, input: unknown): Promise<LlmSettings> {
   const settings = normalizeLlmSettings(input);
   await upsertTenantJsonSetting(scope.tenantId, LLM_SETTINGS_KEY, settings);
+  return settings;
+}
+
+export function normalizeRuntimeCapabilitiesSettings(input: unknown): RuntimeCapabilitiesSettings {
+  const defaults = defaultRuntimeCapabilitiesSettings();
+  const body = input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
+  const llm = body.llm && typeof body.llm === 'object' ? (body.llm as Record<string, unknown>) : {};
+  const image = body.image && typeof body.image === 'object' ? (body.image as Record<string, unknown>) : {};
+  const video = body.video && typeof body.video === 'object' ? (body.video as Record<string, unknown>) : {};
+  return {
+    llm: {
+      enabled: boolValue(llm.enabled, defaults.llm.enabled),
+    },
+    image: {
+      enabled: boolValue(image.enabled, defaults.image.enabled),
+      provider: image.provider === 'packy-gpt-image-2' ? image.provider : defaults.image.provider,
+      baseUrl: stringValue(image.baseUrl, defaults.image.baseUrl),
+      apiKey: typeof image.apiKey === 'string' ? image.apiKey : defaults.image.apiKey,
+      model: stringValue(image.model, defaults.image.model),
+      timeoutMs: positiveIntValue(image.timeoutMs, defaults.image.timeoutMs, 1_000, 600_000),
+    },
+    video: {
+      enabled: boolValue(video.enabled, defaults.video.enabled),
+    },
+  };
+}
+
+export async function getRuntimeCapabilitiesSettings(scope: TenantScope): Promise<RuntimeCapabilitiesSettings> {
+  try {
+    const value = await readJsonSettingWithFallback(scope.tenantId, RUNTIME_CAPABILITIES_SETTINGS_KEY);
+    if (value === undefined) {
+      const defaults = defaultRuntimeCapabilitiesSettings();
+      if (scope.tenantId === DEFAULT_TENANT_ID) {
+        await query(
+          `INSERT INTO app_settings (tenant_id, key, value, updated_at)
+           VALUES ($1, $2, $3::jsonb, now())
+           ON CONFLICT (tenant_id, key) DO NOTHING`,
+          [DEFAULT_TENANT_ID, RUNTIME_CAPABILITIES_SETTINGS_KEY, JSON.stringify(defaults)],
+        );
+      }
+      return defaults;
+    }
+    return normalizeRuntimeCapabilitiesSettings(value);
+  } catch (err) {
+    warnOnce('runtime-capabilities-settings-fallback', `Runtime capability settings fallback to defaults: ${(err as Error).message}`);
+    return defaultRuntimeCapabilitiesSettings();
+  }
+}
+
+export async function saveRuntimeCapabilitiesSettings(scope: TenantScope, input: unknown): Promise<RuntimeCapabilitiesSettings> {
+  const settings = normalizeRuntimeCapabilitiesSettings(input);
+  await upsertTenantJsonSetting(scope.tenantId, RUNTIME_CAPABILITIES_SETTINGS_KEY, settings);
   return settings;
 }
 

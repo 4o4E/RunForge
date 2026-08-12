@@ -7,7 +7,7 @@ import type { CredentialLease } from './types.js';
 test('workload token 明文只用于一次性返回，服务端可用 hash 校验', () => {
   const token = generateWorkloadToken();
 
-  assert.match(token, /^wat_[0-9A-Za-z_-]+$/);
+  assert.match(token, /^wlt_[0-9A-Za-z_-]+$/);
   assert.equal(hashWorkloadToken(token), hashWorkloadToken(token));
   assert.notEqual(hashWorkloadToken(token), token);
 });

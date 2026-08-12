@@ -28,6 +28,7 @@ import type {
   PermissionProfileInput,
   RemoteFileInfo,
   RemoteFileList,
+  RuntimeCapabilitiesSettings,
   TenantUserRole,
   ShellCommand,
   ShellCommandAttachment,
@@ -438,6 +439,15 @@ export const updateLlmSettings = (settings: LlmSettings) =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(settings),
   }).then(json<LlmSettings>);
+
+export const getRuntimeCapabilitiesSettings = () => authFetch('/api/settings/runtime-capabilities').then(json<RuntimeCapabilitiesSettings>);
+
+export const updateRuntimeCapabilitiesSettings = (settings: RuntimeCapabilitiesSettings) =>
+  authFetch('/api/settings/runtime-capabilities', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings),
+  }).then(json<RuntimeCapabilitiesSettings>);
 
 export const probeLlmProviderModels = (provider: LlmProviderSettings) =>
   authFetch('/api/settings/llm/provider/models', {

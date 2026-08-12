@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 
-const TOKEN_PREFIX = 'wat';
+const TOKEN_PREFIX = 'wlt';
 
 export function generateWorkloadToken(): string {
   return `${TOKEN_PREFIX}_${randomBytes(32).toString('base64url')}`;

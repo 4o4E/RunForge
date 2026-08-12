@@ -111,12 +111,12 @@ SELECT * FROM orders LIMIT 20;
 
 ## Platform Workload Token
 
-如果当前 run 提供 `DB_WORKLOAD_TOKEN`，先通过平台接口换短期凭证，再用原生 CLI。每个 run 的 token 和短期凭证都会刷新，旧 run 的凭证不能复用。
+如果当前 run 提供 `WORKLOAD_TOKEN`，先通过平台接口换短期凭证，再用原生 CLI。每个 run 的 token 和短期凭证都会刷新，旧 run 的凭证不能复用。
 
 需要的环境变量：
 
 ```bash
-export DB_WORKLOAD_TOKEN="..."
+export WORKLOAD_TOKEN="..."
 export DATASOURCE_ID="ds_xxx"
 export DATASOURCE_PROFILE="readonly"
 export RUNFORGE_RUNTIME_API_BASE="http://localhost:8080/api/runtime"
@@ -126,7 +126,7 @@ export RUNFORGE_RUNTIME_API_BASE="http://localhost:8080/api/runtime"
 
 ```bash
 curl -s -X POST "$RUNFORGE_RUNTIME_API_BASE/datasources/$DATASOURCE_ID/credentials" \
-  -H "Authorization: Bearer $DB_WORKLOAD_TOKEN" \
+  -H "Authorization: Bearer $WORKLOAD_TOKEN" \
   -H "Content-Type: application/json" \
   -d "{\"profile\":\"${DATASOURCE_PROFILE:-readonly}\"}"
 ```
@@ -138,9 +138,9 @@ curl -s -X POST "$RUNFORGE_RUNTIME_API_BASE/datasources/$DATASOURCE_ID/credentia
 Python:
 
 ```python
-from db_credential import acquire_datasource_credential
+from db_credential import get_datasource_credential
 
-credential = acquire_datasource_credential()
+credential = get_datasource_credential()
 # 把 credential 立即传给数据库驱动或 CLI；不要 print 密码。
 ```
 
@@ -155,9 +155,9 @@ python3 /path/to/skill/scripts/psql_query.py --sql "select current_database(), c
 Node.js:
 
 ```javascript
-import { acquireDatasourceCredential } from './dbCredential.mjs';
+import { getDatasourceCredential } from './dbCredential.mjs';
 
-const credential = await acquireDatasourceCredential();
+const credential = await getDatasourceCredential();
 // 把 credential 立即传给数据库驱动或 CLI；不要 console.log 密码。
 ```
 

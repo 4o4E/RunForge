@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import type { LlmProviderSettings, LlmSettingsOptions, McpServerProbeResult, McpSettings, McpSettingsOptions, ShellCommandOptionItem, ToolSettingsOptionItem, ToolSettingsOptions } from '@runforge/contracts';
-import { getLlmSettings, getMcpSettings, getPageState, getToolSettings, llmModelOptions, normalizeLlmSettings, normalizeMcpSettings, saveLlmSettings, saveMcpSettings, savePageState, saveToolSettings, shellPathForSettings } from '../settings.js';
+import { getLlmSettings, getMcpSettings, getPageState, getRuntimeCapabilitiesSettings, getToolSettings, llmModelOptions, normalizeLlmSettings, normalizeMcpSettings, saveLlmSettings, saveMcpSettings, savePageState, saveRuntimeCapabilitiesSettings, saveToolSettings, shellPathForSettings } from '../settings.js';
 import { toolSchemas } from '../tools/registry.js';
 import { findExecutable, scanExecutableNames } from '../tools/sandbox.js';
 import { config } from '../config.js';
@@ -203,6 +203,22 @@ settingsApi.post('/llm/provider/chat-test', async (req, res) => {
     const model = typeof body.model === 'string' ? body.model : '';
     const input = typeof body.input === 'string' ? body.input : '';
     res.json(await testLlmProviderChat(provider, model, input));
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+settingsApi.get('/runtime-capabilities', async (_req, res) => {
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  res.json(await getRuntimeCapabilitiesSettings(scope));
+});
+
+settingsApi.put('/runtime-capabilities', async (req, res) => {
+  const scope = scopeOrReject(res);
+  if (!scope) return;
+  try {
+    res.json(await saveRuntimeCapabilitiesSettings(scope, req.body));
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }

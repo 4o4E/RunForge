@@ -1,5 +1,6 @@
 import type { LlmMessage, LlmUsage } from '../llm/types.js';
 import type { CompactionAffectedMessage } from '@runforge/contracts';
+import type { RuntimeCapabilitiesSettings } from '@runforge/contracts';
 import type { ThreadMessage } from '../store/types.js';
 import type { Provider } from '../llm/types.js';
 import {
@@ -66,11 +67,37 @@ export function renderRuntimeContext(info: RuntimeContextInfo): string {
 - shell session 会长期记住当前目录 / The shell session remembers cwd across commands: 需要切目录时直接执行 cd，不要给每次命令单独传 cwd。旧 shell 工具只是兼容入口。`;
 }
 
+export function renderRuntimeCapabilitiesContext(settings: RuntimeCapabilitiesSettings): string {
+  const lines = ['运行时内部能力 / Runtime internal capabilities:'];
+  const enabled: string[] = [];
+  if (settings.llm.enabled) enabled.push('llm');
+  if (settings.image.enabled) enabled.push('image');
+  if (settings.video.enabled) enabled.push('video');
+  if (!enabled.length) return `${lines[0]}\n- 当前没有启用可通过 WORKLOAD_TOKEN 换取的额外内部能力。`;
+  lines.push(
+    '- WORKLOAD_TOKEN 是本次 run 的短期能力令牌；只能在脚本或程序代码里作为 Authorization Bearer 使用，不要输出、日志打印或写入仓库文件。',
+    '- WORKLOAD_TOKEN is a short-lived capability token for this run; use it only in code as an Authorization Bearer token, and never print it, log it, or write it into repo files.',
+    '- SDK/helper 只负责换取短期能力凭证和内部代理端点配置，不封装 chat/image/video 调用；调用方代码自行选择 fetch、OpenAI SDK、Packy 兼容 SDK 或其它依赖。',
+    '- The SDK/helper only provides temporary credentials and internal proxy endpoint config; it does not wrap chat/image/video calls. Caller code chooses fetch, OpenAI SDK, Packy-compatible SDK, or other dependencies.',
+    '- 先用 SDK 获取能力凭证，SDK 会从 RUNFORGE_RUNTIME_API_BASE 推导 runtime-capabilities 代理端点；不要向模型或最终回复展示凭证内容。',
+    `- 已启用能力 / Enabled capabilities: ${enabled.join(', ')}.`,
+  );
+  if (settings.llm.enabled) lines.push('- LLM: 可换取 llm 能力凭证，调用内部 /api/runtime-capabilities/llm/* 代理端点。');
+  if (settings.image.enabled) lines.push(`- Image: 可换取 image 能力凭证，默认模型 ${settings.image.model}，内部代理会适配 Packy GPT-Image-2。`);
+  if (settings.video.enabled) lines.push('- Video: 可换取 video 能力凭证；v1 可能返回尚未接入 provider 的明确错误。');
+  return lines.join('\n');
+}
+
+export function renderSystemPrompt(parts: { runtimeContext?: string; runtimeCapabilitiesContext?: string }): string {
+  return [SYSTEM_PROMPT, parts.runtimeContext, parts.runtimeCapabilitiesContext].map((part) => part?.trim()).filter(Boolean).join('\n\n');
+}
+
 export type { CompactionInfo, CompactionResult };
 
 interface ContextOptions {
   appendUserInput?: boolean;
   runtimeContext?: string;
+  systemPrompt?: string;
   userInputPrefix?: string;
 }
 
@@ -98,8 +125,7 @@ export class ContextManager {
 
   constructor(priorMessages: ThreadMessage[], userInput: string, initialGoal = '', opts: ContextOptions = {}) {
     const appendUserInput = opts.appendUserInput ?? true;
-    this.items.push({ msg: { role: 'system', content: SYSTEM_PROMPT }, dbId: null });
-    if (opts.runtimeContext) this.items.push({ msg: { role: 'system', content: opts.runtimeContext }, dbId: null });
+    this.items.push({ msg: { role: 'system', content: opts.systemPrompt ?? renderSystemPrompt({ runtimeContext: opts.runtimeContext }) }, dbId: null });
     this.goalItem = { msg: { role: 'system', content: initialGoal }, dbId: null };
     this.items.push(this.goalItem);
     for (const p of priorMessages) {

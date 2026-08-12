@@ -456,7 +456,7 @@ export class PgStore implements Store {
     }
   }
 
-  async createRun(scope: Scope, threadId: string, input: string, options: { modelRef?: string | null; parentRunId?: string | null } = {}): Promise<RunRow> {
+  async createRun(scope: Scope, threadId: string, input: string, options: { modelRef?: string | null; parentRunId?: string | null; runtimeCapabilitiesSnapshot?: Record<string, unknown> | null } = {}): Promise<RunRow> {
     const { rows: threadRows } = await query<{ active_run_id: string | null }>(
       `SELECT active_run_id FROM threads WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
       [threadId, scope.tenantId, scope.userId],
@@ -479,10 +479,10 @@ export class PgStore implements Store {
       if (!rows.length) throw new Error('parentRunId 不属于当前 thread');
     }
     const { rows } = await query<RunRow>(
-      `INSERT INTO runs (id, thread_id, parent_run_id, status, input, model_ref)
-       VALUES ($1, $2, $3, 'pending', $4, $5)
+      `INSERT INTO runs (id, thread_id, parent_run_id, status, input, model_ref, runtime_capabilities_snapshot)
+       VALUES ($1, $2, $3, 'pending', $4, $5, $6::jsonb)
        RETURNING *`,
-      [id, threadId, parentRunId ?? null, input, options.modelRef ?? null],
+      [id, threadId, parentRunId ?? null, input, options.modelRef ?? null, options.runtimeCapabilitiesSnapshot ? JSON.stringify(options.runtimeCapabilitiesSnapshot) : null],
     );
     await query(`UPDATE threads SET active_run_id = $2, updated_at = now() WHERE id = $1`, [threadId, id]);
     return rows[0];

@@ -1,11 +1,12 @@
 import { Fragment, useEffect, useId, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Activity, ArchiveRestore, Bot, ChevronRight, MessageSquare, Moon, Palette, Plus, RefreshCw, Save, Shield, Sun, Trash2, Wifi, Wrench } from 'lucide-react';
+import { Activity, ArchiveRestore, Bot, ChevronRight, Image, MessageSquare, Moon, Palette, Plus, RefreshCw, Save, Shield, Sun, Trash2, Wifi, Wrench } from 'lucide-react';
 import {
   getLlmSettings,
   getLlmSettingsOptions,
   getMcpSettings,
   getMcpSettingsOptions,
+  getRuntimeCapabilitiesSettings,
   getThread,
   getToolSettings,
   getToolSettingsOptions,
@@ -17,6 +18,7 @@ import {
   testLlmProviderChat,
   updateLlmSettings,
   updateMcpSettings,
+  updateRuntimeCapabilitiesSettings,
   updateThread,
   updateToolSettings,
   type AgentEvent,
@@ -29,6 +31,7 @@ import {
   type McpSettings,
   type McpSettingsOptions,
   type McpToolOption,
+  type RuntimeCapabilitiesSettings,
   type Thread,
   type ToolSettings,
   type ToolSettingsOptions,
@@ -56,6 +59,7 @@ type SettingsPanel =
   | 'usage-stats'
   | 'archived-threads'
   | 'llm-models'
+  | 'runtime-capabilities'
   | 'mcp-client'
   | 'tools-sandbox'
   | 'tools-access';
@@ -1808,6 +1812,100 @@ function LlmSettingsPanel() {
   );
 }
 
+function RuntimeCapabilitiesSettingsPanel() {
+  const { notify } = useNotifications();
+  const [settings, setSettings] = useState<RuntimeCapabilitiesSettings | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    getRuntimeCapabilitiesSettings()
+      .then(setSettings)
+      .catch((err) => notify({ variant: 'error', title: '运行时能力配置加载失败', description: (err as Error).message }));
+  }, [notify]);
+
+  if (!settings) {
+    return <SettingsPanelShell title="运行时能力" description="WORKLOAD_TOKEN 可换取的内部代理能力"><div className="text-sm text-muted-foreground">加载中...</div></SettingsPanelShell>;
+  }
+
+  async function save() {
+    if (!settings) return;
+    setBusy(true);
+    try {
+      const next = await updateRuntimeCapabilitiesSettings(settings);
+      setSettings(next);
+      notify({ variant: 'success', title: '运行时能力配置已保存' });
+    } catch (err) {
+      notify({ variant: 'error', title: '运行时能力配置保存失败', description: (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <SettingsPanelShell
+      title="运行时能力"
+      description="控制 WORKLOAD_TOKEN 可以换取哪些内部代理凭证"
+      actions={<Button onClick={() => void save()} disabled={busy}>{busy ? <Spinner className="h-4 w-4" /> : <Save className="h-4 w-4" />}保存</Button>}
+      contentClassName="grid content-start gap-4"
+    >
+      <Card className="rounded-lg shadow-sm">
+        <CardHeader>
+          <CardTitle>能力开关</CardTitle>
+          <CardDescription>开关实时影响接口硬过滤，新 run 的系统提示词会按创建时快照注入</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4">
+          <label className="flex items-center justify-between gap-3 rounded-md border p-3">
+            <span className="grid gap-1">
+              <span className="text-sm font-medium">LLM 代理凭证</span>
+              <span className="text-xs text-muted-foreground">允许脚本换取 llm 能力代理配置</span>
+            </span>
+            <Switch checked={settings.llm.enabled} onCheckedChange={(enabled) => setSettings({ ...settings, llm: { enabled } })} />
+          </label>
+          <label className="flex items-center justify-between gap-3 rounded-md border p-3">
+            <span className="grid gap-1">
+              <span className="text-sm font-medium">图片生成凭证</span>
+              <span className="text-xs text-muted-foreground">允许脚本换取 image 能力代理配置</span>
+            </span>
+            <Switch checked={settings.image.enabled} onCheckedChange={(enabled) => setSettings({ ...settings, image: { ...settings.image, enabled } })} />
+          </label>
+          <label className="flex items-center justify-between gap-3 rounded-md border p-3">
+            <span className="grid gap-1">
+              <span className="text-sm font-medium">视频生成凭证</span>
+              <span className="text-xs text-muted-foreground">预留能力，v1 接口会返回未接入 provider</span>
+            </span>
+            <Switch checked={settings.video.enabled} onCheckedChange={(enabled) => setSettings({ ...settings, video: { enabled } })} />
+          </label>
+        </CardContent>
+      </Card>
+
+      <Card className="rounded-lg shadow-sm">
+        <CardHeader>
+          <CardTitle>图片供应商</CardTitle>
+          <CardDescription>RunForge 内部代理会把图片请求适配到 Packy GPT-Image-2</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3 sm:grid-cols-2">
+          <label className="grid gap-1 text-sm">
+            Base URL
+            <Input value={settings.image.baseUrl} onChange={(event) => setSettings({ ...settings, image: { ...settings.image, baseUrl: event.target.value } })} />
+          </label>
+          <label className="grid gap-1 text-sm">
+            Model
+            <Input value={settings.image.model} onChange={(event) => setSettings({ ...settings, image: { ...settings.image, model: event.target.value } })} />
+          </label>
+          <label className="grid gap-1 text-sm sm:col-span-2">
+            API Key
+            <Input type="password" value={settings.image.apiKey} onChange={(event) => setSettings({ ...settings, image: { ...settings.image, apiKey: event.target.value } })} />
+          </label>
+          <label className="grid gap-1 text-sm">
+            Timeout ms
+            <Input type="number" min={1000} value={settings.image.timeoutMs} onChange={(event) => setSettings({ ...settings, image: { ...settings.image, timeoutMs: Number(event.target.value) } })} />
+          </label>
+        </CardContent>
+      </Card>
+    </SettingsPanelShell>
+  );
+}
+
 export function SettingsView({
   embedded = false,
   onThreadsChanged,
@@ -1848,6 +1946,9 @@ export function SettingsView({
                 <SectionButton active={panel === 'llm-models'} icon={<Bot className="h-4 w-4" />} onClick={() => setPanel('llm-models')}>
                   模型
                 </SectionButton>
+                <SectionButton active={panel === 'runtime-capabilities'} icon={<Image className="h-4 w-4" />} onClick={() => setPanel('runtime-capabilities')}>
+                  运行时能力
+                </SectionButton>
               </NavGroup>
               <NavGroup label="工具">
                 <SectionButton active={panel === 'tools-access'} icon={<Shield className="h-4 w-4" />} onClick={() => setPanel('tools-access')}>
@@ -1868,6 +1969,7 @@ export function SettingsView({
             {panel === 'usage-stats' && <UsageStatsSettingsPanel />}
             {panel === 'archived-threads' && <ArchivedThreadsSettingsPanel onThreadsChanged={onThreadsChanged} />}
             {panel === 'llm-models' && <LlmSettingsPanel />}
+            {panel === 'runtime-capabilities' && <RuntimeCapabilitiesSettingsPanel />}
             {panel === 'mcp-client' && <McpSettingsPanel />}
             {panel === 'tools-access' && <ToolsSettingsPanel onWorkspaceChanged={onWorkspaceChanged} section="access" />}
             {panel === 'tools-sandbox' && <ToolsSettingsPanel onWorkspaceChanged={onWorkspaceChanged} section="sandbox-shell" />}

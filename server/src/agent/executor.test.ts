@@ -405,7 +405,7 @@ test('executeRun: injects database workload token at run startup', async () => {
           sawRuntimeContext = messages.some((message) => (
             message.role === 'system'
             && (message.content ?? '').includes('数据库访问运行环境（run 级）')
-            && (message.content ?? '').includes('DB_WORKLOAD_TOKEN=已注入')
+            && (message.content ?? '').includes('WORKLOAD_TOKEN=已注入')
           ));
           return {
             content: null,
@@ -428,14 +428,14 @@ test('executeRun: injects database workload token at run startup', async () => {
     toolSettings: testToolSettings(),
     databaseRuntimeEnv: async () => ({
       env: {
-        DB_WORKLOAD_TOKEN: 'wat_test_runtime',
+        WORKLOAD_TOKEN: 'wlt_test_runtime',
         RUNFORGE_RUNTIME_API_BASE: 'http://localhost:8080/api/runtime',
         DATASOURCE_ID: 'ds_test',
         DATASOURCE_PROFILE: 'readonly',
       },
       summary: [
         '数据库访问运行环境（run 级）:',
-        '- DB_WORKLOAD_TOKEN=已注入',
+        '- WORKLOAD_TOKEN=已注入',
         '- DATASOURCE_ID=ds_test',
       ].join('\n'),
     }),

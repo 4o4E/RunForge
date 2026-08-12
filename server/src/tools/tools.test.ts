@@ -155,7 +155,7 @@ test('registry forwards run context to tool implementations', async () => {
     const out = await runTool('shell', { command: 'printf context-ok' }, {
       scope: TEST_SCOPE,
       settings,
-      env: { DB_WORKLOAD_TOKEN: 'wat_test' },
+      env: { WORKLOAD_TOKEN: 'wlt_test' },
       threadId: 'th_test',
       runId: 'ru_test',
       stepId: 'st_test',
@@ -163,7 +163,7 @@ test('registry forwards run context to tool implementations', async () => {
     });
     assert.equal(out.text, 'context-ok');
     assert.equal(seen?.settings, settings);
-    assert.deepEqual(seen?.env, { DB_WORKLOAD_TOKEN: 'wat_test' });
+    assert.deepEqual(seen?.env, { WORKLOAD_TOKEN: 'wlt_test' });
     assert.equal(seen?.threadId, 'th_test');
     assert.equal(seen?.runId, 'ru_test');
     assert.equal(seen?.stepId, 'st_test');
@@ -241,11 +241,11 @@ test('shell blocks database CLI before database-access injects a workload token'
     { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }) },
   ));
   assert.match(blocked, /database-access/);
-  assert.match(blocked, /workload token/);
+  assert.match(blocked, /WORKLOAD_TOKEN/);
 
   const allowed = text(await shellTool.run(
     { command: 'printf ok' },
-    { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }), env: { DB_WORKLOAD_TOKEN: 'wat_test' } },
+    { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }), env: { WORKLOAD_TOKEN: 'wlt_test' } },
   ));
   assert.equal(allowed, 'ok');
 });
@@ -258,21 +258,21 @@ test('shell blocks database-access SDK scripts before workload token injection',
     { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }) },
   ));
   assert.match(blockedShell, /database-access/);
-  assert.match(blockedShell, /workload token/);
+  assert.match(blockedShell, /WORKLOAD_TOKEN/);
 
   const blockedManaged = text(await shellExecTool.run(
     { sessionId: 'ss_test', command, wait: 'foreground' },
     { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }), threadId: 'th_test' },
   ));
   assert.match(blockedManaged, /database-access/);
-  assert.match(blockedManaged, /workload token/);
+  assert.match(blockedManaged, /WORKLOAD_TOKEN/);
 });
 
 test('shell blocks direct database CLI even when workload token exists', async () => {
   const command = 'psql -h localhost -U ag_readonly_old -d runforge -c "select 1"';
   const blocked = text(await shellTool.run(
     { command },
-    { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }), env: { DB_WORKLOAD_TOKEN: 'wat_test' } },
+    { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }), env: { WORKLOAD_TOKEN: 'wlt_test' } },
   ));
   assert.match(blocked, /直接调用数据库 CLI/);
   assert.match(blocked, /短期凭证/);

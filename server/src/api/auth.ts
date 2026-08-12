@@ -20,10 +20,11 @@ function isSignedFileRequest(req: Request): boolean {
     && typeof req.query.expires === 'string';
 }
 
-/** /runtime/* 是容器/shell 脚本用 workload token(不是 JWT,也不在 auth_tokens 表里)
- *  调用的内部接口,由 runtimeApi 自己的 validateWorkloadToken 校验,不走这里的租户身份解析。 */
+/** /runtime/* 和 /runtime-capabilities/* 是容器/shell 脚本用 WORKLOAD_TOKEN
+ *  (不是 JWT,也不在 auth_tokens 表里)调用的内部接口,由对应 router 自己校验。 */
 function isRuntimeRequest(req: Request): boolean {
-  return req.path === '/runtime' || req.path.startsWith('/runtime/');
+  return req.path === '/runtime' || req.path.startsWith('/runtime/')
+    || req.path === '/runtime-capabilities' || req.path.startsWith('/runtime-capabilities/');
 }
 
 /** 全局鉴权中间件:签名文件请求、runtime workload-token 请求直接放行(不建立身份上下文);

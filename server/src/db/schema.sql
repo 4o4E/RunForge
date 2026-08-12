@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS runs (
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS goal_state JSONB;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS model_ref TEXT;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS parent_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS runtime_capabilities_snapshot JSONB;
 
 -- 旧库上线分支前是线性 run 列表；首次迁移时按时间顺序补父子关系。
 WITH legacy_edges AS (
@@ -249,10 +250,13 @@ CREATE TABLE IF NOT EXISTS workload_tokens (
   run_id              TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
   skill_id            TEXT,
   allowed_datasources TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+  allowed_capabilities TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
   expires_at          TIMESTAMPTZ NOT NULL,
   revoked_at          TIMESTAMPTZ,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE workload_tokens ADD COLUMN IF NOT EXISTS allowed_capabilities TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
 
 CREATE INDEX IF NOT EXISTS idx_workload_tokens_run ON workload_tokens(run_id);
 CREATE INDEX IF NOT EXISTS idx_workload_tokens_expiry ON workload_tokens(expires_at);
@@ -384,6 +388,28 @@ CREATE TABLE IF NOT EXISTS tenants (
   status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- runtime capability 审计记录。只存摘要和状态，不保存明文 token 或上游真实密钥。
+CREATE TABLE IF NOT EXISTS runtime_capability_calls (
+  id               TEXT PRIMARY KEY,
+  tenant_id        TEXT NOT NULL REFERENCES tenants(id),
+  run_id           TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  step_id          TEXT REFERENCES steps(id) ON DELETE SET NULL,
+  token_id         TEXT REFERENCES workload_tokens(id) ON DELETE SET NULL,
+  capability       TEXT NOT NULL,
+  provider         TEXT,
+  model            TEXT,
+  request_summary  JSONB NOT NULL DEFAULT '{}'::jsonb,
+  response_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+  usage            JSONB,
+  status           TEXT NOT NULL CHECK (status IN ('success', 'error')),
+  error            TEXT,
+  started_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ended_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_capability_calls_run ON runtime_capability_calls(run_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runtime_capability_calls_tenant ON runtime_capability_calls(tenant_id, started_at DESC);
 
 CREATE TABLE IF NOT EXISTS users (
   id            TEXT PRIMARY KEY,

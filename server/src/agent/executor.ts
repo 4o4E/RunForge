@@ -4,17 +4,19 @@ import type { LlmDelta, LlmMessage, LlmUsage, Provider } from '../llm/types.js';
 import { parseToolArguments } from '../llm/toolArgs.js';
 import { hydrateImageAttachments } from '../llm/attachments.js';
 import { runTool, toolSchemas } from '../tools/registry.js';
-import { ContextManager } from './context.js';
+import { ContextManager, renderRuntimeCapabilitiesContext, renderSystemPrompt } from './context.js';
 import { activateSkill, loadSkillIndex, renderSkillCatalog, renderSkillSystemRules } from '../skills/registry.js';
 import type { SkillIndexItem, SkillActivation } from '../skills/registry.js';
-import { createWorkloadToken, listDatasources, listPermissionProfiles } from '../datasources/accountPool.js';
+import { DATASOURCE_CREDENTIAL_CAPABILITY, createWorkloadToken, listDatasources, listPermissionProfiles } from '../datasources/accountPool.js';
 import { finishGoal, initGoal, mergeGoal, parseGoalPatch, renderGoal } from './goal.js';
 import { runBus } from './bus.js';
 import type { AgentEvent, FinishReason } from './types.js';
 import { store as defaultStore } from '../store/index.js';
 import { scopeForThread, type Scope, type Store } from '../store/types.js';
-import { getMcpSettings, getToolSettings } from '../settings.js';
-import type { McpSettings, ToolSettings } from '../settings.js';
+import { getMcpSettings, getRuntimeCapabilitiesSettings, getToolSettings } from '../settings.js';
+import type { McpSettings, RuntimeCapabilitiesSettings, ToolSettings } from '../settings.js';
+import type { RuntimeCapabilityName } from '@runforge/contracts';
+import { query } from '../db/pool.js';
 import { withSpan } from '../telemetry.js';
 import type { AskUserAnswer, AskUserMode, AskUserOption, AskUserSpec, StreamStage, StreamStats } from './types.js';
 import { renderRuntimeContext } from './context.js';
@@ -77,13 +79,17 @@ export interface ExecutorDeps {
   resume: boolean;
   toolSettings?: ToolSettings;
   mcpSettings?: McpSettings;
-  databaseRuntimeEnv?: (scope: Scope, runId: string) => Promise<DatabaseRuntimeEnv>;
+  databaseRuntimeEnv?: (scope: Scope, runId: string, allowedCapabilities: RuntimeCapabilityName[]) => Promise<DatabaseRuntimeEnv>;
   generateThreadTitle: boolean;
 }
 
 interface DatabaseRuntimeEnv {
   env: Record<string, string>;
   summary: string;
+}
+
+export interface RuntimeCapabilitiesSnapshot extends RuntimeCapabilitiesSettings {
+  allowedCapabilities: RuntimeCapabilityName[];
 }
 
 interface ToolTrace {
@@ -303,17 +309,58 @@ function addUsage(total: LlmUsage | undefined, next: LlmUsage | undefined): LlmU
   };
 }
 
-async function createDefaultDatabaseRuntimeEnv(scope: Scope, runId: string): Promise<DatabaseRuntimeEnv> {
+export function enabledRuntimeCapabilities(settings: RuntimeCapabilitiesSettings, hasDatasources: boolean): RuntimeCapabilityName[] {
+  const capabilities: RuntimeCapabilityName[] = [];
+  if (hasDatasources) capabilities.push(DATASOURCE_CREDENTIAL_CAPABILITY);
+  if (settings.llm.enabled) capabilities.push('llm');
+  if (settings.image.enabled) capabilities.push('image');
+  if (settings.video.enabled) capabilities.push('video');
+  return capabilities;
+}
+
+export async function createRuntimeCapabilitiesSnapshot(scope: Scope, hasDatasources: boolean): Promise<RuntimeCapabilitiesSnapshot> {
+  const settings = await getRuntimeCapabilitiesSettings(scope);
+  return {
+    ...settings,
+    allowedCapabilities: enabledRuntimeCapabilities(settings, hasDatasources),
+  };
+}
+
+async function loadRuntimeCapabilitiesSnapshot(store: Store, scope: Scope, runId: string, hasDatasources: boolean): Promise<RuntimeCapabilitiesSnapshot> {
+  const run = await store.getRunUnscoped(runId);
+  const raw = run?.runtime_capabilities_snapshot;
+  if (raw && typeof raw === 'object') return raw as unknown as RuntimeCapabilitiesSnapshot;
+  const settings = store === defaultStore
+    ? await createRuntimeCapabilitiesSnapshot(scope, hasDatasources)
+    : {
+        llm: { enabled: false },
+        image: { enabled: false, provider: 'packy-gpt-image-2' as const, baseUrl: 'https://cf.api.fan', apiKey: '', model: 'gpt-image-2', timeoutMs: 180_000 },
+        allowedCapabilities: [],
+        video: { enabled: false },
+      };
+  const snapshot: RuntimeCapabilitiesSnapshot = settings;
+  if (store === defaultStore) {
+    await query(
+      `UPDATE runs SET runtime_capabilities_snapshot = $2::jsonb, updated_at = now()
+       WHERE id = $1 AND thread_id IN (SELECT id FROM threads WHERE tenant_id = $3 AND user_id = $4)`,
+      [runId, JSON.stringify(snapshot), scope.tenantId, scope.userId],
+    );
+  }
+  return snapshot;
+}
+
+async function createDefaultDatabaseRuntimeEnv(scope: Scope, runId: string, allowedCapabilities: RuntimeCapabilityName[]): Promise<DatabaseRuntimeEnv> {
   const activeDatasources = (await listDatasources(scope)).filter((datasource) => datasource.enabled && datasource.status === 'active');
   const allowedDatasourceIds = activeDatasources.map((datasource) => datasource.id);
   const created = await createWorkloadToken(scope, {
     runId,
     skillId: 'runtime:run',
     allowedDatasourceIds,
+    allowedCapabilities,
   });
 
   const env: Record<string, string> = {
-    DB_WORKLOAD_TOKEN: created.token,
+    WORKLOAD_TOKEN: created.token,
     RUNFORGE_RUNTIME_API_BASE: runtimeApiBase(),
     DATASOURCE_PROFILE: 'readonly',
   };
@@ -328,11 +375,12 @@ async function createDefaultDatabaseRuntimeEnv(scope: Scope, runId: string): Pro
   }
 
   const visible = [
-    'DB_WORKLOAD_TOKEN=已注入',
+    'WORKLOAD_TOKEN=已注入',
     `RUNFORGE_RUNTIME_API_BASE=${env.RUNFORGE_RUNTIME_API_BASE}`,
     env.DATASOURCE_ID ? `DATASOURCE_ID=${env.DATASOURCE_ID}` : 'DATASOURCE_ID=未自动选择',
     `DATASOURCE_PROFILE=${env.DATASOURCE_PROFILE}`,
     `allowedDatasourceIds=${allowedDatasourceIds.length ? allowedDatasourceIds.join(',') : '无'}`,
+    `allowedCapabilities=${allowedCapabilities.length ? allowedCapabilities.join(',') : '无'}`,
   ];
 
   return {
@@ -340,7 +388,7 @@ async function createDefaultDatabaseRuntimeEnv(scope: Scope, runId: string): Pro
     summary: [
       '数据库访问运行环境（run 级）:',
       ...visible.map((item) => `- ${item}`),
-      '- DB_WORKLOAD_TOKEN 只是换取本次 run 短期数据库凭证的令牌，不是数据库密码。',
+      '- WORKLOAD_TOKEN 只是换取本次 run 短期凭证和内部能力代理配置的令牌，不是数据库密码或上游 API key。',
       '- 涉及数据库 CLI 时必须使用 database-access helper 换取本 run 的短期凭证；不要复用旧 run 的数据库用户名、密码、DATABASE_URL 或宿主默认账号。',
     ].join('\n'),
   };
@@ -546,12 +594,14 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     if (!initialRun.goal_state) await store.setGoalState(scope, runId, goal);
     const toolSettings = deps.toolSettings ?? (await getToolSettings(scope));
     const mcpSettings = deps.mcpSettings ?? (deps.store === defaultStore ? await getMcpSettings(scope) : { servers: [] });
+    const activeDatasources = deps.store === defaultStore ? (await listDatasources(scope)).filter((datasource) => datasource.enabled && datasource.status === 'active') : [];
+    const capabilitySnapshot = await loadRuntimeCapabilitiesSnapshot(store, scope, runId, activeDatasources.length > 0);
     const toolEnv: Record<string, string> = {};
     const databaseRuntimeEnvProvider = deps.databaseRuntimeEnv ?? (deps.store === defaultStore ? createDefaultDatabaseRuntimeEnv : null);
     let databaseRuntimeSummary = '';
     if (databaseRuntimeEnvProvider) {
       try {
-        const runtime = await databaseRuntimeEnvProvider(scope, runId);
+        const runtime = await databaseRuntimeEnvProvider(scope, runId, capabilitySnapshot.allowedCapabilities);
         Object.assign(toolEnv, runtime.env);
         databaseRuntimeSummary = runtime.summary;
       } catch (err) {
@@ -563,10 +613,14 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     const skillRuntimeContext = renderSkillSystemRules();
     const skillCatalog = renderSkillCatalog(skillIndex);
     const workflowRuntimeContext = [renderWorkflowSystemRules(), renderWorkflowCatalog(workflowIndex)].join('\n\n');
+    const runtimeContext = `${renderRuntimeContext(toolSettings)}\n\n${databaseRuntimeSummary}\n\n${workflowRuntimeContext}\n\n${skillRuntimeContext}`;
     const ctx = new ContextManager(prior, userInput, renderGoal(goal), {
       appendUserInput: !hasPersistedMessages,
       userInputPrefix: skillCatalog,
-      runtimeContext: `${renderRuntimeContext(toolSettings)}\n\n${databaseRuntimeSummary}\n\n${workflowRuntimeContext}\n\n${skillRuntimeContext}`,
+      systemPrompt: renderSystemPrompt({
+        runtimeContext,
+        runtimeCapabilitiesContext: renderRuntimeCapabilitiesContext(capabilitySnapshot),
+      }),
     });
     currentCtx = ctx;
     if (!hasPersistedMessages) {
@@ -593,8 +647,13 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     const recentFailures: string[] = [];
     let noActionTurns = 0;
 
+    const envForStep = (stepId: string): Record<string, string> => ({
+      ...toolEnv,
+      RUNFORGE_STEP_ID: stepId,
+    });
+
     const ensureDatabaseToolEnv = async (activation: SkillActivation): Promise<string> => {
-      if (toolEnv.DB_WORKLOAD_TOKEN) return '数据库访问运行环境已在 run 初始化时注入；database-access skill 只提供脚本和操作规范。';
+      if (toolEnv.WORKLOAD_TOKEN) return '数据库访问运行环境已在 run 初始化时注入；database-access skill 只提供脚本和操作规范。';
 
       const activeDatasources = (await listDatasources(scope)).filter((datasource) => datasource.enabled && datasource.status === 'active');
       const allowedDatasourceIds = activeDatasources.map((datasource) => datasource.id);
@@ -602,9 +661,12 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         runId,
         skillId: activation.skill.id,
         allowedDatasourceIds,
+        allowedCapabilities: capabilitySnapshot.allowedCapabilities.includes(DATASOURCE_CREDENTIAL_CAPABILITY)
+          ? capabilitySnapshot.allowedCapabilities
+          : [DATASOURCE_CREDENTIAL_CAPABILITY, ...capabilitySnapshot.allowedCapabilities],
       });
 
-      toolEnv.DB_WORKLOAD_TOKEN = created.token;
+      toolEnv.WORKLOAD_TOKEN = created.token;
       toolEnv.RUNFORGE_RUNTIME_API_BASE = runtimeApiBase();
       toolEnv.MY_AGENT_RUNTIME_API_BASE = toolEnv.RUNFORGE_RUNTIME_API_BASE;
       toolEnv.DATASOURCE_PROFILE = 'readonly';
@@ -618,11 +680,12 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       }
 
       const visible = [
-        `DB_WORKLOAD_TOKEN=已注入`,
+        `WORKLOAD_TOKEN=已注入`,
         `RUNFORGE_RUNTIME_API_BASE=${toolEnv.RUNFORGE_RUNTIME_API_BASE}`,
         toolEnv.DATASOURCE_ID ? `DATASOURCE_ID=${toolEnv.DATASOURCE_ID}` : 'DATASOURCE_ID=未自动选择',
         `DATASOURCE_PROFILE=${toolEnv.DATASOURCE_PROFILE}`,
         `allowedDatasourceIds=${allowedDatasourceIds.length ? allowedDatasourceIds.join(',') : '无'}`,
+        `allowedCapabilities=${capabilitySnapshot.allowedCapabilities.join(',') || '无'}`,
       ];
       return `数据库访问运行环境已注入：${visible.join('；')}。不要输出 token 或短期凭证。`;
     };
@@ -756,7 +819,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
                 const resultText = await runTool(call.name, parsedArgs.args, {
                   scope,
                   settings: toolSettings,
-                  env: toolEnv,
+                  env: envForStep(stepId),
                   threadId,
                   runId,
                   stepId,
@@ -1289,7 +1352,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
               const out = await runTool(call.name, args, {
                 scope,
                 settings: toolSettings,
-                env: toolEnv,
+                env: envForStep(step.id),
                 threadId,
                 runId,
                 stepId: step.id,

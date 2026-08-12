@@ -11,6 +11,7 @@ import { store } from '../store/index.js';
 import type { Scope, TenantScope } from '../store/types.js';
 import { disablePostgresAccount, ensurePostgresAccount, ensurePostgresReadonlyTemplateRole } from './postgresAdapter.js';
 import { generateWorkloadToken, hashWorkloadToken, iso, randomPassword, secondsFromNow } from './token.js';
+import type { RuntimeCapabilityName } from '@runforge/contracts';
 import type {
   CredentialLease,
   DatasourceAccountRow,
@@ -25,6 +26,8 @@ import type {
 } from './types.js';
 
 const TERMINAL_RUN_STATUSES = new Set(['done', 'error', 'canceling', 'canceled']);
+export const DATASOURCE_CREDENTIAL_CAPABILITY: RuntimeCapabilityName = 'datasource.credentials';
+export const RUNTIME_CAPABILITY_NAMES: RuntimeCapabilityName[] = ['datasource.credentials', 'llm', 'image', 'video'];
 const DEFAULT_TOKEN_TTL_SECONDS = 30 * 60;
 const DEFAULT_LEASE_TTL_SECONDS = 30 * 60;
 const DEFAULT_MIN_POOL_SIZE = 0;
@@ -74,6 +77,16 @@ function permissionMode(value: unknown): PermissionMode {
 
 function tokenAllowedDatasource(token: WorkloadTokenRow, datasourceId: string): boolean {
   return token.allowed_datasources.includes('*') || token.allowed_datasources.includes(datasourceId);
+}
+
+function capabilityList(value: unknown, fallback: RuntimeCapabilityName[]): RuntimeCapabilityName[] {
+  if (!Array.isArray(value)) return fallback;
+  const allowed = new Set(RUNTIME_CAPABILITY_NAMES);
+  return [...new Set(value.map((item) => String(item).trim()).filter((item): item is RuntimeCapabilityName => allowed.has(item as RuntimeCapabilityName)))];
+}
+
+export function tokenAllowsCapability(token: WorkloadTokenRow, capability: RuntimeCapabilityName): boolean {
+  return token.allowed_capabilities.includes(capability);
 }
 
 function usernameSlug(value: string): string {
@@ -322,18 +335,28 @@ export async function createWorkloadToken(scope: Scope, input: unknown): Promise
   const allowed = Array.isArray(body.allowedDatasourceIds)
     ? body.allowedDatasourceIds.map((item) => String(item).trim()).filter(Boolean)
     : [];
+  const allowedCapabilities = capabilityList(
+    body.allowedCapabilities,
+    allowed.length ? [DATASOURCE_CREDENTIAL_CAPABILITY] : [],
+  );
   const ttlSeconds = numberValue(body.ttlSeconds, DEFAULT_TOKEN_TTL_SECONDS);
   const token = generateWorkloadToken();
   const expiresAt = secondsFromNow(ttlSeconds);
   const id = newWorkloadTokenId();
 
   const { rows } = await query<WorkloadTokenRow>(
-    `INSERT INTO workload_tokens (id, token_hash, run_id, skill_id, allowed_datasources, expires_at)
-     VALUES ($1, $2, $3, $4, $5::text[], $6)
+    `INSERT INTO workload_tokens (id, token_hash, run_id, skill_id, allowed_datasources, allowed_capabilities, expires_at)
+     VALUES ($1, $2, $3, $4, $5::text[], $6::text[], $7)
      RETURNING *`,
-    [id, hashWorkloadToken(token), runId, stringValue(body.skillId) || null, allowed, expiresAt],
+    [id, hashWorkloadToken(token), runId, stringValue(body.skillId) || null, allowed, allowedCapabilities, expiresAt],
   );
   return { token, row: rows[0] };
+}
+
+export async function requireWorkloadCapability(rawToken: string, capability: RuntimeCapabilityName): Promise<ValidatedWorkloadToken> {
+  const validated = await validateWorkloadToken(rawToken);
+  if (!tokenAllowsCapability(validated.token, capability)) throw new DatasourceError(403, `WORKLOAD_TOKEN 无权使用运行时能力：${capability}`);
+  return validated;
 }
 
 export async function validateWorkloadToken(rawToken: string): Promise<ValidatedWorkloadToken> {
@@ -527,7 +550,7 @@ async function disableRemoteAccount(datasource: DatasourceRow, account: Datasour
 }
 
 export async function acquireCredential(rawToken: string, datasourceId: string, profileName = 'readonly'): Promise<CredentialLease> {
-  const validated = await validateWorkloadToken(rawToken);
+  const validated = await requireWorkloadCapability(rawToken, DATASOURCE_CREDENTIAL_CAPABILITY);
   if (!tokenAllowedDatasource(validated.token, datasourceId)) throw new DatasourceError(403, 'workload token 无权访问该数据源');
 
   const { datasource, profile } = await loadDatasourceAndProfile(datasourceId, profileName);
