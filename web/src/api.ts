@@ -50,6 +50,7 @@ import type {
   WebPushSubscriptionInput,
   WebPushSubscriptionRecord,
 } from '@runforge/contracts';
+export type { RuntimeImageCapabilityModel, RuntimeLlmCapabilityModel, RuntimeVideoCapabilityModel } from '@runforge/contracts';
 
 export type * from '@runforge/contracts';
 

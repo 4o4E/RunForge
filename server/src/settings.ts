@@ -9,6 +9,9 @@ import type {
   McpHeaderSettings,
   McpServerSettings,
   McpSettings,
+  RuntimeImageCapabilityModel,
+  RuntimeLlmCapabilityModel,
+  RuntimeVideoCapabilityModel,
   RuntimeCapabilitiesSettings,
   SandboxBackendName,
   ToolSettings,
@@ -141,6 +144,14 @@ function mcpServerIdValue(value: unknown, fallback: string): string {
   return raw || fallback;
 }
 
+function runtimeModelIdValue(value: unknown, fallback: string): string {
+  const raw = stringValue(value, fallback)
+    .replace(/[^0-9A-Za-z_.-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return raw || fallback;
+}
+
 function defaultToolSettings(): ToolSettings {
   return {
     sandbox: config.tools.sandbox,
@@ -199,16 +210,13 @@ function defaultMcpSettings(): McpSettings {
 
 function defaultRuntimeCapabilitiesSettings(): RuntimeCapabilitiesSettings {
   return {
-    llm: { enabled: false },
+    llm: { enabled: false, defaultModelId: '', models: [] },
     image: {
       enabled: false,
-      provider: 'packy-gpt-image-2',
-      baseUrl: 'https://cf.api.fan',
-      apiKey: '',
-      model: 'gpt-image-2',
-      timeoutMs: 180_000,
+      defaultModelId: '',
+      models: [],
     },
-    video: { enabled: false },
+    video: { enabled: false, defaultModelId: '', models: [] },
   };
 }
 
@@ -527,27 +535,92 @@ export function normalizeRuntimeCapabilitiesSettings(input: unknown): RuntimeCap
   const llm = body.llm && typeof body.llm === 'object' ? (body.llm as Record<string, unknown>) : {};
   const image = body.image && typeof body.image === 'object' ? (body.image as Record<string, unknown>) : {};
   const video = body.video && typeof body.video === 'object' ? (body.video as Record<string, unknown>) : {};
+  const normalizeLlmModels = (): RuntimeLlmCapabilityModel[] => {
+    const rows = Array.isArray(llm.models) ? llm.models : [];
+    return rows.map((item, index) => {
+      const row = item && typeof item === 'object' ? (item as Record<string, unknown>) : {};
+      const modelRef = stringValue(row.modelRef, '');
+      if (!modelRef) return null;
+      const id = runtimeModelIdValue(row.id, `llm-${index + 1}`);
+      return {
+        id,
+        label: stringValue(row.label, modelRef),
+        modelRef,
+      };
+    }).filter((item): item is RuntimeLlmCapabilityModel => Boolean(item));
+  };
+  const normalizeImageModels = (): RuntimeImageCapabilityModel[] => {
+    const rows = Array.isArray(image.models)
+      ? image.models
+      : (image.baseUrl || image.apiKey || image.model)
+        ? [image]
+        : [];
+    return rows.map((item, index) => {
+      const row = item && typeof item === 'object' ? (item as Record<string, unknown>) : {};
+      const model = stringValue(row.model, '');
+      const id = runtimeModelIdValue(row.id, `image-${index + 1}`);
+      return {
+        id,
+        label: stringValue(row.label, model || id),
+        provider: row.provider === 'packy-gpt-image-2' ? row.provider : 'packy-gpt-image-2',
+        baseUrl: stringValue(row.baseUrl, 'https://cf.api.fan'),
+        apiKey: typeof row.apiKey === 'string' ? row.apiKey : '',
+        model: model || 'gpt-image-2',
+        timeoutMs: positiveIntValue(row.timeoutMs, 180_000, 1_000, 600_000),
+      };
+    });
+  };
+  const normalizeVideoModels = (): RuntimeVideoCapabilityModel[] => {
+    const rows = Array.isArray(video.models) ? video.models : [];
+    return rows.map((item, index) => {
+      const row = item && typeof item === 'object' ? (item as Record<string, unknown>) : {};
+      const model = stringValue(row.model, '');
+      if (!model) return null;
+      const provider = stringValue(row.provider, '');
+      if (!provider) return null;
+      const id = runtimeModelIdValue(row.id, `video-${index + 1}`);
+      return {
+        id,
+        label: stringValue(row.label, `${provider}:${model}`),
+        provider,
+        model,
+      };
+    }).filter((item): item is RuntimeVideoCapabilityModel => Boolean(item));
+  };
+  const llmModels = normalizeLlmModels();
+  const imageModels = normalizeImageModels();
+  const videoModels = normalizeVideoModels();
+  const defaultLlmModelId = llmModels.some((model) => model.id === llm.defaultModelId)
+    ? String(llm.defaultModelId)
+    : llmModels[0]?.id ?? '';
+  const defaultImageModelId = imageModels.some((model) => model.id === image.defaultModelId)
+    ? String(image.defaultModelId)
+    : imageModels[0]?.id ?? '';
+  const defaultVideoModelId = videoModels.some((model) => model.id === video.defaultModelId)
+    ? String(video.defaultModelId)
+    : videoModels[0]?.id ?? '';
   return {
     llm: {
       enabled: boolValue(llm.enabled, defaults.llm.enabled),
+      defaultModelId: defaultLlmModelId,
+      models: llmModels,
     },
     image: {
       enabled: boolValue(image.enabled, defaults.image.enabled),
-      provider: image.provider === 'packy-gpt-image-2' ? image.provider : defaults.image.provider,
-      baseUrl: stringValue(image.baseUrl, defaults.image.baseUrl),
-      apiKey: typeof image.apiKey === 'string' ? image.apiKey : defaults.image.apiKey,
-      model: stringValue(image.model, defaults.image.model),
-      timeoutMs: positiveIntValue(image.timeoutMs, defaults.image.timeoutMs, 1_000, 600_000),
+      defaultModelId: defaultImageModelId,
+      models: imageModels,
     },
     video: {
       enabled: boolValue(video.enabled, defaults.video.enabled),
+      defaultModelId: defaultVideoModelId,
+      models: videoModels,
     },
   };
 }
 
 export async function getRuntimeCapabilitiesSettings(scope: TenantScope): Promise<RuntimeCapabilitiesSettings> {
   try {
-    const value = await readJsonSettingWithFallback(scope.tenantId, RUNTIME_CAPABILITIES_SETTINGS_KEY);
+    const value = await readTenantJsonSetting(scope.tenantId, RUNTIME_CAPABILITIES_SETTINGS_KEY);
     if (value === undefined) {
       const defaults = defaultRuntimeCapabilitiesSettings();
       if (scope.tenantId === DEFAULT_TENANT_ID) {

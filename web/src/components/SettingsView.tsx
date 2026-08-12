@@ -32,6 +32,9 @@ import {
   type McpSettingsOptions,
   type McpToolOption,
   type RuntimeCapabilitiesSettings,
+  type RuntimeImageCapabilityModel,
+  type RuntimeLlmCapabilityModel,
+  type RuntimeVideoCapabilityModel,
   type Thread,
   type ToolSettings,
   type ToolSettingsOptions,
@@ -1815,12 +1818,16 @@ function LlmSettingsPanel() {
 function RuntimeCapabilitiesSettingsPanel() {
   const { notify } = useNotifications();
   const [settings, setSettings] = useState<RuntimeCapabilitiesSettings | null>(null);
+  const [llmSettings, setLlmSettings] = useState<LlmSettings | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     getRuntimeCapabilitiesSettings()
       .then(setSettings)
       .catch((err) => notify({ variant: 'error', title: '运行时能力配置加载失败', description: (err as Error).message }));
+    getLlmSettings()
+      .then(setLlmSettings)
+      .catch((err) => notify({ variant: 'error', title: '模型配置加载失败', description: (err as Error).message }));
   }, [notify]);
 
   if (!settings) {
@@ -1841,6 +1848,90 @@ function RuntimeCapabilitiesSettingsPanel() {
     }
   }
 
+  const llmOptions = llmSettings ? llmOptionsFromSettings(llmSettings) : [];
+  const updateLlmModel = (index: number, patch: Partial<RuntimeLlmCapabilityModel>) => {
+    const models = settings.llm.models.map((model, i) => i === index ? { ...model, ...patch } : model);
+    const defaultModelId = models.some((model) => model.id === settings.llm.defaultModelId) ? settings.llm.defaultModelId : models[0]?.id ?? '';
+    setSettings({ ...settings, llm: { ...settings.llm, models, defaultModelId } });
+  };
+  const addLlmModel = () => {
+    const id = `llm-${settings.llm.models.length + 1}`;
+    const modelRef = llmOptions[0]?.ref ?? '';
+    setSettings({
+      ...settings,
+      llm: {
+        ...settings.llm,
+        defaultModelId: settings.llm.defaultModelId || id,
+        models: [...settings.llm.models, { id, label: modelRef || id, modelRef }],
+      },
+    });
+  };
+  const removeLlmModel = (index: number) => {
+    const models = settings.llm.models.filter((_, i) => i !== index);
+    setSettings({
+      ...settings,
+      llm: {
+        ...settings.llm,
+        models,
+        defaultModelId: models.some((model) => model.id === settings.llm.defaultModelId) ? settings.llm.defaultModelId : models[0]?.id ?? '',
+      },
+    });
+  };
+  const updateImageModel = (index: number, patch: Partial<RuntimeImageCapabilityModel>) => {
+    const models = settings.image.models.map((model, i) => i === index ? { ...model, ...patch } : model);
+    const defaultModelId = models.some((model) => model.id === settings.image.defaultModelId) ? settings.image.defaultModelId : models[0]?.id ?? '';
+    setSettings({ ...settings, image: { ...settings.image, models, defaultModelId } });
+  };
+  const addImageModel = () => {
+    const id = `image-${settings.image.models.length + 1}`;
+    setSettings({
+      ...settings,
+      image: {
+        ...settings.image,
+        defaultModelId: settings.image.defaultModelId || id,
+        models: [...settings.image.models, { id, label: 'GPT Image 2', provider: 'packy-gpt-image-2', baseUrl: 'https://cf.api.fan', apiKey: '', model: 'gpt-image-2', timeoutMs: 180000 }],
+      },
+    });
+  };
+  const removeImageModel = (index: number) => {
+    const models = settings.image.models.filter((_, i) => i !== index);
+    setSettings({
+      ...settings,
+      image: {
+        ...settings.image,
+        models,
+        defaultModelId: models.some((model) => model.id === settings.image.defaultModelId) ? settings.image.defaultModelId : models[0]?.id ?? '',
+      },
+    });
+  };
+  const updateVideoModel = (index: number, patch: Partial<RuntimeVideoCapabilityModel>) => {
+    const models = settings.video.models.map((model, i) => i === index ? { ...model, ...patch } : model);
+    const defaultModelId = models.some((model) => model.id === settings.video.defaultModelId) ? settings.video.defaultModelId : models[0]?.id ?? '';
+    setSettings({ ...settings, video: { ...settings.video, models, defaultModelId } });
+  };
+  const addVideoModel = () => {
+    const id = `video-${settings.video.models.length + 1}`;
+    setSettings({
+      ...settings,
+      video: {
+        ...settings.video,
+        defaultModelId: settings.video.defaultModelId || id,
+        models: [...settings.video.models, { id, label: '视频模型', provider: 'todo-provider', model: 'todo-model' }],
+      },
+    });
+  };
+  const removeVideoModel = (index: number) => {
+    const models = settings.video.models.filter((_, i) => i !== index);
+    setSettings({
+      ...settings,
+      video: {
+        ...settings.video,
+        models,
+        defaultModelId: models.some((model) => model.id === settings.video.defaultModelId) ? settings.video.defaultModelId : models[0]?.id ?? '',
+      },
+    });
+  };
+
   return (
     <SettingsPanelShell
       title="运行时能力"
@@ -1859,7 +1950,7 @@ function RuntimeCapabilitiesSettingsPanel() {
               <span className="text-sm font-medium">LLM 代理凭证</span>
               <span className="text-xs text-muted-foreground">允许脚本换取 llm 能力代理配置</span>
             </span>
-            <Switch checked={settings.llm.enabled} onCheckedChange={(enabled) => setSettings({ ...settings, llm: { enabled } })} />
+            <Switch checked={settings.llm.enabled} onCheckedChange={(enabled) => setSettings({ ...settings, llm: { ...settings.llm, enabled } })} />
           </label>
           <label className="flex items-center justify-between gap-3 rounded-md border p-3">
             <span className="grid gap-1">
@@ -1873,33 +1964,131 @@ function RuntimeCapabilitiesSettingsPanel() {
               <span className="text-sm font-medium">视频生成凭证</span>
               <span className="text-xs text-muted-foreground">预留能力，v1 接口会返回未接入 provider</span>
             </span>
-            <Switch checked={settings.video.enabled} onCheckedChange={(enabled) => setSettings({ ...settings, video: { enabled } })} />
+            <Switch checked={settings.video.enabled} onCheckedChange={(enabled) => setSettings({ ...settings, video: { ...settings.video, enabled } })} />
           </label>
         </CardContent>
       </Card>
 
       <Card className="rounded-lg shadow-sm">
         <CardHeader>
-          <CardTitle>图片供应商</CardTitle>
-          <CardDescription>RunForge 内部代理会把图片请求适配到 Packy GPT-Image-2</CardDescription>
+          <CardTitle>LLM 模型</CardTitle>
+          <CardDescription>代码可通过 model 选择这些运行时模型 id</CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-3 sm:grid-cols-2">
-          <label className="grid gap-1 text-sm">
-            Base URL
-            <Input value={settings.image.baseUrl} onChange={(event) => setSettings({ ...settings, image: { ...settings.image, baseUrl: event.target.value } })} />
-          </label>
-          <label className="grid gap-1 text-sm">
-            Model
-            <Input value={settings.image.model} onChange={(event) => setSettings({ ...settings, image: { ...settings.image, model: event.target.value } })} />
-          </label>
-          <label className="grid gap-1 text-sm sm:col-span-2">
-            API Key
-            <Input type="password" value={settings.image.apiKey} onChange={(event) => setSettings({ ...settings, image: { ...settings.image, apiKey: event.target.value } })} />
-          </label>
-          <label className="grid gap-1 text-sm">
-            Timeout ms
-            <Input type="number" min={1000} value={settings.image.timeoutMs} onChange={(event) => setSettings({ ...settings, image: { ...settings.image, timeoutMs: Number(event.target.value) } })} />
-          </label>
+        <CardContent className="grid gap-3">
+          <div className="flex items-center justify-between gap-3">
+            <Select value={settings.llm.defaultModelId || 'none'} onValueChange={(value) => setSettings({ ...settings, llm: { ...settings.llm, defaultModelId: value === 'none' ? '' : value } })}>
+              <SelectTrigger className="max-w-xs"><SelectValue placeholder="默认模型" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">无默认模型</SelectItem>
+                {settings.llm.models.map((model) => <SelectItem key={model.id} value={model.id}>{model.label || model.id}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <Button variant="outline" size="sm" onClick={addLlmModel}><Plus className="h-4 w-4" />新增模型</Button>
+          </div>
+          {settings.llm.models.map((model, index) => (
+            <div key={`${model.id}-${index}`} className="grid gap-3 rounded-md border p-3 md:grid-cols-3">
+              <Field label="模型 ID">
+                <Input value={model.id} onChange={(event) => updateLlmModel(index, { id: event.target.value })} />
+              </Field>
+              <Field label="显示名称">
+                <Input value={model.label} onChange={(event) => updateLlmModel(index, { label: event.target.value })} />
+              </Field>
+              <div className="flex items-end gap-2">
+                <Field label="后端 modelRef">
+                  <ModelSearchSelect value={model.modelRef} options={llmOptions} onChange={(modelRef) => updateLlmModel(index, { modelRef })} placeholder="选择模型" />
+                </Field>
+                <Button variant="ghost" size="icon" className="mb-0.5 size-9" onClick={() => removeLlmModel(index)} aria-label="删除 LLM 模型">
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+
+      <Card className="rounded-lg shadow-sm">
+        <CardHeader>
+          <CardTitle>图片模型</CardTitle>
+          <CardDescription>每个模型条目独立保存 Packy GPT-Image-2 代理配置</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3">
+          <div className="flex items-center justify-between gap-3">
+            <Select value={settings.image.defaultModelId || 'none'} onValueChange={(value) => setSettings({ ...settings, image: { ...settings.image, defaultModelId: value === 'none' ? '' : value } })}>
+              <SelectTrigger className="max-w-xs"><SelectValue placeholder="默认模型" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">无默认模型</SelectItem>
+                {settings.image.models.map((model) => <SelectItem key={model.id} value={model.id}>{model.label || model.id}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <Button variant="outline" size="sm" onClick={addImageModel}><Plus className="h-4 w-4" />新增模型</Button>
+          </div>
+          {settings.image.models.map((model, index) => (
+            <div key={`${model.id}-${index}`} className="grid gap-3 rounded-md border p-3 md:grid-cols-3">
+              <Field label="模型 ID">
+                <Input value={model.id} onChange={(event) => updateImageModel(index, { id: event.target.value })} />
+              </Field>
+              <Field label="显示名称">
+                <Input value={model.label} onChange={(event) => updateImageModel(index, { label: event.target.value })} />
+              </Field>
+              <Field label="上游模型">
+                <Input value={model.model} onChange={(event) => updateImageModel(index, { model: event.target.value })} />
+              </Field>
+              <Field label="Base URL">
+                <Input value={model.baseUrl} onChange={(event) => updateImageModel(index, { baseUrl: event.target.value })} />
+              </Field>
+              <Field label="API Key">
+                <Input type="password" value={model.apiKey} onChange={(event) => updateImageModel(index, { apiKey: event.target.value })} />
+              </Field>
+              <div className="flex items-end gap-2">
+                <Field label="Timeout ms">
+                  <Input type="number" min={1000} value={model.timeoutMs} onChange={(event) => updateImageModel(index, { timeoutMs: Number(event.target.value) })} />
+                </Field>
+                <Button variant="ghost" size="icon" className="mb-0.5 size-9" onClick={() => removeImageModel(index)} aria-label="删除图片模型">
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+
+      <Card className="rounded-lg shadow-sm">
+        <CardHeader>
+          <CardTitle>视频模型</CardTitle>
+          <CardDescription>预留配置，v1 仍返回未接入 provider</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3">
+          <div className="flex items-center justify-between gap-3">
+            <Select value={settings.video.defaultModelId || 'none'} onValueChange={(value) => setSettings({ ...settings, video: { ...settings.video, defaultModelId: value === 'none' ? '' : value } })}>
+              <SelectTrigger className="max-w-xs"><SelectValue placeholder="默认模型" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">无默认模型</SelectItem>
+                {settings.video.models.map((model) => <SelectItem key={model.id} value={model.id}>{model.label || model.id}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <Button variant="outline" size="sm" onClick={addVideoModel}><Plus className="h-4 w-4" />新增模型</Button>
+          </div>
+          {settings.video.models.map((model, index) => (
+            <div key={`${model.id}-${index}`} className="grid gap-3 rounded-md border p-3 md:grid-cols-4">
+              <Field label="模型 ID">
+                <Input value={model.id} onChange={(event) => updateVideoModel(index, { id: event.target.value })} />
+              </Field>
+              <Field label="显示名称">
+                <Input value={model.label} onChange={(event) => updateVideoModel(index, { label: event.target.value })} />
+              </Field>
+              <Field label="Provider">
+                <Input value={model.provider} onChange={(event) => updateVideoModel(index, { provider: event.target.value })} />
+              </Field>
+              <div className="flex items-end gap-2">
+                <Field label="Model">
+                  <Input value={model.model} onChange={(event) => updateVideoModel(index, { model: event.target.value })} />
+                </Field>
+                <Button variant="ghost" size="icon" className="mb-0.5 size-9" onClick={() => removeVideoModel(index)} aria-label="删除视频模型">
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          ))}
         </CardContent>
       </Card>
     </SettingsPanelShell>

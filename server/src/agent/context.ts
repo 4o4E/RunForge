@@ -80,11 +80,13 @@ export function renderRuntimeCapabilitiesContext(settings: RuntimeCapabilitiesSe
     '- SDK/helper 只负责换取短期能力凭证和内部代理端点配置，不封装 chat/image/video 调用；调用方代码自行选择 fetch、OpenAI SDK、Packy 兼容 SDK 或其它依赖。',
     '- The SDK/helper only provides temporary credentials and internal proxy endpoint config; it does not wrap chat/image/video calls. Caller code chooses fetch, OpenAI SDK, Packy-compatible SDK, or other dependencies.',
     '- 先用 SDK 获取能力凭证，SDK 会从 RUNFORGE_RUNTIME_API_BASE 推导 runtime-capabilities 代理端点；不要向模型或最终回复展示凭证内容。',
+    '- 调用 llm/image/video 代理时，使用凭证返回的 models[].id，通过请求体 model 或 modelId 选择模型；不要依赖平台内部 modelRef 或上游真实密钥。',
+    '- When calling llm/image/video proxy endpoints, choose models with models[].id via request body model or modelId; do not depend on internal modelRef or upstream API keys.',
     `- 已启用能力 / Enabled capabilities: ${enabled.join(', ')}.`,
   );
-  if (settings.llm.enabled) lines.push('- LLM: 可换取 llm 能力凭证，调用内部 /api/runtime-capabilities/llm/* 代理端点。');
-  if (settings.image.enabled) lines.push(`- Image: 可换取 image 能力凭证，默认模型 ${settings.image.model}，内部代理会适配 Packy GPT-Image-2。`);
-  if (settings.video.enabled) lines.push('- Video: 可换取 video 能力凭证；v1 可能返回尚未接入 provider 的明确错误。');
+  if (settings.llm.enabled) lines.push(`- LLM: 可换取 llm 能力凭证，调用内部 /api/runtime-capabilities/llm/* 代理端点；可选模型 id: ${settings.llm.models.map((model) => model.id).join(', ') || '未配置'}。`);
+  if (settings.image.enabled) lines.push(`- Image: 可换取 image 能力凭证，内部代理会适配 Packy GPT-Image-2；可选模型 id: ${settings.image.models.map((model) => model.id).join(', ') || '未配置'}。`);
+  if (settings.video.enabled) lines.push(`- Video: 可换取 video 能力凭证；v1 可能返回尚未接入 provider 的明确错误；可选模型 id: ${settings.video.models.map((model) => model.id).join(', ') || '未配置'}。`);
   return lines.join('\n');
 }
 

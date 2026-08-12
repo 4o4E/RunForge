@@ -117,10 +117,25 @@ export type RuntimeCapabilityName = 'datasource.credentials' | 'llm' | 'image' |
 
 export interface RuntimeLlmCapabilitySettings {
   enabled: boolean;
+  defaultModelId: string;
+  models: RuntimeLlmCapabilityModel[];
+}
+
+export interface RuntimeLlmCapabilityModel {
+  id: string;
+  label: string;
+  modelRef: string;
 }
 
 export interface RuntimeImageCapabilitySettings {
   enabled: boolean;
+  defaultModelId: string;
+  models: RuntimeImageCapabilityModel[];
+}
+
+export interface RuntimeImageCapabilityModel {
+  id: string;
+  label: string;
   provider: 'packy-gpt-image-2';
   baseUrl: string;
   apiKey: string;
@@ -130,6 +145,15 @@ export interface RuntimeImageCapabilitySettings {
 
 export interface RuntimeVideoCapabilitySettings {
   enabled: boolean;
+  defaultModelId: string;
+  models: RuntimeVideoCapabilityModel[];
+}
+
+export interface RuntimeVideoCapabilityModel {
+  id: string;
+  label: string;
+  provider: string;
+  model: string;
 }
 
 export interface RuntimeCapabilitiesSettings {
@@ -145,6 +169,7 @@ export interface RuntimeCapabilityCredential {
   expiresAt: string;
   endpoints: Record<string, string>;
   defaults: Record<string, unknown>;
+  models: Record<string, unknown>[];
 }
 
 export interface LlmProviderProbeResult {

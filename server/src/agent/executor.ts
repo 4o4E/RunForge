@@ -333,10 +333,10 @@ async function loadRuntimeCapabilitiesSnapshot(store: Store, scope: Scope, runId
   const settings = store === defaultStore
     ? await createRuntimeCapabilitiesSnapshot(scope, hasDatasources)
     : {
-        llm: { enabled: false },
-        image: { enabled: false, provider: 'packy-gpt-image-2' as const, baseUrl: 'https://cf.api.fan', apiKey: '', model: 'gpt-image-2', timeoutMs: 180_000 },
+        llm: { enabled: false, defaultModelId: '', models: [] },
+        image: { enabled: false, defaultModelId: '', models: [] },
         allowedCapabilities: [],
-        video: { enabled: false },
+        video: { enabled: false, defaultModelId: '', models: [] },
       };
   const snapshot: RuntimeCapabilitiesSnapshot = settings;
   if (store === defaultStore) {

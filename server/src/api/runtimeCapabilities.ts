@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import type { Request } from 'express';
-import type { RuntimeCapabilitiesSettings, RuntimeCapabilityCredential, RuntimeCapabilityName } from '@runforge/contracts';
+import type { RuntimeCapabilitiesSettings, RuntimeCapabilityCredential, RuntimeCapabilityName, RuntimeImageCapabilityModel } from '@runforge/contracts';
 import {
   DATASOURCE_CREDENTIAL_CAPABILITY,
   DatasourceError,
@@ -58,6 +58,10 @@ function optionalString(value: unknown): string | undefined {
 
 function truncate(value: string, max = 500): string {
   return value.length <= max ? value : `${value.slice(0, max)}...[truncated ${value.length - max} chars]`;
+}
+
+function requestedModelId(body: Record<string, unknown>): string | undefined {
+  return optionalString(body.modelId) ?? optionalString(body.model);
 }
 
 async function scopeForRunId(runId: string): Promise<Scope> {
@@ -164,19 +168,38 @@ function normalizeCapability(value: unknown): RuntimeCapabilityName {
   throw new DatasourceError(400, 'capability 必须是 datasource.credentials / llm / image / video');
 }
 
-async function credentialFor(capability: RuntimeCapabilityName, token: string, expiresAt: string, stepId?: string | null): Promise<RuntimeCapabilityCredential> {
+function publicModelsForCredential(capability: RuntimeCapabilityName, settings: RuntimeCapabilitiesSettings | null): Record<string, unknown>[] {
+  if (!settings) return [];
+  if (capability === 'llm') return settings.llm.models.map((model) => ({ id: model.id, label: model.label }));
+  if (capability === 'image') return settings.image.models.map((model) => ({ id: model.id, label: model.label, provider: model.provider, model: model.model }));
+  if (capability === 'video') return settings.video.models.map((model) => ({ id: model.id, label: model.label, provider: model.provider, model: model.model }));
+  return [];
+}
+
+function defaultModelIdForCapability(capability: RuntimeCapabilityName, settings: RuntimeCapabilitiesSettings | null): string | undefined {
+  if (!settings) return undefined;
+  if (capability === 'llm') return settings.llm.defaultModelId || undefined;
+  if (capability === 'image') return settings.image.defaultModelId || undefined;
+  if (capability === 'video') return settings.video.defaultModelId || undefined;
+  return undefined;
+}
+
+async function credentialFor(capability: RuntimeCapabilityName, token: string, expiresAt: string, settings: RuntimeCapabilitiesSettings | null, stepId?: string | null): Promise<RuntimeCapabilityCredential> {
   const base = await runtimeBaseUrl();
   const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
   if (stepId) headers['X-RunForge-Step-Id'] = stepId;
+  const defaultModelId = defaultModelIdForCapability(capability, settings);
   return {
     capability,
     baseUrl: base,
     headers,
     expiresAt,
     endpoints: CAPABILITY_ENDPOINTS[capability],
-    defaults: capability === 'image'
-      ? { model: 'gpt-image-2', n: 1 }
-      : {},
+    defaults: {
+      ...(defaultModelId ? { model: defaultModelId } : {}),
+      ...(capability === 'image' ? { n: 1 } : {}),
+    },
+    models: publicModelsForCredential(capability, settings),
   };
 }
 
@@ -216,8 +239,8 @@ runtimeCapabilitiesApi.post('/credentials', async (req, res) => {
     };
     stepId = await auditStepId(req, audit.runId);
     if (!tokenAllowsCapability(validated.token, capability)) throw new DatasourceError(403, `WORKLOAD_TOKEN 无权使用运行时能力：${capability}`);
-    await loadSettingsAndEnsureEnabled(audit.scope, capability);
-    const credential = await credentialFor(capability, token, validated.token.expires_at, stepId);
+    const settings = await loadSettingsAndEnsureEnabled(audit.scope, capability);
+    const credential = await credentialFor(capability, token, validated.token.expires_at, settings, stepId);
     await addCapabilityAudit({
       ...audit,
       stepId,
@@ -250,9 +273,10 @@ async function handleLlmChat(req: Request, res: import('express').Response, body
   try {
     audit = await identifyWorkloadRequest(req);
     stepId = await auditStepId(req, audit.runId);
-    await requireCapabilityEnabled(audit, 'llm');
     const body = jsonObject(bodyOverride ?? req.body);
-    modelRef = optionalString(body.modelRef);
+    const settings = await requireCapabilityEnabled(audit, 'llm');
+    const selected = selectLlmModel(settings, body);
+    modelRef = selected.modelRef;
     const messages = normalizeMessages(body.messages);
     const { provider, modelRef: resolvedModelRef } = await getConfiguredProvider(audit.scope, modelRef);
     const result = await provider.complete(messages, []);
@@ -264,7 +288,7 @@ async function handleLlmChat(req: Request, res: import('express').Response, body
       capability: 'llm',
       provider: provider.name,
       model: resolvedModelRef,
-      requestSummary: { modelRef: modelRef ?? null, messages: summarizeMessages(messages) },
+      requestSummary: { modelId: selected.id, modelRef, messages: summarizeMessages(messages) },
       responseSummary: { contentChars: result.content?.length ?? 0, toolCalls: result.toolCalls.length, finishReason: result.finishReason },
       usage: result.usage ?? null,
       status: 'success',
@@ -294,18 +318,34 @@ runtimeCapabilitiesApi.post('/llm/chat', (req, res) => void handleLlmChat(req, r
 runtimeCapabilitiesApi.post('/llm/responses', async (req, res) => {
   const body = jsonObject(req.body);
   const input = typeof body.input === 'string' ? body.input : JSON.stringify(body.input ?? '');
-  await handleLlmChat(req, res, { modelRef: optionalString(body.modelRef ?? body.model), messages: [{ role: 'user', content: input }] });
+  await handleLlmChat(req, res, { model: requestedModelId(body), messages: [{ role: 'user', content: input }] });
 });
+
+function selectLlmModel(settings: RuntimeCapabilitiesSettings | null, body: Record<string, unknown>): { id: string; modelRef: string } {
+  if (!settings) throw new DatasourceError(500, 'LLM 能力配置缺失');
+  const id = requestedModelId(body) ?? settings.llm.defaultModelId;
+  const selected = settings.llm.models.find((model) => model.id === id);
+  if (!selected) throw new DatasourceError(400, `运行时 LLM 模型未配置：${id || 'default'}`);
+  return { id: selected.id, modelRef: selected.modelRef };
+}
+
+function selectImageModel(settings: RuntimeCapabilitiesSettings, body: Record<string, unknown>): RuntimeImageCapabilityModel {
+  const id = requestedModelId(body) ?? settings.image.defaultModelId;
+  const selected = settings.image.models.find((model) => model.id === id);
+  if (!selected) throw new DatasourceError(400, `图片模型未配置：${id || 'default'}`);
+  return selected;
+}
 
 async function proxyPackyImage(
   req: Request,
   mode: 'generate' | 'edit',
   settings: RuntimeCapabilitiesSettings,
-): Promise<{ status: number; body: unknown }> {
-  const image = settings.image;
-  if (!image.apiKey.trim()) throw new DatasourceError(400, '图片生成能力未配置 apiKey');
+): Promise<{ status: number; body: unknown; model: RuntimeImageCapabilityModel }> {
   const body = jsonObject(req.body);
-  const payload: Record<string, unknown> = { ...body, model: optionalString(body.model) ?? image.model };
+  const image = selectImageModel(settings, body);
+  if (!image.apiKey.trim()) throw new DatasourceError(400, `图片生成能力未配置 apiKey：${image.id}`);
+  const { model: _modelSelector, modelId: _modelId, ...passthrough } = body;
+  const payload: Record<string, unknown> = { ...passthrough, model: image.model };
   if (typeof payload.n === 'number' && payload.n !== 1) throw new DatasourceError(400, 'gpt-image-2 当前只支持 n=1');
   const endpoint = mode === 'generate' ? '/v1/images/generations' : '/v1/images/edits';
   const headers: Record<string, string> = { Authorization: `Bearer ${image.apiKey}` };
@@ -331,7 +371,7 @@ async function proxyPackyImage(
     } catch {
       parsed = { text };
     }
-    return { status: response.status, body: parsed };
+    return { status: response.status, body: parsed, model: image };
   } finally {
     clearTimeout(timer);
   }
@@ -341,6 +381,7 @@ async function imageRoute(req: Request, res: import('express').Response, mode: '
   const startedAt = new Date();
   let audit: Awaited<ReturnType<typeof identifyWorkloadRequest>> | null = null;
   let settings: RuntimeCapabilitiesSettings | null = null;
+  let selectedImageModel: RuntimeImageCapabilityModel | null = null;
   let stepId: string | null = null;
   try {
     audit = await identifyWorkloadRequest(req);
@@ -348,15 +389,16 @@ async function imageRoute(req: Request, res: import('express').Response, mode: '
     settings = await requireCapabilityEnabled(audit, 'image');
     if (!settings) throw new DatasourceError(500, '图片生成能力配置缺失');
     const proxied = await proxyPackyImage(req, mode, settings);
+    selectedImageModel = proxied.model;
     await addCapabilityAudit({
       scope: audit.scope,
       runId: audit.runId,
       stepId,
       tokenId: audit.tokenId,
       capability: 'image',
-      provider: settings.image.provider,
-      model: settings.image.model,
-      requestSummary: { mode, keys: Object.keys(jsonObject(req.body)) },
+      provider: proxied.model.provider,
+      model: proxied.model.model,
+      requestSummary: { mode, modelId: proxied.model.id, keys: Object.keys(jsonObject(req.body)) },
       responseSummary: { status: proxied.status },
       status: proxied.status >= 200 && proxied.status < 400 ? 'success' : 'error',
       error: proxied.status >= 400 ? JSON.stringify(proxied.body).slice(0, 500) : null,
@@ -371,8 +413,8 @@ async function imageRoute(req: Request, res: import('express').Response, mode: '
         stepId,
         tokenId: audit.tokenId,
         capability: 'image',
-        provider: settings?.image.provider ?? null,
-        model: settings?.image.model ?? null,
+        provider: selectedImageModel?.provider ?? null,
+        model: selectedImageModel?.model ?? null,
         requestSummary: { mode },
         status: 'error',
         error: (err as Error).message,
