@@ -1,4 +1,4 @@
-import { config } from '../config.js';
+import { agentContextSettings, config, type AgentContextSettings } from '../config.js';
 import { getConfiguredProvider } from '../llm/index.js';
 import type { LlmDelta, LlmMessage, LlmUsage, Provider } from '../llm/types.js';
 import { parseToolArguments } from '../llm/toolArgs.js';
@@ -81,6 +81,7 @@ export interface ExecutorDeps {
   mcpSettings?: McpSettings;
   databaseRuntimeEnv?: (scope: Scope, runId: string, allowedCapabilities: RuntimeCapabilityName[]) => Promise<DatabaseRuntimeEnv>;
   generateThreadTitle: boolean;
+  contextSettings: AgentContextSettings;
 }
 
 interface DatabaseRuntimeEnv {
@@ -201,6 +202,11 @@ async function defaultDeps(scope: Scope, overrides: Partial<ExecutorDeps>, model
     toolSettings: overrides.toolSettings,
     databaseRuntimeEnv: overrides.databaseRuntimeEnv,
     generateThreadTitle: overrides.generateThreadTitle ?? overrides.store === undefined,
+    contextSettings: overrides.contextSettings ?? (configured ? agentContextSettings(configured.contextWindow) : {
+      modelContextWindow: config.agent.modelContextWindow,
+      contextBudget: config.agent.contextBudget,
+      contextBudgetSource: config.agent.contextBudgetSource,
+    }),
   };
 }
 
@@ -515,7 +521,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       outputTokens: usage?.outputTokens,
       cachedInputTokens: usage?.cachedInputTokens,
       estContextTokens: currentCtx?.estTokens(),
-      contextBudget: config.agent.contextBudget,
+      contextBudget: deps.contextSettings.contextBudget,
     });
   };
 
@@ -621,6 +627,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         runtimeContext,
         runtimeCapabilitiesContext: renderRuntimeCapabilitiesContext(capabilitySnapshot),
       }),
+      contextSettings: deps.contextSettings,
     });
     currentCtx = ctx;
     if (!hasPersistedMessages) {

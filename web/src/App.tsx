@@ -11,7 +11,7 @@ import {
   deleteThread,
   forkThreadFromRun,
   getCurrentUser,
-  getLlmSettings,
+  getLlmSettingsOptions,
   getPageState,
   getRemoteFileInfo,
   getThread,
@@ -34,16 +34,12 @@ import { toUiEvent } from './transport/legacy';
 import { Sidebar } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
 import { RightSidebar, type RightTabId } from './components/RightSidebar';
-import { SettingsView } from './components/SettingsView';
 import { SearchView } from './components/SearchView';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './components/ui/dialog';
 import type { ComposerAttachment } from './components/Composer';
 import type { AskUserDraft } from './components/AskUserCard';
 import { buildChatPath, currentBrowserPath, readChatRoute, type ChatRoute } from './router';
-import { llmOptionsFromSettings } from './components/ModelSearchSelect';
 import { useNotifications } from './components/GlobalNotifications';
 import { browserPushSupported, currentBrowserPushPermission, disableBrowserPush, enableBrowserPush, readBrowserPushState, type BrowserPushState } from './notifications';
-import { cn } from './lib/utils';
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -103,10 +99,6 @@ function useViewportWidth(): number {
 function activeViewFromPath(pathname = window.location.pathname): ActiveView {
   if (pathname === '/search') return 'search';
   return 'chat';
-}
-
-function isSettingsPath(pathname = window.location.pathname): boolean {
-  return pathname === '/settings';
 }
 
 function readStoredModelRef(): string {
@@ -429,7 +421,6 @@ export function App() {
   const [threads, setThreads] = useState<Thread[]>([]);
   const [route, setRoute] = useState<ChatRoute>(() => readChatRoute());
   const [activeView, setActiveView] = useState<ActiveView>(() => activeViewFromPath());
-  const [settingsOpen, setSettingsOpen] = useState(() => isSettingsPath());
   const [composerDraft, setComposerDraft] = useState(route.draft);
   const [wide, setWide] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
@@ -602,10 +593,10 @@ export function App() {
 
   useEffect(() => {
     let canceled = false;
-    getLlmSettings()
+    getLlmSettingsOptions()
       .then((settings) => {
         if (canceled) return;
-        const options = llmOptionsFromSettings(settings);
+        const options = settings.models;
         modelOptionsRef.current = options;
         setModelOptions(options);
         setSelectedModelRef((current) => {
@@ -823,10 +814,6 @@ export function App() {
 
   useEffect(() => {
     const path = buildChatPath(route);
-    if (isSettingsPath()) {
-      if (currentBrowserPath() !== path) window.history.replaceState(null, '', path);
-      return;
-    }
     if (activeView === 'search') {
       if (window.location.pathname !== '/search') window.history.replaceState(null, '', '/search');
       return;
@@ -839,18 +826,6 @@ export function App() {
     const onPopState = () => {
       flushPendingDraftSync();
       stop();
-      if (isSettingsPath()) {
-        const next = readChatRoute();
-        const fallback = buildChatPath(next);
-        if (currentBrowserPath() !== fallback) window.history.replaceState(null, '', fallback);
-        setSettingsOpen(true);
-        setActiveView('chat');
-        setRoute(next);
-        draftRef.current = next.draft;
-        setComposerDraft(next.draft);
-        return;
-      }
-      setSettingsOpen(false);
       setActiveView(activeViewFromPath());
       const next = readChatRoute();
       setRoute(next);
@@ -1023,14 +998,6 @@ export function App() {
     setMobileSidebarOpen(false);
     if (activeThreadId) rememberThreadDraft(activeThreadId, draftRef.current);
     navigateChatRoute({ draft: threadDraftsRef.current[id] ?? '', threadId: id });
-  }
-
-  function openSettings() {
-    stop();
-    setContinuableRunId(null);
-    setMobileSidebarOpen(false);
-    if (activeThreadId) rememberThreadDraft(activeThreadId, draftRef.current);
-    setSettingsOpen(true);
   }
 
   function openSearch() {
@@ -1469,7 +1436,6 @@ export function App() {
           threads={threads}
           activeId={activeThreadId}
           activeView={activeView}
-          settingsOpen={settingsOpen}
           width="100%"
           collapsed={sidebarCollapsed}
           newHref={newChatHref}
@@ -1479,7 +1445,6 @@ export function App() {
           onToggleCollapsed={() => setSidebarCollapsed((collapsed) => !collapsed)}
           onNew={newChat}
           onSearch={openSearch}
-          onSettings={openSettings}
           onSelect={selectThread}
           onRename={(id) => void renameThread(id)}
           onTogglePin={(id) => void toggleThreadPin(id)}
@@ -1608,7 +1573,6 @@ export function App() {
               threads={threads}
               activeId={activeThreadId}
               activeView={activeView}
-              settingsOpen={settingsOpen}
               width="100%"
               collapsed={false}
               newHref={newChatHref}
@@ -1618,7 +1582,6 @@ export function App() {
               onToggleCollapsed={() => setMobileSidebarOpen(false)}
               onNew={newChat}
               onSearch={openSearch}
-              onSettings={openSettings}
               onSelect={selectThread}
               onRename={(id) => void renameThread(id)}
               onTogglePin={(id) => void toggleThreadPin(id)}
@@ -1657,20 +1620,6 @@ export function App() {
           </div>
         </div>
       )}
-      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-        <DialogContent className={cn(
-          'flex flex-col gap-0 overflow-hidden p-0',
-          isMobile
-            ? 'h-[100dvh] max-h-[100dvh] w-screen max-w-none rounded-none'
-            : 'h-[760px] max-h-[calc(100vh-2rem)] w-[1120px] max-w-[calc(100vw-2rem)]',
-        )}>
-          <DialogHeader className="border-b px-6 py-4">
-            <DialogTitle>设置</DialogTitle>
-            <DialogDescription>外观、用量统计和工具策略</DialogDescription>
-          </DialogHeader>
-          <SettingsView embedded onThreadsChanged={refreshThreads} onWorkspaceChanged={refreshWorkspaceRoot} />
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

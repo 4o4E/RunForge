@@ -120,6 +120,7 @@ test('executeRun: runs the loop across steps and finalizes', async () => {
     publish: (_id, e) => published.push(e),
     hardStepCap: 5,
     toolSettings: testToolSettings(),
+    contextSettings: { modelContextWindow: 50_000, contextBudget: 25_000, contextBudgetSource: 'test-model-settings' },
   });
 
   const finished = await store.getRun(scope, run.id);
@@ -139,7 +140,7 @@ test('executeRun: runs the loop across steps and finalizes', async () => {
   ]);
   const usage = published.filter((e): e is Extract<AgentEvent, { type: 'usage_update' }> => e.type === 'usage_update');
   assert.deepEqual(usage.map((e) => e.step), [1, 2]);
-  assert.ok(usage.every((e) => e.estContextTokens !== undefined && e.contextBudget === config.agent.contextBudget));
+  assert.ok(usage.every((e) => e.estContextTokens !== undefined && e.contextBudget === 25_000));
   const stats = published.filter((e): e is Extract<AgentEvent, { type: 'stream_stats' }> => e.type === 'stream_stats');
   assert.ok(stats.some((e) => e.totals.outputChars >= 'all done'.length));
   assert.ok(stats.some((e) => e.totals.toolInputChars > 0));

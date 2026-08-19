@@ -76,7 +76,7 @@ export function buildResponsesRequest(
       ? tools.map((t) => ({ type: 'function' as const, name: t.name, description: t.description, parameters: t.parameters }))
       : undefined,
     tool_choice: tools.length ? 'auto' : undefined,
-    max_output_tokens: cfg.maxTokens,
+    ...(cfg.maxTokens == null ? {} : { max_output_tokens: cfg.maxTokens }),
     store: false,
     // 新版 Responses 在 stateless 模式默认返回该字段；显式 include 同时兼容旧网关。
     include: ['reasoning.encrypted_content'],

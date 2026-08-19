@@ -64,7 +64,7 @@
 | 使用 agent(创建/操作自己的 thread) | ✓ | ✓ | ✓ |
 | 创建/禁用 `member` | ✓ | ✓ | ✗ |
 | 创建/禁用/提升 `admin`,或对另一个 `owner` 做任何变更 | ✓ | ✗ | ✗ |
-| 管理租户级运行时配置(LLM/沙箱策略/MCP) | ✓ | ✓ | ✗ |
+| 管理租户成员和角色 | ✓ | ✓(仅 member) | ✗ |
 | 颁发/吊销 API token | ✓ | ✗ | ✗ |
 | 暂停/删除整个 tenant | ✓ | ✗ | ✗ |
 | 通过审计接口查看本租户内其他用户的对话(留痕,见 §4) | ✓ | ✓ | ✗ |
@@ -73,7 +73,7 @@
 
 - **防止租户被锁死**:如果只有一种管理员角色,"最后一个管理员被禁用或误操作降级"会导致整个租户没有人能再管理它。`owner` 是一个不能被 `admin` 触碰(创建/禁用/降级)的身份,任何时候至少保留一个活跃 `owner`(见 §4 的引导逻辑),给租户留一条"总能找到人负责"的退路。
 - **收敛最高风险操作的颁发范围**:API token 是长期有效、拿到就能持续以某个用户身份调用的凭证——泄露的影响面和"一次性密码"完全不是一个量级。把"谁能签发/吊销它"限制在人数最少的 `owner`,是在"这类操作需要经常做"和"做错代价很高"之间选择后者优先,而不是图方便让所有管理员都能发。同理,暂停/删除 tenant 这种不可逆或影响全体成员的操作也只留给 `owner`。
-- **`admin` 承担的是日常运营,不是租户的最终控制权**:邀请新成员、调整 LLM/沙箱这类"经常需要做、做错影响有限、可以再改回来"的操作,交给 `admin` 处理,不需要每次都找 `owner`,这是引入 `admin` 这一级的价值——如果没有 `admin`,`owner` 就会变成日常运营的瓶颈;但 `admin` 的权限边界止步于"不触碰账号体系本身和最高风险操作",避免"日常运营角色"逐渐膨胀成事实上的第二个 owner。
+- **`admin` 承担的是租户成员日常运营,不是系统能力配置**:邀请新成员、启停 member 这类租户内部操作交给 `admin`;LLM、数据源、MCP、沙箱和生图/视频供应商包含平台凭证与运行边界,统一由 system admin 在系统设置中按租户维护。
 
 ### 数据可见性
 
@@ -81,7 +81,7 @@ thread(以及挂在 thread 下的 run/message/subagent_run/shell_session)**默�
 
 **管理员审计是这条默认规则之外唯一的例外**,用于合规/support/观测排障,权限范围和实现见 §4"管理员审计"——但它是一条独立、显式声明、全程留痕的旁路,不是"因为你是 admin 所以顺便能看",两者的区别很关键:default 路径(聊天界面、`/api/threads`)永远不会因为调用者是 owner/admin/system admin 就返回别人的数据;只有专门的审计 API 才会,且每次调用都写审计日志。把这两条路径分开、而不是在同一个接口里加一个 `if role === 'admin'` 分支,是为了不让"管理员能看审计"退化成"管理员的所有请求都能看"。
 
-`datasource`(数据源连接)、租户级运行时配置(LLM/沙箱/MCP)是**租户级共享资源**,不挂在具体用户下——它们本质是团队共用的基础设施,任何 member 都能用,但只有 owner/admin 能新增/修改。
+`datasource`(数据源连接)、LLM/沙箱/MCP 和生图/视频供应商配置是**租户级共享资源**,不挂在具体用户下——任何 member 都能使用当前租户已启用的能力,但只有 system admin 能通过 `/api/system/tenants/:tenantId/...` 新增或修改。资源作用域仍是 tenant,管理身份则是 system,两者不能混为一谈。
 
 ---
 
@@ -434,13 +434,13 @@ other tenants: ${TOOL_WORKSPACE_ROOT_BASE}/tenants/<tenant_id>/users/<user_id>/w
 
 ### 管理界面(Phase 3):三层登录入口拓扑
 
-前两阶段只做了后端(身份 + 数据隔离),没有任何管理界面——租户没法自助建用户,系统管理员甚至没有登录页,只能直接调 API。Phase 3 补齐这一圈,新增三个**互相独立、真实整页跳转(不是 SPA 内部路由)**的入口,`web/src/main.tsx` 用一个 `resolveRootRoute(pathname)` 做四路分流(`share-file` / `admin` / `sys-admin` / `app`),不引入路由库:
+前两阶段只做了后端(身份 + 数据隔离),没有任何管理界面——租户没法自助建用户,系统管理员甚至没有登录页,只能直接调 API。Phase 3 补齐这一圈,设置分级改造后形成多个**互相独立、真实整页跳转(不是 SPA 内部路由)**的入口,`web/src/main.tsx` 用一个 `resolveRootRoute(pathname)` 做五路分流(`share-file` / `settings` / `admin` / `sys-admin` / `app`),不引入路由库:
 
 | 入口 | URL | 身份体系 | 面向 | 主要能力 |
 |---|---|---|---|---|
-| 普通用户 | `/` | `scope:'tenant'` JWT(共享) | 任意角色 | 聊天、工具、个人设置(`SettingsView`) |
-| 租户管理 | `/admin` | 与 `/` **同一套** `scope:'tenant'` JWT | owner/admin | 本租户用户管理、API Token 管理、数据源管理 |
-| 系统管理 | `/sys-admin` | 独立的 `scope:'system'` JWT + `system_admin_tokens` 表 | system admin | 租户的建/启用/禁用、系统管理员账号管理 |
+| 普通用户 | `/`、`/settings` | `scope:'tenant'` JWT(共享) | 任意角色 | 聊天，以及外观、个人用量、归档会话 |
+| 租户设置 | `/admin` | 与 `/` **同一套** `scope:'tenant'` JWT | owner/admin | 本租户用户管理、API Token 管理 |
+| 系统设置 | `/sys-admin` | 独立的 `scope:'system'` JWT + `system_admin_tokens` 表 | system admin | 租户、系统管理员，以及按租户管理的数据源、供应商和运行策略 |
 
 关键设计点:
 
@@ -449,8 +449,9 @@ other tenants: ${TOOL_WORKSPACE_ROOT_BASE}/tenants/<tenant_id>/users/<user_id>/w
 - **`/sys-admin` 是完全独立的身份体系**:`web/src/sysAdminApi.ts` 基于新抽的 `web/src/lib/authSession.ts` 工厂造一份独立会话(不同 localStorage key、不同失效事件名),和 `/`、`/admin` 的会话互不干扰,可以在同一浏览器不同标签页同时保持登录。系统管理员的 refresh token 存在新表 `system_admin_tokens`(不能复用 `auth_tokens`,那张表的 `tenant_id`/`user_id` 是 NOT NULL 外键)。
 - **新建租户必须同时建一个 owner**(`POST /api/system/tenants` 接收 `{id, name, ownerEmail, ownerPassword}`),否则新租户没人能登录管理——参照 `bootstrap.ts` "tenant + owner 一起建"的既有模式。
 - **禁用租户(`PATCH /api/system/tenants/:id`)在登录路径同步生效**:`POST /api/auth/login`、`POST /api/auth/refresh` 都新增了 `tenant.status !== 'active'` 检查,不是只改一个没人看的字段。
-- **`/admin` 的用户角色变更(`PATCH /api/tenants/:id/users/:userId`)有三条边界规则**:不能改自己;admin 只能管理 member、也不能把任何人提到 admin/owner(和创建用户的规则对称);不能把租户唯一的 active owner 降级或禁用(防止租户变成没人能管的死租户)——校验都在路由层,Store 的 `updateUserRole`/`updateUserStatus` 本身不做业务规则判断。
-- 原本挂在 `SettingsView.tsx`(个人/工具设置)里的数据源管理面板整体搬到了 `web/src/components/datasources/DatasourceSettingsPanel.tsx`,被 `/admin` 复用——"系统/租户级管理"和"个人工具偏好"是两类不同的东西,不应该混在同一个设置弹窗里。
+- **`/admin` 的用户编辑(`PATCH /api/tenants/:id/users/:userId`)有三条边界规则**:本人只能改邮箱/密码,不能改自己的角色或状态;admin 只能管理 member、也不能把任何人提到 admin/owner;不能把租户唯一的 active owner 降级或禁用。重置密码会吊销该用户已有的 refresh token,避免旧登录态继续续期。
+- **设置分为三个独立页面**:`/settings` 只放当前用户的外观、个人用量和归档会话;`/admin` 只放租户成员与 API Token;`/sys-admin` 放系统能力,并由 system admin 显式选择目标租户后管理数据源、LLM、生图/视频、MCP 和工具运行策略。原设置弹窗不再作为控制面入口。
+- **系统设置不冒充租户用户**:system JWT 通过 `/api/system/tenants/:tenantId/settings/*` 和 `/api/system/tenants/:tenantId/datasources/*` 访问目标租户配置,每次先校验 tenant 存在,底层仍以 `tenant_id` 读写;系统 JWT 依旧不能调用普通租户 API。
 
 ---
 

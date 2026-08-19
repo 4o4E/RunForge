@@ -11,15 +11,17 @@ import { AdminLoginGate } from './admin/AdminLoginGate.js';
 import { AdminApp } from './admin/AdminApp.js';
 import { SysAdminLoginGate } from './sysAdmin/SysAdminLoginGate.js';
 import { SysAdminApp } from './sysAdmin/SysAdminApp.js';
+import { UserSettingsApp } from './settings/UserSettingsApp.js';
 import './index.css';
 import 'streamdown/styles.css';
 
-// /admin、/sys-admin 是完全独立的顶层入口(整页跳转，不是 SPA 内部路由)，和现状的
-// shareFileRoute 判断同一种写法。四路分流，不引入路由库。
-type RootRoute = 'share-file' | 'admin' | 'sys-admin' | 'app';
+// /settings、/admin、/sys-admin 是完全独立的顶层入口（整页跳转，不是 SPA 内部路由），
+// 和 shareFileRoute 判断使用同一种写法。五路分流，不引入路由库。
+type RootRoute = 'share-file' | 'settings' | 'admin' | 'sys-admin' | 'app';
 
 function resolveRootRoute(pathname: string): RootRoute {
   if (pathname === '/share/file') return 'share-file';
+  if (pathname === '/settings' || pathname.startsWith('/settings/')) return 'settings';
   if (pathname === '/admin' || pathname.startsWith('/admin/')) return 'admin';
   if (pathname === '/sys-admin' || pathname.startsWith('/sys-admin/')) return 'sys-admin';
   return 'app';
@@ -115,6 +117,11 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           <SysAdminLoginGate>
             <SysAdminApp />
           </SysAdminLoginGate>
+        )}
+        {rootRoute === 'settings' && (
+          <LoginGate>
+            <UserSettingsApp />
+          </LoginGate>
         )}
         {rootRoute === 'app' && (
           <LoginGate>

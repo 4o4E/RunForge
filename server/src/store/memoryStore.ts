@@ -949,6 +949,26 @@ export class MemoryStore implements Store {
     return row;
   }
 
+  async updateUser(
+    id: string,
+    fields: { email?: string; passwordHash?: string; role?: TenantUserRole; status?: 'active' | 'disabled' },
+  ): Promise<UserRow | null> {
+    const row = this.users.get(id);
+    if (!row) return null;
+    if (fields.email !== undefined) row.email = fields.email;
+    if (fields.passwordHash !== undefined) row.password_hash = fields.passwordHash;
+    if (fields.role !== undefined) row.role = fields.role;
+    if (fields.status !== undefined) row.status = fields.status;
+    return row;
+  }
+
+  async revokeRefreshTokensByUser(userId: string): Promise<void> {
+    const revokedAt = this.now();
+    for (const token of this.authTokens.values()) {
+      if (token.user_id === userId && token.kind === 'refresh' && token.revoked_at == null) token.revoked_at = revokedAt;
+    }
+  }
+
   async createAuthToken(input: {
     tenantId: string;
     userId: string;

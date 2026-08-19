@@ -7,6 +7,7 @@ import { createAnthropicProvider } from './providers/anthropic.js';
 import { createMockProvider } from './providers/mock.js';
 import { getLlmSettings, type LlmProviderSettings } from '../settings.js';
 import type { TenantScope } from '../store/types.js';
+import { mergeModelCapability } from './modelCatalog.js';
 
 // `aisdk` is the default (Phase 2). The legacy hand-written providers are kept
 // selectable as a rollback path until the AI SDK path is validated in real use.
@@ -62,7 +63,7 @@ export function createProviderFromSettings(provider: LlmProviderSettings, model:
   });
 }
 
-export async function getConfiguredProvider(scope: TenantScope, modelRef?: string): Promise<{ provider: Provider; modelRef: string; stream: boolean }> {
+export async function getConfiguredProvider(scope: TenantScope, modelRef?: string): Promise<{ provider: Provider; modelRef: string; stream: boolean; contextWindow: number }> {
   const settings = await getLlmSettings(scope);
   const ref = modelRef?.trim() || settings.defaultModelRef;
   const parsed = parseModelRef(ref);
@@ -76,6 +77,8 @@ export async function getConfiguredProvider(scope: TenantScope, modelRef?: strin
     provider: createProviderFromSettings(providerSettings, parsed.model),
     modelRef: ref,
     stream: providerSettings.stream,
+    contextWindow: providerSettings.modelCapabilities.find((item) => item.model === parsed.model)?.contextWindow
+      ?? mergeModelCapability(parsed.model).contextWindow,
   };
 }
 

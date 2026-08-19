@@ -5,10 +5,12 @@ import { toolSchemas } from '../tools/registry.js';
 import { findExecutable, scanExecutableNames } from '../tools/sandbox.js';
 import { config } from '../config.js';
 import { pingLlmProvider, probeLlmProviderModels, testLlmProviderChat } from '../llm/probe.js';
+import { catalogCapability } from '../llm/modelCatalog.js';
 import { listMcpTools, probeMcpServer } from '../mcp/client.js';
 import { requireScope } from '../auth/context.js';
 import type { TenantScope } from '../store/types.js';
 import type { Response } from 'express';
+import { rejectSystemManagedAccess } from '../auth/guards.js';
 
 export const settingsApi = Router();
 
@@ -60,7 +62,7 @@ export async function getToolSettingsOptions(scope: TenantScope): Promise<ToolSe
 
 export async function getLlmSettingsOptions(scope: TenantScope): Promise<LlmSettingsOptions> {
   const settings = await getLlmSettings(scope);
-  return { models: llmModelOptions(settings) };
+  return { defaultModelRef: settings.defaultModelRef, models: llmModelOptions(settings) };
 }
 
 export async function getMcpSettingsOptions(scope: TenantScope): Promise<McpSettingsOptions> {
@@ -78,19 +80,19 @@ export async function getMcpSettingsOptions(scope: TenantScope): Promise<McpSett
   };
 }
 
-settingsApi.get('/tools', async (_req, res) => {
+settingsApi.get('/tools', rejectSystemManagedAccess, async (_req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
   res.json(await getToolSettings(scope));
 });
 
-settingsApi.get('/tools/options', async (_req, res) => {
+settingsApi.get('/tools/options', rejectSystemManagedAccess, async (_req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
   res.json(await getToolSettingsOptions(scope));
 });
 
-settingsApi.post('/tools/shell-commands/scan', async (req, res) => {
+settingsApi.post('/tools/shell-commands/scan', rejectSystemManagedAccess, async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
   const settings = await getToolSettings(scope);
@@ -105,7 +107,7 @@ settingsApi.post('/tools/shell-commands/scan', async (req, res) => {
   });
 });
 
-settingsApi.put('/tools', async (req, res) => {
+settingsApi.put('/tools', rejectSystemManagedAccess, async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
   try {
@@ -115,19 +117,19 @@ settingsApi.put('/tools', async (req, res) => {
   }
 });
 
-settingsApi.get('/mcp', async (_req, res) => {
+settingsApi.get('/mcp', rejectSystemManagedAccess, async (_req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
   res.json(await getMcpSettings(scope));
 });
 
-settingsApi.get('/mcp/options', async (_req, res) => {
+settingsApi.get('/mcp/options', rejectSystemManagedAccess, async (_req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
   res.json(await getMcpSettingsOptions(scope));
 });
 
-settingsApi.put('/mcp', async (req, res) => {
+settingsApi.put('/mcp', rejectSystemManagedAccess, async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
   try {
@@ -137,7 +139,7 @@ settingsApi.put('/mcp', async (req, res) => {
   }
 });
 
-settingsApi.post('/mcp/server/probe', async (req, res) => {
+settingsApi.post('/mcp/server/probe', rejectSystemManagedAccess, async (req, res) => {
   try {
     const settings = normalizeMcpSettings({ servers: [req.body?.server ?? req.body] });
     const server = settings.servers[0];
@@ -162,7 +164,7 @@ settingsApi.post('/mcp/server/probe', async (req, res) => {
   }
 });
 
-settingsApi.get('/llm', async (_req, res) => {
+settingsApi.get('/llm', rejectSystemManagedAccess, async (_req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
   res.json(await getLlmSettings(scope));
@@ -174,7 +176,7 @@ settingsApi.get('/llm/options', async (_req, res) => {
   res.json(await getLlmSettingsOptions(scope));
 });
 
-settingsApi.put('/llm', async (req, res) => {
+settingsApi.put('/llm', rejectSystemManagedAccess, async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
   try {
@@ -184,7 +186,7 @@ settingsApi.put('/llm', async (req, res) => {
   }
 });
 
-settingsApi.post('/llm/provider/models', async (req, res) => {
+settingsApi.post('/llm/provider/models', rejectSystemManagedAccess, async (req, res) => {
   try {
     res.json(await probeLlmProviderModels(llmProviderFromBody(req.body)));
   } catch (err) {
@@ -192,11 +194,17 @@ settingsApi.post('/llm/provider/models', async (req, res) => {
   }
 });
 
-settingsApi.post('/llm/provider/ping', async (req, res) => {
+settingsApi.post('/llm/model-capability', rejectSystemManagedAccess, async (req, res) => {
+  const model = typeof req.body?.model === 'string' ? req.body.model.trim() : '';
+  if (!model) return res.status(400).json({ error: '缺少模型名称' });
+  res.json(catalogCapability(model));
+});
+
+settingsApi.post('/llm/provider/ping', rejectSystemManagedAccess, async (req, res) => {
   res.json(await pingLlmProvider(llmProviderFromBody(req.body)));
 });
 
-settingsApi.post('/llm/provider/chat-test', async (req, res) => {
+settingsApi.post('/llm/provider/chat-test', rejectSystemManagedAccess, async (req, res) => {
   try {
     const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {};
     const provider = llmProviderFromBody(body);
@@ -208,13 +216,13 @@ settingsApi.post('/llm/provider/chat-test', async (req, res) => {
   }
 });
 
-settingsApi.get('/runtime-capabilities', async (_req, res) => {
+settingsApi.get('/runtime-capabilities', rejectSystemManagedAccess, async (_req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
   res.json(await getRuntimeCapabilitiesSettings(scope));
 });
 
-settingsApi.put('/runtime-capabilities', async (req, res) => {
+settingsApi.put('/runtime-capabilities', rejectSystemManagedAccess, async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
   try {

@@ -10,7 +10,7 @@ import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 
-export function SysAdminTenantsPanel() {
+export function SysAdminTenantsPanel({ onTenantsChanged }: { onTenantsChanged?: (tenants: TenantSummary[]) => void }) {
   const [tenants, setTenants] = useState<TenantSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
@@ -26,6 +26,7 @@ export function SysAdminTenantsPanel() {
     try {
       const result = await listSystemTenants();
       setTenants(result.tenants);
+      onTenantsChanged?.(result.tenants);
     } catch (err) {
       setMessage(`读取租户列表失败：${(err as Error).message}`);
     } finally {
@@ -35,7 +36,7 @@ export function SysAdminTenantsPanel() {
 
   useEffect(() => {
     void refresh();
-  }, []);
+  }, [onTenantsChanged]);
 
   async function createTenant() {
     setCreating(true);
@@ -59,7 +60,11 @@ export function SysAdminTenantsPanel() {
     setMessage('');
     try {
       const result = await updateSystemTenantStatus(tenant.id, active ? 'active' : 'suspended');
-      setTenants((prev) => prev.map((item) => (item.id === result.tenant.id ? result.tenant : item)));
+      setTenants((prev) => {
+        const next = prev.map((item) => (item.id === result.tenant.id ? result.tenant : item));
+        onTenantsChanged?.(next);
+        return next;
+      });
     } catch (err) {
       setMessage(`更新租户状态失败：${(err as Error).message}`);
       await refresh();

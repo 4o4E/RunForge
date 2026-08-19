@@ -123,7 +123,7 @@ test('AI SDK provider: configured streaming also applies to complete()', async (
       baseUrl: 'https://example.invalid/v1',
       apiKey: 'test-key',
       model: 'test-model',
-      maxTokens: 32,
+      maxTokens: null,
       timeoutMs: 1_000,
       retries: 0,
       stream: true,
@@ -133,6 +133,7 @@ test('AI SDK provider: configured streaming also applies to complete()', async (
     const body = JSON.parse(requestBody);
     assert.equal(body.stream, true);
     assert.equal(body.store, false);
+    assert.equal('max_output_tokens' in body, false);
   } finally {
     globalThis.fetch = originalFetch;
   }

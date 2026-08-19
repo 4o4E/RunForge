@@ -16,18 +16,16 @@ interface Props {
   threads: Thread[];
   activeId: string | null;
   activeView: 'chat' | 'search';
-  settingsOpen: boolean;
   width: number | string;
   collapsed: boolean;
   newHref: string;
   searchHref: string;
   threadHref: (id: string) => string;
-  /** 当前登录账号是本租户 owner/admin 时才显示"管理后台"入口(跳 /admin，真实整页跳转)。 */
+  /** 当前登录账号是本租户 owner/admin 时才显示“租户设置”入口。 */
   showAdminEntry: boolean;
   onToggleCollapsed: () => void;
   onNew: () => void;
   onSearch: () => void;
-  onSettings: () => void;
   onSelect: (id: string) => void;
   onRename: (id: string) => void;
   onTogglePin: (id: string) => void;
@@ -49,7 +47,6 @@ export function Sidebar({
   threads,
   activeId,
   activeView,
-  settingsOpen,
   width,
   collapsed,
   newHref,
@@ -59,7 +56,6 @@ export function Sidebar({
   onToggleCollapsed,
   onNew,
   onSearch,
-  onSettings,
   onSelect,
   onRename,
   onTogglePin,
@@ -115,24 +111,20 @@ export function Sidebar({
           <a
             href="/admin"
             className="mb-2 flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
-            title="管理后台"
+            title="租户设置"
           >
             <ShieldCheck className="size-4" />
-            <span className="sr-only">管理后台</span>
+            <span className="sr-only">租户设置</span>
           </a>
         )}
-        <button
-          type="button"
-          onClick={onSettings}
-          className={cn(
-            'flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground',
-            settingsOpen && 'bg-accent text-accent-foreground ring-1 ring-border',
-          )}
+        <a
+          href="/settings"
+          className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
           title="配置"
         >
           <Settings className="size-4" />
           <span className="sr-only">配置</span>
-        </button>
+        </a>
       </aside>
     );
   }
@@ -275,18 +267,12 @@ export function Sidebar({
           {showAdminEntry && (
             <Button asChild variant="ghost" size="sm" className="h-9 w-full justify-start pl-2 pr-3 text-sm text-muted-foreground">
               <a href="/admin">
-                <ShieldCheck className="h-4 w-4" /> 管理后台
+                <ShieldCheck className="h-4 w-4" /> 租户设置
               </a>
             </Button>
           )}
-          <Button
-            variant={settingsOpen ? 'secondary' : 'ghost'}
-            size="sm"
-            onClick={onSettings}
-            className="h-9 w-full justify-start pl-2 pr-3 text-sm text-muted-foreground data-[active=true]:text-foreground"
-            data-active={settingsOpen}
-          >
-            <Settings className="h-4 w-4" /> 设置
+          <Button asChild variant="ghost" size="sm" className="h-9 w-full justify-start pl-2 pr-3 text-sm text-muted-foreground">
+            <a href="/settings"><Settings className="h-4 w-4" /> 用户设置</a>
           </Button>
         </div>
       </div>

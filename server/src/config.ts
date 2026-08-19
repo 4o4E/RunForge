@@ -44,8 +44,27 @@ function modelContextWindow(model: string): number {
 }
 
 function contextBudget(model: string): number {
-  if (process.env.LLM_CONTEXT_BUDGET) return Number(process.env.LLM_CONTEXT_BUDGET);
+  const configured = Number(process.env.LLM_CONTEXT_BUDGET);
+  if (Number.isFinite(configured) && configured > 0) return Math.floor(configured);
   return Math.floor(modelContextWindow(model) * 0.5);
+}
+
+export interface AgentContextSettings {
+  modelContextWindow: number;
+  contextBudget: number;
+  contextBudgetSource: string;
+}
+
+/** 每个模型按自身窗口计算预算；显式环境变量仍保留系统级最高优先级。 */
+export function agentContextSettings(modelWindow: number): AgentContextSettings {
+  const safeWindow = Number.isFinite(modelWindow) && modelWindow > 0 ? Math.floor(modelWindow) : 128_000;
+  const configuredBudget = Number(process.env.LLM_CONTEXT_BUDGET);
+  const hasConfiguredBudget = Number.isFinite(configuredBudget) && configuredBudget > 0;
+  return {
+    modelContextWindow: safeWindow,
+    contextBudget: hasConfiguredBudget ? Math.floor(configuredBudget) : Math.floor(safeWindow * 0.5),
+    contextBudgetSource: hasConfiguredBudget ? 'env' : 'model-settings',
+  };
 }
 
 function contextStrategy(v: string | undefined): 'current' | 'langchain-trim' {
@@ -127,7 +146,7 @@ export const config = {
     // to avoid context rot. Compaction (mask → window) keeps the working set under it.
     modelContextWindow: modelContextWindow(process.env.LLM_MODEL ?? 'gpt-4o-mini'),
     contextBudget: contextBudget(process.env.LLM_MODEL ?? 'gpt-4o-mini'),
-    contextBudgetSource: process.env.LLM_CONTEXT_BUDGET ? 'env' : 'model-default',
+    contextBudgetSource: Number.isFinite(Number(process.env.LLM_CONTEXT_BUDGET)) && Number(process.env.LLM_CONTEXT_BUDGET) > 0 ? 'env' : 'model-default',
     // Fraction of budget that triggers L1 observation masking of old tool results.
     compactWarnRatio: Number(process.env.AGENT_COMPACT_WARN_RATIO ?? 0.75),
     // Fraction of budget that additionally triggers L2 sliding-window truncation.

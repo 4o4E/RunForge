@@ -1,10 +1,13 @@
 import type {
+  LlmInputModality,
+  LlmModelCapabilitySettings,
   LlmProviderChatTestResult,
   LlmProviderPingResult,
   LlmProviderProbeResult,
   LlmProviderSettings,
 } from '@runforge/contracts';
 import { createProviderFromSettings } from './index.js';
+import { mergeModelCapability } from './modelCatalog.js';
 import type { LlmMessage } from './types.js';
 
 function elapsedSince(started: number): number {
@@ -33,7 +36,66 @@ function modelNameFromItem(item: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
-function parseModelList(body: unknown): string[] {
+function positiveNumber(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    const number = typeof value === 'string' ? Number(value) : value;
+    if (typeof number === 'number' && Number.isFinite(number) && number > 0) return Math.floor(number);
+  }
+  return undefined;
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function modalitiesFromItem(row: Record<string, unknown>): LlmInputModality[] | undefined {
+  const architecture = objectValue(row.architecture);
+  const capabilities = objectValue(row.capabilities);
+  const raw = row.input_modalities
+    ?? row.inputModalities
+    ?? row.modalities
+    ?? row.supported_input_modalities
+    ?? architecture.input_modalities
+    ?? architecture.inputModalities;
+  const values = Array.isArray(raw) ? raw.map((item) => String(item).toLowerCase()) : [];
+  const enabled = new Set<LlmInputModality>(['text']);
+  if (values.some((item) => item === 'image' || item === 'images' || item === 'vision')) enabled.add('image');
+  if (values.some((item) => item === 'audio' || item === 'audios')) enabled.add('audio');
+  if (values.some((item) => item === 'video' || item === 'videos')) enabled.add('video');
+
+  const featureValues = Array.isArray(row.features) ? row.features.map((item) => String(item).toLowerCase()) : [];
+  const enabledFlag = (...items: unknown[]) => items.some((item) => item === true);
+  if (enabledFlag(row.vision, row.supports_vision, row.supportsVision, capabilities.vision) || featureValues.includes('vision')) enabled.add('image');
+  if (enabledFlag(row.audio, row.supports_audio, row.supportsAudio, capabilities.audio) || featureValues.includes('audio')) enabled.add('audio');
+  if (enabledFlag(row.video, row.supports_video, row.supportsVideo, capabilities.video) || featureValues.includes('video')) enabled.add('video');
+
+  return raw !== undefined || featureValues.length || enabled.size > 1 ? [...enabled] : undefined;
+}
+
+function capabilityFromItem(item: unknown): LlmModelCapabilitySettings | null {
+  const model = modelNameFromItem(item);
+  if (!model) return null;
+  const row = objectValue(item);
+  const architecture = objectValue(row.architecture);
+  const topProvider = objectValue(row.top_provider);
+  return mergeModelCapability(model, {
+    contextWindow: positiveNumber(
+      row.context_length,
+      row.contextLength,
+      row.context_window,
+      row.contextWindow,
+      row.max_model_len,
+      row.maxModelLen,
+      row.max_context_length,
+      row.inputTokenLimit,
+      architecture.context_length,
+      topProvider.context_length,
+    ),
+    inputModalities: modalitiesFromItem(row),
+  });
+}
+
+export function parseLlmModelList(body: unknown): LlmModelCapabilitySettings[] {
   const root = body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
   const candidates = Array.isArray(root.data)
     ? root.data
@@ -42,13 +104,18 @@ function parseModelList(body: unknown): string[] {
       : Array.isArray(body)
         ? body
         : [];
-  return [...new Set(candidates.map(modelNameFromItem).filter((name): name is string => Boolean(name)))].sort();
+  const byModel = new Map<string, LlmModelCapabilitySettings>();
+  for (const item of candidates) {
+    const capability = capabilityFromItem(item);
+    if (capability) byModel.set(capability.model, capability);
+  }
+  return [...byModel.values()].sort((a, b) => a.model.localeCompare(b.model));
 }
 
-/** 探测供应商公开的模型列表，只返回模型名，不保存配置。 */
+/** 探测供应商公开的模型列表和能力；缺失字段由静态目录补齐，但不直接保存配置。 */
 export async function probeLlmProviderModels(provider: LlmProviderSettings): Promise<LlmProviderProbeResult> {
   if (provider.provider === 'mock') {
-    return { models: ['mock'], source: 'mock' };
+    return { models: ['mock'], modelCapabilities: [mergeModelCapability('mock')], source: 'mock' };
   }
 
   const url = modelsUrl(provider);
@@ -64,9 +131,9 @@ export async function probeLlmProviderModels(provider: LlmProviderSettings): Pro
       const text = (await res.text().catch(() => '')).slice(0, 500);
       throw new Error(`HTTP ${res.status}: ${text}`);
     }
-    const models = parseModelList(await res.json());
-    if (!models.length) throw new Error('模型列表为空或返回格式无法识别');
-    return { models, source: url };
+    const modelCapabilities = parseLlmModelList(await res.json());
+    if (!modelCapabilities.length) throw new Error('模型列表为空或返回格式无法识别');
+    return { models: modelCapabilities.map((item) => item.model), modelCapabilities, source: url };
   } catch (err) {
     const message = (err as Error).name === 'AbortError' ? `请求超时：${url}` : (err as Error).message;
     throw new Error(`模型探测失败：${message}`);

@@ -39,6 +39,11 @@ export function requireOwnerOrAdmin(req: Request, res: Response, next: NextFunct
   next();
 }
 
+/** 供应商凭证和运行策略属于系统控制面；租户身份不能通过旧设置接口访问。 */
+export function rejectSystemManagedAccess(_req: Request, res: Response, _next: NextFunction): void {
+  res.status(403).json({ error: '该配置只能由系统管理员在系统设置中访问或修改' });
+}
+
 /** 租户内角色只能管理自己的 tenant；:id 路径参数必须等于身份里的 tenantId。 */
 export function requireMatchingTenantParam(paramName = 'id') {
   return (req: Request, res: Response, next: NextFunction): void => {

@@ -1,15 +1,6 @@
-import { Plus, RefreshCw, Save, Shield } from 'lucide-react';
+import { Pencil, Plus, RefreshCw, Save, Shield, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import {
-  createDatasource,
-  createPermissionProfile,
-  createReadonlyProfile,
-  getDatasourceDetail,
-  listDatasources,
-  testDatasource,
-  testDatasourceDraft,
-  updateDatasource,
-  updatePermissionProfile,
   type Datasource,
   type DatasourceAccount,
   type DatasourceInput,
@@ -21,6 +12,7 @@ import {
   type PermissionProfile,
   type PermissionProfileInput,
 } from '../../api';
+import type { DatasourceControlApi } from '../../controlApi';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -129,7 +121,13 @@ function accountProfileName(account: DatasourceAccount, profiles: PermissionProf
   return profiles.find((profile) => profile.id === account.profile_id)?.name ?? account.profile_id.slice(0, 8);
 }
 
-export function DatasourceSettingsPanel({ page }: { page: DatasourceSettingsPage }) {
+export function DatasourceSettingsPanel({
+  controlApi,
+  page,
+}: {
+  controlApi: DatasourceControlApi;
+  page: DatasourceSettingsPage;
+}) {
   const [datasources, setDatasources] = useState<Datasource[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<DatasourceDetail | null>(null);
@@ -142,11 +140,15 @@ export function DatasourceSettingsPanel({ page }: { page: DatasourceSettingsPage
   const [testingDatasource, setTestingDatasource] = useState(false);
   const [testResult, setTestResult] = useState<DatasourceTestResult | null>(null);
   const [message, setMessage] = useState('');
+  const [editingDatasource, setEditingDatasource] = useState(false);
+  const [editingProfile, setEditingProfile] = useState(false);
 
+  // 数据源和权限档位默认只读；进入编辑态后锁定左侧选择，避免切换时丢失草稿。
   const selectedDatasource = detail?.datasource ?? datasources.find((item) => item.id === selectedId) ?? null;
+  const selectedProfile = detail?.profiles.find((profile) => profile.id === profileForm.profileId) ?? null;
 
   async function refreshList(nextSelectedId = selectedId) {
-    const result = await listDatasources();
+    const result = await controlApi.listDatasources();
     setDatasources(result.datasources);
     const targetId = nextSelectedId ?? result.datasources[0]?.id ?? null;
     setSelectedId(targetId);
@@ -161,10 +163,12 @@ export function DatasourceSettingsPanel({ page }: { page: DatasourceSettingsPage
   async function refreshDetail(id: string) {
     setLoading(true);
     try {
-      const next = await getDatasourceDetail(id);
+      const next = await controlApi.getDatasourceDetail(id);
       setDetail(next);
       setDatasourceForm(datasourceToForm(next.datasource));
       setProfileForm(next.profiles[0] ? profileToForm(next.profiles[0]) : emptyProfileForm());
+      setEditingDatasource(false);
+      setEditingProfile(false);
     } finally {
       setLoading(false);
     }
@@ -172,14 +176,14 @@ export function DatasourceSettingsPanel({ page }: { page: DatasourceSettingsPage
 
   useEffect(() => {
     let canceled = false;
-    listDatasources()
+    controlApi.listDatasources()
       .then(async (result) => {
         if (canceled) return;
         setDatasources(result.datasources);
         const first = result.datasources[0]?.id ?? null;
         setSelectedId(first);
         if (first) {
-          const next = await getDatasourceDetail(first);
+          const next = await controlApi.getDatasourceDetail(first);
           if (canceled) return;
           setDetail(next);
           setDatasourceForm(datasourceToForm(next.datasource));
@@ -192,7 +196,7 @@ export function DatasourceSettingsPanel({ page }: { page: DatasourceSettingsPage
     return () => {
       canceled = true;
     };
-  }, []);
+  }, [controlApi]);
 
   function newDatasource() {
     setSelectedId(null);
@@ -201,12 +205,16 @@ export function DatasourceSettingsPanel({ page }: { page: DatasourceSettingsPage
     setProfileForm(emptyProfileForm());
     setTestResult(null);
     setMessage('');
+    setEditingDatasource(true);
+    setEditingProfile(false);
   }
 
   async function selectDatasource(id: string) {
     setSelectedId(id);
     setTestResult(null);
     setMessage('');
+    setEditingDatasource(false);
+    setEditingProfile(false);
     await refreshDetail(id);
   }
 
@@ -243,10 +251,11 @@ export function DatasourceSettingsPanel({ page }: { page: DatasourceSettingsPage
       const input = datasourceInputFromForm();
 
       const result = selectedDatasource
-        ? await updateDatasource(selectedDatasource.id, input)
-        : await createDatasource(input);
+        ? await controlApi.updateDatasource(selectedDatasource.id, input)
+        : await controlApi.createDatasource(input);
       setMessage('数据源已保存');
       await refreshList(result.datasource.id);
+      setEditingDatasource(false);
     } catch (err) {
       setMessage(`保存数据源失败：${(err as Error).message}`);
     } finally {
@@ -261,8 +270,8 @@ export function DatasourceSettingsPanel({ page }: { page: DatasourceSettingsPage
     try {
       const input = datasourceInputFromForm();
       const result = selectedDatasource
-        ? await testDatasource(selectedDatasource.id, datasourceForm.adminConnectionUrl.trim() ? { adminConfig: input.adminConfig } : {})
-        : await testDatasourceDraft(input);
+        ? await controlApi.testDatasource(selectedDatasource.id, datasourceForm.adminConnectionUrl.trim() ? { adminConfig: input.adminConfig } : {})
+        : await controlApi.testDatasourceDraft(input);
       setTestResult(result);
       setMessage(`连接成功，发现 ${result.tableCount} 张表`);
     } catch (err) {
@@ -294,10 +303,13 @@ export function DatasourceSettingsPanel({ page }: { page: DatasourceSettingsPage
         grants: detail?.profiles.find((profile) => profile.id === profileForm.profileId)?.grants ?? {},
         poolConfig,
       };
-      if (profileForm.profileId) await updatePermissionProfile(selectedDatasource.id, profileForm.profileId, input);
-      else await createPermissionProfile(selectedDatasource.id, input);
+      const result = profileForm.profileId
+        ? await controlApi.updatePermissionProfile(selectedDatasource.id, profileForm.profileId, input)
+        : await controlApi.createPermissionProfile(selectedDatasource.id, input);
       setMessage('权限档位已保存');
       await refreshDetail(selectedDatasource.id);
+      setProfileForm(profileToForm(result.profile));
+      setEditingProfile(false);
     } catch (err) {
       setMessage(`保存权限档位失败：${(err as Error).message}`);
     } finally {
@@ -310,7 +322,7 @@ export function DatasourceSettingsPanel({ page }: { page: DatasourceSettingsPage
     setCreatingReadonlyProfile(true);
     setMessage('');
     try {
-      await createReadonlyProfile(selectedDatasource.id);
+      await controlApi.createReadonlyProfile(selectedDatasource.id);
       setMessage('只读档位已创建');
       await refreshDetail(selectedDatasource.id);
     } catch (err) {
@@ -349,10 +361,12 @@ export function DatasourceSettingsPanel({ page }: { page: DatasourceSettingsPage
             <RefreshCw className="h-4 w-4" />
             刷新
           </Button>
-          <Button onClick={newDatasource}>
-            <Plus className="h-4 w-4" />
-            新建数据源
-          </Button>
+          {page === 'datasource-connection' && (
+            <Button onClick={newDatasource} disabled={editingDatasource}>
+              <Plus className="h-4 w-4" />
+              新建数据源
+            </Button>
+          )}
         </div>
       </div>
 
@@ -368,6 +382,7 @@ export function DatasourceSettingsPanel({ page }: { page: DatasourceSettingsPage
               <button
                 key={item.id}
                 type="button"
+                disabled={editingDatasource || editingProfile}
                 onClick={() => void selectDatasource(item.id)}
                 className={cn(
                   'grid gap-1 rounded-md border p-3 text-left transition-colors',
@@ -390,12 +405,31 @@ export function DatasourceSettingsPanel({ page }: { page: DatasourceSettingsPage
         <div className="h-full min-h-0">
           {page === 'datasource-connection' && (
             <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto pr-1">
+              {!selectedDatasource || editingDatasource ? (
               <Card className="shrink-0 rounded-lg shadow-sm">
                 <CardHeader className="shrink-0">
-                  <CardTitle className="text-base">连接配置</CardTitle>
-                  <CardDescription>
-                    {selectedDatasource?.hasAdminConfig ? '已保存管理配置；留空不会覆盖' : '尚未保存管理配置'}
-                  </CardDescription>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <CardTitle className="text-base">{selectedDatasource ? '编辑连接' : '新建连接'}</CardTitle>
+                      <CardDescription>{selectedDatasource?.hasAdminConfig ? '已保存管理配置；留空不会覆盖' : '尚未保存管理配置'}</CardDescription>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        if (selectedDatasource) setDatasourceForm(datasourceToForm(selectedDatasource));
+                        else {
+                          const first = datasources[0];
+                          setSelectedId(first?.id ?? null);
+                          if (first) void refreshDetail(first.id);
+                        }
+                        setEditingDatasource(false);
+                        setTestResult(null);
+                      }}
+                    >
+                      <X className="h-4 w-4" />取消
+                    </Button>
+                  </div>
                 </CardHeader>
                 <CardContent className="grid gap-4 md:grid-cols-2">
                   <div className="grid gap-2 text-sm font-medium md:col-span-2">
@@ -495,6 +529,34 @@ export function DatasourceSettingsPanel({ page }: { page: DatasourceSettingsPage
                   </div>
                 </CardContent>
               </Card>
+              ) : (
+                <Card className="shrink-0 rounded-lg shadow-sm">
+                  <CardHeader>
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <CardTitle>{selectedDatasource.name}</CardTitle>
+                        <CardDescription>{selectedDatasource.type} · {selectedDatasource.id}</CardDescription>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button variant="outline" size="sm" onClick={() => void testCurrentDatasource()} disabled={testingDatasource}>
+                          <RefreshCw className={cn('h-4 w-4', testingDatasource && 'animate-spin')} />测试连接
+                        </Button>
+                        <Button variant="outline" size="sm" onClick={() => setEditingDatasource(true)}>
+                          <Pencil className="h-4 w-4" />编辑
+                        </Button>
+                      </div>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    <div className="rounded-md border bg-muted/20 p-3"><div className="text-xs text-muted-foreground">状态</div><div className="mt-1"><Badge variant={statusVariant(selectedDatasource.status)}>{selectedDatasource.status}</Badge></div></div>
+                    <div className="rounded-md border bg-muted/20 p-3"><div className="text-xs text-muted-foreground">LLM 可见性</div><div className="mt-1 text-sm font-medium">{selectedDatasource.enabled ? '可见' : '隐藏'}</div></div>
+                    <div className="rounded-md border bg-muted/20 p-3"><div className="text-xs text-muted-foreground">管理凭证</div><div className="mt-1 text-sm font-medium">{selectedDatasource.hasAdminConfig ? '已配置' : '未配置'}</div></div>
+                    <div className="rounded-md border bg-muted/20 p-3"><div className="text-xs text-muted-foreground">主机</div><div className="mt-1 break-all text-sm font-medium">{stringField(selectedDatasource.connection.host) || '-'}</div></div>
+                    <div className="rounded-md border bg-muted/20 p-3"><div className="text-xs text-muted-foreground">端口</div><div className="mt-1 text-sm font-medium">{stringField(selectedDatasource.connection.port) || '-'}</div></div>
+                    <div className="rounded-md border bg-muted/20 p-3"><div className="text-xs text-muted-foreground">数据库</div><div className="mt-1 break-all text-sm font-medium">{stringField(selectedDatasource.connection.database) || '-'}</div></div>
+                  </CardContent>
+                </Card>
+              )}
 
               {testResult && (
                 <Card className="flex min-h-80 shrink-0 flex-col rounded-lg shadow-sm">
@@ -555,7 +617,12 @@ export function DatasourceSettingsPanel({ page }: { page: DatasourceSettingsPage
                     <Shield className="h-4 w-4" />
                     {creatingReadonlyProfile ? '创建中' : '创建只读档位'}
                   </Button>
-                  <Button variant="outline" size="sm" onClick={() => setProfileForm(emptyProfileForm())} disabled={!selectedDatasource}>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => { setProfileForm(emptyProfileForm()); setEditingProfile(true); }}
+                    disabled={!selectedDatasource || editingProfile}
+                  >
                     <Plus className="h-4 w-4" />
                     新建档位
                   </Button>
@@ -571,7 +638,8 @@ export function DatasourceSettingsPanel({ page }: { page: DatasourceSettingsPage
                       type="button"
                       variant={profileForm.profileId === profile.id ? 'secondary' : 'outline'}
                       size="sm"
-                      onClick={() => setProfileForm(profileToForm(profile))}
+                      disabled={editingProfile}
+                      onClick={() => { setProfileForm(profileToForm(profile)); setEditingProfile(false); }}
                     >
                       <Shield className="h-4 w-4" />
                       {profile.name}
@@ -581,7 +649,21 @@ export function DatasourceSettingsPanel({ page }: { page: DatasourceSettingsPage
               ) : (
                 <div className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">暂无权限档位</div>
               )}
-              <div className="grid gap-4 md:grid-cols-3">
+              {editingProfile ? (
+              <div className="grid gap-4 rounded-md border p-4 md:grid-cols-3">
+                <div className="flex items-center justify-between gap-3 md:col-span-3">
+                  <div><div className="text-sm font-semibold">{profileForm.profileId ? '编辑权限档位' : '新建权限档位'}</div><div className="text-xs text-muted-foreground">保存前只修改当前档位草稿</div></div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setProfileForm(selectedProfile ? profileToForm(selectedProfile) : detail?.profiles[0] ? profileToForm(detail.profiles[0]) : emptyProfileForm());
+                      setEditingProfile(false);
+                    }}
+                  >
+                    <X className="h-4 w-4" />取消
+                  </Button>
+                </div>
                 <Field label="档位名称">
                   <Input value={profileForm.name} onChange={(event) => setProfileForm({ ...profileForm, name: event.target.value })} />
                 </Field>
@@ -619,11 +701,27 @@ export function DatasourceSettingsPanel({ page }: { page: DatasourceSettingsPage
                 <div className="rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground md:col-span-3">
                   表、列、行级权限应由数据库模板角色或 Ranger 兜底；这个档位只绑定模板角色和账号池覆盖参数。
                 </div>
+                <div className="md:col-span-3">
+                  <Button onClick={() => void saveProfile()} disabled={savingProfile || !selectedDatasource || !profileForm.name.trim()}>
+                    <Save className="h-4 w-4" />
+                    {savingProfile ? '保存中' : '保存权限档位'}
+                  </Button>
+                </div>
               </div>
-              <Button onClick={() => void saveProfile()} disabled={savingProfile || !selectedDatasource || !profileForm.name.trim()}>
-                <Save className="h-4 w-4" />
-                {savingProfile ? '保存中' : '保存权限档位'}
-              </Button>
+              ) : selectedProfile ? (
+                <div className="grid gap-4 rounded-md border p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div><div className="text-base font-semibold">{selectedProfile.name}</div><div className="text-xs text-muted-foreground">{selectedProfile.id}</div></div>
+                    <Button variant="outline" size="sm" onClick={() => setEditingProfile(true)}><Pencil className="h-4 w-4" />编辑</Button>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                    <div className="rounded-md border bg-muted/20 p-3"><div className="text-xs text-muted-foreground">模式</div><div className="mt-1 text-sm font-medium">{selectedProfile.mode}</div></div>
+                    <div className="rounded-md border bg-muted/20 p-3"><div className="text-xs text-muted-foreground">模板角色</div><div className="mt-1 text-sm font-medium">{selectedProfile.template_role || '-'}</div></div>
+                    <div className="rounded-md border bg-muted/20 p-3"><div className="text-xs text-muted-foreground">最大账号数</div><div className="mt-1 text-sm font-medium">{stringField(selectedProfile.pool_config.maxPoolSize) || '继承数据源'}</div></div>
+                    <div className="rounded-md border bg-muted/20 p-3"><div className="text-xs text-muted-foreground">租约有效期</div><div className="mt-1 text-sm font-medium">{stringField(selectedProfile.pool_config.leaseTtlSeconds) ? `${stringField(selectedProfile.pool_config.leaseTtlSeconds)} 秒` : '继承数据源'}</div></div>
+                  </div>
+                </div>
+              ) : <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">选择或新建一个权限档位</div>}
             </CardContent>
           </Card>}
 

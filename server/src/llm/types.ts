@@ -78,7 +78,8 @@ export interface LlmConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
-  maxTokens: number;
+  /** null 表示不设置 RunForge 本地输出上限，由上游模型决定。 */
+  maxTokens: number | null;
   timeoutMs: number;
   retries: number;
   /** 该供应商要求流式传输时，完整结果调用也通过流式协议聚合。 */

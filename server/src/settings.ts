@@ -2,6 +2,9 @@ import { resolve } from 'node:path';
 import { mkdir } from 'node:fs/promises';
 import type {
   LlmAiSdkFlavor,
+  LlmInputModality,
+  LlmModelCapabilitySettings,
+  LlmModelCapabilitySource,
   LlmModelOption,
   LlmProviderName,
   LlmProviderSettings,
@@ -21,6 +24,7 @@ import { config } from './config.js';
 import { query } from './db/pool.js';
 import type { Scope, TenantScope } from './store/types.js';
 import { resolveWorkspaceRoot } from './files/workspaceRoot.js';
+import { mergeModelCapability } from './llm/modelCatalog.js';
 
 const DEFAULT_TENANT_ID = 'default';
 
@@ -121,8 +125,56 @@ function positiveIntValue(value: unknown, fallback: number, min: number, max: nu
   return Math.min(max, Math.max(min, raw));
 }
 
+function optionalPositiveIntValue(value: unknown, fallback: number | null, min: number, max: number): number | null {
+  if (value === null || value === '') return null;
+  if (value === undefined || typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
 function uniqStrings(items: string[]): string[] {
   return [...new Set(items.map((item) => item.trim()).filter(Boolean))];
+}
+
+function llmModalities(value: unknown, fallback: LlmInputModality[]): LlmInputModality[] {
+  if (!Array.isArray(value)) return fallback;
+  const allowed = new Set<LlmInputModality>(['text', 'image', 'audio', 'video']);
+  const normalized = value.map((item) => String(item).trim()).filter((item): item is LlmInputModality => allowed.has(item as LlmInputModality));
+  return [...new Set<LlmInputModality>(['text', ...normalized])];
+}
+
+function normalizeLlmModelCapabilities(
+  value: unknown,
+  models: string[],
+  fallback: LlmModelCapabilitySettings[] = [],
+): LlmModelCapabilitySettings[] {
+  const rows = Array.isArray(value) ? value : [];
+  const rowByModel = new Map(rows.flatMap((item) => {
+    const row = item && typeof item === 'object' ? item as Record<string, unknown> : {};
+    const model = typeof row.model === 'string' ? row.model.trim() : '';
+    return model ? [[model, row] as const] : [];
+  }));
+  const fallbackByModel = new Map(fallback.map((item) => [item.model, item]));
+  return models.map((model) => {
+    const inherited = fallbackByModel.get(model) ?? mergeModelCapability(model);
+    const row = rowByModel.get(model);
+    if (!row) return inherited;
+    const contextSource = llmCapabilitySource(row.contextWindowSource);
+    const modalitiesSource = llmCapabilitySource(row.inputModalitiesSource);
+    return mergeModelCapability(model, {
+      contextWindow: contextSource === 'manual' || contextSource === 'provider'
+        ? positiveIntValue(row.contextWindow, inherited.contextWindow, 1, 10_000_000)
+        : inherited.contextWindow,
+      contextWindowSource: contextSource === 'manual' || contextSource === 'provider' ? contextSource : inherited.contextWindowSource,
+      inputModalities: modalitiesSource === 'manual' || modalitiesSource === 'provider'
+        ? llmModalities(row.inputModalities, inherited.inputModalities)
+        : inherited.inputModalities,
+      inputModalitiesSource: modalitiesSource === 'manual' || modalitiesSource === 'provider' ? modalitiesSource : inherited.inputModalitiesSource,
+    });
+  });
+}
+
+function llmCapabilitySource(value: unknown): LlmModelCapabilitySource | null {
+  return value === 'provider' || value === 'catalog' || value === 'default' || value === 'manual' ? value : null;
 }
 
 function keyValueList(value: unknown): McpHeaderSettings[] {
@@ -185,7 +237,9 @@ function defaultLlmProviderSettings(): LlmProviderSettings {
     baseUrl: config.llm.baseUrl,
     apiKey: config.llm.apiKey,
     discoveredModels: [defaultModel],
+    discoveredModelCapabilities: [mergeModelCapability(defaultModel)],
     models: [defaultModel],
+    modelCapabilities: [mergeModelCapability(defaultModel)],
     defaultModel,
     maxTokens: positiveIntValue(config.llm.maxTokens, 4096, 1, 200_000),
     timeoutMs: positiveIntValue(config.llm.timeoutMs, 120_000, 1000, 600_000),
@@ -452,6 +506,17 @@ function normalizeLlmProvider(input: unknown, fallback: LlmProviderSettings, use
   const fallbackModels = fallback.models.length ? fallback.models : [];
   const models = uniqStrings(stringList(body.models, fallbackModels));
   const discoveredModels = uniqStrings(stringList(body.discoveredModels, [...fallback.discoveredModels, ...models]));
+  const allDiscoveredModels = uniqStrings([...discoveredModels, ...models]);
+  const discoveredModelCapabilities = normalizeLlmModelCapabilities(
+    body.discoveredModelCapabilities,
+    allDiscoveredModels,
+    fallback.discoveredModelCapabilities,
+  );
+  const modelCapabilities = normalizeLlmModelCapabilities(
+    body.modelCapabilities,
+    models,
+    discoveredModelCapabilities,
+  );
   const requestedDefaultModel = typeof body.defaultModel === 'string' && body.defaultModel.trim() ? body.defaultModel.trim() : fallback.defaultModel;
   const defaultModel = models.includes(requestedDefaultModel) ? requestedDefaultModel : models[0] ?? '';
 
@@ -461,10 +526,12 @@ function normalizeLlmProvider(input: unknown, fallback: LlmProviderSettings, use
     provider: llmProviderNameValue(body.provider, fallback.provider),
     baseUrl: stringValue(body.baseUrl, fallback.baseUrl),
     apiKey: typeof body.apiKey === 'string' ? body.apiKey : fallback.apiKey,
-    discoveredModels: uniqStrings([...discoveredModels, ...models]),
+    discoveredModels: allDiscoveredModels,
+    discoveredModelCapabilities,
     models,
+    modelCapabilities,
     defaultModel,
-    maxTokens: positiveIntValue(body.maxTokens, fallback.maxTokens, 1, 200_000),
+    maxTokens: optionalPositiveIntValue(body.maxTokens, fallback.maxTokens, 1, 200_000),
     timeoutMs: positiveIntValue(body.timeoutMs, fallback.timeoutMs, 1000, 600_000),
     retries: positiveIntValue(body.retries, fallback.retries, 0, 10),
     stream: boolValue(body.stream, fallback.stream),

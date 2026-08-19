@@ -19,9 +19,10 @@ function chatUserContent(m: LlmMessage) {
   ));
 }
 
-export function buildChatRequest(messages: LlmMessage[], tools: LlmTool[], model: string) {
+export function buildChatRequest(messages: LlmMessage[], tools: LlmTool[], model: string, maxTokens: number | null = null) {
   return {
     model,
+    ...(maxTokens == null ? {} : { max_tokens: maxTokens }),
     messages: messages.map((m) => {
       if (m.role === 'assistant' && m.toolCalls?.length) {
         return {
@@ -153,7 +154,7 @@ export function createOpenAIChatProvider(cfg: LlmConfig): Provider {
   return {
     name: 'openai-chat',
     async complete(messages, tools) {
-      const data = await postJson(url, auth, buildChatRequest(messages, tools, cfg.model), {
+      const data = await postJson(url, auth, buildChatRequest(messages, tools, cfg.model, cfg.maxTokens), {
         timeoutMs: cfg.timeoutMs,
         retries: cfg.retries,
       });
@@ -170,7 +171,7 @@ export function createOpenAIChatProvider(cfg: LlmConfig): Provider {
       await streamPost(
         url,
         auth,
-        { ...buildChatRequest(messages, tools, cfg.model), stream: true },
+        { ...buildChatRequest(messages, tools, cfg.model, cfg.maxTokens), stream: true },
         cfg.timeoutMs,
         (data) => {
           if (data === '[DONE]') return;

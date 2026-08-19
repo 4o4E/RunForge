@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { config } from '../config.js';
 import { buildApp, listen, seedOwner, seedSystemAdmin } from './testHelpers.js';
+import { signTenantAccessToken } from '../auth/jwt.js';
 
 test.before(() => {
   config.auth.jwtSecret = config.auth.jwtSecret || 'test-jwt-secret';
@@ -164,6 +165,67 @@ test('GET/POST /api/system/admins: 列出并创建系统管理员账号', async 
       body: JSON.stringify({ email: 'new-admin@admins.test', password: 'pw2' }),
     });
     assert.equal(duplicate.status, 409);
+  } finally {
+    close();
+  }
+});
+
+test('系统设置接口: system admin 可按租户读取，租户身份不能越权，未知租户返回 404', async () => {
+  await seedSystemAdmin('sysadmin@settings.test', 'sys-pw');
+  const owner = await seedOwner('tn_system_settings', 'owner@settings.test', 'pw');
+  const ownerJwt = signTenantAccessToken({ id: owner.id, tenantId: 'tn_system_settings', role: 'owner' });
+  const { port, close } = await listen(buildApp());
+  try {
+    const base = `http://127.0.0.1:${port}/api`;
+    const { accessToken } = await systemLogin(base, 'sysadmin@settings.test', 'sys-pw');
+
+    const systemRead = await fetch(`${base}/system/tenants/tn_system_settings/settings/llm`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    assert.equal(systemRead.status, 200);
+
+    const resolvedCapability = await fetch(`${base}/system/tenants/tn_system_settings/settings/llm/model-capability`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify({ model: 'zhipu-ai/glm-5-2-flash' }),
+    });
+    assert.equal(resolvedCapability.status, 200);
+    assert.equal(((await resolvedCapability.json()) as { contextWindow: number }).contextWindow, 1_048_576);
+
+    const tenantEscalation = await fetch(`${base}/system/tenants/tn_system_settings/settings/llm`, {
+      headers: { Authorization: `Bearer ${ownerJwt}` },
+    });
+    assert.equal(tenantEscalation.status, 403);
+
+    const tenantWrite = await fetch(`${base}/settings/llm`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ownerJwt}` },
+      body: JSON.stringify({ providers: [] }),
+    });
+    assert.equal(tenantWrite.status, 403);
+
+    const tenantFullRead = await fetch(`${base}/settings/llm`, {
+      headers: { Authorization: `Bearer ${ownerJwt}` },
+    });
+    assert.equal(tenantFullRead.status, 403);
+
+    const tenantDatasourceDetail = await fetch(`${base}/datasources/ds_not_exposed`, {
+      headers: { Authorization: `Bearer ${ownerJwt}` },
+    });
+    assert.equal(tenantDatasourceDetail.status, 403);
+
+    const tenantModelOptions = await fetch(`${base}/settings/llm/options`, {
+      headers: { Authorization: `Bearer ${ownerJwt}` },
+    });
+    assert.equal(tenantModelOptions.status, 200);
+    const modelOptionsText = await tenantModelOptions.text();
+    assert.equal(modelOptionsText.includes('apiKey'), false);
+    assert.equal(modelOptionsText.includes('baseUrl'), false);
+
+    const missingTenant = await fetch(`${base}/system/tenants/not_found/settings/llm`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    assert.equal(missingTenant.status, 404);
   } finally {
     close();
   }

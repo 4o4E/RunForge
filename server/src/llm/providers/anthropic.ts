@@ -54,7 +54,7 @@ export function buildAnthropicRequest(
 
   return {
     model: cfg.model,
-    max_tokens: cfg.maxTokens,
+    ...(cfg.maxTokens == null ? {} : { max_tokens: cfg.maxTokens }),
     system: system || undefined,
     messages: apiMessages,
     tools: tools.length

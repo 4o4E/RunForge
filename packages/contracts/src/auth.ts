@@ -54,6 +54,8 @@ export interface CreateUserInput {
 }
 
 export interface UpdateUserInput {
+  email?: string;
+  password?: string;
   role?: TenantUserRole;
   status?: 'active' | 'disabled';
 }

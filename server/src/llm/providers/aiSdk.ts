@@ -183,7 +183,7 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
     model,
     messages: toModelMessages(messages),
     tools: toToolSet(tools),
-    maxOutputTokens: cfg.maxTokens,
+    maxOutputTokens: cfg.maxTokens ?? undefined,
     maxRetries: cfg.retries,
     abortSignal: AbortSignal.timeout(cfg.timeoutMs),
     // OpenAI Responses 走无状态模式，确保 reasoning item 返回不可解密的

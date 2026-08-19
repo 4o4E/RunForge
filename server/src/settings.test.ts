@@ -1,7 +1,96 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeRuntimeCapabilitiesSettings } from './settings.js';
+import { normalizeLlmSettings, normalizeRuntimeCapabilitiesSettings } from './settings.js';
 import { renderRuntimeCapabilitiesContext } from './agent/context.js';
+import { agentContextSettings } from './config.js';
+
+test('agent context settings: 按模型窗口计算预算，并忽略非法环境变量', () => {
+  const original = process.env.LLM_CONTEXT_BUDGET;
+  try {
+    delete process.env.LLM_CONTEXT_BUDGET;
+    assert.deepEqual(agentContextSettings(1_048_576), {
+      modelContextWindow: 1_048_576,
+      contextBudget: 524_288,
+      contextBudgetSource: 'model-settings',
+    });
+
+    process.env.LLM_CONTEXT_BUDGET = 'not-a-number';
+    assert.equal(agentContextSettings(200_000).contextBudget, 100_000);
+
+    process.env.LLM_CONTEXT_BUDGET = '90000';
+    assert.deepEqual(agentContextSettings(200_000), {
+      modelContextWindow: 200_000,
+      contextBudget: 90_000,
+      contextBudgetSource: 'env',
+    });
+  } finally {
+    if (original === undefined) delete process.env.LLM_CONTEXT_BUDGET;
+    else process.env.LLM_CONTEXT_BUDGET = original;
+  }
+});
+
+test('llm settings: 旧模型列表会自动补齐能力，人工配置最终覆盖自动值', () => {
+  const settings = normalizeLlmSettings({
+    defaultModelRef: 'openai:gpt-4.1-mini',
+    providers: [{
+      id: 'openai',
+      label: 'OpenAI',
+      provider: 'aisdk',
+      baseUrl: 'https://api.openai.com/v1',
+      apiKey: '',
+      discoveredModels: ['gpt-4.1-mini', 'custom-model'],
+      models: ['gpt-4.1-mini', 'custom-model'],
+      modelCapabilities: [{
+        model: 'custom-model',
+        contextWindow: 32_000,
+        contextWindowSource: 'manual',
+        inputModalities: ['text', 'audio'],
+        inputModalitiesSource: 'manual',
+      }],
+      defaultModel: 'gpt-4.1-mini',
+      maxTokens: 4096,
+      timeoutMs: 120_000,
+      retries: 2,
+      stream: true,
+      aisdkFlavor: 'openai-compatible',
+      reasoningTag: 'think',
+    }],
+  });
+
+  const provider = settings.providers[0];
+  assert.equal(provider.modelCapabilities.find((item) => item.model === 'gpt-4.1-mini')?.contextWindow, 1_048_576);
+  assert.deepEqual(provider.modelCapabilities.find((item) => item.model === 'custom-model'), {
+    model: 'custom-model',
+    contextWindow: 32_000,
+    contextWindowSource: 'manual',
+    inputModalities: ['text', 'audio'],
+    inputModalitiesSource: 'manual',
+  });
+});
+
+test('llm settings: 已保存的自动默认值会按更具体的前缀目录刷新', () => {
+  const settings = normalizeLlmSettings({
+    providers: [{
+      id: 'deepseek',
+      models: ['deepseek-v4-flash-260425'],
+      discoveredModels: ['deepseek-v4-flash-260425'],
+      discoveredModelCapabilities: [{ model: 'deepseek-v4-flash-260425', contextWindow: 128_000, inputModalities: ['text'] }],
+      modelCapabilities: [{ model: 'deepseek-v4-flash-260425', contextWindow: 128_000, inputModalities: ['text'] }],
+    }],
+  });
+
+  const capability = settings.providers[0].modelCapabilities[0];
+  assert.equal(capability.contextWindow, 1_048_576);
+  assert.equal(capability.contextWindowSource, 'catalog');
+});
+
+test('llm settings: 输出 token 上限允许显式设为空', () => {
+  const settings = normalizeLlmSettings({
+    providers: [{ id: 'no-local-output-limit', maxTokens: null }],
+  });
+
+  assert.equal(settings.providers[0].maxTokens, null);
+});
 
 test('runtime capability settings: 支持每个能力配置多个可选模型', () => {
   const settings = normalizeRuntimeCapabilitiesSettings({

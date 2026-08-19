@@ -1,16 +1,15 @@
 import { useEffect, useState } from 'react';
-import { ArrowLeft, Database, KeyRound, LogOut, Shield, Users } from 'lucide-react';
+import { ArrowLeft, KeyRound, LogOut, Users } from 'lucide-react';
 import { getCurrentUser, logout } from '../api';
 import type { TenantUserSummary } from '@runforge/contracts';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { NavGroup, SectionButton } from '@/components/ui/settings-nav';
-import { DatasourceSettingsPanel, type DatasourceSettingsPage } from '../components/datasources/DatasourceSettingsPanel';
 import { AdminUsersPanel } from './panels/AdminUsersPanel';
 import { AdminTokensPanel } from './panels/AdminTokensPanel';
 
-type AdminPanel = 'users' | 'tokens' | DatasourceSettingsPage;
+type AdminPanel = 'users' | 'tokens';
 
 export function AdminApp() {
   const [user, setUser] = useState<TenantUserSummary | null>(null);
@@ -40,8 +39,8 @@ export function AdminApp() {
     <main className="app-main-surface flex h-full min-h-0 flex-col overflow-hidden">
       <div className="flex shrink-0 items-center justify-between gap-3 border-b px-6 py-4">
         <div>
-          <h1 className="text-xl font-semibold">管理后台</h1>
-          <p className="mt-1 text-sm text-muted-foreground">{user.email} · {user.role} · 租户 {user.tenantId}</p>
+          <h1 className="text-xl font-semibold">租户设置</h1>
+          <p className="mt-1 text-sm text-muted-foreground">{user.email} · {user.role} · 只管理租户 {user.tenantId}</p>
         </div>
         <div className="flex items-center gap-2">
           <a href="/">
@@ -68,7 +67,7 @@ export function AdminApp() {
       <div className="grid min-h-0 flex-1 items-start gap-4 p-6 lg:grid-cols-[14rem_minmax(0,1fr)]">
         <Card className="h-full min-h-0 overflow-hidden rounded-lg shadow-sm">
           <CardContent className="grid max-h-full gap-2 overflow-y-auto p-3">
-            <NavGroup label="用户">
+            <NavGroup label="成员与访问">
               <SectionButton active={panel === 'users'} icon={<Users className="h-4 w-4" />} onClick={() => setPanel('users')}>
                 用户管理
               </SectionButton>
@@ -78,29 +77,12 @@ export function AdminApp() {
                 </SectionButton>
               )}
             </NavGroup>
-            <NavGroup label="数据源">
-              <SectionButton active={panel === 'datasource-connection'} icon={<Database className="h-4 w-4" />} onClick={() => setPanel('datasource-connection')}>
-                连接
-              </SectionButton>
-              <SectionButton active={panel === 'datasource-permissions'} icon={<Shield className="h-4 w-4" />} onClick={() => setPanel('datasource-permissions')}>
-                权限
-              </SectionButton>
-              <SectionButton active={panel === 'datasource-pool'} icon={<Database className="h-4 w-4" />} onClick={() => setPanel('datasource-pool')}>
-                账号池
-              </SectionButton>
-              <SectionButton active={panel === 'datasource-leases'} icon={<Database className="h-4 w-4" />} onClick={() => setPanel('datasource-leases')}>
-                租约
-              </SectionButton>
-            </NavGroup>
           </CardContent>
         </Card>
 
         <div className="h-full min-h-0 overflow-hidden">
           {panel === 'users' && <AdminUsersPanel tenantId={user.tenantId} currentUserId={user.id} currentRole={user.role} />}
           {panel === 'tokens' && user.role === 'owner' && <AdminTokensPanel tenantId={user.tenantId} />}
-          {(panel === 'datasource-connection' || panel === 'datasource-permissions' || panel === 'datasource-pool' || panel === 'datasource-leases') && (
-            <DatasourceSettingsPanel page={panel} />
-          )}
         </div>
       </div>
     </main>

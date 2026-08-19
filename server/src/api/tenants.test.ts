@@ -104,6 +104,54 @@ test('PATCH /api/tenants/:id/users/:userId: owner 能改 member 角色，admin �
   }
 });
 
+test('PATCH /api/tenants/:id/users/:userId: 能编辑邮箱和重置密码，并吊销旧 refresh token', async () => {
+  const owner = await seedOwner('tn_edit_users', 'owner@edit.test', 'pw');
+  const member = await store.createUser({ tenantId: 'tn_edit_users', email: 'member@edit.test', passwordHash: hashPassword('old-pw'), role: 'member' });
+  const ownerJwt = signTenantAccessToken({ id: owner.id, tenantId: 'tn_edit_users', role: 'owner' });
+  const { port, close } = await listen(buildApp());
+  try {
+    const base = `http://127.0.0.1:${port}/api`;
+    const oldLogin = await fetch(`${base}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'member@edit.test', password: 'old-pw', tenantId: 'tn_edit_users' }),
+    });
+    assert.equal(oldLogin.status, 200);
+    const { refreshToken } = (await oldLogin.json()) as { refreshToken: string };
+
+    const edited = await fetch(`${base}/tenants/tn_edit_users/users/${member.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ownerJwt}` },
+      body: JSON.stringify({ email: 'member-new@edit.test', password: 'new-pw', status: 'active', role: 'member' }),
+    });
+    assert.equal(edited.status, 200);
+    assert.equal(((await edited.json()) as { email: string }).email, 'member-new@edit.test');
+
+    const oldRefresh = await fetch(`${base}/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken }),
+    });
+    assert.equal(oldRefresh.status, 401);
+
+    const oldCredentials = await fetch(`${base}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'member@edit.test', password: 'old-pw', tenantId: 'tn_edit_users' }),
+    });
+    assert.equal(oldCredentials.status, 401);
+
+    const newCredentials = await fetch(`${base}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'member-new@edit.test', password: 'new-pw', tenantId: 'tn_edit_users' }),
+    });
+    assert.equal(newCredentials.status, 200);
+  } finally {
+    close();
+  }
+});
+
 test('DELETE /api/tenants/:id/tokens/:tokenId: owner 能吊销 token，吊销后的 token 不能再鉴权；admin 无权吊销', async () => {
   const owner = await seedOwner('tn_revoke_token', 'owner@revoke.test', 'pw');
   const admin = await store.createUser({ tenantId: 'tn_revoke_token', email: 'admin@revoke.test', passwordHash: hashPassword('pw'), role: 'admin' });

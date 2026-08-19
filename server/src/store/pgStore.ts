@@ -1369,6 +1369,41 @@ export class PgStore implements Store {
     return rows[0] ?? null;
   }
 
+  async updateUser(
+    id: string,
+    fields: { email?: string; passwordHash?: string; role?: TenantUserRole; status?: 'active' | 'disabled' },
+  ): Promise<UserRow | null> {
+    const { rows } = await query<UserRow>(
+      `UPDATE users
+       SET email = CASE WHEN $2 THEN $3 ELSE email END,
+           password_hash = CASE WHEN $4 THEN $5 ELSE password_hash END,
+           role = CASE WHEN $6 THEN $7 ELSE role END,
+           status = CASE WHEN $8 THEN $9 ELSE status END
+       WHERE id = $1
+       RETURNING *`,
+      [
+        id,
+        fields.email !== undefined,
+        fields.email ?? '',
+        fields.passwordHash !== undefined,
+        fields.passwordHash ?? '',
+        fields.role !== undefined,
+        fields.role ?? 'member',
+        fields.status !== undefined,
+        fields.status ?? 'active',
+      ],
+    );
+    return rows[0] ?? null;
+  }
+
+  async revokeRefreshTokensByUser(userId: string): Promise<void> {
+    await query(
+      `UPDATE auth_tokens SET revoked_at = now()
+       WHERE user_id = $1 AND kind = 'refresh' AND revoked_at IS NULL`,
+      [userId],
+    );
+  }
+
   async createAuthToken(input: {
     tenantId: string;
     userId: string;

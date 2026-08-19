@@ -77,6 +77,16 @@ export interface McpServerProbeResult {
 
 export type LlmProviderName = 'aisdk' | 'openai-responses' | 'openai-chat' | 'anthropic' | 'mock';
 export type LlmAiSdkFlavor = 'openai-compatible' | 'openai' | 'anthropic';
+export type LlmInputModality = 'text' | 'image' | 'audio' | 'video';
+export type LlmModelCapabilitySource = 'provider' | 'catalog' | 'default' | 'manual';
+
+export interface LlmModelCapabilitySettings {
+  model: string;
+  contextWindow: number;
+  contextWindowSource: LlmModelCapabilitySource;
+  inputModalities: LlmInputModality[];
+  inputModalitiesSource: LlmModelCapabilitySource;
+}
 
 export interface LlmProviderSettings {
   id: string;
@@ -85,9 +95,11 @@ export interface LlmProviderSettings {
   baseUrl: string;
   apiKey: string;
   discoveredModels: string[];
+  discoveredModelCapabilities: LlmModelCapabilitySettings[];
   models: string[];
+  modelCapabilities: LlmModelCapabilitySettings[];
   defaultModel: string;
-  maxTokens: number;
+  maxTokens: number | null;
   timeoutMs: number;
   retries: number;
   stream: boolean;
@@ -110,6 +122,7 @@ export interface LlmSettings {
 }
 
 export interface LlmSettingsOptions {
+  defaultModelRef: string;
   models: LlmModelOption[];
 }
 
@@ -174,6 +187,7 @@ export interface RuntimeCapabilityCredential {
 
 export interface LlmProviderProbeResult {
   models: string[];
+  modelCapabilities: LlmModelCapabilitySettings[];
   source: string;
 }
 

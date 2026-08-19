@@ -3,6 +3,7 @@ import type { CompactionAffectedMessage } from '@runforge/contracts';
 import type { RuntimeCapabilitiesSettings } from '@runforge/contracts';
 import type { ThreadMessage } from '../store/types.js';
 import type { Provider } from '../llm/types.js';
+import { config, type AgentContextSettings } from '../config.js';
 import {
   createContextCompactor,
   type CompactionInfo,
@@ -101,6 +102,7 @@ interface ContextOptions {
   runtimeContext?: string;
   systemPrompt?: string;
   userInputPrefix?: string;
+  contextSettings?: AgentContextSettings;
 }
 
 function prefixUserInput(prefix: string | undefined, content: string | null): string | null {
@@ -122,10 +124,16 @@ export class ContextManager {
   private goalItem: WorkingMessage;
   /** 每字符 token 估算比例，有真实 provider 用量时会校准。 */
   private tokensPerChar = 0.25;
+  private readonly contextSettings: AgentContextSettings;
   /** 上次模型调用实际发送的字符数，用于校准比例。 */
   private lastSentChars = 0;
 
   constructor(priorMessages: ThreadMessage[], userInput: string, initialGoal = '', opts: ContextOptions = {}) {
+    this.contextSettings = opts.contextSettings ?? {
+      modelContextWindow: config.agent.modelContextWindow,
+      contextBudget: config.agent.contextBudget,
+      contextBudgetSource: config.agent.contextBudgetSource,
+    };
     const appendUserInput = opts.appendUserInput ?? true;
     this.items.push({ msg: { role: 'system', content: opts.systemPrompt ?? renderSystemPrompt({ runtimeContext: opts.runtimeContext }) }, dbId: null });
     this.goalItem = { msg: { role: 'system', content: initialGoal }, dbId: null };
@@ -222,6 +230,7 @@ export class ContextManager {
       tokensPerChar: this.tokensPerChar,
       provider,
       forceMaskedToolNames: this.forceMaskedToolNames,
+      contextSettings: this.contextSettings,
     };
   }
 

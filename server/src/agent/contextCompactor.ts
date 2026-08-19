@@ -7,6 +7,7 @@ import {
   type BaseMessage,
 } from '@langchain/core/messages';
 import { config } from '../config.js';
+import type { AgentContextSettings } from '../config.js';
 import type { LlmMessage } from '../llm/types.js';
 import type { Provider } from '../llm/types.js';
 import type { CompactionAffectedMessage } from '@runforge/contracts';
@@ -51,6 +52,7 @@ export interface ContextCompactionInput {
   tokensPerChar: number;
   provider?: Provider;
   forceMaskedToolNames: string[];
+  contextSettings: AgentContextSettings;
 }
 
 export interface ContextCompactionOutput extends Omit<CompactionResult, 'affected'> {
@@ -111,8 +113,8 @@ class CurrentContextCompactor implements ContextCompactor {
   }
 
   async compact(input: ContextCompactionInput): Promise<ContextCompactionOutput | null> {
-    const { contextBudget, compactWarnRatio, compactHardRatio, keepRecentMessages, contextBudgetSource, modelContextWindow } =
-      config.agent;
+    const { contextBudget, contextBudgetSource, modelContextWindow } = input.contextSettings;
+    const { compactWarnRatio, compactHardRatio, keepRecentMessages } = config.agent;
     const items = [...input.items];
     const estBefore = estimateTokens(messagesOf(items), input.tokensPerChar);
 
@@ -257,8 +259,8 @@ class LangChainTrimContextCompactor extends CurrentContextCompactor {
   readonly name = 'langchain-trim' as const;
 
   override async compact(input: ContextCompactionInput): Promise<ContextCompactionOutput | null> {
-    const { contextBudget, compactWarnRatio, compactHardRatio, keepRecentMessages, contextBudgetSource, modelContextWindow } =
-      config.agent;
+    const { contextBudget, contextBudgetSource, modelContextWindow } = input.contextSettings;
+    const { compactWarnRatio, compactHardRatio, keepRecentMessages } = config.agent;
     const items = [...input.items];
     const estBefore = estimateTokens(messagesOf(items), input.tokensPerChar);
 

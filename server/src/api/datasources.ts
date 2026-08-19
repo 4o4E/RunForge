@@ -4,11 +4,7 @@ import {
   createPermissionProfile,
   DatasourceError,
   ensureReadonlyPermissionProfile,
-  getDatasource,
-  listDatasourceAccounts,
-  listDatasourceLeases,
   listDatasources,
-  listPermissionProfiles,
   poolDefaults,
   updateDatasource,
   updatePermissionProfile,
@@ -16,7 +12,7 @@ import {
 import { testDatasourceById, testDatasourceDraft } from '../datasources/introspection.js';
 import type { DatasourceRow } from '../datasources/types.js';
 import type { Datasource } from '@runforge/contracts';
-import { requireOwnerOrAdmin } from '../auth/guards.js';
+import { rejectSystemManagedAccess } from '../auth/guards.js';
 import { requireScope } from '../auth/context.js';
 import type { Response } from 'express';
 
@@ -41,9 +37,9 @@ function publicDatasource(datasource: DatasourceRow): Datasource {
   return { ...safe, hasAdminConfig: Object.keys(adminConfig).length > 0 };
 }
 
-// 创建数据源元数据。adminConfig 只用于控制面，不会返回给运行容器。
-// 建/改数据源需要 owner/admin 权限——member 只能读(角色矩阵修复，Phase 2 review 发现)。
-datasourcesApi.post('/', requireOwnerOrAdmin, async (req, res) => {
+// 租户侧只读数据源元数据，供成员选择和运行时展示；管理凭证与写操作统一走系统设置接口。
+// adminConfig 只用于系统控制面，不会返回给运行容器或租户侧读取接口。
+datasourcesApi.post('/', rejectSystemManagedAccess, async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
   try {
@@ -64,7 +60,7 @@ datasourcesApi.get('/', async (_req, res) => {
   }
 });
 
-datasourcesApi.post('/test', requireOwnerOrAdmin, async (req, res) => {
+datasourcesApi.post('/test', rejectSystemManagedAccess, async (req, res) => {
   try {
     res.json(await testDatasourceDraft(req.body));
   } catch (err) {
@@ -72,22 +68,10 @@ datasourcesApi.post('/test', requireOwnerOrAdmin, async (req, res) => {
   }
 });
 
-datasourcesApi.get('/:id', async (req, res) => {
-  const scope = scopeOrReject(res);
-  if (!scope) return;
-  try {
-    const datasource = await getDatasource(scope, req.params.id);
-    if (!datasource) return res.status(404).json({ error: '数据源不存在' });
-    const profiles = await listPermissionProfiles(scope, datasource.id);
-    const accounts = await listDatasourceAccounts(scope, datasource.id);
-    const leases = await listDatasourceLeases(scope, datasource.id);
-    res.json({ datasource: publicDatasource(datasource), profiles, accounts, leases });
-  } catch (err) {
-    handleError(res, err);
-  }
-});
+// 详情包含权限档位、账号池和租约，属于系统控制面；租户用户只保留列表元数据读取。
+datasourcesApi.get('/:id', rejectSystemManagedAccess);
 
-datasourcesApi.patch('/:id', requireOwnerOrAdmin, async (req, res) => {
+datasourcesApi.patch('/:id', rejectSystemManagedAccess, async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
   try {
@@ -98,7 +82,7 @@ datasourcesApi.patch('/:id', requireOwnerOrAdmin, async (req, res) => {
   }
 });
 
-datasourcesApi.post('/:id/test', requireOwnerOrAdmin, async (req, res) => {
+datasourcesApi.post('/:id/test', rejectSystemManagedAccess, async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
   try {
@@ -108,7 +92,7 @@ datasourcesApi.post('/:id/test', requireOwnerOrAdmin, async (req, res) => {
   }
 });
 
-datasourcesApi.post('/:id/profiles', requireOwnerOrAdmin, async (req, res) => {
+datasourcesApi.post('/:id/profiles', rejectSystemManagedAccess, async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
   try {
@@ -119,7 +103,7 @@ datasourcesApi.post('/:id/profiles', requireOwnerOrAdmin, async (req, res) => {
   }
 });
 
-datasourcesApi.post('/:id/profiles/readonly-default', requireOwnerOrAdmin, async (req, res) => {
+datasourcesApi.post('/:id/profiles/readonly-default', rejectSystemManagedAccess, async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
   try {
@@ -130,7 +114,7 @@ datasourcesApi.post('/:id/profiles/readonly-default', requireOwnerOrAdmin, async
   }
 });
 
-datasourcesApi.patch('/:id/profiles/:profileId', requireOwnerOrAdmin, async (req, res) => {
+datasourcesApi.patch('/:id/profiles/:profileId', rejectSystemManagedAccess, async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
   try {

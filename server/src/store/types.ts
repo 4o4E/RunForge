@@ -462,6 +462,11 @@ export interface Store {
   listUsersByTenant(tenantId: string): Promise<UserRow[]>;
   updateUserRole(id: string, role: TenantUserRole): Promise<UserRow | null>;
   updateUserStatus(id: string, status: 'active' | 'disabled'): Promise<UserRow | null>;
+  updateUser(
+    id: string,
+    fields: { email?: string; passwordHash?: string; role?: TenantUserRole; status?: 'active' | 'disabled' },
+  ): Promise<UserRow | null>;
+  revokeRefreshTokensByUser(userId: string): Promise<void>;
 
   createAuthToken(input: {
     tenantId: string;

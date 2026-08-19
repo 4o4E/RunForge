@@ -98,10 +98,20 @@ tenantsApi.patch('/:id/users/:userId', requireMatchingTenantParam('id'), require
     return;
   }
   const body = req.body as Partial<UpdateUserInput> | undefined;
+  const nextEmail = typeof body?.email === 'string' ? body.email.trim() : undefined;
+  const nextPassword = typeof body?.password === 'string' ? body.password : undefined;
   const nextRole = body?.role;
   const nextStatus = body?.status;
-  if (nextRole === undefined && nextStatus === undefined) {
+  if (nextEmail === undefined && nextPassword === undefined && nextRole === undefined && nextStatus === undefined) {
     res.status(400).json({ error: '缺少可更新字段' });
+    return;
+  }
+  if (nextEmail !== undefined && !nextEmail) {
+    res.status(400).json({ error: 'email 不能为空' });
+    return;
+  }
+  if (nextPassword !== undefined && !nextPassword) {
+    res.status(400).json({ error: 'password 不能为空' });
     return;
   }
   if (nextRole !== undefined && nextRole !== 'owner' && nextRole !== 'admin' && nextRole !== 'member') {
@@ -119,8 +129,8 @@ tenantsApi.patch('/:id/users/:userId', requireMatchingTenantParam('id'), require
     return;
   }
 
-  // 不能改自己:防止误操作把自己锁死(比如把自己降级或禁用后再也叫不出 owner)。
-  if (target.id === identity.userId) {
+  // 自己可以更新登录信息，但不能更改自己的角色或状态，避免误操作把自己锁死。
+  if (target.id === identity.userId && (nextRole !== undefined || nextStatus !== undefined)) {
     res.status(403).json({ error: '不能修改自己的角色或状态' });
     return;
   }
@@ -129,12 +139,20 @@ tenantsApi.patch('/:id/users/:userId', requireMatchingTenantParam('id'), require
   // (docs/multi-tenancy-design.md §4):admin 既不能动 owner/admin 账号,
   // 也不能把任何人的角色设成非 member。
   if (identity.role === 'admin') {
-    if (target.role !== 'member') {
+    if (target.id !== identity.userId && target.role !== 'member') {
       res.status(403).json({ error: 'admin 只能管理 member 账号' });
       return;
     }
     if (nextRole !== undefined && nextRole !== 'member') {
       res.status(403).json({ error: '只有 owner 能设置 admin 或 owner 角色' });
+      return;
+    }
+  }
+
+  if (nextEmail !== undefined && nextEmail !== target.email) {
+    const existing = await store.findUserByEmail(identity.tenantId, nextEmail);
+    if (existing && existing.id !== target.id) {
+      res.status(409).json({ error: '该邮箱在当前租户下已存在' });
       return;
     }
   }
@@ -154,9 +172,18 @@ tenantsApi.patch('/:id/users/:userId', requireMatchingTenantParam('id'), require
     }
   }
 
-  let updated = target;
-  if (nextRole !== undefined) updated = (await store.updateUserRole(target.id, nextRole)) ?? updated;
-  if (nextStatus !== undefined) updated = (await store.updateUserStatus(target.id, nextStatus)) ?? updated;
+  const updated = await store.updateUser(target.id, {
+    email: nextEmail,
+    passwordHash: nextPassword === undefined ? undefined : hashPassword(nextPassword),
+    role: nextRole,
+    status: nextStatus,
+  });
+  if (!updated) {
+    res.status(404).json({ error: '用户不存在' });
+    return;
+  }
+  // 密码重置后立即吊销旧的交互登录凭证，避免旧会话继续长期有效。
+  if (nextPassword !== undefined) await store.revokeRefreshTokensByUser(target.id);
   res.json(toUserSummary(updated));
 });
 

@@ -177,7 +177,7 @@ Web 创建 thread
 
 - `Sidebar`：会话列表和入口导航。
 - `ChatView`、`Conversation`、`Composer`：聊天主界面。
-- `SettingsView`：工具策略、沙箱、网络和输出上限等运行时配置。
+- `SettingsView`：当前用户的外观、个人用量和归档会话；工具策略、供应商和运行时能力由 `/sys-admin` 系统设置按租户管理。
 - `RemoteFilesPanel`：工作区文件浏览和预览。
 
 ## Provider 设计

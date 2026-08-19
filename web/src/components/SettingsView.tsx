@@ -1,26 +1,10 @@
 import { Fragment, useEffect, useId, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Activity, ArchiveRestore, Bot, ChevronRight, Image, MessageSquare, Moon, Palette, Plus, RefreshCw, Save, Shield, Sun, Trash2, Wifi, Wrench } from 'lucide-react';
+import { Activity, ArchiveRestore, ChevronRight, MessageSquare, Moon, Palette, Plus, RefreshCw, Save, Sun, Trash2, Wifi } from 'lucide-react';
 import {
-  getLlmSettings,
-  getLlmSettingsOptions,
-  getMcpSettings,
-  getMcpSettingsOptions,
-  getRuntimeCapabilitiesSettings,
   getThread,
-  getToolSettings,
-  getToolSettingsOptions,
   listThreads,
-  pingLlmProvider,
-  probeMcpServer,
-  probeLlmProviderModels,
-  scanShellCommandOptions,
-  testLlmProviderChat,
-  updateLlmSettings,
-  updateMcpSettings,
-  updateRuntimeCapabilitiesSettings,
   updateThread,
-  updateToolSettings,
   type AgentEvent,
   type LlmProviderChatTestResult,
   type LlmProviderSettings,
@@ -39,6 +23,7 @@ import {
   type ToolSettings,
   type ToolSettingsOptions,
 } from '../api';
+import type { SettingsControlApi } from '../controlApi';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -60,12 +45,7 @@ import { NavGroup, SectionButton } from '@/components/ui/settings-nav';
 type SettingsPanel =
   | 'appearance'
   | 'usage-stats'
-  | 'archived-threads'
-  | 'llm-models'
-  | 'runtime-capabilities'
-  | 'mcp-client'
-  | 'tools-sandbox'
-  | 'tools-access';
+  | 'archived-threads';
 
 interface UsagePoint {
   at: string;
@@ -364,7 +344,9 @@ function defaultLlmProvider(index: number): LlmProviderSettings {
     baseUrl: 'https://api.openai.com/v1',
     apiKey: '',
     discoveredModels: ['gpt-4o-mini'],
+    discoveredModelCapabilities: [{ model: 'gpt-4o-mini', contextWindow: 128_000, contextWindowSource: 'catalog', inputModalities: ['text', 'image'], inputModalitiesSource: 'catalog' }],
     models: ['gpt-4o-mini'],
+    modelCapabilities: [{ model: 'gpt-4o-mini', contextWindow: 128_000, contextWindowSource: 'catalog', inputModalities: ['text', 'image'], inputModalitiesSource: 'catalog' }],
     defaultModel: 'gpt-4o-mini',
     maxTokens: 4096,
     timeoutMs: 120000,
@@ -724,11 +706,13 @@ function ArchivedThreadsSettingsPanel({ onThreadsChanged }: { onThreadsChanged?:
   );
 }
 
-function ToolsSettingsPanel({
+export function ToolsSettingsPanel({
+  controlApi,
   onWorkspaceChanged,
   section,
 }: {
-  onWorkspaceChanged: () => void;
+  controlApi: SettingsControlApi;
+  onWorkspaceChanged?: () => void;
   section: 'access' | 'sandbox-shell';
 }) {
   const [settings, setSettings] = useState<ToolSettings | null>(null);
@@ -741,7 +725,7 @@ function ToolsSettingsPanel({
 
   useEffect(() => {
     let canceled = false;
-    Promise.all([getToolSettings(), getToolSettingsOptions()])
+    Promise.all([controlApi.getToolSettings(), controlApi.getToolSettingsOptions()])
       .then(([data, nextOptions]) => {
         if (canceled) return;
         setSettings(data);
@@ -754,7 +738,7 @@ function ToolsSettingsPanel({
     return () => {
       canceled = true;
     };
-  }, []);
+  }, [controlApi]);
 
   const prepared = useMemo<ToolSettings | null>(() => {
     if (!settings) return null;
@@ -829,7 +813,7 @@ function ToolsSettingsPanel({
     setScanning(true);
     setMessage('');
     try {
-      const result = await scanShellCommandOptions({
+      const result = await controlApi.scanShellCommandOptions({
         shellPathMode: settings.shellPathMode,
         shellPath: settings.shellPath,
         include: settings.shellAllowCommands,
@@ -848,11 +832,11 @@ function ToolsSettingsPanel({
     setSaving(true);
     setMessage('');
     try {
-      const next = await updateToolSettings(prepared);
+      const next = await controlApi.updateToolSettings(prepared);
       setSettings(next);
-      setOptions(await getToolSettingsOptions());
+      setOptions(await controlApi.getToolSettingsOptions());
       setShellDenyText(listToText(next.shellDeny));
-      onWorkspaceChanged();
+      onWorkspaceChanged?.();
       setMessage('已保存');
     } catch (err) {
       setMessage(`保存失败：${(err as Error).message}`);
@@ -1050,7 +1034,7 @@ function ToolsSettingsPanel({
   );
 }
 
-function McpSettingsPanel() {
+export function McpSettingsPanel({ controlApi }: { controlApi: SettingsControlApi }) {
   const { notify } = useNotifications();
   const [settings, setSettings] = useState<McpSettings | null>(null);
   const [options, setOptions] = useState<McpSettingsOptions | null>(null);
@@ -1060,14 +1044,14 @@ function McpSettingsPanel() {
   const [message, setMessage] = useState('');
 
   async function reload() {
-    const [nextSettings, nextOptions] = await Promise.all([getMcpSettings(), getMcpSettingsOptions()]);
+    const [nextSettings, nextOptions] = await Promise.all([controlApi.getMcpSettings(), controlApi.getMcpSettingsOptions()]);
     setSettings(nextSettings);
     setOptions(nextOptions);
   }
 
   useEffect(() => {
     reload().catch((err) => setMessage((err as Error).message));
-  }, []);
+  }, [controlApi]);
 
   function updateServer(index: number, patch: Partial<McpServerSettings>) {
     if (!settings) return;
@@ -1100,9 +1084,9 @@ function McpSettingsPanel() {
     setSaving(true);
     setMessage('');
     try {
-      const next = await updateMcpSettings(settings);
+      const next = await controlApi.updateMcpSettings(settings);
       setSettings(next);
-      setOptions(await getMcpSettingsOptions());
+      setOptions(await controlApi.getMcpSettingsOptions());
       notify({ variant: 'success', title: 'MCP 配置已保存' });
     } catch (err) {
       const text = (err as Error).message;
@@ -1118,7 +1102,7 @@ function McpSettingsPanel() {
     const server = settings.servers[index];
     setProbing(server.id);
     try {
-      const result = await probeMcpServer(server);
+      const result = await controlApi.probeMcpServer(server);
       setProbeResults((prev) => ({ ...prev, [server.id]: result }));
       notify({ variant: result.ok ? 'success' : 'error', title: result.ok ? 'MCP 连接成功' : 'MCP 连接失败', description: result.message });
     } catch (err) {
@@ -1250,7 +1234,7 @@ function McpSettingsPanel() {
   );
 }
 
-function LlmSettingsPanel() {
+export function LlmSettingsPanel({ controlApi }: { controlApi: SettingsControlApi }) {
   const { notify } = useNotifications();
   const [settings, setSettings] = useState<LlmSettings | null>(null);
   const [options, setOptions] = useState<LlmSettingsOptions | null>(null);
@@ -1266,7 +1250,7 @@ function LlmSettingsPanel() {
 
   useEffect(() => {
     let canceled = false;
-    Promise.all([getLlmSettings(), getLlmSettingsOptions()])
+    Promise.all([controlApi.getLlmSettings(), controlApi.getLlmSettingsOptions()])
       .then(([data, nextOptions]) => {
         if (canceled) return;
         setProviderUiKeys(reconcileLlmProviderUiKeys([], data.providers.length));
@@ -1279,7 +1263,7 @@ function LlmSettingsPanel() {
     return () => {
       canceled = true;
     };
-  }, []);
+  }, [controlApi]);
 
   useEffect(() => {
     if (!settings) return;
@@ -1342,6 +1326,9 @@ function LlmSettingsPanel() {
     const models = toggleListValue(provider.models, model, checked);
     updateProvider(index, {
       models,
+      modelCapabilities: models.map((item) => provider.modelCapabilities.find((capability) => capability.model === item)
+        ?? provider.discoveredModelCapabilities.find((capability) => capability.model === item)
+        ?? { model: item, contextWindow: 128_000, contextWindowSource: 'default', inputModalities: ['text'], inputModalitiesSource: 'default' }),
       defaultModel: models.includes(provider.defaultModel) ? provider.defaultModel : models[0] ?? '',
       discoveredModels: [...new Set([...provider.discoveredModels, model])].sort(),
     });
@@ -1358,6 +1345,9 @@ function LlmSettingsPanel() {
     const models = [...next].sort();
     updateProvider(index, {
       models,
+      modelCapabilities: models.map((item) => provider.modelCapabilities.find((capability) => capability.model === item)
+        ?? provider.discoveredModelCapabilities.find((capability) => capability.model === item)
+        ?? { model: item, contextWindow: 128_000, contextWindowSource: 'default', inputModalities: ['text'], inputModalitiesSource: 'default' }),
       defaultModel: models.includes(provider.defaultModel) ? provider.defaultModel : models[0] ?? '',
       discoveredModels: [...new Set([...provider.discoveredModels, ...modelsInPrefix])].sort(),
     });
@@ -1378,9 +1368,10 @@ function LlmSettingsPanel() {
     const provider = settings.providers[index];
     setProviderBusyLabel(index, '拉取中');
     try {
-      const result = await probeLlmProviderModels(provider);
+      const result = await controlApi.probeLlmProviderModels(provider);
       updateProvider(index, {
         discoveredModels: [...new Set([...provider.discoveredModels, ...result.models])].sort(),
+        discoveredModelCapabilities: [...new Map([...provider.discoveredModelCapabilities, ...result.modelCapabilities].map((item) => [item.model, item])).values()].sort((a, b) => a.model.localeCompare(b.model)),
       });
       notify({
         title: `模型列表拉取成功：${provider.label || provider.id}`,
@@ -1403,7 +1394,7 @@ function LlmSettingsPanel() {
     const provider = settings.providers[index];
     setProviderBusyLabel(index, 'Ping');
     try {
-      const ping = await pingLlmProvider(provider);
+      const ping = await controlApi.pingLlmProvider(provider);
       const providerName = provider.label || provider.id;
       notify({
         title: `Ping ${ping.ok ? '成功' : '失败'}：${providerName}`,
@@ -1443,7 +1434,7 @@ function LlmSettingsPanel() {
     setChatTesting(true);
     setChatDialog({ ...chatDialog, result: undefined });
     try {
-      const chat = await testLlmProviderChat(provider, chatDialog.model, chatDialog.input);
+      const chat = await controlApi.testLlmProviderChat(provider, chatDialog.model, chatDialog.input);
       setChatDialog((current) => current ? { ...current, result: chat } : current);
     } catch (err) {
       setChatDialog((current) => current ? {
@@ -1490,9 +1481,9 @@ function LlmSettingsPanel() {
     setSaving(true);
     setMessage('');
     try {
-      const next = await updateLlmSettings(settings);
+      const next = await controlApi.updateLlmSettings(settings);
       setSettings(next);
-      setOptions(await getLlmSettingsOptions());
+      setOptions(await controlApi.getLlmSettingsOptions());
       setMessage('已保存，新 run 会使用最新模型配置');
     } catch (err) {
       setMessage(`保存失败：${(err as Error).message}`);
@@ -1628,7 +1619,7 @@ function LlmSettingsPanel() {
                   <Input value={provider.baseUrl} onChange={(event) => updateProvider(index, { baseUrl: event.target.value })} />
                 </Field>
                 <Field label="API Key">
-                  <Input type="password" value={provider.apiKey} onChange={(event) => updateProvider(index, { apiKey: event.target.value })} />
+                  <Input type="text" name={`llm-provider-api-key-${index}`} autoComplete="off" spellCheck={false} data-1p-ignore data-lpignore="true" data-bwignore="true" className="[-webkit-text-security:disc]" value={provider.apiKey} onChange={(event) => updateProvider(index, { apiKey: event.target.value })} />
                 </Field>
                 <Field label="AI SDK Flavor">
                   <Select value={provider.aisdkFlavor} onValueChange={(value) => updateProvider(index, { aisdkFlavor: value as LlmProviderSettings['aisdkFlavor'] })}>
@@ -1646,8 +1637,8 @@ function LlmSettingsPanel() {
                     placeholder={provider.models.length ? '选择默认模型' : '先启用模型'}
                   />
                 </Field>
-                <Field label="输出 token 上限">
-                  <Input type="number" min={1} value={provider.maxTokens} onChange={(event) => updateProvider(index, { maxTokens: Number(event.target.value) })} />
+                <Field label="输出 token 上限（可选）">
+                  <Input type="number" min={1} value={provider.maxTokens ?? ''} placeholder="不设置本地上限" onChange={(event) => updateProvider(index, { maxTokens: event.target.value === '' ? null : Number(event.target.value) })} />
                 </Field>
                 <Field label="超时毫秒">
                   <Input type="number" min={1000} value={provider.timeoutMs} onChange={(event) => updateProvider(index, { timeoutMs: Number(event.target.value) })} />
@@ -1815,20 +1806,20 @@ function LlmSettingsPanel() {
   );
 }
 
-function RuntimeCapabilitiesSettingsPanel() {
+export function RuntimeCapabilitiesSettingsPanel({ controlApi }: { controlApi: SettingsControlApi }) {
   const { notify } = useNotifications();
   const [settings, setSettings] = useState<RuntimeCapabilitiesSettings | null>(null);
   const [llmSettings, setLlmSettings] = useState<LlmSettings | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    getRuntimeCapabilitiesSettings()
+    controlApi.getRuntimeCapabilitiesSettings()
       .then(setSettings)
       .catch((err) => notify({ variant: 'error', title: '运行时能力配置加载失败', description: (err as Error).message }));
-    getLlmSettings()
+    controlApi.getLlmSettings()
       .then(setLlmSettings)
       .catch((err) => notify({ variant: 'error', title: '模型配置加载失败', description: (err as Error).message }));
-  }, [notify]);
+  }, [controlApi, notify]);
 
   if (!settings) {
     return <SettingsPanelShell title="运行时能力" description="WORKLOAD_TOKEN 可换取的内部代理能力"><div className="text-sm text-muted-foreground">加载中...</div></SettingsPanelShell>;
@@ -1838,7 +1829,7 @@ function RuntimeCapabilitiesSettingsPanel() {
     if (!settings) return;
     setBusy(true);
     try {
-      const next = await updateRuntimeCapabilitiesSettings(settings);
+      const next = await controlApi.updateRuntimeCapabilitiesSettings(settings);
       setSettings(next);
       notify({ variant: 'success', title: '运行时能力配置已保存' });
     } catch (err) {
@@ -2095,27 +2086,14 @@ function RuntimeCapabilitiesSettingsPanel() {
   );
 }
 
-export function SettingsView({
-  embedded = false,
-  onThreadsChanged,
-  onWorkspaceChanged,
-}: {
-  embedded?: boolean;
-  onThreadsChanged?: () => void;
-  onWorkspaceChanged: () => void;
-}) {
+export function SettingsView() {
   const [panel, setPanel] = useState<SettingsPanel>('appearance');
 
   return (
-    <main className={cn(embedded ? 'min-h-0 flex-1 bg-background' : 'app-main-surface h-full flex-1 overflow-y-auto')}>
-      <div className={cn('mx-auto flex max-w-7xl flex-col gap-4 px-6 py-5', embedded && 'h-full min-h-0 w-full')}>
-        {!embedded && <div>
-          <h1 className="text-xl font-semibold">设置</h1>
-        </div>}
-
-        <div className={cn('grid items-start gap-4 lg:grid-cols-[14rem_minmax(0,1fr)]', embedded && 'h-full min-h-0 flex-1')}>
-          <Card className={cn('rounded-lg shadow-sm', embedded ? 'h-full min-h-0 overflow-hidden' : 'h-fit')}>
-            <CardContent className={cn('grid gap-2 p-3', embedded && 'max-h-full overflow-y-auto')}>
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="mx-auto grid h-full min-h-0 max-w-7xl items-start gap-4 px-6 py-5 lg:grid-cols-[14rem_minmax(0,1fr)]">
+          <Card className="h-full min-h-0 overflow-hidden rounded-lg shadow-sm">
+            <CardContent className="grid max-h-full gap-2 overflow-y-auto p-3">
               <NavGroup label="外观">
                 <SectionButton active={panel === 'appearance'} icon={<Palette className="h-4 w-4" />} onClick={() => setPanel('appearance')}>
                   外观
@@ -2131,40 +2109,15 @@ export function SettingsView({
                   已归档
                 </SectionButton>
               </NavGroup>
-              <NavGroup label="模型">
-                <SectionButton active={panel === 'llm-models'} icon={<Bot className="h-4 w-4" />} onClick={() => setPanel('llm-models')}>
-                  模型
-                </SectionButton>
-                <SectionButton active={panel === 'runtime-capabilities'} icon={<Image className="h-4 w-4" />} onClick={() => setPanel('runtime-capabilities')}>
-                  运行时能力
-                </SectionButton>
-              </NavGroup>
-              <NavGroup label="工具">
-                <SectionButton active={panel === 'tools-access'} icon={<Shield className="h-4 w-4" />} onClick={() => setPanel('tools-access')}>
-                  工具准入
-                </SectionButton>
-                <SectionButton active={panel === 'tools-sandbox'} icon={<Wrench className="h-4 w-4" />} onClick={() => setPanel('tools-sandbox')}>
-                  Shell / 沙箱
-                </SectionButton>
-                <SectionButton active={panel === 'mcp-client'} icon={<Wifi className="h-4 w-4" />} onClick={() => setPanel('mcp-client')}>
-                  MCP Client
-                </SectionButton>
-              </NavGroup>
             </CardContent>
           </Card>
 
-          <div className={cn('min-w-0', embedded && 'h-full min-h-0 overflow-hidden pr-1')}>
+          <div className="h-full min-h-0 min-w-0 overflow-hidden pr-1">
             {panel === 'appearance' && <AppearanceSettingsPanel />}
             {panel === 'usage-stats' && <UsageStatsSettingsPanel />}
-            {panel === 'archived-threads' && <ArchivedThreadsSettingsPanel onThreadsChanged={onThreadsChanged} />}
-            {panel === 'llm-models' && <LlmSettingsPanel />}
-            {panel === 'runtime-capabilities' && <RuntimeCapabilitiesSettingsPanel />}
-            {panel === 'mcp-client' && <McpSettingsPanel />}
-            {panel === 'tools-access' && <ToolsSettingsPanel onWorkspaceChanged={onWorkspaceChanged} section="access" />}
-            {panel === 'tools-sandbox' && <ToolsSettingsPanel onWorkspaceChanged={onWorkspaceChanged} section="sandbox-shell" />}
+            {panel === 'archived-threads' && <ArchivedThreadsSettingsPanel />}
           </div>
-        </div>
       </div>
-    </main>
+    </div>
   );
 }

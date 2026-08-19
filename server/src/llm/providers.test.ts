@@ -39,6 +39,17 @@ test('openai-responses: builds request with instructions + function_call items',
   assert.deepEqual(types, ['user', 'function_call', 'function_call_output']);
 });
 
+test('provider requests: 空输出上限不会发送本地 token 限制', () => {
+  const responses = buildResponsesRequest(CONVO, TOOLS, { model: 'gpt-x', maxTokens: null });
+  const chat = buildChatRequest(CONVO, TOOLS, 'gpt-x', null);
+  const anthropic = buildAnthropicRequest(CONVO, TOOLS, { model: 'claude-x', maxTokens: null });
+  assert.equal('max_output_tokens' in responses, false);
+  assert.equal('max_tokens' in chat, false);
+  assert.equal('max_tokens' in anthropic, false);
+
+  assert.equal(buildChatRequest(CONVO, TOOLS, 'gpt-x', 321).max_tokens, 321);
+});
+
 test('openai-responses: persists and replays encrypted reasoning items', () => {
   const parsed = parseResponsesOutput({
     output: [{
