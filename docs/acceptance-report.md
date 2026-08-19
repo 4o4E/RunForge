@@ -51,7 +51,7 @@
 ### 沙箱与隔离基础
 
 - 所有工具调用先经过 tool policy（工具策略）。
-- 支持 `TOOL_ALLOW` / `TOOL_DENY`、路径围栏、shell 开关、网络开关和输出上限。
+- 主 agent 的原生工具默认加载；安全边界由路径围栏、shell 开关、网络开关、只读资源保护和输出上限执行。
 - shell 支持可选 bwrap（bubblewrap，Linux 用户态沙箱）后端；`auto` 模式在 bwrap 不可用时会回落宿主执行，强制隔离需要 `TOOL_SANDBOX_BACKEND=bwrap`。
 - 支持托管 shell session：命令可以前台等待或后台运行，后续通过 `shell_poll` 观察、`shell_kill` 终止，并在右侧 Shell 面板持续展示输出。
 - shell session 和命令日志会落库，用户也可以在 UI 中打开、关闭、重命名、执行命令和标记输出给 LLM 参考。
@@ -61,8 +61,9 @@
 ### Skill、Workflow 与 Subagent
 
 - 支持 skill 文件协议：内置 skill 从 `server/src/skills/builtin` 物化到 `.agents/skills`，用户 skill 从 `.skills` 读取。
-- 初始上下文只注入 skill 名称和描述；需要正文时通过 `skill_activate` 按需加载，并记录 `skill_activated` 事件。
-- 支持 `allowed-tools` 缩小激活 skill 后可见工具集合，不能放大全局工具策略。
+- 初始上下文只注入 Skill `id` 和描述；需要正文时通过 `skill_activate(id)` 按需加载，并记录 `skill_activated` 事件。
+- Skill 入口通过工具结果进入上下文，下一次 LLM 请求完整消费后立即折叠；run 内保留短锚点，同一 run 恢复可从事件重建，新 run 自动取消激活。
+- 初始上下文只注入 MCP Server `id` 和描述；通过 `mcp_activate(id)` 后才加载该 Server 的全部工具 schema，且只在当前 run 生效。
 - 支持 workflow 文件协议：内置 workflow 从 `server/src/workflows/builtin` 物化，LLM 可用 `workflow_list` 和 `workflow_read` 选择稳定流程。
 - 支持异步只读 subagent：主 agent 通过 `subagent_run` 创建子任务，立即拿到 `subagentRunId`，后续通过 `subagent_poll` / `subagent_list` 回收结果。
 - subagent 输出和 usage 写入 `subagent_runs`，并产生 `subagent_started`、`subagent_finished` 或 `subagent_failed` 事件；前端右侧资源栏可以查看 subagent。

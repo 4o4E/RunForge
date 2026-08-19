@@ -4,7 +4,7 @@ import type { LlmTool } from '../llm/types.js';
 import { createPolicy } from './policy.js';
 import { getToolSettings, type McpSettings } from '../settings.js';
 import type { Scope } from '../store/types.js';
-import { callMcpTool, mcpToolSchemas, parseMcpToolName } from '../mcp/client.js';
+import { callMcpTool, mcpToolSchemas, parseMcpToolName, type McpMappedTool } from '../mcp/client.js';
 import { shellTool } from './shell.js';
 import { fileReadTool } from './fileRead.js';
 import { fileWriteTool } from './fileWrite.js';
@@ -16,6 +16,7 @@ import { webSearchTool } from './webSearch.js';
 import { askUserTool } from './askUser.js';
 import { updatePlanTool } from './updatePlan.js';
 import { skillActivateTool } from './skillActivate.js';
+import { mcpActivateTool } from './mcpActivate.js';
 import { subagentListTool, subagentPollTool, subagentRunTool } from './subagentRun.js';
 import { workflowListTool, workflowReadTool } from './workflow.js';
 import { datasourceListTool } from './datasourceList.js';
@@ -33,6 +34,7 @@ const TOOLS: Tool[] = [
   askUserTool,
   updatePlanTool,
   skillActivateTool,
+  mcpActivateTool,
   workflowListTool,
   workflowReadTool,
   subagentRunTool,
@@ -47,6 +49,7 @@ const CORE_TOOL_NAMES = new Set([
   'ask_user',
   'update_plan',
   'skill_activate',
+  'mcp_activate',
   'workflow_list',
   'workflow_read',
   'subagent_run',
@@ -54,15 +57,15 @@ const CORE_TOOL_NAMES = new Set([
   'subagent_list',
 ]);
 
-export async function toolSchemas(allowedTools?: string[], mcpSettings?: McpSettings): Promise<LlmTool[]> {
-  const builtinTools = !allowedTools ? TOOLS.map(toLlmTool) : (() => {
-    const allowed = new Set([...allowedTools, ...CORE_TOOL_NAMES]);
-    return TOOLS.filter((tool) => allowed.has(tool.name)).map(toLlmTool);
+export async function toolSchemas(profileTools?: string[], activeMcpTools: McpMappedTool[] = []): Promise<LlmTool[]> {
+  const builtinTools = !profileTools ? TOOLS.map(toLlmTool) : (() => {
+    const selected = new Set([...profileTools, ...CORE_TOOL_NAMES]);
+    return TOOLS.filter((tool) => selected.has(tool.name)).map(toLlmTool);
   })();
-  const mcpTools = await mcpToolSchemas(mcpSettings);
-  if (!allowedTools) return [...builtinTools, ...mcpTools];
-  const allowed = new Set([...allowedTools, ...CORE_TOOL_NAMES]);
-  return [...builtinTools, ...mcpTools.filter((tool) => allowed.has(tool.name))];
+  const mcpTools = mcpToolSchemas(activeMcpTools);
+  if (!profileTools) return [...builtinTools, ...mcpTools];
+  const selected = new Set([...profileTools, ...CORE_TOOL_NAMES]);
+  return [...builtinTools, ...mcpTools.filter((tool) => selected.has(tool.name))];
 }
 
 export function getTool(name: string): Tool | undefined {
@@ -85,6 +88,7 @@ export async function runTool(
     stepId?: string;
     step?: number;
     mcpSettings?: McpSettings;
+    activeMcpServerIds?: ReadonlySet<string>;
   },
 ): Promise<ToolResult> {
   const mcpTool = parseMcpToolName(name);
@@ -97,6 +101,9 @@ export async function runTool(
   if (!decision.ok) return { text: `工具策略已阻止：${decision.reason}` };
   try {
     if (mcpTool) {
+      if (!ctx.activeMcpServerIds?.has(mcpTool.serverId)) {
+        return { text: `MCP server 尚未在当前 run 激活：${mcpTool.serverId}` };
+      }
       const result = await callMcpTool(name, args, ctx.mcpSettings, {
         workspaceRoot: settings.workspaceRoot,
         runId: ctx.runId,

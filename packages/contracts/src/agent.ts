@@ -114,7 +114,14 @@ export type AgentEvent =
       root: string;
       readonly: boolean;
       hash: string;
-      allowedTools: string[];
+    }
+  | {
+      type: 'mcp_activated';
+      step: number;
+      serverId: string;
+      label: string;
+      description: string;
+      toolNames: string[];
     }
   | ({
       type: 'subagent_started';

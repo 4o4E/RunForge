@@ -20,7 +20,6 @@ type SysAdminPanel =
   | 'llm-models'
   | 'runtime-capabilities'
   | 'mcp-client'
-  | 'tools-access'
   | 'tools-sandbox'
   | DatasourceSettingsPage;
 
@@ -116,9 +115,6 @@ export function SysAdminApp() {
               </SectionButton>
             </NavGroup>
             <NavGroup label="运行时">
-              <SectionButton active={panel === 'tools-access'} icon={<Shield className="h-4 w-4" />} onClick={() => setPanel('tools-access')}>
-                工具准入
-              </SectionButton>
               <SectionButton active={panel === 'tools-sandbox'} icon={<Wrench className="h-4 w-4" />} onClick={() => setPanel('tools-sandbox')}>
                 Shell / 沙箱
               </SectionButton>
@@ -139,8 +135,7 @@ export function SysAdminApp() {
           {tenantId && settingsControlApi && panel === 'llm-models' && <LlmProviderSettingsPanel key={`${tenantId}:${panel}`} controlApi={settingsControlApi} />}
           {tenantId && settingsControlApi && panel === 'runtime-capabilities' && <RuntimeCapabilitySettingsPanel key={`${tenantId}:${panel}`} controlApi={settingsControlApi} />}
           {tenantId && settingsControlApi && panel === 'mcp-client' && <McpServerSettingsPanel key={`${tenantId}:${panel}`} controlApi={settingsControlApi} />}
-          {tenantId && settingsControlApi && panel === 'tools-access' && <ToolsSettingsPanel key={`${tenantId}:${panel}`} controlApi={settingsControlApi} section="access" />}
-          {tenantId && settingsControlApi && panel === 'tools-sandbox' && <ToolsSettingsPanel key={`${tenantId}:${panel}`} controlApi={settingsControlApi} section="sandbox-shell" />}
+          {tenantId && settingsControlApi && panel === 'tools-sandbox' && <ToolsSettingsPanel key={`${tenantId}:${panel}`} controlApi={settingsControlApi} />}
           {tenantId && datasourceControlApi && panel.startsWith('datasource-') && (
             <DatasourceSettingsPanel key={`${tenantId}:${panel}`} controlApi={datasourceControlApi} page={panel as DatasourceSettingsPage} />
           )}

@@ -1,7 +1,6 @@
 ---
 name: workflow-authoring
 description: 创建或维护本地 workflow 文件，定义阶段目标、输入输出、gate、默认 skill 和 subagent 分工。Use when the user asks to add, edit, or evolve workflow definitions.
-allowed-tools: workflow_list workflow_read file_read file_write grep glob
 metadata:
   runforge.tool-scope: workspace-readwrite
 ---

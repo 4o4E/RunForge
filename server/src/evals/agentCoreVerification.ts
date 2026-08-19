@@ -11,10 +11,10 @@ import type { AgentEvent } from '../agent/types.js';
 import type { LlmMessage } from '../llm/types.js';
 import type { Scope, Store, ThreadRow } from '../store/types.js';
 import { getToolSettings, type ToolSettings } from '../settings.js';
+import { hashPassword } from '../auth/passwords.js';
 
 const execFileAsync = promisify(execFile);
 
-const TOOL_ALLOW = ['file_read', 'file_write', 'file_edit', 'glob', 'grep', 'shell', 'update_plan'];
 const VERIFY_ROOT = resolve(process.cwd(), '../workspace/agent-core-verification');
 const VERIFY_SCOPE: Scope = { tenantId: 'default', userId: 'us_agent_core_verification' };
 
@@ -92,6 +92,10 @@ function hasTool(events: AgentEvent[], name: string): boolean {
   return events.some((event) => event.type === 'tool_call' && event.name === name);
 }
 
+function hasShellExecution(events: AgentEvent[]): boolean {
+  return hasTool(events, 'shell') || hasTool(events, 'shell_exec');
+}
+
 function toolNames(events: AgentEvent[]): string[] {
   return events.filter((event): event is Extract<AgentEvent, { type: 'tool_call' }> => event.type === 'tool_call').map((event) => event.name);
 }
@@ -157,9 +161,6 @@ function verificationToolSettings(base: ToolSettings, workspaceRoot: string): To
     sandbox: 'enforce',
     sandboxBackend: 'none',
     workspaceRoot,
-    toolAccessMode: 'allow',
-    allow: TOOL_ALLOW,
-    deny: [],
     shellEnabled: true,
     shellUseHostPath: true,
     network: 'disabled',
@@ -270,7 +271,7 @@ const scenarios: Scenario[] = [
         assertRunDone(result),
         assertNoBrokenToolPairs(result.rawMessages),
         assertFinalAssistantHasNoToolCall(result.rawMessages),
-        hasTool(result.events, 'shell') ? ok('调用过 shell') : fail('调用过 shell'),
+        hasShellExecution(result.events) ? ok('调用过 Shell 执行工具') : fail('调用过 Shell 执行工具'),
         hasTool(result.events, 'file_write') ? ok('调用过 file_write') : fail('调用过 file_write'),
         report.includes('lines=3') ? ok('shell 报告内容正确') : fail('shell 报告内容正确', `实际内容：${report || '文件不存在或为空'}`),
       ];
@@ -354,7 +355,7 @@ const scenarios: Scenario[] = [
         assertRunDone(result),
         assertNoBrokenToolPairs(result.rawMessages),
         assertFinalAssistantHasNoToolCall(result.rawMessages),
-        hasTool(result.events, 'shell') ? ok('调用过 shell 验证') : fail('调用过 shell 验证'),
+        hasShellExecution(result.events) ? ok('调用过 Shell 执行工具验证') : fail('调用过 Shell 执行工具验证'),
         verifyOk && verifyOutput.includes('fixture-pass') ? ok('fixture 测试真实通过') : fail('fixture 测试真实通过', verifyOutput),
       ];
     },
@@ -365,6 +366,27 @@ function applyContextOverride(override: Partial<typeof config.agent> | undefined
   const original = { ...config.agent };
   if (override) Object.assign(config.agent, override);
   return () => Object.assign(config.agent, original);
+}
+
+async function ensureVerificationScope(): Promise<void> {
+  // 验证器直接使用 PgStore，不走登录引导；为自己的固定 scope 幂等补齐外键身份。
+  await query(
+    `INSERT INTO tenants (id, name, status)
+     VALUES ($1, $2, 'active')
+     ON CONFLICT (id) DO NOTHING`,
+    [VERIFY_SCOPE.tenantId, 'Default'],
+  );
+  await query(
+    `INSERT INTO users (id, tenant_id, email, password_hash, role, status)
+     VALUES ($1, $2, $3, $4, 'member', 'active')
+     ON CONFLICT (id) DO UPDATE
+     SET tenant_id = EXCLUDED.tenant_id,
+         email = EXCLUDED.email,
+         password_hash = EXCLUDED.password_hash,
+         role = EXCLUDED.role,
+         status = EXCLUDED.status`,
+    [VERIFY_SCOPE.userId, VERIFY_SCOPE.tenantId, 'agent-core-verification@runforge.local', hashPassword('agent-core-verification-no-login')],
+  );
 }
 
 async function runScenario(store: Store, baseToolSettings: ToolSettings, root: string, scenario: Scenario): Promise<ScenarioReport> {
@@ -462,6 +484,7 @@ async function main(): Promise<void> {
   await mkdir(runRoot, { recursive: true });
 
   const store = new PgStore();
+  await ensureVerificationScope();
   const baseToolSettings = await getToolSettings(VERIFY_SCOPE);
   const reports: ScenarioReport[] = [];
   for (const scenario of targets) {
@@ -488,4 +511,6 @@ main()
   })
   .finally(async () => {
     await pool.end().catch(() => {});
+    // provider/HTTP transport 可能保留 keep-alive；报告和数据库都已收口后显式结束 CLI。
+    process.exit(process.exitCode ?? 0);
   });

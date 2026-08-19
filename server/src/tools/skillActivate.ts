@@ -7,14 +7,14 @@ export const skillActivateTool: Tool = {
   parameters: {
     type: 'object',
     properties: {
-      name: { type: 'string', description: 'skill 名称，或 source:name 形式的唯一 id' },
+      id: { type: 'string', description: '初始 Skill 列表中的 source:name 唯一 id' },
     },
-    required: ['name'],
+    required: ['id'],
   },
   async run(args, ctx) {
     const settings = ctx?.settings;
     if (!settings) return '缺少工具运行设置，无法定位 workspaceRoot';
-    const name = String(args.name ?? '');
+    const name = String(args.id ?? args.name ?? '');
     try {
       const activated = await activateSkill(settings.workspaceRoot, name);
       return `已激活 skill ${activated.skill.name}。`;

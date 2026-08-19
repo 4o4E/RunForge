@@ -12,7 +12,6 @@ export interface SkillIndexItem {
   source: SkillSource;
   root: string;
   readonly: boolean;
-  allowedTools: string[];
   hash: string;
 }
 
@@ -24,7 +23,6 @@ export interface SkillActivation {
 interface Frontmatter {
   name: string;
   description: string;
-  allowedTools: string[];
 }
 
 const SKILL_NAME_RE = /^[a-z0-9-]+$/;
@@ -84,11 +82,7 @@ function parseFrontmatter(content: string, file: string): { frontmatter: Frontma
   const description = fields.get('description') ?? '';
   if (!SKILL_NAME_RE.test(name)) throw new Error(`${file} 的 skill name 无效: ${name}`);
   if (!description) throw new Error(`${file} 缺少 description`);
-  const allowedTools = (fields.get('allowed-tools') ?? '')
-    .split(/[,\s]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  return { frontmatter: { name, description, allowedTools }, body };
+  return { frontmatter: { name, description }, body };
 }
 
 function stripInternalComments(content: string): string {
@@ -149,7 +143,6 @@ async function readSkill(root: string, source: SkillSource, readonly: boolean): 
     source,
     root,
     readonly,
-    allowedTools: frontmatter.allowedTools,
     hash: await hashDir(root),
   };
 }
@@ -185,14 +178,14 @@ export function renderSkillCatalog(skills: SkillIndexItem[]): string {
   if (!skills.length) return '可用 Skills / Available skills: none';
   return [
     '可用 Skills / Available skills:',
-    ...skills.map((skill) => `- ${skill.name}: ${skill.description}`),
+    ...skills.map((skill) => `- ${skill.id}: ${skill.description}`),
   ].join('\n');
 }
 
 export function renderSkillSystemRules(): string {
   return `Skill 使用规则 / Skill usage rules:
-- 初始 skill 列表只用于选择能力；需要某个 skill 时调用 skill_activate。
-- The initial skill list is for routing; call skill_activate when a skill is needed.
+- 初始 skill 列表只用于选择能力；需要某个 skill 时调用 skill_activate，并传入列表中的 id。
+- The initial skill list is for routing; call skill_activate with the listed id when a skill is needed.
 - 激活 skill 后，你会看到该 skill 的 name、root 和 instructions。
 - After a skill is activated, you will see its name, root, and instructions.
 - Skill 正文里的相对路径都以该 skill 的 root 为基准解析。
@@ -221,8 +214,11 @@ export async function activateSkill(workspaceRoot: string, nameOrId: string): Pr
   const skillPath = join(skill.root, 'SKILL.md');
   const { body } = parseFrontmatter(await readFile(skillPath, 'utf8'), skillPath);
   const systemMessage = [
-    '已激活 Skill / Activated Skill:',
+    '当前 run 的 Skill 激活结果 / Skill activation result for the current run:',
+    '- 这段入口说明只在当前 run 生效；如果它出现在后续 run 的历史里，不代表仍处于激活状态。',
+    '- These entry instructions apply only to the current run; seeing them in later run history does not mean the skill is still active.',
     `- name: ${skill.name}`,
+    `- id: ${skill.id}`,
     `- root: ${skill.root}`,
     '',
     '正文 / Instructions:',

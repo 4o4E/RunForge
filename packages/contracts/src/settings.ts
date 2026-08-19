@@ -4,9 +4,6 @@ export interface ToolSettings {
   sandbox: 'off' | 'enforce';
   sandboxBackend: SandboxBackendName;
   workspaceRoot: string;
-  toolAccessMode: 'allow' | 'deny';
-  allow: string[];
-  deny: string[];
   shellEnabled: boolean;
   shellUseHostPath: boolean;
   shellPathMode: 'system' | 'custom';
@@ -17,11 +14,6 @@ export interface ToolSettings {
   maxOutput: number;
 }
 
-export interface ToolSettingsOptionItem {
-  name: string;
-  description: string;
-}
-
 export interface ShellCommandOptionItem {
   name: string;
   path: string | null;
@@ -29,7 +21,6 @@ export interface ShellCommandOptionItem {
 }
 
 export interface ToolSettingsOptions {
-  tools: ToolSettingsOptionItem[];
   shellCommands: ShellCommandOptionItem[];
   systemPath: string;
 }
@@ -42,11 +33,11 @@ export interface McpHeaderSettings {
 export interface McpServerSettings {
   id: string;
   label: string;
+  description: string;
   enabled: boolean;
   url: string;
   bearerToken: string;
   headers: McpHeaderSettings[];
-  allowedTools: string[];
   timeoutMs: number;
   maxOutput: number;
 }
@@ -61,7 +52,6 @@ export interface McpToolOption {
   name: string;
   mappedName: string;
   description: string;
-  enabled: boolean;
 }
 
 export interface McpSettingsOptions {

@@ -6,7 +6,7 @@
 
 - Agent 编排：围绕 `thread -> run -> step` 组织多轮任务和执行步骤。
 - LLM 集成：支持 AI SDK、OpenAI Responses、OpenAI Chat、Anthropic 和离线 mock。
-- 工具调用：内置 shell、托管 shell、文件读写/编辑、glob/grep、web 获取/搜索、用户提问、skill 激活、workflow 读取、subagent 派发等工具。
+- 工具调用：原生工具默认加载；Skill 与 MCP 按 run 激活，另有 shell、文件读写、web、workflow、subagent 等能力。
 - 执行可观测：通过 REST/WebSocket 输出 step、reasoning、tool_call、tool_result、subagent、shell、final 等事件。
 - 持久化：使用 PostgreSQL 保存 thread、run、step、message、event、shell session、subagent run 和运行配置。
 - 隔离基础：提供工具策略层和可选 bwrap shell 沙箱，为后续云端隔离执行打基础。
@@ -178,7 +178,7 @@ pnpm --filter server typecheck
 - [长任务设计](docs/long-task-design.md)：Goal 锚点、上下文压缩、token 预算、取消与长任务验证链路。
 - [托管 Shell 资源设计](docs/background-shell-design.md)：shell session、前台/后台命令、轮询、接管和跨 run 生命周期。
 - [工具沙箱设计](docs/tool-sandbox.md)：工具权限、bwrap 沙箱选型、读写范围与命令限制。
-- [Skill 系统设计](docs/skill-system-design.md)：当前 skill 文件协议、内置/用户 skill、bash 资源暴露、allowed-tools、激活生命周期和安全边界。
+- [Skill 系统设计](docs/skill-system-design.md)：当前 skill 文件协议、内置/用户 skill、bash 资源暴露、run 级激活生命周期和安全边界。
 - [Subagent 与 Gene Memory 设计](docs/subagent-memory-design.md)：当前 subagent v1 协作语义，以及后续 runtime profile、gene 读写、RAG 召回、经验提升和退化流程。
 - [题面验收报告](docs/acceptance-report.md)：当前完成范围、未实现边界和后续平台化设计。
 - [架构改造方案](docs/refactor-plan.md)：AI SDK、AI Elements、Streamdown、HTML artifact、可观测和沙箱路线。

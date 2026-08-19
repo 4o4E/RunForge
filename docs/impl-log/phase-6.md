@@ -40,8 +40,8 @@
 - [server/src/config.ts](../../server/src/config.ts) —— 新增 `tools` 策略配置块;
   `patterns()` 按逗号/换行切分(允许含空格的正则);`list()` 用于无空格的名字/host。
 - [server/src/index.ts](../../server/src/index.ts) —— 启动日志打印 sandbox 状态。
-- [.env.example](../../.env.example) —— 新增 `TOOL_SANDBOX` / `TOOL_WORKSPACE_ROOT` /
-  `TOOL_DENY` / `TOOL_ALLOW` / `SHELL_*` / `WEB_*` / `TOOL_MAX_OUTPUT` 文档。
+- [.env.example](../../.env.example) —— 当时新增工具 allow/deny 与沙箱环境变量文档；
+  当前主 agent 已改为原生工具默认加载，allow/deny 配置和“工具准入”页面已移除，保留 Shell/沙箱、网络与输出上限。
 
 ## 验收
 

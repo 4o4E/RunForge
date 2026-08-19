@@ -259,7 +259,6 @@ systemApi.post('/tenants/:tenantId/settings/mcp/server/probe', async (req, res) 
         name: tool.originalName,
         mappedName: tool.mappedName,
         description: tool.description,
-        enabled: server.allowedTools.includes(tool.originalName),
       })),
     };
     res.json(result);

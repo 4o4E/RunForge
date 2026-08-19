@@ -9,9 +9,6 @@ function cfg(over: Partial<ToolPolicyConfig> = {}): ToolPolicyConfig {
   return {
     sandbox: 'enforce',
     workspaceRoot: ROOT,
-    toolAccessMode: 'deny',
-    allow: [],
-    deny: [],
     shellEnabled: true,
     shellDeny: ['rm\\s+-rf\\s+/'],
     network: 'enabled',
@@ -25,18 +22,6 @@ test('isWithin: confinement check handles escapes and absolutes', () => {
   assert.equal(isWithin(ROOT, ROOT), true);
   assert.equal(isWithin(ROOT, resolve(ROOT, '../other/x')), false);
   assert.equal(isWithin(ROOT, resolve('/etc/passwd')), false);
-});
-
-test('deny list blocks in any mode', () => {
-  const p = createPolicy(cfg({ sandbox: 'off', deny: ['shell'] }));
-  assert.equal(p.check('shell', { command: 'echo hi' }).ok, false);
-  assert.equal(p.check('glob', { pattern: '*' }).ok, true);
-});
-
-test('allow list permits only listed tools', () => {
-  const p = createPolicy(cfg({ toolAccessMode: 'allow', allow: ['glob', 'grep'] }));
-  assert.equal(p.check('glob', { pattern: '*' }).ok, true);
-  assert.equal(p.check('shell', { command: 'echo hi' }).ok, false);
 });
 
 test('enforce: filesystem path confinement', () => {
@@ -59,7 +44,7 @@ test('materialized agent resource directories are readonly for file writes', () 
   assert.match((blockedWorkflow as { reason: string }).reason, /只读/);
 });
 
-test('off mode skips path confinement but still caps/denies', () => {
+test('off mode skips path confinement but keeps always-on resource guards', () => {
   const p = createPolicy(cfg({ sandbox: 'off' }));
   assert.equal(p.check('file_read', { path: resolve('/etc/passwd') }).ok, true);
 });

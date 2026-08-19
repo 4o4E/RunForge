@@ -30,9 +30,6 @@ function testToolSettings(overrides: Partial<ToolSettings> = {}): ToolSettings {
     sandbox: 'enforce',
     sandboxBackend: 'bwrap',
     workspaceRoot: testWorkspace,
-    toolAccessMode: 'deny',
-    allow: [],
-    deny: [],
     shellEnabled: true,
     shellUseHostPath: true,
     shellPathMode: 'system',
@@ -413,12 +410,12 @@ test('executeRun: injects database workload token at run startup', async () => {
             toolCalls: [{
               id: 'skill_1',
               name: 'skill_activate',
-              arguments: '{"name":"database-access"}',
+              arguments: '{"id":"builtin:database-access"}',
             }],
           };
         }
         sawSkillReusedRunEnv = messages.some((message) => (
-          message.role === 'system'
+          message.role === 'tool'
           && (message.content ?? '').includes('数据库访问运行环境已在 run 初始化时注入')
         ));
         return { content: 'done', toolCalls: [] };
@@ -446,7 +443,7 @@ test('executeRun: injects database workload token at run startup', async () => {
   assert.equal(sawSkillReusedRunEnv, true);
 });
 
-test('executeRun: activates a skill without trimming main-agent tools to allowed-tools', async () => {
+test('executeRun: activates a skill while native tools remain loaded', async () => {
   const skillRoot = join(testWorkspace, '.skills', 'sample-skill');
   await mkdir(skillRoot, { recursive: true });
   await writeFile(
@@ -455,7 +452,6 @@ test('executeRun: activates a skill without trimming main-agent tools to allowed
       '---',
       'name: sample-skill',
       'description: Use when a test needs a tiny skill.',
-      'allowed-tools: file_read',
       '---',
       '',
       '# Sample Skill',
@@ -473,6 +469,7 @@ test('executeRun: activates a skill without trimming main-agent tools to allowed
   let firstSystemText = '';
   let firstUserText = '';
   let secondSystemText = '';
+  let secondToolText = '';
   let turn = 0;
 
   await executeRun(run.id, {
@@ -489,12 +486,13 @@ test('executeRun: activates a skill without trimming main-agent tools to allowed
           return {
             content: null,
             toolCalls: [
-              { id: 'skill_1', name: 'skill_activate', arguments: '{"name":"sample-skill"}' },
+              { id: 'skill_1', name: 'skill_activate', arguments: '{"id":"user:sample-skill"}' },
               { id: 'read_1', name: 'file_read', arguments: JSON.stringify({ path: join(skillRoot, 'SKILL.md') }) },
             ],
           };
         }
         secondSystemText = systemText;
+        secondToolText = messages.filter((m) => m.role === 'tool').map((m) => m.content ?? '').join('\n');
         return { content: 'done', toolCalls: [] };
       },
     },
@@ -503,12 +501,13 @@ test('executeRun: activates a skill without trimming main-agent tools to allowed
     toolSettings: testToolSettings(),
   });
 
-  assert.doesNotMatch(firstSystemText, /sample-skill: Use when a test needs a tiny skill/);
-  assert.match(firstUserText, /sample-skill: Use when a test needs a tiny skill/);
+  assert.doesNotMatch(firstSystemText, /user:sample-skill: Use when a test needs a tiny skill/);
+  assert.match(firstUserText, /user:sample-skill: Use when a test needs a tiny skill/);
   assert.match(firstUserText, /用户请求 \/ User request:\nuse a skill/);
-  assert.match(secondSystemText, /已激活 Skill/);
-  assert.match(secondSystemText, /root:/);
-  assert.match(secondSystemText, /# Sample Skill/);
+  assert.match(secondSystemText, /user:sample-skill/);
+  assert.match(secondSystemText, /root=/);
+  assert.doesNotMatch(secondSystemText, /# Sample Skill/);
+  assert.match(secondToolText, /# Sample Skill/);
   assert.ok(toolNamesByTurn[0].includes('shell'));
   assert.ok(toolNamesByTurn[0].includes('skill_activate'));
   assert.ok(toolNamesByTurn[1].includes('file_read'));
@@ -517,13 +516,15 @@ test('executeRun: activates a skill without trimming main-agent tools to allowed
   const activated = published.find((e) => e.type === 'skill_activated');
   assert.equal(activated?.type, 'skill_activated');
   assert.equal(activated?.type === 'skill_activated' ? activated.name : '', 'sample-skill');
-  assert.deepEqual(activated?.type === 'skill_activated' ? activated.allowedTools : [], ['file_read']);
   const msgs = await store.loadThreadMessages(scope, thread.id);
   assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'tool', 'tool', 'assistant']);
   assert.equal(msgs[0].content, 'use a skill');
   assert.equal(msgs[2].toolCallId, 'skill_1');
+  assert.equal(msgs[2].collapsed, 'masked');
+  assert.doesNotMatch(msgs[2].content ?? '', /# Sample Skill/);
   assert.equal(msgs[3].toolCallId, 'read_1');
   assert.equal(msgs.some((m) => m.role === 'system' && (m.content ?? '').includes('已激活 Skill')), false);
+  assert.equal(published.some((event) => event.type === 'compaction' && event.reason === 'skill-activation-consumed'), true);
   assert.equal((await store.getRun(scope, run.id))?.status, 'done');
 });
 
@@ -565,7 +566,7 @@ test('executeRun: skill catalog uses folded YAML descriptions in user prompt wit
     toolSettings: testToolSettings(),
   });
 
-  assert.match(userText, /ppt-master: AI-driven multi-format SVG content generation system\. Use when user asks/);
+  assert.match(userText, /user:ppt-master: AI-driven multi-format SVG content generation system\. Use when user asks/);
   assert.match(userText, /生成PPT/);
   assert.doesNotMatch(userText, /ppt-master: >/);
   assert.match(userText, /用户请求 \/ User request:\n测试：做一个example ppt/);
@@ -602,7 +603,7 @@ test('executeRun: resumed runs still expose the skill catalog before the persist
     toolSettings: testToolSettings(),
   });
 
-  assert.match(userText, /resume-skill: Use when checking resumed prompt context/);
+  assert.match(userText, /user:resume-skill: Use when checking resumed prompt context/);
   assert.match(userText, /用户请求 \/ User request:\nresume needs skill list/);
   const msgs = await store.loadThreadMessages(scope, thread.id);
   assert.equal(msgs[0].content, 'resume needs skill list');
@@ -613,7 +614,7 @@ test('executeRun: skill activation instructions do not leak into the next run hi
   await mkdir(skillRoot, { recursive: true });
   await writeFile(
     join(skillRoot, 'SKILL.md'),
-    ['---', 'name: leaky-skill', 'description: Use in leakage tests.', 'allowed-tools: file_read', '---', '', '# Leaky Skill'].join('\n'),
+    ['---', 'name: leaky-skill', 'description: Use in leakage tests.', '---', '', '# Leaky Skill'].join('\n'),
     'utf8',
   );
 
@@ -627,7 +628,7 @@ test('executeRun: skill activation instructions do not leak into the next run hi
       name: 'activate-then-finish',
       async complete() {
         turn += 1;
-        if (turn === 1) return { content: null, toolCalls: [{ id: 'skill_1', name: 'skill_activate', arguments: '{"name":"leaky-skill"}' }] };
+        if (turn === 1) return { content: null, toolCalls: [{ id: 'skill_1', name: 'skill_activate', arguments: '{"id":"user:leaky-skill"}' }] };
         return { content: 'done', toolCalls: [] };
       },
     },
@@ -638,12 +639,14 @@ test('executeRun: skill activation instructions do not leak into the next run hi
 
   const run2 = await store.createRun(scope, thread.id, 'new run');
   let secondRunSystemText = '';
+  let secondRunContext = '';
   await executeRun(run2.id, {
     store,
     provider: {
       name: 'capture-next-run',
       async complete(messages) {
         secondRunSystemText = messages.filter((m) => m.role === 'system').map((m) => m.content ?? '').join('\n');
+        secondRunContext = messages.map((m) => m.content ?? '').join('\n');
         return { content: 'done', toolCalls: [] };
       },
     },
@@ -652,8 +655,107 @@ test('executeRun: skill activation instructions do not leak into the next run hi
     toolSettings: testToolSettings(),
   });
 
-  assert.equal(secondRunSystemText.includes('已激活 Skill'), false);
+  assert.match(secondRunSystemText, /Skills: none/);
   assert.equal(secondRunSystemText.includes('# Leaky Skill'), false);
+  assert.equal(secondRunContext.includes('# Leaky Skill'), false);
+});
+
+test('executeRun: MCP tools load only after current-run activation and unload in the next run', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread(scope);
+  const mcpSettings = {
+    servers: [{
+      id: 'browser',
+      label: 'Browser MCP',
+      description: '控制真实浏览器完成页面操作。',
+      enabled: true,
+      url: 'https://example.com/mcp',
+      bearerToken: '',
+      headers: [],
+      timeoutMs: 60_000,
+      maxOutput: 40_000,
+    }],
+  };
+  const extraTools = Array.from({ length: 80 }, (_, index) => ({
+    serverId: 'browser',
+    serverLabel: 'Browser MCP',
+    originalName: `browser_tool_${index}_${'x'.repeat(20)}`,
+    mappedName: `mcp__browser__browser_tool_${index}_${'x'.repeat(20)}`,
+    description: `浏览器工具 ${index}`,
+    parameters: { type: 'object' },
+  }));
+  const mcpToolLoader = async () => ({
+    server: mcpSettings.servers[0],
+    tools: [{
+      serverId: 'browser',
+      serverLabel: 'Browser MCP',
+      originalName: 'open_page',
+      mappedName: 'mcp__browser__open_page',
+      description: '打开页面',
+      parameters: { type: 'object', properties: { url: { type: 'string' } } },
+    }, ...extraTools],
+  });
+
+  const run1 = await store.createRun(scope, thread.id, '使用浏览器');
+  const run1Tools: string[][] = [];
+  let run1UserText = '';
+  let run1SystemText = '';
+  let activationResult = '';
+  let turn = 0;
+  await executeRun(run1.id, {
+    store,
+    provider: {
+      name: 'mcp-activation',
+      async complete(messages, tools) {
+        turn += 1;
+        run1Tools.push(tools.map((tool) => tool.name));
+        if (turn === 1) {
+          run1UserText = messages.filter((message) => message.role === 'user').at(-1)?.content ?? '';
+          return { content: null, toolCalls: [{ id: 'mcp_1', name: 'mcp_activate', arguments: '{"id":"browser"}' }] };
+        }
+        run1SystemText = messages.filter((message) => message.role === 'system').map((message) => message.content ?? '').join('\n');
+        activationResult = messages.find((message) => message.role === 'tool' && message.toolCallId === 'mcp_1')?.content ?? '';
+        return { content: 'done', toolCalls: [] };
+      },
+    },
+    publish: () => {},
+    hardStepCap: 3,
+    toolSettings: testToolSettings({ maxOutput: 1_000 }),
+    mcpSettings,
+    mcpToolLoader,
+  });
+
+  assert.match(run1UserText, /browser: 控制真实浏览器完成页面操作/);
+  assert.equal(run1Tools[0].includes('mcp__browser__open_page'), false);
+  assert.equal(run1Tools[0].includes('mcp_activate'), true);
+  assert.equal(run1Tools[1].includes('mcp__browser__open_page'), true);
+  assert.match(run1SystemText, /MCP: browser/);
+  assert.equal(activationResult.length, 1_000);
+  assert.match(activationResult, /工具策略已截断/);
+  assert.equal((await store.getEvents(scope, run1.id)).some((event) => event.type === 'mcp_activated' && event.serverId === 'browser'), true);
+
+  const run2 = await store.createRun(scope, thread.id, '下一轮不使用浏览器');
+  let run2Tools: string[] = [];
+  let run2SystemText = '';
+  await executeRun(run2.id, {
+    store,
+    provider: {
+      name: 'mcp-unloaded',
+      async complete(messages, tools) {
+        run2Tools = tools.map((tool) => tool.name);
+        run2SystemText = messages.filter((message) => message.role === 'system').map((message) => message.content ?? '').join('\n');
+        return { content: 'done', toolCalls: [] };
+      },
+    },
+    publish: () => {},
+    hardStepCap: 2,
+    toolSettings: testToolSettings(),
+    mcpSettings,
+    mcpToolLoader,
+  });
+
+  assert.equal(run2Tools.includes('mcp__browser__open_page'), false);
+  assert.match(run2SystemText, /MCP: none/);
 });
 
 test('executeRun: starts async subagents and allows cross-run polling', async () => {
@@ -1242,7 +1344,7 @@ test('executeRun: truncated tool-call turn does not execute tools', async () => 
       },
       publish: (_id, e) => published.push(e),
       hardStepCap: 2,
-      toolSettings: testToolSettings({ toolAccessMode: 'allow', allow: ['file_write'] }),
+      toolSettings: testToolSettings(),
     });
   });
 

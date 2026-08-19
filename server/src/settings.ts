@@ -39,9 +39,6 @@ const TOOL_SETTING_KEYS = [
   'tools.sandbox',
   'tools.sandboxBackend',
   'tools.workspaceRoot',
-  'tools.toolAccessMode',
-  'tools.allow',
-  'tools.deny',
   'tools.shellEnabled',
   'tools.shellUseHostPath',
   'tools.shellPathMode',
@@ -94,10 +91,6 @@ function backendValue(value: unknown, fallback: SandboxBackendName): SandboxBack
 
 function networkValue(value: unknown, fallback: ToolSettings['network']): ToolSettings['network'] {
   return value === 'enabled' || value === 'disabled' ? value : fallback;
-}
-
-function toolAccessModeValue(value: unknown, fallback: ToolSettings['toolAccessMode']): ToolSettings['toolAccessMode'] {
-  return value === 'allow' || value === 'deny' ? value : fallback;
 }
 
 function shellPathModeValue(value: unknown, fallback: ToolSettings['shellPathMode']): ToolSettings['shellPathMode'] {
@@ -209,9 +202,6 @@ function defaultToolSettings(): ToolSettings {
     sandbox: config.tools.sandbox,
     sandboxBackend: config.tools.sandboxBackend,
     workspaceRoot: config.tools.workspaceRoot,
-    toolAccessMode: config.tools.toolAccessMode,
-    allow: config.tools.allow,
-    deny: config.tools.deny,
     shellEnabled: config.tools.shellEnabled,
     shellUseHostPath: config.tools.shellUseHostPath,
     shellPathMode: config.tools.shellPathMode,
@@ -280,15 +270,10 @@ function rowsToMap(rows: SettingRow[]): Map<string, unknown> {
 
 function mergeToolSettings(values: Map<string, unknown>): ToolSettings {
   const defaults = defaultToolSettings();
-  const allow = stringList(values.get('tools.allow'), defaults.allow);
-  const deny = stringList(values.get('tools.deny'), defaults.deny);
   return {
     sandbox: sandboxValue(values.get('tools.sandbox'), defaults.sandbox),
     sandboxBackend: backendValue(values.get('tools.sandboxBackend'), defaults.sandboxBackend),
     workspaceRoot: resolve(stringValue(values.get('tools.workspaceRoot'), defaults.workspaceRoot)),
-    toolAccessMode: toolAccessModeValue(values.get('tools.toolAccessMode'), allow.length ? 'allow' : defaults.toolAccessMode),
-    allow,
-    deny,
     shellEnabled: boolValue(values.get('tools.shellEnabled'), defaults.shellEnabled),
     shellUseHostPath: boolValue(values.get('tools.shellUseHostPath'), defaults.shellUseHostPath),
     shellPathMode: shellPathModeValue(values.get('tools.shellPathMode'), defaults.shellPathMode),
@@ -364,9 +349,6 @@ function toolSettingsToEntries(settings: ToolSettings): Array<[string, unknown]>
     ['tools.sandbox', settings.sandbox],
     ['tools.sandboxBackend', settings.sandboxBackend],
     ['tools.workspaceRoot', settings.workspaceRoot],
-    ['tools.toolAccessMode', settings.toolAccessMode],
-    ['tools.allow', settings.allow],
-    ['tools.deny', settings.deny],
     ['tools.shellEnabled', settings.shellEnabled],
     ['tools.shellUseHostPath', settings.shellUseHostPath],
     ['tools.shellPathMode', settings.shellPathMode],
@@ -412,14 +394,16 @@ function normalizeMcpServer(input: unknown, fallback: McpServerSettings, usedIds
   let id = rawId;
   for (let i = 2; usedIds.has(id); i += 1) id = `${rawId}-${i}`;
   usedIds.add(id);
+  const label = stringValue(body.label, fallback.label || id);
   return {
     id,
-    label: stringValue(body.label, fallback.label || id),
+    label,
+    // 旧配置没有 description 时先用显示名称路由，管理员后续可补成更准确的能力描述。
+    description: stringValue(body.description, label),
     enabled: boolValue(body.enabled, fallback.enabled),
     url: stringValue(body.url, fallback.url),
     bearerToken: typeof body.bearerToken === 'string' ? body.bearerToken : fallback.bearerToken,
     headers: keyValueList(body.headers),
-    allowedTools: uniqStrings(stringList(body.allowedTools, fallback.allowedTools)),
     timeoutMs: positiveIntValue(body.timeoutMs, fallback.timeoutMs, 1000, 600_000),
     maxOutput: outputLimitValue(body.maxOutput, fallback.maxOutput),
   };
@@ -433,11 +417,11 @@ export function normalizeMcpSettings(input: unknown): McpSettings {
   const fallback: McpServerSettings = {
     id: 'mcp',
     label: 'MCP Server',
+    description: '外部 MCP Server 提供的能力。',
     enabled: false,
     url: '',
     bearerToken: '',
     headers: [],
-    allowedTools: [],
     timeoutMs: 60_000,
     maxOutput: 40_000,
   };

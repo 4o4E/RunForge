@@ -51,13 +51,15 @@ MCP 是 Model Context Protocol，中文可以理解为“模型上下文协议�
 RunForge 仍然自己负责：
 
 - 把 MCP 工具映射成 `mcp__serverId__toolName`，避免和内置工具重名。
-- 按 settings 中的 server allowlist 控制哪些 MCP 工具暴露给模型。
+- 初始上下文只注入已启用 MCP Server 的 `id` 和能力描述，不连接远端拉取工具。
+- 模型调用 `mcp_activate(id)` 后，才把该 Server 的全部工具 schema 加入当前 run 后续请求；下一 run 自动卸载。
+- MCP 工具执行时再次校验当前 run 是否已激活对应 Server，不能只依赖模型看不到 schema。
 - 对 MCP 结果做文本化、二进制落盘、图片 Markdown 链接和输出长度截断。
 - MCP 工具调用仍要经过 RunForge 的工具策略入口。
 
 原因：
 
-MCP SDK 解决协议和传输问题，但工具命名空间、权限策略、工作区落盘和前端可见结果是 RunForge 自己的产品边界。
+MCP SDK 解决协议和传输问题，但工具命名空间、run 级激活、工作区落盘和前端可见结果是 RunForge 自己的产品边界。
 
 相关文件：
 
@@ -313,4 +315,3 @@ LangGraph、Mastra、Temporal、Inngest、Trigger.dev 等方案可以在未来�
 - [server/src/agent/compaction.test.ts](../server/src/agent/compaction.test.ts) 覆盖压缩纯函数、默认策略和 `langchain-trim` 策略。
 - [server/src/agent/persistence.test.ts](../server/src/agent/persistence.test.ts) 覆盖 collapsed 持久化和 model view 还原。
 - [server/src/evals/agentCoreVerification.ts](../server/src/evals/agentCoreVerification.ts) 提供 agent core 端到端验收脚本，覆盖工具组合、计划收口、压缩和配对等核心链路。
-

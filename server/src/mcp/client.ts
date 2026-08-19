@@ -14,7 +14,11 @@ export interface McpMappedTool {
   mappedName: string;
   description: string;
   parameters: Record<string, unknown>;
-  enabled: boolean;
+}
+
+export interface McpActivation {
+  server: McpServerSettings;
+  tools: McpMappedTool[];
 }
 
 interface ClientEntry {
@@ -103,7 +107,6 @@ async function listServerTools(server: McpServerSettings): Promise<McpMappedTool
     cursor = page.nextCursor;
   } while (cursor);
 
-  const allowed = new Set(server.allowedTools);
   return tools.map((tool) => ({
     serverId: server.id,
     serverLabel: server.label || server.id,
@@ -114,7 +117,6 @@ async function listServerTools(server: McpServerSettings): Promise<McpMappedTool
       tool.description ?? '',
     ].filter(Boolean).join('\n'),
     parameters: schemaObject(tool.inputSchema),
-    enabled: allowed.has(tool.name),
   }));
 }
 
@@ -124,15 +126,36 @@ export async function listMcpTools(settings?: McpSettings): Promise<McpMappedToo
   return settled.flatMap((item) => item.status === 'fulfilled' ? item.value : []);
 }
 
-export async function mcpToolSchemas(settings?: McpSettings): Promise<LlmTool[]> {
-  const tools = await listMcpTools(settings);
-  return tools
-    .filter((tool) => tool.enabled)
-    .map((tool) => ({
-      name: tool.mappedName,
-      description: tool.description,
-      parameters: tool.parameters,
-    }));
+export function mcpToolSchemas(tools: McpMappedTool[]): LlmTool[] {
+  return tools.map((tool) => ({
+    name: tool.mappedName,
+    description: tool.description,
+    parameters: tool.parameters,
+  }));
+}
+
+export function renderMcpCatalog(settings: McpSettings): string {
+  const servers = settings.servers.filter((server) => server.enabled);
+  if (!servers.length) return '可用 MCP / Available MCP servers: none';
+  return [
+    '可用 MCP / Available MCP servers:',
+    ...servers.map((server) => `- ${server.id}: ${server.description}`),
+  ].join('\n');
+}
+
+export function renderMcpSystemRules(): string {
+  return `MCP 使用规则 / MCP usage rules:
+- 初始 MCP 列表只用于能力路由，不会注册远端工具；需要时调用 mcp_activate，并传入 server id。
+- The initial MCP list is only for capability routing; remote tools are not registered until mcp_activate is called with a server id.
+- 激活后，该 MCP Server 的工具 schema 只加入当前 run 后续的 LLM 请求；下一个 run 会恢复为未激活。
+- After activation, that MCP server's tool schemas are added only to later LLM requests in the current run; the next run starts inactive.`;
+}
+
+export async function activateMcpServer(settings: McpSettings, serverId: string): Promise<McpActivation> {
+  const id = serverId.trim();
+  const server = settings.servers.find((item) => item.id === id);
+  if (!server || !server.enabled) throw new Error(`MCP server 未启用或不存在：${id}`);
+  return { server, tools: await listServerTools(server) };
 }
 
 function extensionFromMimeType(mimeType: string): string {
@@ -250,7 +273,6 @@ export async function callMcpTool(
   const mcpSettings = settings ?? await getMcpSettings({ tenantId: 'default' });
   const server = mcpSettings.servers.find((item) => item.id === parsed.serverId);
   if (!server || !server.enabled) throw new Error(`MCP server 未启用：${parsed.serverId}`);
-  if (!server.allowedTools.includes(parsed.toolName)) throw new Error(`MCP 工具未允许：${parsed.serverId}/${parsed.toolName}`);
 
   const client = await connectServer(server);
   const rawResult = await client.callTool(

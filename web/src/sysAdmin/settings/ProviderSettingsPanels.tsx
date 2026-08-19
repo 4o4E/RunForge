@@ -84,11 +84,11 @@ function newMcpServer(): McpServerSettings {
   return {
     id: `mcp-${Date.now()}`,
     label: 'MCP Server',
+    description: '描述这个 MCP Server 提供的能力。',
     enabled: false,
     url: '',
     bearerToken: '',
     headers: [],
-    allowedTools: [],
     timeoutMs: 60_000,
     maxOutput: 40_000,
   };
@@ -148,7 +148,7 @@ export function McpServerSettingsPanel({ controlApi }: { controlApi: SettingsCon
   function beginEdit() {
     if (!selected) return;
     setEditIndex(selectedIndex);
-    setDraft({ ...selected, headers: selected.headers.map((header) => ({ ...header })), allowedTools: [...selected.allowedTools] });
+    setDraft({ ...selected, headers: selected.headers.map((header) => ({ ...header })) });
     setProbeResult(null);
     setPendingDelete(null);
   }
@@ -216,18 +216,10 @@ export function McpServerSettingsPanel({ controlApi }: { controlApi: SettingsCon
     }
   }
 
-  function toggleDraftTool(name: string, checked: boolean) {
-    if (!draft) return;
-    const allowedTools = new Set(draft.allowedTools);
-    if (checked) allowedTools.add(name);
-    else allowedTools.delete(name);
-    setDraft({ ...draft, allowedTools: [...allowedTools].sort() });
-  }
-
   return (
     <PanelShell
       title="MCP Server"
-      description="默认浏览连接摘要，只有新建或编辑时才显示凭证与工具表单"
+      description="配置可激活的 MCP Server；远端工具不会默认进入模型上下文"
       actions={<Button onClick={beginCreate} disabled={editing || busy}><Plus className="h-4 w-4" />新增 Server</Button>}
     >
       <EntityLayout
@@ -244,7 +236,7 @@ export function McpServerSettingsPanel({ controlApi }: { controlApi: SettingsCon
               <Badge variant={server.enabled ? 'default' : 'outline'}>{server.enabled ? '启用' : '停用'}</Badge>
             </span>
             <span className="truncate text-xs text-muted-foreground">{server.id}</span>
-            <span className="text-xs text-muted-foreground">允许 {server.allowedTools.length} 个工具</span>
+            <span className="line-clamp-2 text-xs text-muted-foreground">{server.description}</span>
           </button>
         )) : <div className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">暂无 MCP Server</div>}
       >
@@ -264,20 +256,21 @@ export function McpServerSettingsPanel({ controlApi }: { controlApi: SettingsCon
               <div className="grid gap-3 md:grid-cols-2">
                 <Field label="Server ID"><Input value={draft.id} onChange={(event) => setDraft({ ...draft, id: event.target.value })} /></Field>
                 <Field label="显示名称"><Input value={draft.label} onChange={(event) => setDraft({ ...draft, label: event.target.value })} /></Field>
+                <div className="md:col-span-2"><Field label="能力描述"><Textarea rows={3} value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></Field></div>
                 <Field label="URL"><Input value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} placeholder="https://example.com/mcp" /></Field>
                 <Field label="Bearer Token"><Input type="password" value={draft.bearerToken} onChange={(event) => setDraft({ ...draft, bearerToken: event.target.value })} /></Field>
                 <Field label="超时毫秒"><Input type="number" min={1000} value={draft.timeoutMs} onChange={(event) => setDraft({ ...draft, timeoutMs: Number(event.target.value) })} /></Field>
                 <Field label="结果上限"><Input type="number" min={1000} value={draft.maxOutput} onChange={(event) => setDraft({ ...draft, maxOutput: Number(event.target.value) })} /></Field>
                 <div className="md:col-span-2"><Field label="Headers（每行 name=value）"><Textarea rows={4} value={headersToText(draft.headers)} onChange={(event) => setDraft({ ...draft, headers: textToHeaders(event.target.value) })} /></Field></div>
                 <div className="flex items-center justify-between rounded-md border p-3 md:col-span-2">
-                  <div><div className="text-sm font-medium">启用 Server</div><div className="text-xs text-muted-foreground">停用后不会向模型注册远端工具</div></div>
+                  <div><div className="text-sm font-medium">启用 Server</div><div className="text-xs text-muted-foreground">启用后只注入 id 和描述；调用 mcp_activate 后才加载工具 schema</div></div>
                   <Switch checked={draft.enabled} onCheckedChange={(enabled) => setDraft({ ...draft, enabled })} />
                 </div>
               </div>
               <div className="flex items-center justify-between gap-3">
-                <div className="text-sm font-medium">允许工具</div>
+                <div><div className="text-sm font-medium">激活后加载的工具</div><div className="text-xs text-muted-foreground">当前 Server 返回的全部工具会在当前 run 激活后加入请求上下文</div></div>
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-muted-foreground">已允许 {draft.allowedTools.length} / 已发现 {discoveredTools.length}</span>
+                  <span className="text-xs text-muted-foreground">已发现 {discoveredTools.length}</span>
                   <Button variant="outline" size="sm" onClick={() => void testServer(draft)} disabled={probing}>{probing ? <Spinner className="h-4 w-4" /> : <RefreshCw className="h-4 w-4" />}测试并刷新</Button>
                 </div>
               </div>
@@ -285,10 +278,9 @@ export function McpServerSettingsPanel({ controlApi }: { controlApi: SettingsCon
                 <div className="grid divide-y">
                   {!discoveredTools.length && <div className="p-3 text-sm text-muted-foreground">尚未发现工具，请先测试连接</div>}
                   {discoveredTools.map((tool) => (
-                    <label key={`${tool.serverId}:${tool.name}`} className="flex cursor-pointer items-start gap-3 p-3 hover:bg-accent/60">
-                      <Checkbox checked={draft.allowedTools.includes(tool.name)} onCheckedChange={(checked) => toggleDraftTool(tool.name, checked === true)} />
+                    <div key={`${tool.serverId}:${tool.name}`} className="flex items-start gap-3 p-3">
                       <span className="min-w-0 flex-1"><span className="block break-all text-sm font-medium">{tool.name}</span><span className="block text-xs text-muted-foreground">{tool.description || tool.mappedName}</span></span>
-                    </label>
+                    </div>
                   ))}
                 </div>
               </ScrollArea>
@@ -311,19 +303,14 @@ export function McpServerSettingsPanel({ controlApi }: { controlApi: SettingsCon
             <CardContent className="grid gap-4">
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                 <SummaryRow label="状态" value={selected.enabled ? '已启用' : '已停用'} />
+                <SummaryRow label="能力描述" value={selected.description} />
                 <SummaryRow label="URL" value={selected.url} />
                 <SummaryRow label="认证" value={selected.bearerToken ? '已配置 Bearer Token' : '未配置'} />
                 <SummaryRow label="Headers" value={`${selected.headers.length} 项`} />
                 <SummaryRow label="超时" value={`${selected.timeoutMs} ms`} />
                 <SummaryRow label="结果上限" value={selected.maxOutput.toLocaleString()} />
               </div>
-              <div>
-                <div className="mb-2 text-sm font-medium">允许工具</div>
-                <div className="flex flex-wrap gap-2">
-                  {!selected.allowedTools.length && <span className="text-sm text-muted-foreground">未允许任何工具</span>}
-                  {selected.allowedTools.map((tool) => <Badge key={tool} variant="outline">{tool}</Badge>)}
-                </div>
-              </div>
+              <div className="rounded-md border bg-muted/20 p-3 text-sm text-muted-foreground">运行时只预注入 Server ID 和能力描述；当前 run 调用 mcp_activate 后，才加载该 Server 返回的全部工具 schema。</div>
             </CardContent>
           </Card>
         ) : <div className="flex h-full items-center justify-center rounded-lg border border-dashed text-sm text-muted-foreground">选择或新建一个 MCP Server</div>}

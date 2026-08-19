@@ -2,7 +2,6 @@
 // every tool call passes through (see registry.runTool). It provides the trusted
 // boundary for "safely calling system capabilities":
 //
-//   - allow/deny lists           (honored in any mode)
 //   - output size cap            (honored in any mode)
 //   - filesystem path confinement (enforce mode)
 //   - shell enable + command denylist (enforce mode)
@@ -17,9 +16,6 @@ import { isAbsolute, relative, resolve } from 'node:path';
 export interface ToolPolicyConfig {
   sandbox: 'off' | 'enforce';
   workspaceRoot: string;
-  toolAccessMode: 'allow' | 'deny';
-  allow: string[];
-  deny: string[];
   shellEnabled: boolean;
   shellDeny: string[];
   network: 'enabled' | 'disabled';
@@ -36,8 +32,7 @@ interface ToolMeta {
   pathArgs?: string[];
 }
 
-// Per-tool security metadata. Unknown tools default to 'safe' (only allow/deny
-// and the output cap apply).
+// 每个工具的安全元数据；未知工具按 safe 处理，但仍受统一输出上限约束。
 const META: Record<string, ToolMeta> = {
   file_read: { kind: 'fs-read', pathArgs: ['path'] },
   file_write: { kind: 'fs-write', pathArgs: ['path'] },
@@ -57,6 +52,7 @@ const META: Record<string, ToolMeta> = {
   ask_user: { kind: 'safe' },
   update_plan: { kind: 'safe' },
   skill_activate: { kind: 'safe' },
+  mcp_activate: { kind: 'safe' },
   subagent_run: { kind: 'safe' },
   subagent_poll: { kind: 'safe' },
   subagent_list: { kind: 'safe' },
@@ -85,11 +81,6 @@ export function createPolicy(cfg: ToolPolicyConfig): ToolPolicy {
   const shellDenyRes = cfg.shellDeny.map((p) => new RegExp(p, 'i'));
 
   function check(name: string, args: Record<string, unknown>): PolicyDecision {
-    // 1) deny/allow lists — honored in every mode.
-    if (cfg.deny.includes(name)) return { ok: false, reason: `工具 '${name}' 被策略拒绝` };
-    if (cfg.toolAccessMode === 'allow' && !cfg.allow.includes(name)) {
-      return { ok: false, reason: `工具 '${name}' 不在允许列表中` };
-    }
     const meta = META[name] ?? { kind: 'safe' as const };
     const readonlyAgentRoots = [
       resolve(cfg.workspaceRoot, '.agents/skills'),

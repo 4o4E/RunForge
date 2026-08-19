@@ -1,7 +1,6 @@
 import { Router } from 'express';
-import type { LlmProviderSettings, LlmSettingsOptions, McpServerProbeResult, McpSettings, McpSettingsOptions, ShellCommandOptionItem, ToolSettingsOptionItem, ToolSettingsOptions } from '@runforge/contracts';
+import type { LlmProviderSettings, LlmSettingsOptions, McpServerProbeResult, McpSettingsOptions, ShellCommandOptionItem, ToolSettingsOptions } from '@runforge/contracts';
 import { getLlmSettings, getMcpSettings, getPageState, getRuntimeCapabilitiesSettings, getToolSettings, llmModelOptions, normalizeLlmSettings, normalizeMcpSettings, saveLlmSettings, saveMcpSettings, savePageState, saveRuntimeCapabilitiesSettings, saveToolSettings, shellPathForSettings } from '../settings.js';
-import { toolSchemas } from '../tools/registry.js';
 import { findExecutable, scanExecutableNames } from '../tools/sandbox.js';
 import { config } from '../config.js';
 import { pingLlmProvider, probeLlmProviderModels, testLlmProviderChat } from '../llm/probe.js';
@@ -27,12 +26,6 @@ function uniq(items: string[]): string[] {
   return [...new Set(items.map((item) => item.trim()).filter(Boolean))];
 }
 
-export async function toolOptions(mcpSettings?: McpSettings): Promise<ToolSettingsOptionItem[]> {
-  return (await toolSchemas(undefined, mcpSettings))
-    .map((tool) => ({ name: tool.name, description: tool.description }))
-    .sort((a, b) => a.name.localeCompare(b.name));
-}
-
 export function shellCommandOptions(names: string[], envPath = process.env.PATH ?? ''): ShellCommandOptionItem[] {
   return uniq(names)
     .map((name) => {
@@ -52,9 +45,7 @@ function llmProviderFromBody(body: unknown): LlmProviderSettings {
 export async function getToolSettingsOptions(scope: TenantScope): Promise<ToolSettingsOptions> {
   const settings = await getToolSettings(scope);
   const envPath = shellPathForSettings(settings);
-  const mcpSettings = await getMcpSettings(scope);
   return {
-    tools: await toolOptions(mcpSettings),
     shellCommands: shellCommandOptions([...config.tools.shellAllowCommands, ...settings.shellAllowCommands], envPath),
     systemPath: process.env.PATH ?? '',
   };
@@ -75,7 +66,6 @@ export async function getMcpSettingsOptions(scope: TenantScope): Promise<McpSett
       name: tool.originalName,
       mappedName: tool.mappedName,
       description: tool.description,
-      enabled: tool.enabled,
     })),
   };
 }
@@ -154,7 +144,6 @@ settingsApi.post('/mcp/server/probe', rejectSystemManagedAccess, async (req, res
         name: tool.originalName,
         mappedName: tool.mappedName,
         description: tool.description,
-        enabled: server.allowedTools.includes(tool.originalName),
       })),
     };
     res.json(result);

@@ -16,7 +16,7 @@ import { shellExecTool } from './managedShell.js';
 import { requiresDatabaseAccess } from './databaseAccessGuard.js';
 import type { ToolResult, ToolRunContext } from './types.js';
 import { normalizeMcpSettings, normalizeToolSettings } from '../settings.js';
-import { shellCommandOptions, toolOptions } from '../api/settings.js';
+import { shellCommandOptions } from '../api/settings.js';
 import { mcpToolName, parseMcpToolName } from '../mcp/client.js';
 import type { Scope } from '../store/types.js';
 
@@ -24,7 +24,6 @@ import type { Scope } from '../store/types.js';
 const text = (r: string | ToolResult): string => (typeof r === 'string' ? r : r.text);
 
 let dir: string;
-const emptyMcpSettings = { servers: [] };
 const TEST_SCOPE: Scope = { tenantId: 'default', userId: 'us_test' };
 
 before(async () => {
@@ -42,29 +41,25 @@ after(async () => {
 });
 
 test('registry exposes neutral tool schemas and dispatches by name', async () => {
-  const schemas = await toolSchemas(undefined, emptyMcpSettings);
+  const schemas = await toolSchemas();
   assert.ok(schemas.find((s) => s.name === 'shell'));
   assert.equal(schemas.some((s) => s.name === 'finish_conversation'), false);
   assert.equal(schemas.some((s) => s.name.includes('artifact')), false);
   assert.ok(schemas.find((s) => s.name === 'skill_activate'));
+  assert.ok(schemas.find((s) => s.name === 'mcp_activate'));
   assert.ok(schemas.find((s) => s.name === 'workflow_list'));
   assert.ok(schemas.find((s) => s.name === 'workflow_read'));
   assert.ok(schemas.find((s) => s.name === 'datasource_list'));
-  assert.ok((await toolSchemas(['file_read'], emptyMcpSettings)).some((s) => s.name === 'file_read'));
-  assert.equal((await toolSchemas(['file_read'], emptyMcpSettings)).some((s) => s.name === 'shell'), false);
-  assert.ok((await toolSchemas(['file_read'], emptyMcpSettings)).some((s) => s.name === 'update_plan'));
-  assert.ok((await toolSchemas(['file_read'], emptyMcpSettings)).some((s) => s.name === 'workflow_read'));
-  assert.ok((await toolSchemas(['datasource_list'], emptyMcpSettings)).some((s) => s.name === 'datasource_list'));
+  assert.ok((await toolSchemas(['file_read'])).some((s) => s.name === 'file_read'));
+  assert.equal((await toolSchemas(['file_read'])).some((s) => s.name === 'shell'), false);
+  assert.ok((await toolSchemas(['file_read'])).some((s) => s.name === 'update_plan'));
+  assert.ok((await toolSchemas(['file_read'])).some((s) => s.name === 'workflow_read'));
+  assert.ok((await toolSchemas(['datasource_list'])).some((s) => s.name === 'datasource_list'));
   assert.ok(getTool('glob'));
   assert.match((await runTool('does_not_exist', {}, { scope: TEST_SCOPE })).text, /未知工具/);
 });
 
-test('tool settings options come from backend tool registry and command resolution', async () => {
-  const tools = await toolOptions(emptyMcpSettings);
-  assert.ok(tools.find((tool) => tool.name === 'shell'));
-  assert.ok(tools.find((tool) => tool.name === 'file_read'));
-  assert.equal(tools.some((tool) => tool.name === 'finish_conversation'), false);
-
+test('shell command settings options come from command resolution', () => {
   const commands = shellCommandOptions(['sh', 'definitely_missing_command_for_test', 'sh']);
   assert.deepEqual(commands.map((command) => command.name).sort(), ['definitely_missing_command_for_test', 'sh']);
   assert.equal(commands.find((command) => command.name === 'sh')?.available, true);
@@ -78,12 +73,35 @@ test('mcp tool names are mapped into a separate namespace', () => {
   assert.equal(parseMcpToolName('search'), null);
 });
 
+test('MCP schema and execution require current-run activation', async () => {
+  const mappedTool = {
+    serverId: 'github',
+    serverLabel: 'GitHub',
+    originalName: 'search',
+    mappedName: mcpToolName('github', 'search'),
+    description: '搜索仓库',
+    parameters: { type: 'object' },
+  };
+  assert.equal((await toolSchemas()).some((tool) => tool.name === mappedTool.mappedName), false);
+  assert.equal((await toolSchemas(undefined, [mappedTool])).some((tool) => tool.name === mappedTool.mappedName), true);
+
+  const settings = normalizeMcpSettings({
+    servers: [{ id: 'github', label: 'GitHub', description: '代码托管能力', enabled: true, url: 'https://example.com/mcp' }],
+  });
+  const blocked = await runTool(mappedTool.mappedName, { query: 'runforge' }, {
+    scope: TEST_SCOPE,
+    mcpSettings: settings,
+    activeMcpServerIds: new Set(),
+  });
+  assert.match(blocked.text, /尚未在当前 run 激活/);
+});
+
 test('mcp server ids cannot collide with the tool-name separator', () => {
   const settings = normalizeMcpSettings({ servers: [{ id: 'bad__server', label: 'Bad', url: 'https://example.com/mcp' }] });
   assert.equal(settings.servers[0].id, 'bad-server');
 });
 
-test('mcp settings only keep remote server connection fields', () => {
+test('mcp settings keep connection and activation-routing fields', () => {
   const settings = normalizeMcpSettings({
     servers: [{
       id: 'local',
@@ -98,6 +116,8 @@ test('mcp settings only keep remote server connection fields', () => {
   });
   const server = settings.servers[0] as unknown as Record<string, unknown>;
   assert.equal(server.url, 'https://example.com/mcp');
+  assert.equal(server.description, 'Local');
+  assert.equal('allowedTools' in server, false);
   assert.equal('transport' in server, false);
   assert.equal('command' in server, false);
   assert.equal('args' in server, false);

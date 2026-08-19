@@ -158,17 +158,14 @@ export const config = {
   },
   // Tool sandbox / permission policy (Phase 6). The product is a general-purpose
   // OS agent, so confinement is OPT-IN: TOOL_SANDBOX=enforce turns on path
-  // confinement, shell gating and the network switch. `deny`/`allow` lists and
-  // the output cap apply in any mode. Default 'off' preserves current behavior.
+  // confinement, shell gating and the network switch. 原生工具始终注册，安全边界由
+  // 沙箱、网络开关和具体工具约束承担。
   tools: {
     sandbox: ((process.env.TOOL_SANDBOX ?? 'off') === 'enforce' ? 'enforce' : 'off') as 'off' | 'enforce',
     // shell 子进程沙箱后端:auto=Linux+bwrap 时启用,none=直通,bwrap=强制启用。
     sandboxBackend: sandboxBackend(process.env.TOOL_SANDBOX_BACKEND),
     // Filesystem tools are confined under this root in enforce mode (default: repo root).
     workspaceRoot: resolve(process.env.TOOL_WORKSPACE_ROOT ?? resolve(process.cwd(), '..')),
-    allow: list(process.env.TOOL_ALLOW), // if non-empty, ONLY these tools may run
-    deny: list(process.env.TOOL_DENY), // these tools are always blocked
-    toolAccessMode: (list(process.env.TOOL_ALLOW).length ? 'allow' : 'deny') as 'allow' | 'deny',
     shellEnabled: (process.env.SHELL_ENABLED ?? 'true') !== 'false',
     // true 时 shell 直接使用宿主机 PATH 和 cwd=workspaceRoot，避免 bwrap 白名单漏投射 CLI。
     shellUseHostPath: (process.env.SHELL_USE_HOST_PATH ?? 'true') !== 'false',

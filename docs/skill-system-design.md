@@ -4,7 +4,7 @@
 
 ## 背景和目标
 
-当前原逻辑是：后端在每轮 LLM 调用时通过 `toolSchemas()` 暴露全部工具 schema，工具说明、参数 schema 和业务特化工具都会进入模型上下文。随着工具数量增加，会带来三个问题：
+早期原逻辑是：后端在每轮 LLM 调用时通过 `toolSchemas()` 暴露原生工具和全部 MCP 工具 schema，业务说明也容易长期进入模型上下文。当前边界改为“原生工具常驻，Skill 入口和 MCP 工具按 run 渐进加载”。随着外部能力增加，仍要解决三个问题：
 
 - 上下文膨胀：模型每轮都要读一堆不相关工具。
 - 工具选择变差：工具越多，模型越容易选错或误用。
@@ -12,7 +12,7 @@
 
 新的 skill 系统要做的改变：
 
-- 初始上下文只注入 skill 的 `name` 和 `description`，用于路由判断。
+- 初始上下文只注入 skill 的 `id` 和 `description`，用于路由判断。
 - skill 激活后才加载 `SKILL.md` 的正文和运行上下文。
 - skill 可以携带 `references/`、`assets/`、`scripts/`，但这些内容只按需读取或执行。
 - skill 内资源通过 bash 和文件系统暴露，不引入 `skill://` resource URL。
@@ -32,16 +32,16 @@
    `SKILL.md` 是入口，附属内容放在同一目录下，便于版本管理和本地执行。
 
 2. **初始上下文只做路由。**
-   初始注入只包含 `name` 和 `description`。路径、来源、工具权限、hash、版本都不进入初始列表。
+   初始注入只包含 `id` 和 `description`。路径、hash、版本都不进入初始列表。
 
 3. **激活后最小注入。**
-   激活 skill 时只注入这个 skill 独有的信息：`name`、运行时根目录和去掉 frontmatter 后的 `SKILL.md` 正文。路径规则、资源规则、权限语义等通用说明放在系统提示词中，不随每个 skill 重复注入。
+   激活工具结果只注入这个 skill 独有的信息：`id`、`name`、运行时根目录和去掉 frontmatter 后的 `SKILL.md` 正文。下一次 LLM 请求完整消费后立即折叠结果，每轮只保留轻量 run 锚点。
 
 4. **资源直接走 bash / 文件工具。**
    skill 中的模板、数据、文档和脚本都是普通文件。模型可以用 `sed`、`rg`、`node`、`python` 等命令查看和执行，但所有调用必须经过现有工具策略和沙箱。
 
-5. **权限由后端执行，不靠提示词约束。**
-   `allowed-tools` 只能缩小 skill 可用工具范围，不能放大全局权限。内置 skill 只读也必须由 policy 或 bwrap 只读挂载保证。
+5. **Skill 不承担工具准入。**
+   主 agent 的原生工具默认加载；Skill 只提供方法、入口和资源。安全边界仍由路径策略、shell 沙箱、网络开关和具体工具约束执行。
 
 6. **长任务中保留轻量锚点。**
    skill 的大正文和工具结果可以被上下文压缩；每轮只需要保留已激活 skill 的短锚点，必要时重新读取 `SKILL.md` 或附属文件。
@@ -135,7 +135,6 @@ server start
 ---
 name: data-query
 description: Query project datasource docs and run readonly SQL helper scripts. Use when the user asks about datasource schemas, account pools, or report queries.
-allowed-tools: shell grep file_read
 compatibility: Requires node and psql client when running scripts.
 metadata:
   runforge.tool-scope: readonly
@@ -147,7 +146,6 @@ metadata:
 
 - `name`：必需，和目录名一致；小写字母、数字和短横线；不使用 `builtin-` 前缀。
 - `description`：必需，写清楚这个 skill 做什么、什么时候用；这是初始路由的核心。
-- `allowed-tools`：可选，声明该 skill 预期需要的最小工具集合。
 - `compatibility`：可选，说明运行环境要求，例如需要 `python3`、`node`、`psql`。
 - `metadata.runforge.*`：可选，本项目私有扩展。
 
@@ -171,7 +169,6 @@ interface SkillIndexItem {
   source: 'builtin' | 'user';
   root: string;
   readonly: boolean;
-  allowedTools: string[];
   compatibility?: string;
   hash: string;
 }
@@ -181,11 +178,11 @@ interface SkillIndexItem {
 
 ```text
 可用 Skills / Available skills:
-- code-review: Review code changes and identify bugs, regressions, and missing tests.
-- data-query: Query project datasource docs and run readonly SQL helper scripts.
+- builtin:code-review: Review code changes and identify bugs, regressions, and missing tests.
+- user:data-query: Query project datasource docs and run readonly SQL helper scripts.
 ```
 
-不注入路径、hash、source、allowedTools 的原因：
+不注入路径和 hash 的原因：
 
 - 初始列表只用于选择 skill，不用于执行。
 - 路径提前出现会增加模型错误引用路径的概率。
@@ -207,18 +204,19 @@ skill 激活是 run 级状态，不是全局状态。
 ```text
 LLM 看到初始 skill 列表
 -> 判断任务需要某个 skill
--> 调用 skill_activate(name)
+-> 调用 skill_activate(id)
 -> 后端解析 SkillIndex
--> 校验 allowed-tools 和全局工具策略
 -> 读取并解析 SKILL.md
--> 注入 name + root + 正文
+-> 通过工具结果注入 id + name + root + 正文
 -> 记录 skill_activated 事件
+-> 下一次 LLM 请求消费入口后折叠该工具结果，并保留 run 级短锚点
 ```
 
 激活后只注入最小内容：
 
 ```text
-已激活 Skill / Activated Skill:
+当前 run 的 Skill 激活结果 / Skill activation result for the current run:
+- id: user:data-query
 - name: data-query
 - root: /workspace/.skills/data-query
 
@@ -228,10 +226,9 @@ LLM 看到初始 skill 列表
 
 不随 skill 重复注入的内容：
 
-- `source`、`readonly`、`hash`、`allowedTools` 等索引和审计字段。
+- `source`、`readonly`、`hash` 等索引和审计字段。
 - 相对路径如何解析。
 - `references/`、`assets/`、`scripts/` 的通用用法。
-- `allowed-tools` 和全局工具策略的权限关系。
 - 内置 skill 只读、用户 skill 脚本不可信等安全规则。
 
 这些内容由系统提示词和后端策略统一承载。
@@ -296,32 +293,13 @@ node /workspace/.skills/data-query/scripts/query.js --help
 - 大文件先用 `ls`、`file`、`head`、`rg` 定位，再局部读取。
 - 二进制文件不要直接塞进工具输出；脚本应输出摘要或生成 artifact。
 
-## allowed-tools 语义
+## Skill 与工具的关系
 
-`allowed-tools` 是 skill 的最小工具需求声明，不是授权来源。
-
-最终工具可用集合：
-
-```text
-全局 app_settings 工具策略
-∩ run 级策略
-∩ skill allowed-tools
-```
-
-含义：
-
-- 如果全局禁用 shell，skill 写了 `allowed-tools: shell` 也不能用。
-- 如果全局 deny 了 web_search，skill 不能重新打开。
-- 如果 skill 没写 `allowed-tools`，只给基础安全工具，例如 `file_read`、`grep`，不自动给 shell、网络和写文件。
-- 如果多个 skill 同时激活，可用工具集取所有 active skill 的并集后再和全局策略取交集；但写工具、shell 和网络仍应按 run 策略严格限制。
-
-建议第一阶段支持的工具名沿用现有 registry 名称：
-
-```text
-shell file_read file_write file_edit glob grep web_fetch web_search ask_user update_plan
-```
-
-后续如果引入业务工具，可以让业务工具只在特定 skill 激活后暴露给模型，避免常驻工具 schema 膨胀。
+- 主 agent 的原生工具 schema 每个 run 默认加载，不由 Skill 或系统管理页做 allow/deny。
+- Skill 激活只加载入口说明，不新增也不删除原生工具。
+- 文件路径围栏、只读目录、shell 开关、命令限制、网络开关和输出上限仍由后端强制执行。
+- subagent 可以按 runtime profile 选择较小的原生工具集合；这是 subagent 的执行配置，不是 Skill 准入。
+- MCP 属于外部动态工具，必须通过 `mcp_activate(id)` 在当前 run 激活后才加载 schema，与原生工具区别处理。
 
 ## 内置和用户 skill 的冲突
 
@@ -353,15 +331,15 @@ user:code-review
 
 第一层：初始 skill 列表裁剪。
 
-- 只保留 `name` 和 `description`。
+- 只保留 `id` 和 `description`。
 - 超预算时裁剪低相关 skill。
 - 被裁剪的 skill 不代表不可用；后续可以通过搜索或设置页选择。
 
 第二层：active skill 内容裁剪。
 
-- 激活时只注入 `name`、`root` 和 `SKILL.md` 正文。
+- 激活工具结果只注入 `id`、`name`、`root` 和 `SKILL.md` 正文。
 - `references/`、`assets/`、`scripts/` 不提前全文注入。
-- 长任务中如果 `SKILL.md` 的工具结果被压缩，不必强保留全文。
+- 下一次 LLM 请求完整消费入口后立即折叠激活工具结果，不让正文长期占用上下文。
 
 第三层：长任务锚点。
 
@@ -399,8 +377,7 @@ sed -n '1,220p' /workspace/.skills/data-query/SKILL.md
   "source": "user",
   "root": "/workspace/.skills/data-query",
   "readonly": false,
-  "hash": "sha256:...",
-  "allowedTools": ["shell", "grep", "file_read"]
+  "hash": "sha256:..."
 }
 ```
 
@@ -416,7 +393,6 @@ sed -n '1,220p' /workspace/.skills/data-query/SKILL.md
 - shell 执行仍受 `SHELL_ENABLED`、`SHELL_DENY`、`TOOL_NETWORK`、`TOOL_MAX_OUTPUT` 控制。
 - 用户 skill 脚本视为不可信输入。
 - 内置 skill 不能因为来自代码仓库就绕过全局工具策略。
-- `allowed-tools` 只能缩小权限。
 
 第一阶段不解决的问题：
 
@@ -450,8 +426,8 @@ sed -n '1,220p' /workspace/.skills/data-query/SKILL.md
 
 当前实现状态：
 
-- 阶段 1 已落地：`server/src/skills/` 会扫描内置和用户 skill，物化内置 skill 到 `.agents/skills`，初始上下文注入 skill 名称和描述，并通过 `skill_activate` 按需加载正文。
-- 阶段 2 已部分落地：`allowed-tools` 会参与工具 schema 暴露，工具策略会保护 `.agents/skills` 写入；更细的 symlink 越界和 bwrap 只读挂载仍需要继续验收。
+- 阶段 1 已落地：`server/src/skills/` 会扫描内置和用户 skill，物化内置 skill 到 `.agents/skills`，初始上下文注入 skill id 和描述，并通过 `skill_activate` 按需加载正文。
+- 阶段 2 已部分落地：工具策略会保护 `.agents/skills` 写入；更细的 symlink 越界和 bwrap 只读挂载仍需要继续验收。
 - 阶段 3 已部分落地：DB events 能看到 `skill_activated`，但设置页管理、冲突展示和完整前端调试面仍未完成。
 - 阶段 4、阶段 5 仍是后续平台化方向。
 
@@ -461,13 +437,13 @@ sed -n '1,220p' /workspace/.skills/data-query/SKILL.md
 - 扫描内置和用户 skill。
 - 校验 `SKILL.md`。
 - materialize 内置 skill 到 `.agents/skills`。
-- 初始上下文注入 `name` 和 `description`。
+- 初始上下文注入 `id` 和 `description`。
 - 新增 `skill_activate` 工具。
 - 记录 `skill_activated` 事件。
 
 阶段 2：权限和沙箱收紧。
 
-- `allowed-tools` 参与工具 schema 暴露。
+- 原生工具保持默认加载，Skill 不承担工具准入。
 - `.agents/skills` 写保护。
 - shell/bwrap 对 `.agents/skills` 只读挂载。
 - realpath 防 symlink 越界。
@@ -475,7 +451,7 @@ sed -n '1,220p' /workspace/.skills/data-query/SKILL.md
 阶段 3：前端和调试。
 
 - 设置页展示 builtin/user skill。
-- 展示冲突、hash、readonly、allowed-tools。
+- 展示冲突、hash、readonly。
 - run 详情展示本次激活了哪些 skill。
 
 阶段 4：复杂路由。
@@ -498,12 +474,12 @@ sed -n '1,220p' /workspace/.skills/data-query/SKILL.md
 基础验收：
 
 - 启动后能发现内置 skill 和用户 skill。
-- 初始 LLM 上下文只包含 `name` 和 `description`。
+- 初始 LLM 上下文只包含 `id` 和 `description`。
 - 模型能激活 skill，并看到运行时 root 和 `SKILL.md` 正文。
 - 模型能通过 bash 读取 `references/`，执行 `scripts/`，使用 `assets/`。
 - 内置 skill materialize 后不可被 file 写工具或 shell 修改。
 - 用户 skill 同名覆盖内置 skill 时有明确 warning。
-- `allowed-tools` 能限制 skill 激活后的工具可见集合。
+- Skill 激活前后原生工具集合不变。
 - 长任务压缩后仍保留 active skill 锚点，必要时可重新读取 `SKILL.md`。
 
 安全验收：

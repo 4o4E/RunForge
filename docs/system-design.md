@@ -55,7 +55,7 @@ Server (Node.js / TypeScript 单体)
   |-- Agent 执行循环
   |     |-- ContextManager: system prompt、Goal 锚点、历史消息、压缩视图
   |     |-- Provider 抽象: aisdk / openai-responses / openai-chat / anthropic / mock
-  |     |-- Skill / Workflow registry: 渐进加载任务流程和业务能力
+  |     |-- Skill / MCP / Workflow registry: 按 run 渐进加载外部能力和任务流程
   |     |-- Tool registry: 工具注册、策略检查、输出截断
   |     |-- Subagent runner: 异步只读子任务
   |     `-- Run bus: 进程内事件发布
@@ -177,7 +177,7 @@ Web 创建 thread
 
 - `Sidebar`：会话列表和入口导航。
 - `ChatView`、`Conversation`、`Composer`：聊天主界面。
-- `SettingsView`：当前用户的外观、个人用量和归档会话；工具策略、供应商和运行时能力由 `/sys-admin` 系统设置按租户管理。
+- `SettingsView`：当前用户的外观、个人用量和归档会话；Shell/沙箱、MCP 连接、供应商和运行时能力由 `/sys-admin` 系统设置按租户管理。
 - `RemoteFilesPanel`：工作区文件浏览和预览。
 
 ## Provider 设计
@@ -249,7 +249,7 @@ Run API：
 辅助 API：
 
 - `/api/files`：工作区文件信息、文件读取和上传。
-- `/api/settings`：读取和保存工具策略配置。
+- `/api/settings`：读取和保存 Shell/沙箱与 MCP 连接配置。
 - `/api/shell-sessions`、`/api/shell-commands`：托管 shell session、命令、日志、终止和用户标记。
 - `/api/threads/:id/subagents`：列出当前 thread 下可恢复查看的 subagent 子任务。
 - `/api/datasources`、`/api/runtime/datasources`：数据源管理、连通性测试和运行时短期凭证租赁。
@@ -288,7 +288,8 @@ LLM tool call
 
 策略层能力：
 
-- `TOOL_ALLOW` / `TOOL_DENY` 控制工具准入。
+- 主 agent 的原生工具默认全部注册，不提供系统级工具 allow/deny 管理页。
+- Skill 通过 `skill_activate(id)` 加载入口说明；MCP 通过 `mcp_activate(id)` 按当前 run 加载远端工具 schema。
 - `TOOL_SANDBOX=enforce` 时启用文件路径围栏、shell 开关和网络开关。
 - `TOOL_WORKSPACE_ROOT` 定义受控工作区根目录。
 - `SHELL_ENABLED` 控制 shell 工具是否可用。

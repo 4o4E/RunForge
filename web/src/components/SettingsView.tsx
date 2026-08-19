@@ -304,11 +304,11 @@ function newMcpServer(): McpServerSettings {
   return {
     id: `mcp-${Date.now()}`,
     label: 'MCP Server',
+    description: '描述这个 MCP Server 提供的能力。',
     enabled: false,
     url: '',
     bearerToken: '',
     headers: [],
-    allowedTools: [],
     timeoutMs: 60000,
     maxOutput: 40000,
   };
@@ -709,11 +709,9 @@ function ArchivedThreadsSettingsPanel({ onThreadsChanged }: { onThreadsChanged?:
 export function ToolsSettingsPanel({
   controlApi,
   onWorkspaceChanged,
-  section,
 }: {
   controlApi: SettingsControlApi;
   onWorkspaceChanged?: () => void;
-  section: 'access' | 'sandbox-shell';
 }) {
   const [settings, setSettings] = useState<ToolSettings | null>(null);
   const [options, setOptions] = useState<ToolSettingsOptions | null>(null);
@@ -744,14 +742,11 @@ export function ToolsSettingsPanel({
     if (!settings) return null;
     return {
       ...settings,
-      deny: settings.toolAccessMode === 'deny' ? settings.deny : [],
-      allow: settings.toolAccessMode === 'allow' ? settings.allow : [],
       shellDeny: textToList(shellDenyText),
       maxOutput: Math.max(1000, Math.floor(Number(settings.maxOutput) || 1000)),
     };
   }, [settings, shellDenyText]);
 
-  const toolOptions = options?.tools ?? [];
   const shellCommandOptions = options?.shellCommands ?? [];
   const filteredShellCommandOptions = useMemo(() => {
     const query = shellCommandQuery.trim().toLowerCase();
@@ -761,47 +756,7 @@ export function ToolsSettingsPanel({
       return command.name.toLowerCase().includes(query) || path.toLowerCase().includes(query);
     });
   }, [shellCommandOptions, shellCommandQuery]);
-  const allToolNames = useMemo(() => toolOptions.map((tool) => tool.name), [toolOptions]);
-  const selectedToolSet = useMemo(
-    () => new Set(settings?.toolAccessMode === 'allow' ? settings.allow : settings?.deny ?? []),
-    [settings?.allow, settings?.deny, settings?.toolAccessMode],
-  );
   const shellCommandSet = useMemo(() => new Set(settings?.shellAllowCommands ?? []), [settings?.shellAllowCommands]);
-
-  function setToolMode(mode: ToolSettings['toolAccessMode']) {
-    if (!settings) return;
-    if (mode === settings.toolAccessMode) return;
-    if (mode === 'allow') {
-      const denied = new Set(settings.deny);
-      setSettings({ ...settings, toolAccessMode: 'allow', allow: allToolNames.filter((name) => !denied.has(name)), deny: [] });
-      return;
-    }
-    const allowed = new Set(settings.allow);
-    setSettings({ ...settings, toolAccessMode: 'deny', allow: [], deny: allToolNames.filter((name) => !allowed.has(name)) });
-  }
-
-  function setToolSelected(name: string, checked: boolean) {
-    if (!settings) return;
-    if (settings.toolAccessMode === 'allow') {
-      setSettings({ ...settings, allow: toggleListValue(settings.allow, name, checked), deny: [] });
-      return;
-    }
-    setSettings({ ...settings, allow: [], deny: toggleListValue(settings.deny, name, checked) });
-  }
-
-  function setAllTools(checked: boolean) {
-    if (!settings) return;
-    if (settings.toolAccessMode === 'allow') {
-      setSettings({ ...settings, allow: checked ? allToolNames : [], deny: [] });
-      return;
-    }
-    setSettings({ ...settings, allow: [], deny: checked ? allToolNames : [] });
-  }
-
-  function resetTools() {
-    if (!settings) return;
-    setSettings({ ...settings, toolAccessMode: 'deny', allow: [], deny: [] });
-  }
 
   function setShellCommand(name: string, checked: boolean) {
     if (!settings) return;
@@ -848,13 +803,11 @@ export function ToolsSettingsPanel({
   if (!settings || !options) {
     return <div className="flex min-h-64 items-center justify-center text-sm text-muted-foreground">正在读取配置...</div>;
   }
-  const accessSection = section === 'access';
-
   return (
     <SettingsPanelShell
-      title={accessSection ? '工具准入' : 'Shell / 沙箱'}
-      description={accessSection ? '选择可调用或拒绝调用的工具' : 'Shell 执行方式、bwrap 后端、PATH 和可见指令'}
-      contentClassName={accessSection ? 'flex flex-col gap-4' : 'grid content-start gap-4'}
+      title="Shell / 沙箱"
+      description="原生工具默认加载；这里仅配置 Shell 执行方式、bwrap 后端、PATH 和可见指令"
+      contentClassName="grid content-start gap-4"
       actions={
         <>
           {message && <span className="text-sm text-muted-foreground">{message}</span>}
@@ -866,36 +819,7 @@ export function ToolsSettingsPanel({
       }
     >
 
-      {accessSection ? (
-        <div className="flex min-h-0 flex-1 flex-col gap-4">
-          <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
-            <div className="inline-flex h-8 items-center gap-2 rounded-md border border-input bg-background px-3 text-xs font-medium shadow-sm">
-              <span className={cn(settings.toolAccessMode === 'deny' ? 'text-foreground' : 'text-muted-foreground')}>黑名单</span>
-              <Switch
-                checked={settings.toolAccessMode === 'allow'}
-                onCheckedChange={(checked) => setToolMode(checked ? 'allow' : 'deny')}
-              />
-              <span className={cn(settings.toolAccessMode === 'allow' ? 'text-foreground' : 'text-muted-foreground')}>白名单</span>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Button variant="outline" size="sm" onClick={() => setAllTools(true)}>全选</Button>
-              <Button variant="outline" size="sm" onClick={() => setAllTools(false)}>全不选</Button>
-              <Button variant="outline" size="sm" onClick={resetTools}>重置</Button>
-            </div>
-          </div>
-          <div className="flex min-h-0 flex-1 flex-col gap-2">
-            <div className="text-sm font-medium">{settings.toolAccessMode === 'allow' ? '白名单工具' : '黑名单工具'}</div>
-            <OptionList
-              fill
-              empty="后端没有下发工具候选"
-              items={toolOptions}
-              selected={(name) => selectedToolSet.has(name)}
-              onToggle={setToolSelected}
-            />
-          </div>
-        </div>
-      ) : (
-        <div className="grid gap-4">
+      <div className="grid gap-4">
           <div>
             <Field label="工作区根目录">
               <Input value={settings.workspaceRoot} onChange={(event) => setSettings({ ...settings, workspaceRoot: event.target.value })} />
@@ -1028,8 +952,7 @@ export function ToolsSettingsPanel({
               onToggle={setShellCommand}
             />
           </div>
-        </div>
-      )}
+      </div>
     </SettingsPanelShell>
   );
 }
@@ -1068,15 +991,6 @@ export function McpSettingsPanel({ controlApi }: { controlApi: SettingsControlAp
     const probed = probeResults[server.id]?.tools;
     if (probed) return probed;
     return (options?.tools ?? []).filter((tool) => tool.serverId === server.id);
-  }
-
-  function setToolAllowed(index: number, toolName: string, checked: boolean) {
-    if (!settings) return;
-    const server = settings.servers[index];
-    const next = new Set(server.allowedTools);
-    if (checked) next.add(toolName);
-    else next.delete(toolName);
-    updateServer(index, { allowedTools: [...next].sort() });
   }
 
   async function save() {
@@ -1121,7 +1035,7 @@ export function McpSettingsPanel({ controlApi }: { controlApi: SettingsControlAp
   return (
     <SettingsPanelShell
       title="MCP Client"
-      description="连接外部 MCP Server，并选择允许模型调用的远端工具"
+      description="连接外部 MCP Server；工具只在当前 run 激活后加载"
       contentClassName="grid content-start gap-4"
       actions={
         <>
@@ -1142,7 +1056,6 @@ export function McpSettingsPanel({ controlApi }: { controlApi: SettingsControlAp
       )}
       {settings.servers.map((server, index) => {
         const serverTools = toolsForServer(server);
-        const allowed = new Set(server.allowedTools);
         return (
           <Card key={index} className="rounded-lg shadow-sm">
             <CardHeader className="space-y-3">
@@ -1154,6 +1067,7 @@ export function McpSettingsPanel({ controlApi }: { controlApi: SettingsControlAp
                   <Field label="名称">
                     <Input value={server.label} onChange={(event) => updateServer(index, { label: event.target.value })} />
                   </Field>
+                  <div className="md:col-span-2"><Field label="能力描述"><Textarea rows={3} value={server.description} onChange={(event) => updateServer(index, { description: event.target.value })} /></Field></div>
                 </div>
                 <div className="flex shrink-0 flex-wrap items-center gap-2">
                   <Badge variant={server.enabled ? 'default' : 'outline'}>{server.enabled ? '已启用' : '未启用'}</Badge>
@@ -1194,37 +1108,20 @@ export function McpSettingsPanel({ controlApi }: { controlApi: SettingsControlAp
               </div>
               <div className="grid gap-2">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="text-sm font-medium">允许工具</div>
+                  <div><div className="text-sm font-medium">激活后加载的工具</div><div className="text-xs text-muted-foreground">当前 Server 返回的全部工具会加入当前 run</div></div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <div className="text-xs text-muted-foreground">已允许 {server.allowedTools.length} / 已发现 {serverTools.length}</div>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => updateServer(index, { allowedTools: serverTools.map((tool) => tool.name).sort() })}
-                      disabled={serverTools.length === 0}
-                    >
-                      全选
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => updateServer(index, { allowedTools: [] })}
-                      disabled={server.allowedTools.length === 0}
-                    >
-                      清空
-                    </Button>
+                    <div className="text-xs text-muted-foreground">已发现 {serverTools.length}</div>
                   </div>
                 </div>
-                <OptionList
-                  empty="还没有发现工具，请先测试连接"
-                  items={serverTools.map((tool) => ({ name: tool.name, description: tool.description }))}
-                  selected={(name) => allowed.has(name)}
-                  renderMeta={(item) => {
-                    const tool = serverTools.find((candidate) => candidate.name === item.name);
-                    return tool ? <Badge variant="outline">{tool.mappedName}</Badge> : null;
-                  }}
-                  onToggle={(name, checked) => setToolAllowed(index, name, checked)}
-                />
+                <div className="grid divide-y rounded-md border">
+                  {!serverTools.length && <div className="p-3 text-sm text-muted-foreground">还没有发现工具，请先测试连接</div>}
+                  {serverTools.map((tool) => (
+                    <div key={tool.mappedName} className="flex items-start justify-between gap-3 p-3">
+                      <div className="min-w-0"><div className="break-all text-sm font-medium">{tool.name}</div><div className="text-xs text-muted-foreground">{tool.description}</div></div>
+                      <Badge variant="outline">{tool.mappedName}</Badge>
+                    </div>
+                  ))}
+                </div>
               </div>
             </CardContent>
           </Card>

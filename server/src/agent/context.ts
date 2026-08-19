@@ -11,7 +11,7 @@ import {
   type ContextCompactor,
   type WorkingMessage,
 } from './contextCompactor.js';
-import { estimateTokens, totalChars } from './compaction.js';
+import { estimateTokens, maskPlaceholder, totalChars } from './compaction.js';
 
 const SYSTEM_PROMPT = `你是 RunForge，一个通用自主助手。
 
@@ -102,6 +102,7 @@ interface ContextOptions {
   runtimeContext?: string;
   systemPrompt?: string;
   userInputPrefix?: string;
+  activationContext?: string;
   contextSettings?: AgentContextSettings;
 }
 
@@ -122,6 +123,8 @@ export class ContextManager {
   private items: WorkingMessage[] = [];
   /** 目标锚点 system 消息按引用保存，每步可原地刷新，并放在前置 system 区避免被压缩丢掉。 */
   private goalItem: WorkingMessage;
+  /** 当前 run 已激活能力的轻量锚点；正文仍通过可折叠的工具结果进入上下文。 */
+  private activationItem: WorkingMessage;
   /** 每字符 token 估算比例，有真实 provider 用量时会校准。 */
   private tokensPerChar = 0.25;
   private readonly contextSettings: AgentContextSettings;
@@ -138,6 +141,8 @@ export class ContextManager {
     this.items.push({ msg: { role: 'system', content: opts.systemPrompt ?? renderSystemPrompt({ runtimeContext: opts.runtimeContext }) }, dbId: null });
     this.goalItem = { msg: { role: 'system', content: initialGoal }, dbId: null };
     this.items.push(this.goalItem);
+    this.activationItem = { msg: { role: 'system', content: opts.activationContext ?? '' }, dbId: null };
+    this.items.push(this.activationItem);
     for (const p of priorMessages) {
       this.items.push({
         msg: {
@@ -163,6 +168,11 @@ export class ContextManager {
   /** 刷新目标锚点 system 消息；每步重注入，用来防止目标漂移。 */
   setGoal(rendered: string): void {
     this.goalItem.msg = { role: 'system', content: rendered };
+  }
+
+  /** 激活状态属于 run，不写进 thread 历史；每轮只保留轻量 id/root 锚点。 */
+  setActivationContext(rendered: string): void {
+    this.activationItem.msg = { role: 'system', content: rendered };
   }
 
   /** 返回干净的模型消息列表，不把 DB id 泄露给 provider。 */
@@ -208,6 +218,46 @@ export class ContextManager {
   }
 
   /**
+   * 某些工具结果只需要被下一次 LLM 请求完整消费一次。请求完成后立即折叠，既保留
+   * tool_call/tool_result 配对和原始落库内容，也避免长入口说明持续占用上下文。
+   */
+  collapseConsumedToolResults(toolNames: string[], reason = 'consumed-tool-result'): CompactionResult | null {
+    const before = this.items;
+    const items = this.cloneItems(this.items);
+    const wanted = new Set(toolNames);
+    const nameByCallId = new Map<string, string>();
+    for (const item of items) {
+      for (const call of item.msg.toolCalls ?? []) nameByCallId.set(call.id, call.name);
+    }
+
+    const collapsedIds: number[] = [];
+    for (const item of items) {
+      const message = item.msg;
+      if (message.role !== 'tool' || message.collapsed || !message.toolCallId) continue;
+      if (!wanted.has(nameByCallId.get(message.toolCallId) ?? '')) continue;
+      item.msg = { ...message, content: maskPlaceholder(message.content ?? ''), collapsed: 'masked' };
+      if (item.dbId != null) collapsedIds.push(item.dbId);
+    }
+    if (!collapsedIds.length) return null;
+
+    const estBefore = estimateTokens(this.all(), this.tokensPerChar);
+    return this.applyCompactionOutput({
+      items,
+      sentChars: totalChars(items.map((item) => item.msg)),
+      info: {
+        estBefore,
+        estAfter: estimateTokens(items.map((item) => item.msg), this.tokensPerChar),
+        masked: collapsedIds.length,
+        summarized: 0,
+        dropped: 0,
+        reason,
+      },
+      collapsedIds,
+      summarizedIds: [],
+    }, before);
+  }
+
+  /**
    * 工作上下文超过警戒线时执行压缩级联。
    * 这里会原地修改工作列表；有改动则返回新 mask 的 DB id 和压缩结果，否则返回 null。
    */
@@ -220,9 +270,11 @@ export class ContextManager {
   private compactionInput(provider?: Provider) {
     const items = this.cloneItems(this.items);
     const goalIndex = this.items.indexOf(this.goalItem);
+    const activationIndex = this.items.indexOf(this.activationItem);
     // Goal 依赖稳定对象引用逐步刷新；压缩副本中仍复用这一项，确保压缩后 setGoal
     // 修改的是当前模型上下文，而不是已经脱离列表的旧对象。
     if (goalIndex >= 0) items[goalIndex] = this.goalItem;
+    if (activationIndex >= 0) items[activationIndex] = this.activationItem;
     return {
       // 压缩策略可替换消息对象；传入副本后才能可靠比较压缩前后内容并生成审计明细。
       items,
@@ -237,7 +289,7 @@ export class ContextManager {
   private cloneItems(items: WorkingMessage[]): WorkingMessage[] {
     // 压缩函数只替换 WorkingMessage.msg，不会修改 LlmMessage 内部字段；复制包装器
     // 即可隔离策略写入，同时避免每轮复制可能很大的 encrypted_content。
-    return items.map((item) => ({ ...item }));
+    return items.map((item) => item === this.goalItem || item === this.activationItem ? item : { ...item });
   }
 
   private affectedMessages(

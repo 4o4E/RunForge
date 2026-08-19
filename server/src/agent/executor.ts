@@ -4,6 +4,7 @@ import type { LlmDelta, LlmMessage, LlmUsage, Provider } from '../llm/types.js';
 import { parseToolArguments } from '../llm/toolArgs.js';
 import { hydrateImageAttachments } from '../llm/attachments.js';
 import { runTool, toolSchemas } from '../tools/registry.js';
+import { createPolicy } from '../tools/policy.js';
 import { ContextManager, renderRuntimeCapabilitiesContext, renderSystemPrompt } from './context.js';
 import { activateSkill, loadSkillIndex, renderSkillCatalog, renderSkillSystemRules } from '../skills/registry.js';
 import type { SkillIndexItem, SkillActivation } from '../skills/registry.js';
@@ -15,6 +16,12 @@ import { store as defaultStore } from '../store/index.js';
 import { scopeForThread, type Scope, type Store } from '../store/types.js';
 import { getMcpSettings, getRuntimeCapabilitiesSettings, getToolSettings } from '../settings.js';
 import type { McpSettings, RuntimeCapabilitiesSettings, ToolSettings } from '../settings.js';
+import {
+  activateMcpServer,
+  renderMcpCatalog,
+  renderMcpSystemRules,
+  type McpActivation,
+} from '../mcp/client.js';
 import type { RuntimeCapabilityName } from '@runforge/contracts';
 import { query } from '../db/pool.js';
 import { withSpan } from '../telemetry.js';
@@ -41,6 +48,7 @@ const SUBAGENT_FORBIDDEN_TOOLS = new Set([
   ASK_USER_TOOL_NAME,
   'update_plan',
   'skill_activate',
+  'mcp_activate',
   SUBAGENT_RUN_TOOL_NAME,
   SUBAGENT_POLL_TOOL_NAME,
   SUBAGENT_LIST_TOOL_NAME,
@@ -79,6 +87,7 @@ export interface ExecutorDeps {
   resume: boolean;
   toolSettings?: ToolSettings;
   mcpSettings?: McpSettings;
+  mcpToolLoader?: (settings: McpSettings, serverId: string) => Promise<McpActivation>;
   databaseRuntimeEnv?: (scope: Scope, runId: string, allowedCapabilities: RuntimeCapabilityName[]) => Promise<DatabaseRuntimeEnv>;
   generateThreadTitle: boolean;
   contextSettings: AgentContextSettings;
@@ -106,6 +115,21 @@ interface ToolTrace {
 interface LoopGuardHit {
   reason: string;
   question: string;
+}
+
+function renderRunActivationContext(activeSkills: SkillIndexItem[], activeMcp: Map<string, McpActivation>): string {
+  const lines = [
+    '当前 run 已激活能力 / Active capabilities in this run:',
+    activeSkills.length
+      ? `- Skills: ${activeSkills.map((skill) => `${skill.id}, root=${skill.root}`).join('; ')}`
+      : '- Skills: none',
+    activeMcp.size
+      ? `- MCP: ${[...activeMcp.keys()].join(', ')}`
+      : '- MCP: none',
+    '- 这些激活状态只属于当前 run；历史激活记录不代表当前 run 已激活。',
+    '- These activation states belong only to the current run; historical activation records do not mean they are active now.',
+  ];
+  return lines.join('\n');
 }
 
 function durationMs(startedAt: string, endedAt: string): number {
@@ -200,6 +224,8 @@ async function defaultDeps(scope: Scope, overrides: Partial<ExecutorDeps>, model
     stream: overrides.stream ?? configured?.stream ?? config.llm.stream,
     resume: overrides.resume ?? false,
     toolSettings: overrides.toolSettings,
+    mcpSettings: overrides.mcpSettings,
+    mcpToolLoader: overrides.mcpToolLoader,
     databaseRuntimeEnv: overrides.databaseRuntimeEnv,
     generateThreadTitle: overrides.generateThreadTitle ?? overrides.store === undefined,
     contextSettings: overrides.contextSettings ?? (configured ? agentContextSettings(configured.contextWindow) : {
@@ -599,6 +625,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     let goal = initialRun.goal_state ?? initGoal(userInput);
     if (!initialRun.goal_state) await store.setGoalState(scope, runId, goal);
     const toolSettings = deps.toolSettings ?? (await getToolSettings(scope));
+    const toolPolicy = createPolicy(toolSettings);
     const mcpSettings = deps.mcpSettings ?? (deps.store === defaultStore ? await getMcpSettings(scope) : { servers: [] });
     const activeDatasources = deps.store === defaultStore ? (await listDatasources(scope)).filter((datasource) => datasource.enabled && datasource.status === 'active') : [];
     const capabilitySnapshot = await loadRuntimeCapabilitiesSnapshot(store, scope, runId, activeDatasources.length > 0);
@@ -616,13 +643,34 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     }
     const skillIndex = await loadSkillIndex(toolSettings.workspaceRoot);
     const workflowIndex = await loadWorkflowIndex(toolSettings.workspaceRoot);
+    const mcpToolLoader = deps.mcpToolLoader ?? activateMcpServer;
+    const runEvents = await store.getEvents(scope, runId);
+    const activeSkills: SkillIndexItem[] = [];
+    const activeMcp = new Map<string, McpActivation>();
+
+    // 激活状态以 run 事件恢复：同一 run 重启后继续生效，新 run 没有这些事件，天然清空。
+    for (const event of runEvents) {
+      if (event.type === 'skill_activated' && !activeSkills.some((skill) => skill.id === event.skillId)) {
+        const skill = skillIndex.find((item) => item.id === event.skillId);
+        if (skill) activeSkills.push(skill);
+      }
+      if (event.type === 'mcp_activated' && !activeMcp.has(event.serverId)) {
+        try {
+          activeMcp.set(event.serverId, await mcpToolLoader(mcpSettings, event.serverId));
+        } catch (err) {
+          console.warn(`恢复 run ${runId} 的 MCP ${event.serverId} 激活状态失败：${(err as Error).message}`);
+        }
+      }
+    }
+
     const skillRuntimeContext = renderSkillSystemRules();
-    const skillCatalog = renderSkillCatalog(skillIndex);
+    const capabilityCatalog = [renderSkillCatalog(skillIndex), renderMcpCatalog(mcpSettings)].join('\n\n');
     const workflowRuntimeContext = [renderWorkflowSystemRules(), renderWorkflowCatalog(workflowIndex)].join('\n\n');
-    const runtimeContext = `${renderRuntimeContext(toolSettings)}\n\n${databaseRuntimeSummary}\n\n${workflowRuntimeContext}\n\n${skillRuntimeContext}`;
+    const runtimeContext = `${renderRuntimeContext(toolSettings)}\n\n${databaseRuntimeSummary}\n\n${workflowRuntimeContext}\n\n${skillRuntimeContext}\n\n${renderMcpSystemRules()}`;
     const ctx = new ContextManager(prior, userInput, renderGoal(goal), {
       appendUserInput: !hasPersistedMessages,
-      userInputPrefix: skillCatalog,
+      userInputPrefix: capabilityCatalog,
+      activationContext: renderRunActivationContext(activeSkills, activeMcp),
       systemPrompt: renderSystemPrompt({
         runtimeContext,
         runtimeCapabilitiesContext: renderRuntimeCapabilitiesContext(capabilitySnapshot),
@@ -635,7 +683,6 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       await store.addMessage(scope, threadId, runId, null, { role: 'user', content: userInput });
     }
 
-    const activeSkills: SkillIndexItem[] = [];
     const stepIds = new Map<number, string>();
     let livePersistQueue = Promise.resolve();
     const persistLiveEvent = (event: AgentEvent) => {
@@ -745,7 +792,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
             skillMessages.push(`Skill "${name}" 加载失败：${(err as Error).message}`);
           }
         }
-        const toolSchemasForProfile = await toolSchemas(profile.tools, mcpSettings);
+        const toolSchemasForProfile = await toolSchemas(profile.tools);
         const tools = toolSchemasForProfile.filter((tool) => !SUBAGENT_FORBIDDEN_TOOLS.has(tool.name));
         const allowedToolNames = new Set(tools.map((tool) => tool.name));
 
@@ -1001,11 +1048,15 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       await emit(step.id, { type: 'step_start', step: stepIdx });
       streamStats.mark(stepIdx, 'llm_waiting', undefined, true);
 
+      ctx.setActivationContext(renderRunActivationContext(activeSkills, activeMcp));
       // 模型调用前先控制工作上下文大小；mask 决策会落库，窗口丢弃只留在内存。
       const compaction = await ctx.maybeCompact(provider);
       await persistCompaction(step.id, compaction);
       // 每个 step 调模型前先推估算上下文，避免等待模型返回期间占用为空。
       await emitUsageUpdate(step.id, stepIdx);
+      // 一次模型请求内的能力集合必须保持不变；本轮激活的 Skill/MCP 从下一次请求才生效。
+      const requestMcpServerIds = new Set(activeMcp.keys());
+      const requestActiveSkillNames = new Set(activeSkills.map((skill) => skill.name));
 
       // 支持流式时实时发布增量；完整文本只在末尾落库，历史回放更紧凑。
       let result;
@@ -1021,8 +1072,8 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       const streamedToolNames = new Map<string, string>();
       const stopLlmHeartbeat = streamStats.startHeartbeat(stepIdx, () => llmStage, () => llmActiveTool);
       try {
-        // skill 是外部能力说明，不是主 agent 的工具权限边界；工具权限由 RunForge 设置/策略统一管理。
-        const tools = await toolSchemas(undefined, mcpSettings);
+        // 原生工具始终注册；MCP schema 只取当前 run 已激活的 server。
+        const tools = await toolSchemas(undefined, [...activeMcp.values()].flatMap((activation) => activation.tools));
         const modelMessages = await hydrateImageAttachments(ctx.all(), toolSettings.workspaceRoot);
         const onStreamDelta = (d: LlmDelta) => {
           publishedDelta = true;
@@ -1129,6 +1180,8 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       };
       ctx.add(assistantMsg);
       ctx.setLastDbId(await store.addMessage(scope, threadId, runId, step.id, assistantMsg));
+      // Skill 入口已经被本次 LLM 请求完整消费；立即折叠其工具结果，保留原始落库内容与配对。
+      await persistCompaction(step.id, ctx.collapseConsumedToolResults(['skill_activate'], 'skill-activation-consumed'));
 
       if (toolCalls.length && result.finishReason && result.finishReason !== 'tool-calls') {
         const message = renderAbnormalFinishMessage(result.finishReason, result.rawFinishReason, Boolean(content?.trim()));
@@ -1209,10 +1262,21 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       noActionTurns = 0;
 
       const toolTraces: ToolTrace[] = [];
-      const pendingSkillSystemMessages: LlmMessage[] = [];
-      const applySkillActivation = async (activation: SkillActivation) => {
+      const applySkillActivation = async (activation: SkillActivation): Promise<string> => {
         const alreadyActive = activeSkills.some((skill) => skill.id === activation.skill.id);
-        if (!alreadyActive) activeSkills.push(activation.skill);
+        if (!alreadyActive) {
+          activeSkills.push(activation.skill);
+          await emit(step.id, {
+            type: 'skill_activated',
+            step: stepIdx,
+            skillId: activation.skill.id,
+            name: activation.skill.name,
+            source: activation.skill.source,
+            root: activation.skill.root,
+            readonly: activation.skill.readonly,
+            hash: activation.skill.hash,
+          });
+        }
         let runtimeEnvMessage = '';
         if (activation.skill.name === DATABASE_ACCESS_SKILL_NAME) {
           try {
@@ -1221,19 +1285,29 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
             runtimeEnvMessage = `\n\n数据库访问运行环境注入失败：${(err as Error).message}`;
           }
         }
-        const skillMsg = { role: 'system' as const, content: `${activation.systemMessage}${runtimeEnvMessage}` };
-        pendingSkillSystemMessages.push(skillMsg);
+        ctx.setActivationContext(renderRunActivationContext(activeSkills, activeMcp));
+        // Skill 入口通过工具结果进入上下文，也必须遵守统一单条输出上限。
+        return toolPolicy.capOutput(`${activation.systemMessage}${runtimeEnvMessage}`);
+      };
+
+      const applyMcpActivation = async (serverId: string): Promise<string> => {
+        const id = serverId.trim();
+        const existing = activeMcp.get(id);
+        if (existing) return `MCP ${id} 已在当前 run 激活，共 ${existing.tools.length} 个工具。`;
+        const activation = await mcpToolLoader(mcpSettings, id);
+        activeMcp.set(id, activation);
+        ctx.setActivationContext(renderRunActivationContext(activeSkills, activeMcp));
         await emit(step.id, {
-          type: 'skill_activated',
+          type: 'mcp_activated',
           step: stepIdx,
-          skillId: activation.skill.id,
-          name: activation.skill.name,
-          source: activation.skill.source,
-          root: activation.skill.root,
-          readonly: activation.skill.readonly,
-          hash: activation.skill.hash,
-          allowedTools: activation.skill.allowedTools,
+          serverId: activation.server.id,
+          label: activation.server.label,
+          description: activation.server.description,
+          toolNames: activation.tools.map((tool) => tool.mappedName),
         });
+        const names = activation.tools.map((tool) => tool.mappedName).join(', ') || '无';
+        // MCP 可能返回大量工具名；激活回执也必须遵守统一的单条工具输出上限。
+        return toolPolicy.capOutput(`已激活 MCP ${activation.server.id}。从当前 run 的下一次模型请求开始加载 ${activation.tools.length} 个工具：${names}`);
       };
 
       // 执行模型请求的每个工具，并把结果回填给模型。
@@ -1299,16 +1373,12 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           const toolMsg = { role: 'tool' as const, content: text, toolCallId: call.id };
           ctx.add(toolMsg);
           ctx.setLastDbId(await store.addMessage(scope, threadId, runId, step.id, toolMsg));
-          for (const msg of pendingSkillSystemMessages) {
-            ctx.add(msg);
-          }
           await store.setRunStatus(scope, runId, 'waiting_for_user');
           return;
         }
 
         let toolStage: StreamStage = 'tool_running';
         const stopToolHeartbeat = streamStats.startHeartbeat(stepIdx, () => toolStage, () => activeTool);
-        const activatedSkill: { value?: SkillActivation } = {};
         let result = await withSpan(
           'execute_tool',
           { 'gen_ai.tool.name': call.name, 'tool.call_id': call.id },
@@ -1316,15 +1386,26 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
             try {
               if (call.name === 'skill_activate') {
                 try {
-                  activatedSkill.value = await activateSkill(toolSettings.workspaceRoot, String(args.name ?? ''));
+                  const activation = await activateSkill(toolSettings.workspaceRoot, String(args.id ?? args.name ?? ''));
+                  const out = { text: await applySkillActivation(activation) };
+                  span.setAttribute('tool.result.length', out.text.length);
+                  return out;
                 } catch (err) {
                   const out = { text: `激活 skill 失败：${(err as Error).message}` };
                   span.setAttribute('tool.result.length', out.text.length);
                   return out;
                 }
-                const out = { text: `已激活 skill ${activatedSkill.value.skill.name}。` };
-                span.setAttribute('tool.result.length', out.text.length);
-                return out;
+              }
+              if (call.name === 'mcp_activate') {
+                try {
+                  const out = { text: await applyMcpActivation(String(args.id ?? '')) };
+                  span.setAttribute('tool.result.length', out.text.length);
+                  return out;
+                } catch (err) {
+                  const out = { text: `激活 MCP 失败：${(err as Error).message}` };
+                  span.setAttribute('tool.result.length', out.text.length);
+                  return out;
+                }
               }
               if (call.name === SUBAGENT_RUN_TOOL_NAME) {
                 const out = await startSubagent(args, step.id, stepIdx, startedAt);
@@ -1345,16 +1426,11 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
               if (
                 command
                 && requiresDatabaseAccess(command)
-                && !activeSkills.some((skill) => skill.name === DATABASE_ACCESS_SKILL_NAME)
+                && !requestActiveSkillNames.has(DATABASE_ACCESS_SKILL_NAME)
               ) {
-                try {
-                  const activation = await activateSkill(toolSettings.workspaceRoot, DATABASE_ACCESS_SKILL_NAME);
-                  await applySkillActivation(activation);
-                } catch (err) {
-                  const out = { text: `自动激活 database-access 失败：${(err as Error).message}` };
-                  span.setAttribute('tool.result.length', out.text.length);
-                  return out;
-                }
+                const out = { text: '数据库命令未执行：请先调用 skill_activate，并传入 id/name "database-access" 激活操作规范。' };
+                span.setAttribute('tool.result.length', out.text.length);
+                return out;
               }
               const out = await runTool(call.name, args, {
                 scope,
@@ -1365,6 +1441,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
                 stepId: step.id,
                 step: stepIdx,
                 mcpSettings,
+                activeMcpServerIds: requestMcpServerIds,
               });
               span.setAttribute('tool.result.length', out.text.length);
               return out;
@@ -1394,9 +1471,6 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         ctx.add(toolMsg);
         ctx.setLastDbId(await store.addMessage(scope, threadId, runId, step.id, toolMsg));
 
-        const activation = activatedSkill.value;
-        if (activation) await applySkillActivation(activation);
-
         const signature = toolSignature(call.name, args);
         if (!isPendingSubagentWait(call.name, result.text)) {
           recentToolSignatures.push(signature);
@@ -1419,13 +1493,6 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         }
 
       }
-
-      // 同一个 assistant turn 里可能有多个 tool_call。Provider 要求这些调用的
-      // tool_result 连续出现，所以 skill 的 system 注入必须等本轮工具结果全部回填后再追加。
-      for (const msg of pendingSkillSystemMessages) {
-        ctx.add(msg);
-      }
-
       const guardHit = detectLoopGuard(recentToolSignatures, recentFailures);
       if (guardHit) {
         await emit(step.id, { type: 'progress_stalled', step: stepIdx, reason: guardHit.reason, question: guardHit.question });
