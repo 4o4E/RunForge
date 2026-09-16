@@ -1,4 +1,6 @@
 import { pool, query } from '../db/pool.js';
+import { prisma } from '../db/prisma.js';
+import { Prisma } from '../generated/prisma/client.js';
 import type { AgentEvent, RunStatus } from '../agent/types.js';
 import type { LlmMessage } from '../llm/types.js';
 import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
@@ -41,6 +43,20 @@ import {
   newThreadId,
   newUserId,
 } from '../id.js';
+import {
+  nullableJson,
+  requiredJson,
+  serialId,
+  toAuthTokenRow,
+  toRunRow,
+  toStepRow,
+  toSystemAdminRow,
+  toSystemAdminTokenRow,
+  toTenantRow,
+  toThreadNoticeRow,
+  toThreadRow,
+  toUserRow,
+} from './prismaRows.js';
 
 function isEphemeralSystemMessage(role: LlmMessage['role'], content: string | null): boolean {
   return role === 'system' && typeof content === 'string' && content.startsWith('已激活 Skill / Activated Skill:');
@@ -52,65 +68,86 @@ export class PgStore implements Store {
   // 先校验归属,查不到就让调用方按"空结果"处理,再跑原来没改动过的查询逻辑,
   // 降低在复杂 SQL 里手改引入 bug 的风险。其余简单查询直接把 scope 折进 WHERE/JOIN。
   private async threadBelongsToScope(scope: Scope, threadId: string): Promise<boolean> {
-    const { rows } = await query(
-      `SELECT 1 FROM threads WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
-      [threadId, scope.tenantId, scope.userId],
-    );
-    return rows.length > 0;
+    return await prisma.threads.count({
+      where: { id: threadId, tenant_id: scope.tenantId, user_id: scope.userId },
+    }) > 0;
   }
 
-  private async runBelongsToScope(scope: Scope, runId: string): Promise<boolean> {
-    const { rows } = await query(
-      `SELECT 1 FROM runs r JOIN threads t ON t.id = r.thread_id WHERE r.id = $1 AND t.tenant_id = $2 AND t.user_id = $3`,
-      [runId, scope.tenantId, scope.userId],
-    );
-    return rows.length > 0;
+  private async runBelongsToScope(scope: Scope, runId: string, threadId?: string): Promise<boolean> {
+    return await prisma.runs.count({
+      where: {
+        id: runId,
+        thread_id: threadId,
+        threads_runs_thread_idTothreads: { tenant_id: scope.tenantId, user_id: scope.userId },
+      },
+    }) > 0;
+  }
+
+  /** thread 只展示 active run 到根节点这一条分支；旧线性数据没有 active run 时展示全部 run。 */
+  private async visibleRunIds(scope: Scope, threadId: string, selectedRunId?: string | null): Promise<string[] | null> {
+    const thread = await prisma.threads.findFirst({
+      where: { id: threadId, tenant_id: scope.tenantId, user_id: scope.userId },
+      select: { active_run_id: true },
+    });
+    if (!thread) return null;
+    const runs = await prisma.runs.findMany({
+      where: { thread_id: threadId },
+      select: { id: true, parent_run_id: true },
+    });
+    const target = selectedRunId ?? thread.active_run_id;
+    if (!target) return runs.map((run) => run.id);
+
+    const byId = new Map(runs.map((run) => [run.id, run]));
+    if (!byId.has(target)) return [];
+    const result: string[] = [];
+    const visited = new Set<string>();
+    let current: string | null = target;
+    while (current && !visited.has(current)) {
+      visited.add(current);
+      result.push(current);
+      current = byId.get(current)?.parent_run_id ?? null;
+    }
+    return result;
   }
 
   async createThread(scope: Scope, title?: string): Promise<ThreadRow> {
-    const id = newThreadId();
-    const { rows } = await query<ThreadRow>(
-      `INSERT INTO threads (id, tenant_id, user_id, title) VALUES ($1, $2, $3, $4) RETURNING *`,
-      [id, scope.tenantId, scope.userId, title ?? null],
-    );
-    return rows[0];
+    return toThreadRow(await prisma.threads.create({
+      data: { id: newThreadId(), tenant_id: scope.tenantId, user_id: scope.userId, title: title ?? null },
+    }));
   }
 
   async getThread(scope: Scope, id: string): Promise<ThreadRow | null> {
-    const { rows } = await query<ThreadRow>(
-      `SELECT t.*, fallback.input AS fallback_title
-       FROM threads t
-       LEFT JOIN LATERAL (
-         SELECT input
-         FROM runs
-         WHERE thread_id = t.id
-         ORDER BY created_at, id
-         LIMIT 1
-       ) fallback ON true
-       WHERE t.id = $1 AND t.tenant_id = $2 AND t.user_id = $3`,
-      [id, scope.tenantId, scope.userId],
-    );
-    return rows[0] ?? null;
+    const row = await prisma.threads.findFirst({
+      where: { id, tenant_id: scope.tenantId, user_id: scope.userId },
+      include: {
+        runs_runs_thread_idTothreads: {
+          select: { input: true },
+          orderBy: [{ created_at: 'asc' }, { id: 'asc' }],
+          take: 1,
+        },
+      },
+    });
+    return row ? toThreadRow(row, row.runs_runs_thread_idTothreads[0]?.input ?? null) : null;
   }
 
   async listThreads(scope: Scope, limit = 50, options: { archived?: boolean } = {}): Promise<ThreadRow[]> {
-    const { rows } = await query<ThreadRow>(
-      `SELECT t.*, fallback.input AS fallback_title
-       FROM threads t
-       LEFT JOIN LATERAL (
-         SELECT input
-         FROM runs
-         WHERE thread_id = t.id
-         ORDER BY created_at, id
-         LIMIT 1
-       ) fallback ON true
-       WHERE t.tenant_id = $2 AND t.user_id = $3
-         AND (($4::boolean AND t.archived_at IS NOT NULL) OR (NOT $4::boolean AND t.archived_at IS NULL))
-       ORDER BY t.pinned_at DESC NULLS LAST, t.updated_at DESC, t.created_at DESC
-       LIMIT $1`,
-      [limit, scope.tenantId, scope.userId, options.archived === true],
-    );
-    return rows;
+    const rows = await prisma.threads.findMany({
+      where: {
+        tenant_id: scope.tenantId,
+        user_id: scope.userId,
+        archived_at: options.archived === true ? { not: null } : null,
+      },
+      include: {
+        runs_runs_thread_idTothreads: {
+          select: { input: true },
+          orderBy: [{ created_at: 'asc' }, { id: 'asc' }],
+          take: 1,
+        },
+      },
+      orderBy: [{ pinned_at: { sort: 'desc', nulls: 'last' } }, { updated_at: 'desc' }, { created_at: 'desc' }],
+      take: limit,
+    });
+    return rows.map((row) => toThreadRow(row, row.runs_runs_thread_idTothreads[0]?.input ?? null));
   }
 
   async updateThread(
@@ -118,121 +155,101 @@ export class PgStore implements Store {
     id: string,
     fields: { title?: string | null; pinned?: boolean; archived?: boolean; activeRunId?: string | null },
   ): Promise<ThreadRow | null> {
+    const existing = await prisma.threads.findFirst({
+      where: { id, tenant_id: scope.tenantId, user_id: scope.userId },
+    });
+    if (!existing) return null;
+
     let activeRunId = fields.activeRunId ?? null;
     if (fields.activeRunId) {
-      // 这个 CTE 只在给定 thread_id 下找叶子 run,不需要单独加 scope——归属校验
-      // 由下面主 UPDATE 的 WHERE tenant_id/user_id 兜底,查不到就返回 null。
-      const { rows: runRows } = await query<{ id: string }>(
-        `WITH RECURSIVE subtree AS (
-           SELECT id, parent_run_id, created_at
-           FROM runs
-           WHERE id = $1 AND thread_id = $2
-
-           UNION ALL
-
-           SELECT child.id, child.parent_run_id, child.created_at
-           FROM runs child
-           JOIN subtree parent ON child.parent_run_id = parent.id
-           WHERE child.thread_id = $2
-         ),
-         leaf_runs AS (
-           SELECT run.id, run.created_at
-           FROM subtree run
-           WHERE NOT EXISTS (
-             SELECT 1 FROM subtree child WHERE child.parent_run_id = run.id
-           )
-         )
-         SELECT id FROM leaf_runs ORDER BY created_at DESC, id DESC LIMIT 1`,
-        [fields.activeRunId, id],
-      );
+      const runRows = await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+        WITH RECURSIVE subtree AS (
+          SELECT id, parent_run_id, created_at FROM runs
+          WHERE id = ${fields.activeRunId} AND thread_id = ${id}
+          UNION ALL
+          SELECT child.id, child.parent_run_id, child.created_at
+          FROM runs child JOIN subtree parent ON child.parent_run_id = parent.id
+          WHERE child.thread_id = ${id}
+        ),
+        leaf_runs AS (
+          SELECT run.id, run.created_at FROM subtree run
+          WHERE NOT EXISTS (SELECT 1 FROM subtree child WHERE child.parent_run_id = run.id)
+        )
+        SELECT id FROM leaf_runs ORDER BY created_at DESC, id DESC LIMIT 1
+      `);
       if (!runRows.length) return null;
       activeRunId = runRows[0].id;
     }
-    const { rows } = await query<ThreadRow>(
-      `UPDATE threads
-       SET title = CASE WHEN $2 THEN $3 ELSE title END,
-           pinned_at = CASE WHEN $4::boolean IS NULL THEN pinned_at WHEN $4 THEN COALESCE(pinned_at, now()) ELSE NULL END,
-           archived_at = CASE WHEN $5::boolean IS NULL THEN archived_at WHEN $5 THEN COALESCE(archived_at, now()) ELSE NULL END,
-           active_run_id = CASE WHEN $6 THEN $7 ELSE active_run_id END,
-           updated_at = now()
-       WHERE id = $1 AND tenant_id = $8 AND user_id = $9
-       RETURNING *`,
-      [
-        id,
-        Object.prototype.hasOwnProperty.call(fields, 'title'),
-        fields.title ?? null,
-        fields.pinned ?? null,
-        fields.archived ?? null,
-        Object.prototype.hasOwnProperty.call(fields, 'activeRunId'),
-        activeRunId,
-        scope.tenantId,
-        scope.userId,
-      ],
-    );
-    return rows[0] ?? null;
+    const [row] = await prisma.threads.updateManyAndReturn({
+      where: { id, tenant_id: scope.tenantId, user_id: scope.userId },
+      data: {
+        title: Object.prototype.hasOwnProperty.call(fields, 'title') ? fields.title ?? null : undefined,
+        pinned_at: fields.pinned === undefined ? undefined : fields.pinned ? existing.pinned_at ?? new Date() : null,
+        archived_at: fields.archived === undefined ? undefined : fields.archived ? existing.archived_at ?? new Date() : null,
+        active_run_id: Object.prototype.hasOwnProperty.call(fields, 'activeRunId') ? activeRunId : undefined,
+        updated_at: new Date(),
+      },
+    });
+    return row ? toThreadRow(row) : null;
   }
 
   async setThreadTitleIfEmpty(scope: Scope, id: string, title: string): Promise<ThreadRow | null> {
-    const { rows } = await query<ThreadRow>(
-      `UPDATE threads
-       SET title = $2, updated_at = now()
-       WHERE id = $1 AND tenant_id = $3 AND user_id = $4 AND (title IS NULL OR btrim(title) = '')
-       RETURNING *`,
-      [id, title, scope.tenantId, scope.userId],
-    );
-    return rows[0] ?? null;
+    const rows = await prisma.$queryRaw<Array<Parameters<typeof toThreadRow>[0]>>(Prisma.sql`
+      UPDATE threads SET title = ${title}, updated_at = now()
+      WHERE id = ${id} AND tenant_id = ${scope.tenantId} AND user_id = ${scope.userId}
+        AND (title IS NULL OR btrim(title) = '')
+      RETURNING *
+    `);
+    return rows[0] ? toThreadRow(rows[0]) : null;
   }
 
   async deleteThread(scope: Scope, id: string): Promise<boolean> {
-    const result = await query(
-      `DELETE FROM threads WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
-      [id, scope.tenantId, scope.userId],
-    );
-    return (result.rowCount ?? 0) > 0;
+    const result = await prisma.threads.deleteMany({
+      where: { id, tenant_id: scope.tenantId, user_id: scope.userId },
+    });
+    return result.count > 0;
   }
 
   async searchThreadMessages(scope: Scope, searchText: string, limit = 50): Promise<ThreadSearchResultRow[]> {
     const q = searchText.trim();
     if (!q) return [];
-    const { rows } = await query<{
-      thread_id: string;
-      thread_title: string | null;
-      run_id: string;
-      message_id: string;
-      role: 'user' | 'assistant';
-      content: string;
-      created_at: string;
-    }>(
-      `SELECT
-         m.thread_id,
-         t.title AS thread_title,
-         m.run_id,
-         m.id::text AS message_id,
-         m.role,
-         m.content,
-         m.created_at
-      FROM messages m
-      JOIN threads t ON t.id = m.thread_id
-      WHERE t.tenant_id = $3 AND t.user_id = $4
-        AND m.content IS NOT NULL
-        AND m.role IN ('user', 'assistant')
-        AND m.content ILIKE '%' || $1 || '%'
-      ORDER BY m.created_at DESC, m.id DESC
-      LIMIT $2`,
-      [q, Math.min(Math.max(limit, 1), 100), scope.tenantId, scope.userId],
-    );
-    return rows.map((row) => ({ ...row, message_id: Number(row.message_id) }));
+    const rows = await prisma.messages.findMany({
+      where: {
+        content: { not: null, contains: q, mode: 'insensitive' },
+        role: { in: ['user', 'assistant'] },
+        threads: { tenant_id: scope.tenantId, user_id: scope.userId },
+      },
+      select: {
+        thread_id: true,
+        run_id: true,
+        id: true,
+        role: true,
+        content: true,
+        created_at: true,
+        threads: { select: { title: true } },
+      },
+      orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
+      take: Math.min(Math.max(limit, 1), 100),
+    });
+    return rows.map((row) => ({
+      thread_id: row.thread_id,
+      thread_title: row.threads.title,
+      run_id: row.run_id,
+      message_id: serialId(row.id),
+      role: row.role as 'user' | 'assistant',
+      content: row.content!,
+      created_at: row.created_at.toISOString(),
+    }));
   }
 
   async listThreadNotices(scope: Scope, threadId: string): Promise<ThreadNoticeRow[]> {
-    const { rows } = await query<ThreadNoticeRow>(
-      `SELECT tn.* FROM thread_notices tn
-       JOIN threads t ON t.id = tn.thread_id
-       WHERE tn.thread_id = $1 AND t.tenant_id = $2 AND t.user_id = $3
-       ORDER BY tn.created_at, tn.id`,
-      [threadId, scope.tenantId, scope.userId],
-    );
-    return rows;
+    return (await prisma.thread_notices.findMany({
+      where: {
+        thread_id: threadId,
+        threads_thread_notices_thread_idTothreads: { tenant_id: scope.tenantId, user_id: scope.userId },
+      },
+      orderBy: [{ created_at: 'asc' }, { id: 'asc' }],
+    })).map(toThreadNoticeRow);
   }
 
   async addThreadNotice(scope: Scope, input: {
@@ -243,15 +260,19 @@ export class PgStore implements Store {
     linkedThreadId?: string | null;
     linkedRunId?: string | null;
   }): Promise<ThreadNoticeRow> {
-    const { rows } = await query<ThreadNoticeRow>(
-      `INSERT INTO thread_notices (thread_id, kind, message, title, linked_thread_id, linked_run_id)
-       SELECT $1, $2, $3, $4, $5, $6
-       WHERE EXISTS (SELECT 1 FROM threads WHERE id = $1 AND tenant_id = $7 AND user_id = $8)
-       RETURNING *`,
-      [input.threadId, input.kind ?? 'info', input.message, input.title ?? null, input.linkedThreadId ?? null, input.linkedRunId ?? null, scope.tenantId, scope.userId],
-    );
-    if (!rows[0]) throw new Error('threadId 不存在或不属于当前用户');
-    return rows[0];
+    if (!(await this.threadBelongsToScope(scope, input.threadId))) {
+      throw new Error('threadId 不存在或不属于当前用户');
+    }
+    return toThreadNoticeRow(await prisma.thread_notices.create({
+      data: {
+        thread_id: input.threadId,
+        kind: input.kind ?? 'info',
+        message: input.message,
+        title: input.title ?? null,
+        linked_thread_id: input.linkedThreadId ?? null,
+        linked_run_id: input.linkedRunId ?? null,
+      },
+    }));
   }
 
   async forkThreadAtRun(scope: Scope, sourceRunId: string): Promise<{ thread: ThreadRow; activeRun: RunRow } | null> {
@@ -457,378 +478,300 @@ export class PgStore implements Store {
   }
 
   async createRun(scope: Scope, threadId: string, input: string, options: { modelRef?: string | null; parentRunId?: string | null; runtimeCapabilitiesSnapshot?: Record<string, unknown> | null } = {}): Promise<RunRow> {
-    const { rows: threadRows } = await query<{ active_run_id: string | null }>(
-      `SELECT active_run_id FROM threads WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
-      [threadId, scope.tenantId, scope.userId],
-    );
-    if (!threadRows.length) throw new Error('threadId 不存在或不属于当前用户');
     const id = newRunId();
-    let parentRunId = options.parentRunId;
-    if (parentRunId === undefined) {
-      parentRunId = threadRows[0]?.active_run_id ?? null;
-      if (!parentRunId) {
-        const legacy = await query<{ id: string }>(
-          `SELECT id FROM runs WHERE thread_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`,
-          [threadId],
-        );
-        parentRunId = legacy.rows[0]?.id ?? null;
+    const row = await prisma.$transaction(async (tx) => {
+      const thread = await tx.threads.findFirst({
+        where: { id: threadId, tenant_id: scope.tenantId, user_id: scope.userId },
+        select: { active_run_id: true },
+      });
+      if (!thread) throw new Error('threadId 不存在或不属于当前用户');
+
+      let parentRunId = options.parentRunId;
+      if (parentRunId === undefined) {
+        parentRunId = thread.active_run_id;
+        if (!parentRunId) {
+          parentRunId = (await tx.runs.findFirst({
+            where: { thread_id: threadId },
+            select: { id: true },
+            orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
+          }))?.id ?? null;
+        }
       }
-    }
-    if (parentRunId) {
-      const { rows } = await query<{ id: string }>(`SELECT id FROM runs WHERE id = $1 AND thread_id = $2`, [parentRunId, threadId]);
-      if (!rows.length) throw new Error('parentRunId 不属于当前 thread');
-    }
-    const { rows } = await query<RunRow>(
-      `INSERT INTO runs (id, thread_id, parent_run_id, status, input, model_ref, runtime_capabilities_snapshot)
-       VALUES ($1, $2, $3, 'pending', $4, $5, $6::jsonb)
-       RETURNING *`,
-      [id, threadId, parentRunId ?? null, input, options.modelRef ?? null, options.runtimeCapabilitiesSnapshot ? JSON.stringify(options.runtimeCapabilitiesSnapshot) : null],
-    );
-    await query(`UPDATE threads SET active_run_id = $2, updated_at = now() WHERE id = $1`, [threadId, id]);
-    return rows[0];
+      if (parentRunId && !await tx.runs.count({ where: { id: parentRunId, thread_id: threadId } })) {
+        throw new Error('parentRunId 不属于当前 thread');
+      }
+
+      const created = await tx.runs.create({
+        data: {
+          id,
+          thread_id: threadId,
+          parent_run_id: parentRunId ?? null,
+          status: 'pending',
+          input,
+          model_ref: options.modelRef ?? null,
+          runtime_capabilities_snapshot: nullableJson(options.runtimeCapabilitiesSnapshot),
+        },
+      });
+      await tx.threads.update({ where: { id: threadId }, data: { active_run_id: id, updated_at: new Date() } });
+      return created;
+    });
+    return toRunRow(row);
   }
 
   async getRun(scope: Scope, id: string): Promise<RunRow | null> {
-    const { rows } = await query<RunRow>(
-      `SELECT r.* FROM runs r JOIN threads t ON t.id = r.thread_id
-       WHERE r.id = $1 AND t.tenant_id = $2 AND t.user_id = $3`,
-      [id, scope.tenantId, scope.userId],
-    );
-    return rows[0] ?? null;
+    const row = await prisma.runs.findFirst({
+      where: {
+        id,
+        threads_runs_thread_idTothreads: { tenant_id: scope.tenantId, user_id: scope.userId },
+      },
+    });
+    return row ? toRunRow(row) : null;
   }
 
   async listRuns(scope: Scope, threadId: string): Promise<RunRow[]> {
-    const { rows } = await query<RunRow>(
-      `SELECT r.* FROM runs r JOIN threads t ON t.id = r.thread_id
-       WHERE r.thread_id = $1 AND t.tenant_id = $2 AND t.user_id = $3
-       ORDER BY r.created_at`,
-      [threadId, scope.tenantId, scope.userId],
-    );
-    return rows;
+    return (await prisma.runs.findMany({
+      where: {
+        thread_id: threadId,
+        threads_runs_thread_idTothreads: { tenant_id: scope.tenantId, user_id: scope.userId },
+      },
+      orderBy: { created_at: 'asc' },
+    })).map(toRunRow);
   }
 
   async listRunsByStatusUnscoped(statuses: RunStatus[]): Promise<RunRow[]> {
     if (!statuses.length) return [];
-    const { rows } = await query<RunRow>(
-      `SELECT * FROM runs WHERE status = ANY($1::text[]) ORDER BY updated_at, created_at`,
-      [statuses],
-    );
-    return rows;
+    return (await prisma.runs.findMany({
+      where: { status: { in: statuses } },
+      orderBy: [{ updated_at: 'asc' }, { created_at: 'asc' }],
+    })).map(toRunRow);
   }
 
   async setRunStatus(scope: Scope, id: string, status: RunStatus, fields: { output?: string | null; error?: string | null } = {}): Promise<void> {
-    await query(
-      `UPDATE runs
-       SET status = $2,
-           output = CASE WHEN $3 THEN $4 ELSE output END,
-           error = CASE WHEN $5 THEN $6 ELSE error END,
-           updated_at = now()
-       WHERE id = $1 AND thread_id IN (SELECT id FROM threads WHERE tenant_id = $7 AND user_id = $8)`,
-      [
+    await prisma.runs.updateMany({
+      where: {
         id,
+        threads_runs_thread_idTothreads: { tenant_id: scope.tenantId, user_id: scope.userId },
+      },
+      data: {
         status,
-        Object.prototype.hasOwnProperty.call(fields, 'output'),
-        fields.output ?? null,
-        Object.prototype.hasOwnProperty.call(fields, 'error'),
-        fields.error ?? null,
-        scope.tenantId,
-        scope.userId,
-      ],
-    );
+        output: Object.prototype.hasOwnProperty.call(fields, 'output') ? fields.output ?? null : undefined,
+        error: Object.prototype.hasOwnProperty.call(fields, 'error') ? fields.error ?? null : undefined,
+        updated_at: new Date(),
+      },
+    });
   }
 
   async setGoalState(scope: Scope, runId: string, goal: GoalState): Promise<void> {
-    await query(
-      `UPDATE runs SET goal_state = $2, updated_at = now()
-       WHERE id = $1 AND thread_id IN (SELECT id FROM threads WHERE tenant_id = $3 AND user_id = $4)`,
-      [runId, JSON.stringify(goal), scope.tenantId, scope.userId],
-    );
+    await prisma.runs.updateMany({
+      where: {
+        id: runId,
+        threads_runs_thread_idTothreads: { tenant_id: scope.tenantId, user_id: scope.userId },
+      },
+      data: { goal_state: requiredJson(goal), updated_at: new Date() },
+    });
+  }
+
+  async setRuntimeCapabilitiesSnapshot(
+    scope: Scope,
+    runId: string,
+    snapshot: object,
+  ): Promise<void> {
+    await prisma.runs.updateMany({
+      where: {
+        id: runId,
+        threads_runs_thread_idTothreads: { tenant_id: scope.tenantId, user_id: scope.userId },
+      },
+      data: { runtime_capabilities_snapshot: requiredJson(snapshot), updated_at: new Date() },
+    });
   }
 
   async getRunUnscoped(id: string): Promise<RunRow | null> {
-    const { rows } = await query<RunRow>(`SELECT * FROM runs WHERE id = $1`, [id]);
-    return rows[0] ?? null;
+    const row = await prisma.runs.findUnique({ where: { id } });
+    return row ? toRunRow(row) : null;
   }
 
   async getThreadUnscoped(id: string): Promise<ThreadRow | null> {
-    const { rows } = await query<ThreadRow>(`SELECT * FROM threads WHERE id = $1`, [id]);
-    return rows[0] ?? null;
+    const row = await prisma.threads.findUnique({ where: { id } });
+    return row ? toThreadRow(row) : null;
   }
 
   async createStep(scope: Scope, runId: string, idx: number): Promise<StepRow> {
-    const id = newStepId();
-    const { rows } = await query<StepRow>(
-      `INSERT INTO steps (id, run_id, idx)
-       SELECT $1, $2, $3
-       WHERE EXISTS (SELECT 1 FROM runs r JOIN threads t ON t.id = r.thread_id WHERE r.id = $2 AND t.tenant_id = $4 AND t.user_id = $5)
-       RETURNING *`,
-      [id, runId, idx, scope.tenantId, scope.userId],
-    );
-    if (!rows.length) throw new Error('runId 不存在或不属于当前用户');
-    return rows[0];
+    if (!(await this.runBelongsToScope(scope, runId))) throw new Error('runId 不存在或不属于当前用户');
+    return toStepRow(await prisma.steps.create({ data: { id: newStepId(), run_id: runId, idx } }));
   }
 
   async getLastStepIndex(scope: Scope, runId: string): Promise<number> {
-    const { rows } = await query<{ idx: number | null }>(
-      `SELECT max(s.idx) AS idx FROM steps s
-       JOIN runs r ON r.id = s.run_id JOIN threads t ON t.id = r.thread_id
-       WHERE s.run_id = $1 AND t.tenant_id = $2 AND t.user_id = $3`,
-      [runId, scope.tenantId, scope.userId],
-    );
-    return rows[0]?.idx ?? 0;
+    if (!(await this.runBelongsToScope(scope, runId))) return 0;
+    return (await prisma.steps.aggregate({ where: { run_id: runId }, _max: { idx: true } }))._max.idx ?? 0;
   }
 
   async getLastCompletedStepIndex(scope: Scope, runId: string): Promise<number> {
     const owns = await this.runBelongsToScope(scope, runId);
     if (!owns) return 0;
-    const { rows } = await query<{
-      step_id: string;
-      idx: number;
-      role: LlmMessage['role'] | null;
-      tool_calls: LlmMessage['toolCalls'] | null;
-      tool_call_id: string | null;
-    }>(
-      `SELECT s.id AS step_id, s.idx, m.role, m.tool_calls, m.tool_call_id
-       FROM steps s
-       LEFT JOIN messages m ON m.step_id = s.id
-       WHERE s.run_id = $1
-       ORDER BY s.idx, m.id`,
-      [runId],
-    );
-    const byStep = new Map<string, typeof rows>();
-    const stepIndex = new Map<string, number>();
-    for (const row of rows) {
-      byStep.set(row.step_id, [...(byStep.get(row.step_id) ?? []), row]);
-      stepIndex.set(row.step_id, row.idx);
-    }
     let last = 0;
-    for (const [stepId, stepRows] of byStep) {
-      const assistantRows = stepRows.filter((row) => row.role === 'assistant');
+    const steps = await prisma.steps.findMany({
+      where: { run_id: runId },
+      select: {
+        idx: true,
+        messages: {
+          select: { role: true, tool_calls: true, tool_call_id: true },
+          orderBy: { id: 'asc' },
+        },
+      },
+      orderBy: { idx: 'asc' },
+    });
+    for (const step of steps) {
+      const assistantRows = step.messages.filter((row) => row.role === 'assistant');
       if (!assistantRows.length) continue;
-      const requiredToolIds = assistantRows.flatMap((row) => (row.tool_calls ?? []).map((call) => call.id));
-      const answeredToolIds = new Set(stepRows.filter((row) => row.role === 'tool' && row.tool_call_id).map((row) => row.tool_call_id as string));
-      if (requiredToolIds.every((id) => answeredToolIds.has(id))) last = Math.max(last, stepIndex.get(stepId) ?? 0);
+      const requiredToolIds = assistantRows.flatMap((row) => {
+        const calls = (row.tool_calls ?? []) as unknown as NonNullable<LlmMessage['toolCalls']>;
+        return calls.map((call) => call.id);
+      });
+      const answeredToolIds = new Set(step.messages
+        .filter((row) => row.role === 'tool' && row.tool_call_id)
+        .map((row) => row.tool_call_id as string));
+      if (requiredToolIds.every((id) => answeredToolIds.has(id))) last = Math.max(last, step.idx);
     }
     return last;
   }
 
   async loadThreadMessages(scope: Scope, threadId: string, options: { runId?: string | null } = {}): Promise<ThreadMessage[]> {
-    const owns = await this.threadBelongsToScope(scope, threadId);
-    if (!owns) return [];
-    const targetRunId = options.runId ?? null;
-    const { rows } = await query<{
-      id: string;
-      role: LlmMessage['role'];
-      content: string | null;
-      tool_calls: LlmMessage['toolCalls'] | null;
-      tool_call_id: string | null;
-      collapsed: 'masked' | 'summarized' | null;
-      summary_of: string[] | null;
-      provider_state: LlmMessage['providerState'] | null;
-    }>(
-      `WITH RECURSIVE selected_run AS (
-         SELECT COALESCE($2::text, active_run_id) AS id
-         FROM threads
-         WHERE id = $1
-       ),
-       branch_runs AS (
-         SELECT r.id, r.parent_run_id, 1 AS depth
-         FROM runs r
-         JOIN selected_run s ON s.id = r.id
-         WHERE r.thread_id = $1
-
-         UNION ALL
-
-         SELECT parent.id, parent.parent_run_id, child.depth + 1
-         FROM runs parent
-         JOIN branch_runs child ON child.parent_run_id = parent.id
-         WHERE parent.thread_id = $1
-       ),
-       fallback_runs AS (
-         SELECT id, NULL::text AS parent_run_id, 0 AS depth
-         FROM runs
-         WHERE thread_id = $1
-           AND NOT EXISTS (SELECT 1 FROM selected_run WHERE id IS NOT NULL)
-       ),
-       visible_runs AS (
-         SELECT id FROM branch_runs
-         UNION
-         SELECT id FROM fallback_runs
-       )
-       SELECT m.id, m.role, m.content, m.tool_calls, m.tool_call_id, m.collapsed, m.summary_of, m.provider_state
-       FROM messages m
-       JOIN visible_runs vr ON vr.id = m.run_id
-       WHERE m.thread_id = $1
-       ORDER BY m.id`,
-      [threadId, targetRunId],
-    );
+    const visibleRunIds = await this.visibleRunIds(scope, threadId, options.runId);
+    if (!visibleRunIds?.length) return [];
+    const rows = await prisma.messages.findMany({
+      where: { thread_id: threadId, run_id: { in: visibleRunIds } },
+      select: {
+        id: true,
+        role: true,
+        content: true,
+        tool_calls: true,
+        tool_call_id: true,
+        collapsed: true,
+        summary_of: true,
+        provider_state: true,
+      },
+      orderBy: { id: 'asc' },
+    });
     // Build the compacted LLM-facing view. The original content/tool args stay in
     // the DB; masked rows render placeholders, summarized rows are folded out.
     const messages = rows
-      .filter((r) => r.collapsed !== 'summarized' && !isEphemeralSystemMessage(r.role, r.content))
-      .sort((a, b) => Number(a.summary_of?.[0] ?? a.id) - Number(b.summary_of?.[0] ?? b.id))
+      .filter((r) => r.collapsed !== 'summarized'
+        && !isEphemeralSystemMessage(r.role as LlmMessage['role'], r.content))
+      .sort((a, b) => Number(a.summary_of[0] ?? a.id) - Number(b.summary_of[0] ?? b.id))
       .map((r) => ({
-        id: Number(r.id),
-        role: r.role,
+        id: serialId(r.id),
+        role: r.role as LlmMessage['role'],
         content: r.collapsed === 'masked' && r.role === 'tool' ? maskPlaceholder(r.content ?? '') : r.content,
         toolCalls:
           r.collapsed === 'masked' && r.role === 'assistant' && r.tool_calls
-            ? maskToolCallArguments(r.tool_calls).calls
-            : (r.tool_calls ?? undefined),
+            ? maskToolCallArguments(r.tool_calls as unknown as NonNullable<LlmMessage['toolCalls']>).calls
+            : (r.tool_calls as unknown as LlmMessage['toolCalls'] ?? undefined),
         toolCallId: r.tool_call_id ?? undefined,
-        providerState: r.collapsed === 'masked' ? undefined : (r.provider_state ?? undefined),
-        collapsed: r.collapsed ?? undefined,
+        providerState: r.collapsed === 'masked'
+          ? undefined
+          : (r.provider_state as unknown as LlmMessage['providerState'] ?? undefined),
+        collapsed: r.collapsed as ThreadMessage['collapsed'] ?? undefined,
       }));
     return sanitizeThreadMessagesForModel(messages);
   }
 
   async loadThreadMessageMetadata(scope: Scope, threadId: string, options: { runId?: string | null } = {}): Promise<ThreadMessageMetadata[]> {
-    if (!(await this.threadBelongsToScope(scope, threadId))) return [];
-    const { rows } = await query<{
-      id: string;
+    const visibleRunIds = await this.visibleRunIds(scope, threadId, options.runId);
+    if (!visibleRunIds?.length) return [];
+    const rows = await prisma.$queryRaw<Array<{
+      id: bigint;
       run_id: string;
       step_id: string | null;
       role: LlmMessage['role'];
       tool_calls: Array<{ id: string; name: string; argumentChars: number }>;
       tool_call_id: string | null;
       collapsed: 'masked' | 'summarized';
-      summary_of: string[] | null;
+      summary_of: bigint[] | null;
       content_chars: number;
-      created_at: string;
-    }>(
-      `WITH RECURSIVE selected_run AS (
-         SELECT COALESCE($2::text, active_run_id) AS id FROM threads WHERE id = $1
-       ),
-       branch_runs AS (
-         SELECT r.id, r.parent_run_id FROM runs r JOIN selected_run s ON s.id = r.id WHERE r.thread_id = $1
-         UNION ALL
-         SELECT parent.id, parent.parent_run_id
-         FROM runs parent JOIN branch_runs child ON child.parent_run_id = parent.id
-         WHERE parent.thread_id = $1
-       ),
-       fallback_runs AS (
-         SELECT id FROM runs
-         WHERE thread_id = $1 AND NOT EXISTS (SELECT 1 FROM selected_run WHERE id IS NOT NULL)
-       ),
-       visible_runs AS (
-         SELECT id FROM branch_runs UNION SELECT id FROM fallback_runs
-       )
-       SELECT m.id, m.run_id, m.step_id, m.role, m.tool_call_id, m.collapsed, m.summary_of,
-              length(COALESCE(m.content, ''))::int AS content_chars,
-              m.created_at,
-              COALESCE((
-                SELECT jsonb_agg(jsonb_build_object(
-                  'id', call->>'id',
-                  'name', call->>'name',
-                  'argumentChars', length(COALESCE(call->>'arguments', ''))
-                ))
-                FROM jsonb_array_elements(COALESCE(m.tool_calls, '[]'::jsonb)) call
-              ), '[]'::jsonb) AS tool_calls
-       FROM messages m JOIN visible_runs vr ON vr.id = m.run_id
-       WHERE m.thread_id = $1 AND m.collapsed IS NOT NULL
-       ORDER BY m.id`,
-      [threadId, options.runId ?? null],
-    );
+      created_at: Date;
+    }>>(Prisma.sql`
+      SELECT m.id, m.run_id, m.step_id, m.role, m.tool_call_id, m.collapsed, m.summary_of,
+             length(COALESCE(m.content, ''))::int AS content_chars,
+             m.created_at,
+             COALESCE((
+               SELECT jsonb_agg(jsonb_build_object(
+                 'id', call->>'id',
+                 'name', call->>'name',
+                 'argumentChars', length(COALESCE(call->>'arguments', ''))
+               ))
+               FROM jsonb_array_elements(COALESCE(m.tool_calls, '[]'::jsonb)) call
+             ), '[]'::jsonb) AS tool_calls
+      FROM messages m
+      WHERE m.thread_id = ${threadId}
+        AND m.run_id IN (${Prisma.join(visibleRunIds)})
+        AND m.collapsed IS NOT NULL
+      ORDER BY m.id
+    `);
     return rows.map((row) => ({
-      id: Number(row.id),
+      id: serialId(row.id),
       run_id: row.run_id,
       step_id: row.step_id,
       role: row.role,
       toolCalls: row.tool_calls,
       toolCallId: row.tool_call_id,
       collapsed: row.collapsed,
-      summaryOf: (row.summary_of ?? []).map(Number),
+      summaryOf: (row.summary_of ?? []).map(serialId),
       contentChars: row.content_chars,
-      created_at: row.created_at,
+      created_at: row.created_at.toISOString(),
     }));
   }
 
   async loadRawThreadMessages(scope: Scope, threadId: string, options: { runId?: string | null } = {}): Promise<RawThreadMessage[]> {
-    if (!(await this.threadBelongsToScope(scope, threadId))) return [];
-    const { rows } = await query<{
-      id: string;
-      run_id: string;
-      step_id: string | null;
-      role: LlmMessage['role'];
-      content: string | null;
-      tool_calls: LlmMessage['toolCalls'] | null;
-      tool_call_id: string | null;
-      collapsed: 'masked' | 'summarized' | null;
-      summary_of: string[] | null;
-      provider_state: LlmMessage['providerState'] | null;
-      created_at: string;
-    }>(
-      `WITH RECURSIVE selected_run AS (
-         SELECT COALESCE($2::text, active_run_id) AS id FROM threads WHERE id = $1
-       ),
-       branch_runs AS (
-         SELECT r.id, r.parent_run_id FROM runs r JOIN selected_run s ON s.id = r.id WHERE r.thread_id = $1
-         UNION ALL
-         SELECT parent.id, parent.parent_run_id
-         FROM runs parent JOIN branch_runs child ON child.parent_run_id = parent.id
-         WHERE parent.thread_id = $1
-       ),
-       fallback_runs AS (
-         SELECT id FROM runs
-         WHERE thread_id = $1 AND NOT EXISTS (SELECT 1 FROM selected_run WHERE id IS NOT NULL)
-       ),
-       visible_runs AS (
-         SELECT id FROM branch_runs UNION SELECT id FROM fallback_runs
-       )
-       SELECT m.id, m.run_id, m.step_id, m.role, m.content, m.tool_calls, m.tool_call_id,
-              m.collapsed, m.summary_of, m.provider_state, m.created_at
-       FROM messages m JOIN visible_runs vr ON vr.id = m.run_id
-       WHERE m.thread_id = $1
-       ORDER BY m.id`,
-      [threadId, options.runId ?? null],
-    );
+    const visibleRunIds = await this.visibleRunIds(scope, threadId, options.runId);
+    if (!visibleRunIds?.length) return [];
+    const rows = await prisma.messages.findMany({
+      where: { thread_id: threadId, run_id: { in: visibleRunIds } },
+      orderBy: { id: 'asc' },
+    });
     return rows
-      .filter((row) => !isEphemeralSystemMessage(row.role, row.content))
+      .filter((row) => !isEphemeralSystemMessage(row.role as LlmMessage['role'], row.content))
       .map((row) => ({
-        id: Number(row.id),
+        id: serialId(row.id),
         run_id: row.run_id,
         step_id: row.step_id,
-        role: row.role,
+        role: row.role as LlmMessage['role'],
         content: row.content,
-        toolCalls: row.tool_calls ?? undefined,
+        toolCalls: row.tool_calls as unknown as LlmMessage['toolCalls'] ?? undefined,
         toolCallId: row.tool_call_id ?? undefined,
-        providerState: row.provider_state ?? undefined,
-        collapsed: row.collapsed ?? undefined,
-        summaryOf: (row.summary_of ?? []).map(Number),
-        created_at: row.created_at,
+        providerState: row.provider_state as unknown as LlmMessage['providerState'] ?? undefined,
+        collapsed: row.collapsed as RawThreadMessage['collapsed'] ?? undefined,
+        summaryOf: row.summary_of.map(serialId),
+        created_at: row.created_at.toISOString(),
       }));
   }
 
   async addMessage(scope: Scope, threadId: string, runId: string, stepId: string | null, msg: LlmMessage): Promise<number> {
-    const { rows } = await query<{ id: string }>(
-      `INSERT INTO messages (thread_id, run_id, step_id, role, content, tool_calls, tool_call_id, provider_state)
-       SELECT $1, $2, $3, $4, $5, $6, $7, $8
-       WHERE EXISTS (SELECT 1 FROM threads WHERE id = $1 AND tenant_id = $9 AND user_id = $10)
-       RETURNING id`,
-      [
-        threadId,
-        runId,
-        stepId,
-        msg.role,
-        msg.content,
-        msg.toolCalls ? JSON.stringify(msg.toolCalls) : null,
-        msg.toolCallId ?? null,
-        msg.providerState ? JSON.stringify(msg.providerState) : null,
-        scope.tenantId,
-        scope.userId,
-      ],
-    );
-    if (!rows.length) throw new Error('threadId 不存在或不属于当前用户');
-    return Number(rows[0].id);
+    if (!(await this.runBelongsToScope(scope, runId, threadId))) {
+      throw new Error('threadId/runId 不存在、不匹配或不属于当前用户');
+    }
+    if (stepId && !await prisma.steps.count({ where: { id: stepId, run_id: runId } })) {
+      throw new Error('stepId 不属于当前 run');
+    }
+    const row = await prisma.messages.create({
+      data: {
+        thread_id: threadId,
+        run_id: runId,
+        step_id: stepId,
+        role: msg.role,
+        content: msg.content,
+        tool_calls: nullableJson(msg.toolCalls),
+        tool_call_id: msg.toolCallId ?? null,
+        provider_state: nullableJson(msg.providerState),
+      },
+      select: { id: true },
+    });
+    return serialId(row.id);
   }
 
   async countRunMessages(scope: Scope, runId: string): Promise<number> {
-    const { rows } = await query<{ count: string }>(
-      `SELECT count(*)::text AS count FROM messages m JOIN threads t ON t.id = m.thread_id
-       WHERE m.run_id = $1 AND t.tenant_id = $2 AND t.user_id = $3`,
-      [runId, scope.tenantId, scope.userId],
-    );
-    return Number(rows[0]?.count ?? 0);
+    return prisma.messages.count({
+      where: { run_id: runId, threads: { tenant_id: scope.tenantId, user_id: scope.userId } },
+    });
   }
 
   async addSummaryMessage(
@@ -839,60 +782,60 @@ export class PgStore implements Store {
     msg: LlmMessage,
     summaryOf: number[],
   ): Promise<number> {
-    const { rows } = await query<{ id: string }>(
-      `INSERT INTO messages (thread_id, run_id, step_id, role, content, tool_calls, tool_call_id, summary_of, provider_state)
-       SELECT $1, $2, $3, $4, $5, $6, $7, $8::bigint[], $9
-       WHERE EXISTS (SELECT 1 FROM threads WHERE id = $1 AND tenant_id = $10 AND user_id = $11)
-       RETURNING id`,
-      [
-        threadId,
-        runId,
-        stepId,
-        msg.role,
-        msg.content,
-        msg.toolCalls ? JSON.stringify(msg.toolCalls) : null,
-        msg.toolCallId ?? null,
-        summaryOf,
-        msg.providerState ? JSON.stringify(msg.providerState) : null,
-        scope.tenantId,
-        scope.userId,
-      ],
-    );
-    if (!rows.length) throw new Error('threadId 不存在或不属于当前用户');
-    return Number(rows[0].id);
+    if (!(await this.runBelongsToScope(scope, runId, threadId))) {
+      throw new Error('threadId/runId 不存在、不匹配或不属于当前用户');
+    }
+    if (stepId && !await prisma.steps.count({ where: { id: stepId, run_id: runId } })) {
+      throw new Error('stepId 不属于当前 run');
+    }
+    const row = await prisma.messages.create({
+      data: {
+        thread_id: threadId,
+        run_id: runId,
+        step_id: stepId,
+        role: msg.role,
+        content: msg.content,
+        tool_calls: nullableJson(msg.toolCalls),
+        tool_call_id: msg.toolCallId ?? null,
+        summary_of: summaryOf.map(BigInt),
+        provider_state: nullableJson(msg.providerState),
+      },
+      select: { id: true },
+    });
+    return serialId(row.id);
   }
 
   async markMessagesCollapsed(scope: Scope, ids: number[], kind: 'masked' | 'summarized'): Promise<void> {
     if (!ids.length) return;
-    await query(
-      `UPDATE messages SET collapsed = $2
-       WHERE id = ANY($1::bigint[]) AND thread_id IN (SELECT id FROM threads WHERE tenant_id = $3 AND user_id = $4)`,
-      [ids, kind, scope.tenantId, scope.userId],
-    );
+    await prisma.messages.updateMany({
+      where: {
+        id: { in: ids.map(BigInt) },
+        threads: { tenant_id: scope.tenantId, user_id: scope.userId },
+      },
+      data: { collapsed: kind },
+    });
   }
 
   async addEvent(scope: Scope, runId: string, stepId: string | null, event: AgentEvent): Promise<void> {
     const idx = 'step' in event ? event.step : 0;
-    await query(
-      `INSERT INTO events (run_id, step_id, idx, type, data)
-       SELECT $1, $2, $3, $4, $5
-       WHERE EXISTS (
-         SELECT 1 FROM runs r JOIN threads t ON t.id = r.thread_id
-         WHERE r.id = $1 AND t.tenant_id = $6 AND t.user_id = $7
-       )`,
-      [runId, stepId, idx, event.type, JSON.stringify(event), scope.tenantId, scope.userId],
-    );
+    if (!(await this.runBelongsToScope(scope, runId))) return;
+    if (stepId && !await prisma.steps.count({ where: { id: stepId, run_id: runId } })) {
+      throw new Error('stepId 不属于当前 run');
+    }
+    await prisma.events.create({
+      data: { run_id: runId, step_id: stepId, idx, type: event.type, data: requiredJson(event) },
+    });
   }
 
   async getEvents(scope: Scope, runId: string): Promise<AgentEvent[]> {
-    const { rows } = await query<{ data: AgentEvent }>(
-      `SELECT e.data FROM events e
-       JOIN runs r ON r.id = e.run_id JOIN threads t ON t.id = r.thread_id
-       WHERE e.run_id = $1 AND t.tenant_id = $2 AND t.user_id = $3
-       ORDER BY e.id`,
-      [runId, scope.tenantId, scope.userId],
-    );
-    return rows.map((r) => r.data);
+    return (await prisma.events.findMany({
+      where: {
+        run_id: runId,
+        runs: { threads_runs_thread_idTothreads: { tenant_id: scope.tenantId, user_id: scope.userId } },
+      },
+      select: { data: true },
+      orderBy: { id: 'asc' },
+    })).map((row) => row.data as unknown as AgentEvent);
   }
 
   async createSubagentRun(scope: Scope, input: {
@@ -1298,110 +1241,80 @@ export class PgStore implements Store {
 
   // 多租户改造 Phase 1(docs/multi-tenancy-design.md §4)。
   async createTenant(input: { id: string; name: string }): Promise<TenantRow> {
-    const { rows } = await query<TenantRow>(
-      `INSERT INTO tenants (id, name) VALUES ($1, $2) RETURNING *`,
-      [input.id, input.name],
-    );
-    return rows[0];
+    return toTenantRow(await prisma.tenants.create({ data: { id: input.id, name: input.name } }));
   }
 
   async findTenant(id: string): Promise<TenantRow | null> {
-    const { rows } = await query<TenantRow>(`SELECT * FROM tenants WHERE id = $1`, [id]);
-    return rows[0] ?? null;
+    const row = await prisma.tenants.findUnique({ where: { id } });
+    return row ? toTenantRow(row) : null;
   }
 
   async listTenants(): Promise<TenantRow[]> {
-    const { rows } = await query<TenantRow>(`SELECT * FROM tenants ORDER BY created_at`);
-    return rows;
+    return (await prisma.tenants.findMany({ orderBy: { created_at: 'asc' } })).map(toTenantRow);
   }
 
   async updateTenantStatus(id: string, status: 'active' | 'suspended'): Promise<TenantRow | null> {
-    const { rows } = await query<TenantRow>(
-      `UPDATE tenants SET status = $2 WHERE id = $1 RETURNING *`,
-      [id, status],
-    );
-    return rows[0] ?? null;
+    const [row] = await prisma.tenants.updateManyAndReturn({ where: { id }, data: { status } });
+    return row ? toTenantRow(row) : null;
   }
 
   async createUser(input: { tenantId: string; email: string; passwordHash: string; role: TenantUserRole }): Promise<UserRow> {
-    const { rows } = await query<UserRow>(
-      `INSERT INTO users (id, tenant_id, email, password_hash, role)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [newUserId(), input.tenantId, input.email, input.passwordHash, input.role],
-    );
-    return rows[0];
+    return toUserRow(await prisma.users.create({
+      data: {
+        id: newUserId(),
+        tenant_id: input.tenantId,
+        email: input.email,
+        password_hash: input.passwordHash,
+        role: input.role,
+      },
+    }));
   }
 
   async findUserByEmail(tenantId: string, email: string): Promise<UserRow | null> {
-    const { rows } = await query<UserRow>(
-      `SELECT * FROM users WHERE tenant_id = $1 AND email = $2`,
-      [tenantId, email],
-    );
-    return rows[0] ?? null;
+    const row = await prisma.users.findUnique({ where: { tenant_id_email: { tenant_id: tenantId, email } } });
+    return row ? toUserRow(row) : null;
   }
 
   async findUserById(id: string): Promise<UserRow | null> {
-    const { rows } = await query<UserRow>(`SELECT * FROM users WHERE id = $1`, [id]);
-    return rows[0] ?? null;
+    const row = await prisma.users.findUnique({ where: { id } });
+    return row ? toUserRow(row) : null;
   }
 
   async listUsersByTenant(tenantId: string): Promise<UserRow[]> {
-    const { rows } = await query<UserRow>(
-      `SELECT * FROM users WHERE tenant_id = $1 ORDER BY created_at`,
-      [tenantId],
-    );
-    return rows;
+    return (await prisma.users.findMany({ where: { tenant_id: tenantId }, orderBy: { created_at: 'asc' } })).map(toUserRow);
   }
 
   async updateUserRole(id: string, role: TenantUserRole): Promise<UserRow | null> {
-    const { rows } = await query<UserRow>(
-      `UPDATE users SET role = $2 WHERE id = $1 RETURNING *`,
-      [id, role],
-    );
-    return rows[0] ?? null;
+    const [row] = await prisma.users.updateManyAndReturn({ where: { id }, data: { role } });
+    return row ? toUserRow(row) : null;
   }
 
   async updateUserStatus(id: string, status: 'active' | 'disabled'): Promise<UserRow | null> {
-    const { rows } = await query<UserRow>(
-      `UPDATE users SET status = $2 WHERE id = $1 RETURNING *`,
-      [id, status],
-    );
-    return rows[0] ?? null;
+    const [row] = await prisma.users.updateManyAndReturn({ where: { id }, data: { status } });
+    return row ? toUserRow(row) : null;
   }
 
   async updateUser(
     id: string,
     fields: { email?: string; passwordHash?: string; role?: TenantUserRole; status?: 'active' | 'disabled' },
   ): Promise<UserRow | null> {
-    const { rows } = await query<UserRow>(
-      `UPDATE users
-       SET email = CASE WHEN $2 THEN $3 ELSE email END,
-           password_hash = CASE WHEN $4 THEN $5 ELSE password_hash END,
-           role = CASE WHEN $6 THEN $7 ELSE role END,
-           status = CASE WHEN $8 THEN $9 ELSE status END
-       WHERE id = $1
-       RETURNING *`,
-      [
-        id,
-        fields.email !== undefined,
-        fields.email ?? '',
-        fields.passwordHash !== undefined,
-        fields.passwordHash ?? '',
-        fields.role !== undefined,
-        fields.role ?? 'member',
-        fields.status !== undefined,
-        fields.status ?? 'active',
-      ],
-    );
-    return rows[0] ?? null;
+    const [row] = await prisma.users.updateManyAndReturn({
+      where: { id },
+      data: {
+        email: fields.email,
+        password_hash: fields.passwordHash,
+        role: fields.role,
+        status: fields.status,
+      },
+    });
+    return row ? toUserRow(row) : null;
   }
 
   async revokeRefreshTokensByUser(userId: string): Promise<void> {
-    await query(
-      `UPDATE auth_tokens SET revoked_at = now()
-       WHERE user_id = $1 AND kind = 'refresh' AND revoked_at IS NULL`,
-      [userId],
-    );
+    await prisma.auth_tokens.updateMany({
+      where: { user_id: userId, kind: 'refresh', revoked_at: null },
+      data: { revoked_at: new Date() },
+    });
   }
 
   async createAuthToken(input: {
@@ -1412,58 +1325,53 @@ export class PgStore implements Store {
     label?: string | null;
     expiresAt?: string | null;
   }): Promise<AuthTokenRow> {
-    const { rows } = await query<AuthTokenRow>(
-      `INSERT INTO auth_tokens (id, tenant_id, user_id, kind, token_hash, label, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [newAuthTokenId(), input.tenantId, input.userId, input.kind, input.tokenHash, input.label ?? null, input.expiresAt ?? null],
-    );
-    return rows[0];
+    return toAuthTokenRow(await prisma.auth_tokens.create({
+      data: {
+        id: newAuthTokenId(),
+        tenant_id: input.tenantId,
+        user_id: input.userId,
+        kind: input.kind,
+        token_hash: input.tokenHash,
+        label: input.label ?? null,
+        expires_at: input.expiresAt ? new Date(input.expiresAt) : null,
+      },
+    }));
   }
 
   async findAuthTokenByHash(tokenHash: string): Promise<AuthTokenRow | null> {
-    const { rows } = await query<AuthTokenRow>(
-      `SELECT * FROM auth_tokens WHERE token_hash = $1`,
-      [tokenHash],
-    );
-    return rows[0] ?? null;
+    const row = await prisma.auth_tokens.findUnique({ where: { token_hash: tokenHash } });
+    return row ? toAuthTokenRow(row) : null;
   }
 
   async revokeAuthToken(id: string): Promise<void> {
-    await query(
-      `UPDATE auth_tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL`,
-      [id],
-    );
+    await prisma.auth_tokens.updateMany({ where: { id, revoked_at: null }, data: { revoked_at: new Date() } });
   }
 
   async listApiTokensByTenant(tenantId: string): Promise<AuthTokenRow[]> {
-    const { rows } = await query<AuthTokenRow>(
-      `SELECT * FROM auth_tokens WHERE tenant_id = $1 AND kind = 'api' ORDER BY created_at DESC`,
-      [tenantId],
-    );
-    return rows;
+    return (await prisma.auth_tokens.findMany({
+      where: { tenant_id: tenantId, kind: 'api' },
+      orderBy: { created_at: 'desc' },
+    })).map(toAuthTokenRow);
   }
 
   async createSystemAdmin(input: { email: string; passwordHash: string }): Promise<SystemAdminRow> {
-    const { rows } = await query<SystemAdminRow>(
-      `INSERT INTO system_admins (id, email, password_hash) VALUES ($1, $2, $3) RETURNING *`,
-      [newSystemAdminId(), input.email, input.passwordHash],
-    );
-    return rows[0];
+    return toSystemAdminRow(await prisma.system_admins.create({
+      data: { id: newSystemAdminId(), email: input.email, password_hash: input.passwordHash },
+    }));
   }
 
   async findSystemAdminByEmail(email: string): Promise<SystemAdminRow | null> {
-    const { rows } = await query<SystemAdminRow>(`SELECT * FROM system_admins WHERE email = $1`, [email]);
-    return rows[0] ?? null;
+    const row = await prisma.system_admins.findUnique({ where: { email } });
+    return row ? toSystemAdminRow(row) : null;
   }
 
   async findSystemAdminById(id: string): Promise<SystemAdminRow | null> {
-    const { rows } = await query<SystemAdminRow>(`SELECT * FROM system_admins WHERE id = $1`, [id]);
-    return rows[0] ?? null;
+    const row = await prisma.system_admins.findUnique({ where: { id } });
+    return row ? toSystemAdminRow(row) : null;
   }
 
   async listSystemAdmins(): Promise<SystemAdminRow[]> {
-    const { rows } = await query<SystemAdminRow>(`SELECT * FROM system_admins ORDER BY created_at`);
-    return rows;
+    return (await prisma.system_admins.findMany({ orderBy: { created_at: 'asc' } })).map(toSystemAdminRow);
   }
 
   async createSystemAdminToken(input: {
@@ -1471,26 +1379,22 @@ export class PgStore implements Store {
     tokenHash: string;
     expiresAt?: string | null;
   }): Promise<SystemAdminTokenRow> {
-    const { rows } = await query<SystemAdminTokenRow>(
-      `INSERT INTO system_admin_tokens (id, system_admin_id, token_hash, expires_at)
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [newSystemAdminTokenId(), input.systemAdminId, input.tokenHash, input.expiresAt ?? null],
-    );
-    return rows[0];
+    return toSystemAdminTokenRow(await prisma.system_admin_tokens.create({
+      data: {
+        id: newSystemAdminTokenId(),
+        system_admin_id: input.systemAdminId,
+        token_hash: input.tokenHash,
+        expires_at: input.expiresAt ? new Date(input.expiresAt) : null,
+      },
+    }));
   }
 
   async findSystemAdminTokenByHash(tokenHash: string): Promise<SystemAdminTokenRow | null> {
-    const { rows } = await query<SystemAdminTokenRow>(
-      `SELECT * FROM system_admin_tokens WHERE token_hash = $1`,
-      [tokenHash],
-    );
-    return rows[0] ?? null;
+    const row = await prisma.system_admin_tokens.findUnique({ where: { token_hash: tokenHash } });
+    return row ? toSystemAdminTokenRow(row) : null;
   }
 
   async revokeSystemAdminToken(id: string): Promise<void> {
-    await query(
-      `UPDATE system_admin_tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL`,
-      [id],
-    );
+    await prisma.system_admin_tokens.updateMany({ where: { id, revoked_at: null }, data: { revoked_at: new Date() } });
   }
 }

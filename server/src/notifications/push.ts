@@ -1,8 +1,8 @@
 import webPush from 'web-push';
 import type { PushSubscription } from 'web-push';
 import { config } from '../config.js';
-import { query } from '../db/pool.js';
 import { store as defaultStore } from '../store/index.js';
+import { findSetting, insertMissingSettings } from '../store/settingsRepository.js';
 import type { PushSubscriptionRow, Scope, Store } from '../store/types.js';
 
 const VAPID_SETTING_KEY = 'web_push_vapid';
@@ -58,25 +58,12 @@ async function readOrCreateVapidSetting(): Promise<VapidSetting> {
 
   // VAPID 密钥是这一个部署实例的 Web Push 身份,不是租户策略——固定放在 default
   // 租户分区下,不管调用方是哪个租户(docs/multi-tenancy-design.md §9)。
-  const { rows } = await query<{ value: VapidSetting }>(
-    `SELECT value FROM app_settings WHERE tenant_id = 'default' AND key = $1`,
-    [VAPID_SETTING_KEY],
-  );
-  const stored = rows[0]?.value;
+  const stored = await findSetting('default', VAPID_SETTING_KEY) as VapidSetting | undefined;
   if (stored?.publicKey && stored?.privateKey) return stored;
 
   const generated = webPush.generateVAPIDKeys();
-  await query(
-    `INSERT INTO app_settings (tenant_id, key, value, updated_at)
-     VALUES ('default', $1, $2::jsonb, now())
-     ON CONFLICT (tenant_id, key) DO NOTHING`,
-    [VAPID_SETTING_KEY, JSON.stringify(generated)],
-  );
-  const { rows: afterInsert } = await query<{ value: VapidSetting }>(
-    `SELECT value FROM app_settings WHERE tenant_id = 'default' AND key = $1`,
-    [VAPID_SETTING_KEY],
-  );
-  return afterInsert[0]?.value ?? generated;
+  await insertMissingSettings('default', [{ key: VAPID_SETTING_KEY, value: generated }]);
+  return await findSetting('default', VAPID_SETTING_KEY) as VapidSetting ?? generated;
 }
 
 export async function getWebPushPublicKey(): Promise<{ enabled: boolean; publicKey: string | null; reason?: string }> {

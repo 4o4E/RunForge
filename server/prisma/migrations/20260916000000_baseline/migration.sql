@@ -1,3 +1,5 @@
+-- Prisma baseline：完整描述引入 Prisma 前由 RunForge 管理的 PostgreSQL 结构。
+-- 已有数据库只登记为 applied；全新数据库从本文件创建，不再并行维护 schema.sql。
 -- Agent persistence schema (PostgreSQL)
 -- Conversation hierarchy: thread → run → step → (messages, events)
 

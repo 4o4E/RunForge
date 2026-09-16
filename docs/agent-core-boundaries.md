@@ -216,7 +216,7 @@ OpenTelemetry 面向工程观测，RunForge 的 `events` 面向用户可见执�
 
 自研范围：
 
-- PostgreSQL schema。
+- Prisma schema 与 PostgreSQL migration。
 - Store 抽象。
 - `messages` 原文保留和压缩视图。
 - `events` 作为前端回放 source of truth。
@@ -230,7 +230,8 @@ RunForge 要展示“agent 做过什么”，不是只拿到最终答案。社�
 
 - [server/src/store/pgStore.ts](../server/src/store/pgStore.ts)
 - [server/src/store/messageView.ts](../server/src/store/messageView.ts)
-- [server/src/db/schema.sql](../server/src/db/schema.sql)
+- [server/prisma/schema.prisma](../server/prisma/schema.prisma)
+- [server/prisma/migrations](../server/prisma/migrations)
 
 ### 数据源短期凭证
 

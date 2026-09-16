@@ -1,0 +1,485 @@
+generator client {
+  provider        = "prisma-client"
+  output          = "../src/generated/prisma"
+  previewFeatures = ["partialIndexes"]
+  moduleFormat    = "esm"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model app_settings {
+  key        String
+  value      Json
+  updated_at DateTime @default(now()) @db.Timestamptz(6)
+  tenant_id  String   @default("default")
+  tenants    tenants  @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([tenant_id, key])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model auth_tokens {
+  id         String    @id
+  tenant_id  String
+  user_id    String
+  kind       String
+  token_hash String    @unique
+  label      String?
+  expires_at DateTime? @db.Timestamptz(6)
+  revoked_at DateTime? @db.Timestamptz(6)
+  created_at DateTime  @default(now()) @db.Timestamptz(6)
+  tenants    tenants   @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users      users     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([user_id, kind, revoked_at], map: "idx_auth_tokens_user")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model datasource_account_leases {
+  id                             String                         @id
+  account_id                     String
+  datasource_id                  String
+  profile_id                     String
+  run_id                         String
+  token_id                       String?
+  status                         String                         @default("leased")
+  leased_at                      DateTime                       @default(now()) @db.Timestamptz(6)
+  expires_at                     DateTime                       @db.Timestamptz(6)
+  released_at                    DateTime?                      @db.Timestamptz(6)
+  error                          String?
+  created_at                     DateTime                       @default(now()) @db.Timestamptz(6)
+  updated_at                     DateTime                       @default(now()) @db.Timestamptz(6)
+  datasource_accounts            datasource_accounts            @relation(fields: [account_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  datasources                    datasources                    @relation(fields: [datasource_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  datasource_permission_profiles datasource_permission_profiles @relation(fields: [profile_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  runs                           runs                           @relation(fields: [run_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  workload_tokens                workload_tokens?               @relation(fields: [token_id], references: [id], onUpdate: NoAction)
+
+  @@index([status, expires_at], map: "idx_datasource_leases_expiry")
+  @@index([run_id, status], map: "idx_datasource_leases_run")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model datasource_accounts {
+  id                             String                         @id
+  datasource_id                  String
+  profile_id                     String
+  username                       String
+  status                         String                         @default("idle")
+  current_run_id                 String?
+  leased_until                   DateTime?                      @db.Timestamptz(6)
+  last_lease_at                  DateTime?                      @db.Timestamptz(6)
+  last_rotated_at                DateTime?                      @db.Timestamptz(6)
+  failure_count                  Int                            @default(0)
+  metadata                       Json                           @default("{}")
+  created_at                     DateTime                       @default(now()) @db.Timestamptz(6)
+  updated_at                     DateTime                       @default(now()) @db.Timestamptz(6)
+  datasource_account_leases      datasource_account_leases[]
+  runs                           runs?                          @relation(fields: [current_run_id], references: [id], onUpdate: NoAction)
+  datasources                    datasources                    @relation(fields: [datasource_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  datasource_permission_profiles datasource_permission_profiles @relation(fields: [profile_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([datasource_id, username])
+  @@index([datasource_id, profile_id, status], map: "idx_datasource_accounts_pool")
+  @@index([current_run_id], map: "idx_datasource_accounts_run")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model datasource_permission_profiles {
+  id                        String                      @id
+  datasource_id             String
+  name                      String
+  mode                      String                      @default("readonly")
+  template_role             String?
+  grants                    Json                        @default("{}")
+  pool_config               Json                        @default("{}")
+  created_at                DateTime                    @default(now()) @db.Timestamptz(6)
+  updated_at                DateTime                    @default(now()) @db.Timestamptz(6)
+  datasource_account_leases datasource_account_leases[]
+  datasource_accounts       datasource_accounts[]
+  datasources               datasources                 @relation(fields: [datasource_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([datasource_id, name])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model datasources {
+  id                             String                           @id
+  name                           String
+  type                           String
+  status                         String                           @default("active")
+  connection                     Json                             @default("{}")
+  admin_config                   Json                             @default("{}")
+  pool_config                    Json                             @default("{}")
+  created_at                     DateTime                         @default(now()) @db.Timestamptz(6)
+  updated_at                     DateTime                         @default(now()) @db.Timestamptz(6)
+  enabled                        Boolean                          @default(true)
+  tenant_id                      String                           @default("default")
+  datasource_account_leases      datasource_account_leases[]
+  datasource_accounts            datasource_accounts[]
+  datasource_permission_profiles datasource_permission_profiles[]
+  tenants                        tenants                          @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([tenant_id, name], map: "idx_datasources_name_tenant")
+}
+
+model events {
+  id         BigInt   @id @default(autoincrement())
+  run_id     String
+  step_id    String?
+  idx        Int      @default(0)
+  type       String
+  data       Json     @default("{}")
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+  runs       runs     @relation(fields: [run_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  steps      steps?   @relation(fields: [step_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([run_id, id], map: "idx_events_run")
+}
+
+model messages {
+  id             BigInt   @id @default(autoincrement())
+  thread_id      String
+  run_id         String
+  step_id        String?
+  role           String
+  content        String?
+  tool_calls     Json?
+  tool_call_id   String?
+  collapsed      String?
+  created_at     DateTime @default(now()) @db.Timestamptz(6)
+  summary_of     BigInt[]
+  provider_state Json?
+  runs           runs     @relation(fields: [run_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  steps          steps?   @relation(fields: [step_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  threads        threads  @relation(fields: [thread_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([run_id, id], map: "idx_messages_run")
+  @@index([thread_id, id], map: "idx_messages_thread")
+}
+
+model push_subscriptions {
+  endpoint        String    @id
+  p256dh          String
+  auth            String
+  expiration_time DateTime? @db.Timestamptz(6)
+  user_agent      String?
+  enabled         Boolean   @default(true)
+  last_error      String?
+  created_at      DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime  @default(now()) @db.Timestamptz(6)
+  tenant_id       String    @default("default")
+  user_id         String?
+  tenants         tenants   @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users           users?    @relation(fields: [user_id], references: [id], onUpdate: NoAction)
+
+  @@index([enabled, updated_at(sort: Desc)], map: "idx_push_subscriptions_enabled")
+  @@index([tenant_id, user_id, enabled], map: "idx_push_subscriptions_tenant_user")
+}
+
+model runs {
+  id                                  String                      @id
+  thread_id                           String
+  status                              String                      @default("pending")
+  input                               String
+  output                              String?
+  error                               String?
+  goal_state                          Json?
+  created_at                          DateTime                    @default(now()) @db.Timestamptz(6)
+  updated_at                          DateTime                    @default(now()) @db.Timestamptz(6)
+  model_ref                           String?
+  parent_run_id                       String?
+  runtime_capabilities_snapshot       Json?
+  datasource_account_leases           datasource_account_leases[]
+  datasource_accounts                 datasource_accounts[]
+  events                              events[]
+  messages                            messages[]
+  runs                                runs?                       @relation("runsToruns", fields: [parent_run_id], references: [id], onUpdate: NoAction)
+  other_runs                          runs[]                      @relation("runsToruns")
+  threads_runs_thread_idTothreads     threads                     @relation("runs_thread_idTothreads", fields: [thread_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  runtime_capability_calls            runtime_capability_calls[]
+  shell_commands                      shell_commands[]
+  shell_sessions                      shell_sessions[]
+  steps                               steps[]
+  subagent_runs                       subagent_runs[]
+  thread_notices                      thread_notices[]
+  threads_threads_active_run_idToruns threads[]                   @relation("threads_active_run_idToruns")
+  workload_tokens                     workload_tokens[]
+
+  @@index([thread_id, created_at], map: "idx_runs_thread")
+  @@index([thread_id, parent_run_id, created_at], map: "idx_runs_thread_parent")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model runtime_capability_calls {
+  id               String           @id
+  tenant_id        String
+  run_id           String
+  step_id          String?
+  token_id         String?
+  capability       String
+  provider         String?
+  model            String?
+  request_summary  Json             @default("{}")
+  response_summary Json             @default("{}")
+  usage            Json?
+  status           String
+  error            String?
+  started_at       DateTime         @default(now()) @db.Timestamptz(6)
+  ended_at         DateTime         @default(now()) @db.Timestamptz(6)
+  runs             runs             @relation(fields: [run_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  steps            steps?           @relation(fields: [step_id], references: [id], onUpdate: NoAction)
+  tenants          tenants          @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  workload_tokens  workload_tokens? @relation(fields: [token_id], references: [id], onUpdate: NoAction)
+
+  @@index([run_id, started_at(sort: Desc)], map: "idx_runtime_capability_calls_run")
+  @@index([tenant_id, started_at(sort: Desc)], map: "idx_runtime_capability_calls_tenant")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model shell_command_logs {
+  id             BigInt         @id @default(autoincrement())
+  command_id     String
+  seq            BigInt
+  stream         String
+  chunk          String
+  created_at     DateTime       @default(now()) @db.Timestamptz(6)
+  shell_commands shell_commands @relation(fields: [command_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([command_id, seq])
+  @@index([command_id, seq], map: "idx_shell_command_logs_command")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model shell_commands {
+  id                 String               @id
+  session_id         String               @unique(map: "idx_shell_commands_one_running_per_session", where: raw("(status = ANY (ARRAY['queued'::text, 'running'::text]))"))
+  run_id             String?
+  step_id            String?
+  actor              String               @default("agent")
+  command            String
+  cwd                String
+  wait_mode          String               @default("foreground")
+  status             String               @default("queued")
+  attention          String?
+  host_pid           Int?
+  child_pid          Int?
+  exit_code          Int?
+  signal             String?
+  soft_timeout_ms    Int?
+  hard_timeout_ms    Int?
+  soft_timeout_at    DateTime?            @db.Timestamptz(6)
+  hard_timeout_at    DateTime?            @db.Timestamptz(6)
+  last_output_at     DateTime?            @db.Timestamptz(6)
+  output_bytes       BigInt               @default(0)
+  error              String?
+  started_at         DateTime             @default(now()) @db.Timestamptz(6)
+  ended_at           DateTime?            @db.Timestamptz(6)
+  updated_at         DateTime             @default(now()) @db.Timestamptz(6)
+  shell_command_logs shell_command_logs[]
+  runs               runs?                @relation(fields: [run_id], references: [id], onUpdate: NoAction)
+  shell_sessions     shell_sessions       @relation(fields: [session_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  steps              steps?               @relation(fields: [step_id], references: [id], onUpdate: NoAction)
+
+  @@index([run_id, status], map: "idx_shell_commands_run")
+  @@index([session_id, started_at], map: "idx_shell_commands_session")
+  @@index([status, updated_at], map: "idx_shell_commands_status")
+}
+
+model shell_session_events {
+  id             BigInt         @id @default(autoincrement())
+  session_id     String
+  actor          String
+  kind           String
+  data           Json           @default("{}")
+  created_at     DateTime       @default(now()) @db.Timestamptz(6)
+  shell_sessions shell_sessions @relation(fields: [session_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([session_id, id], map: "idx_shell_session_events_session")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model shell_sessions {
+  id                   String                 @id
+  thread_id            String
+  workspace_root       String
+  backend              String
+  status               String                 @default("idle")
+  lease_actor          String?
+  lease_run_id         String?
+  created_at           DateTime               @default(now()) @db.Timestamptz(6)
+  updated_at           DateTime               @default(now()) @db.Timestamptz(6)
+  cwd                  String
+  name                 String
+  owner                String                 @default("agent")
+  config_snapshot      Json?
+  deleted_at           DateTime?              @db.Timestamptz(6)
+  tenant_id            String                 @default("default")
+  shell_commands       shell_commands?
+  shell_session_events shell_session_events[]
+  runs                 runs?                  @relation(fields: [lease_run_id], references: [id], onUpdate: NoAction)
+  tenants              tenants                @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  threads              threads                @relation(fields: [thread_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([thread_id, workspace_root, deleted_at], map: "idx_shell_sessions_active")
+  @@index([tenant_id], map: "idx_shell_sessions_tenant")
+  @@index([thread_id, workspace_root, status], map: "idx_shell_sessions_thread")
+}
+
+model steps {
+  id                       String                     @id
+  run_id                   String
+  idx                      Int
+  created_at               DateTime                   @default(now()) @db.Timestamptz(6)
+  events                   events[]
+  messages                 messages[]
+  runtime_capability_calls runtime_capability_calls[]
+  shell_commands           shell_commands[]
+  runs                     runs                       @relation(fields: [run_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  subagent_runs            subagent_runs[]
+
+  @@index([run_id, idx], map: "idx_steps_run")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model subagent_runs {
+  id                 String    @id
+  parent_run_id      String
+  parent_step_id     String?
+  workflow_id        String?
+  stage_id           String?
+  runtime_profile_id String?
+  status             String    @default("running")
+  task_assignment    Json      @default("{}")
+  skill_names        String[]  @default([])
+  output             String?
+  error              String?
+  usage              Json?
+  created_at         DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at         DateTime  @default(now()) @db.Timestamptz(6)
+  finished_at        DateTime? @db.Timestamptz(6)
+  tenant_id          String    @default("default")
+  runs               runs      @relation(fields: [parent_run_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  steps              steps?    @relation(fields: [parent_step_id], references: [id], onUpdate: NoAction)
+  tenants            tenants   @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([parent_run_id, created_at], map: "idx_subagent_runs_parent")
+  @@index([parent_run_id, stage_id], map: "idx_subagent_runs_stage")
+  @@index([tenant_id], map: "idx_subagent_runs_tenant")
+}
+
+model system_admin_tokens {
+  id              String        @id
+  system_admin_id String
+  token_hash      String        @unique
+  expires_at      DateTime?     @db.Timestamptz(6)
+  revoked_at      DateTime?     @db.Timestamptz(6)
+  created_at      DateTime      @default(now()) @db.Timestamptz(6)
+  system_admins   system_admins @relation(fields: [system_admin_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([system_admin_id, revoked_at], map: "idx_system_admin_tokens_admin")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model system_admins {
+  id                  String                @id
+  email               String                @unique
+  password_hash       String
+  status              String                @default("active")
+  created_at          DateTime              @default(now()) @db.Timestamptz(6)
+  system_admin_tokens system_admin_tokens[]
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model tenants {
+  id                       String                     @id
+  name                     String
+  status                   String                     @default("active")
+  created_at               DateTime                   @default(now()) @db.Timestamptz(6)
+  app_settings             app_settings[]
+  auth_tokens              auth_tokens[]
+  datasources              datasources[]
+  push_subscriptions       push_subscriptions[]
+  runtime_capability_calls runtime_capability_calls[]
+  shell_sessions           shell_sessions[]
+  subagent_runs            subagent_runs[]
+  threads                  threads[]
+  users                    users[]
+}
+
+model thread_notices {
+  id                                               BigInt   @id @default(autoincrement())
+  thread_id                                        String
+  kind                                             String   @default("info")
+  message                                          String
+  linked_thread_id                                 String?
+  linked_run_id                                    String?
+  created_at                                       DateTime @default(now()) @db.Timestamptz(6)
+  title                                            String?
+  runs                                             runs?    @relation(fields: [linked_run_id], references: [id], onUpdate: NoAction)
+  threads_thread_notices_linked_thread_idTothreads threads? @relation("thread_notices_linked_thread_idTothreads", fields: [linked_thread_id], references: [id], onUpdate: NoAction)
+  threads_thread_notices_thread_idTothreads        threads  @relation("thread_notices_thread_idTothreads", fields: [thread_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([thread_id, created_at, id], map: "idx_thread_notices_thread")
+}
+
+model threads {
+  id                                                      String           @id
+  title                                                   String?
+  created_at                                              DateTime         @default(now()) @db.Timestamptz(6)
+  updated_at                                              DateTime         @default(now()) @db.Timestamptz(6)
+  pinned_at                                               DateTime?        @db.Timestamptz(6)
+  archived_at                                             DateTime?        @db.Timestamptz(6)
+  active_run_id                                           String?
+  tenant_id                                               String           @default("default")
+  user_id                                                 String?
+  messages                                                messages[]
+  runs_runs_thread_idTothreads                            runs[]           @relation("runs_thread_idTothreads")
+  shell_sessions                                          shell_sessions[]
+  thread_notices_thread_notices_linked_thread_idTothreads thread_notices[] @relation("thread_notices_linked_thread_idTothreads")
+  thread_notices_thread_notices_thread_idTothreads        thread_notices[] @relation("thread_notices_thread_idTothreads")
+  runs_threads_active_run_idToruns                        runs?            @relation("threads_active_run_idToruns", fields: [active_run_id], references: [id], onUpdate: NoAction)
+  tenants                                                 tenants          @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users                                                   users?           @relation(fields: [user_id], references: [id], onUpdate: NoAction)
+
+  @@index([created_at(sort: Desc)], map: "idx_threads_created")
+  @@index([archived_at, pinned_at(sort: Desc), updated_at(sort: Desc), created_at(sort: Desc)], map: "idx_threads_sidebar")
+  @@index([tenant_id, user_id, updated_at(sort: Desc)], map: "idx_threads_tenant_user")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model users {
+  id                 String               @id
+  tenant_id          String
+  email              String
+  password_hash      String
+  role               String               @default("member")
+  status             String               @default("active")
+  created_at         DateTime             @default(now()) @db.Timestamptz(6)
+  auth_tokens        auth_tokens[]
+  push_subscriptions push_subscriptions[]
+  threads            threads[]
+  tenants            tenants              @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([tenant_id, email])
+}
+
+model workload_tokens {
+  id                        String                      @id
+  token_hash                String                      @unique
+  run_id                    String
+  skill_id                  String?
+  allowed_datasources       String[]                    @default([])
+  expires_at                DateTime                    @db.Timestamptz(6)
+  revoked_at                DateTime?                   @db.Timestamptz(6)
+  created_at                DateTime                    @default(now()) @db.Timestamptz(6)
+  allowed_capabilities      String[]                    @default([])
+  datasource_account_leases datasource_account_leases[]
+  runtime_capability_calls  runtime_capability_calls[]
+  runs                      runs                        @relation(fields: [run_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([expires_at], map: "idx_workload_tokens_expiry")
+  @@index([run_id], map: "idx_workload_tokens_run")
+}

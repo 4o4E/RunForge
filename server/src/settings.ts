@@ -21,8 +21,8 @@ import type {
 } from '@runforge/contracts';
 export type { LlmModelOption, LlmProviderSettings, LlmSettings, McpServerSettings, McpSettings, RuntimeCapabilitiesSettings, ToolSettings } from '@runforge/contracts';
 import { config } from './config.js';
-import { query } from './db/pool.js';
 import type { Scope, TenantScope } from './store/types.js';
+import { findSetting, findSettings, insertMissingSettings, upsertSettings } from './store/settingsRepository.js';
 import { resolveWorkspaceRoot } from './files/workspaceRoot.js';
 import { mergeModelCapability } from './llm/modelCatalog.js';
 
@@ -293,26 +293,17 @@ async function bindWorkspaceRoot(settings: ToolSettings, scope: TenantScope | Sc
 }
 
 async function readSettingRows(tenantId: string, keys: readonly string[]): Promise<SettingRow[]> {
-  const { rows } = await query<SettingRow>(
-    `SELECT key, value FROM app_settings WHERE tenant_id = $1 AND key = ANY($2::text[])`,
-    [tenantId, [...keys]],
-  );
-  return rows;
+  return findSettings(tenantId, keys);
 }
 
 /** 只给 default 租户播种基础层默认值;其它租户没有覆盖就一路 fallback 到
  *  default 租户的值再到 env 默认值(见 getToolSettings),不自动写入具体值。 */
 async function insertMissingDefaults(rows: SettingRow[]): Promise<void> {
   const existing = new Set(rows.map((row) => row.key));
-  for (const [key, value] of toolSettingsToEntries(defaultToolSettings())) {
-    if (existing.has(key)) continue;
-    await query(
-      `INSERT INTO app_settings (tenant_id, key, value, updated_at)
-       VALUES ($1, $2, $3::jsonb, now())
-       ON CONFLICT (tenant_id, key) DO NOTHING`,
-      [DEFAULT_TENANT_ID, key, JSON.stringify(value)],
-    );
-  }
+  const missing = toolSettingsToEntries(defaultToolSettings())
+    .filter(([key]) => !existing.has(key))
+    .map(([key, value]) => ({ key, value }));
+  await insertMissingSettings(DEFAULT_TENANT_ID, missing);
 }
 
 /** 读取当前租户的工具配置:本租户覆盖 -> default 租户覆盖 -> env 默认值三层回退
@@ -375,14 +366,7 @@ export function shellPathForSettings(settings: ToolSettings): string {
 
 export async function saveToolSettings(scope: TenantScope, input: unknown): Promise<ToolSettings> {
   const settings = normalizeToolSettings(input);
-  for (const [key, value] of toolSettingsToEntries(settings)) {
-    await query(
-      `INSERT INTO app_settings (tenant_id, key, value, updated_at)
-       VALUES ($1, $2, $3::jsonb, now())
-       ON CONFLICT (tenant_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
-      [scope.tenantId, key, JSON.stringify(value)],
-    );
-  }
+  await upsertSettings(scope.tenantId, toolSettingsToEntries(settings).map(([key, value]) => ({ key, value })));
   // 存进去的值可能被调用方 normalize 出一个不受信任的 workspaceRoot,但返回值必须是
   // 计算出来的那个——同一个理由见 getToolSettings。
   return await bindWorkspaceRoot(settings, scope);
@@ -431,8 +415,7 @@ export function normalizeMcpSettings(input: unknown): McpSettings {
 }
 
 async function readTenantJsonSetting(tenantId: string, key: string): Promise<unknown> {
-  const { rows } = await query<SettingRow>(`SELECT value FROM app_settings WHERE tenant_id = $1 AND key = $2`, [tenantId, key]);
-  return rows[0]?.value;
+  return findSetting(tenantId, key);
 }
 
 /** 本租户覆盖 -> default 租户覆盖 两层回退,给 mcp/llm 这类单行 JSON 配置用。 */
@@ -444,12 +427,7 @@ async function readJsonSettingWithFallback(tenantId: string, key: string): Promi
 }
 
 async function upsertTenantJsonSetting(tenantId: string, key: string, value: unknown): Promise<void> {
-  await query(
-    `INSERT INTO app_settings (tenant_id, key, value, updated_at)
-     VALUES ($1, $2, $3::jsonb, now())
-     ON CONFLICT (tenant_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
-    [tenantId, key, JSON.stringify(value)],
-  );
+  await upsertSettings(tenantId, [{ key, value }]);
 }
 
 export async function getMcpSettings(scope: TenantScope): Promise<McpSettings> {
@@ -458,12 +436,7 @@ export async function getMcpSettings(scope: TenantScope): Promise<McpSettings> {
     if (value === undefined) {
       const defaults = defaultMcpSettings();
       if (scope.tenantId === DEFAULT_TENANT_ID) {
-        await query(
-          `INSERT INTO app_settings (tenant_id, key, value, updated_at)
-           VALUES ($1, $2, $3::jsonb, now())
-           ON CONFLICT (tenant_id, key) DO NOTHING`,
-          [DEFAULT_TENANT_ID, MCP_SETTINGS_KEY, JSON.stringify(defaults)],
-        );
+        await insertMissingSettings(DEFAULT_TENANT_ID, [{ key: MCP_SETTINGS_KEY, value: defaults }]);
       }
       return defaults;
     }
@@ -558,12 +531,7 @@ export async function getLlmSettings(scope: TenantScope): Promise<LlmSettings> {
     if (value === undefined) {
       const defaults = defaultLlmSettings();
       if (scope.tenantId === DEFAULT_TENANT_ID) {
-        await query(
-          `INSERT INTO app_settings (tenant_id, key, value, updated_at)
-           VALUES ($1, $2, $3::jsonb, now())
-           ON CONFLICT (tenant_id, key) DO NOTHING`,
-          [DEFAULT_TENANT_ID, LLM_SETTINGS_KEY, JSON.stringify(defaults)],
-        );
+        await insertMissingSettings(DEFAULT_TENANT_ID, [{ key: LLM_SETTINGS_KEY, value: defaults }]);
       }
       return defaults;
     }
@@ -675,12 +643,7 @@ export async function getRuntimeCapabilitiesSettings(scope: TenantScope): Promis
     if (value === undefined) {
       const defaults = defaultRuntimeCapabilitiesSettings();
       if (scope.tenantId === DEFAULT_TENANT_ID) {
-        await query(
-          `INSERT INTO app_settings (tenant_id, key, value, updated_at)
-           VALUES ($1, $2, $3::jsonb, now())
-           ON CONFLICT (tenant_id, key) DO NOTHING`,
-          [DEFAULT_TENANT_ID, RUNTIME_CAPABILITIES_SETTINGS_KEY, JSON.stringify(defaults)],
-        );
+        await insertMissingSettings(DEFAULT_TENANT_ID, [{ key: RUNTIME_CAPABILITIES_SETTINGS_KEY, value: defaults }]);
       }
       return defaults;
     }
@@ -708,8 +671,7 @@ function normalizePageState(input: unknown): Record<string, unknown> {
 
 // pageState 是纯 UI 状态,不是策略配置,只按本租户存取,不做 default 租户回退。
 export async function getPageState(scope: TenantScope): Promise<Record<string, unknown>> {
-  const { rows } = await query<SettingRow>(`SELECT value FROM app_settings WHERE tenant_id = $1 AND key = $2`, [scope.tenantId, PAGE_STATE_KEY]);
-  return normalizePageState(rows[0]?.value);
+  return normalizePageState(await findSetting(scope.tenantId, PAGE_STATE_KEY));
 }
 
 export async function savePageState(scope: TenantScope, input: unknown): Promise<Record<string, unknown>> {

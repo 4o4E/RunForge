@@ -346,14 +346,15 @@ attempt 记录不由该清理任务删除。
 
 ## 12. Prisma 实施顺序
 
-项目已确认后续迁移到 Prisma，但当前代码仍使用 `pg`、`schema.sql` 和分散的原生查询。
-空间功能会新增多张表、事务、外键和并发约束，如果先按现有 SQL 全量实现再迁移，
-会产生一次明显的重复改造。
+项目已切换到 Node.js 24 和 Prisma 7.10.0。现有结构已经建立 Prisma baseline，空间改造会
+触及的 thread/run/message/event/settings/auth 查询已迁到 Prisma；fork 历史复制、subagent、
+shell、push subscription、数据源账号池及 runtime capability 的原生 SQL 暂时保留，并与
+Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范围继续收口。
 
 已确认 Prisma 是空间数据库改造的前置阶段：
 
-1. Cordis 隔离原型先行，不依赖数据库迁移。
-2. 原型通过后先完成 Prisma baseline、生成客户端和 Store 持久化边界迁移。
+1. Cordis 隔离原型已先行完成，不依赖数据库迁移。
+2. Prisma baseline、生成客户端和空间前置 Store/repository 边界迁移已完成。
 3. 空间新表和后续业务查询直接基于 Prisma 实现，不再新增散落的 `pool.query()`。
 
 本需求当前不依赖手写部分唯一索引或显式行锁：
@@ -410,9 +411,9 @@ attempt 记录不由该清理任务删除。
 
 ### 阶段 1：Prisma 基础
 
-- baseline 现有数据库，保留数据和已有 ID。
-- 明确 Prisma schema、CAS 事务和 Store/repository 迁移边界。
-- 先迁移空间改造会触及的 thread/run/message/event/settings/auth 查询。
+- ✅ baseline 现有数据库，保留数据和已有 ID。
+- ✅ 明确 Prisma schema、CAS 事务和 Store/repository 迁移边界。
+- ✅ 迁移空间改造会触及的 thread/run/message/event/settings/auth 查询。
 
 ### 阶段 2：空间与身份数据模型
 

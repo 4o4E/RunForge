@@ -3,7 +3,9 @@ packages:
   - web
   - packages/*
 allowBuilds:
+  '@prisma/engines': true
   esbuild: true
+  prisma: true
   protobufjs: true
 minimumReleaseAgeExclude:
   - '@ai-sdk/react@3.0.203'

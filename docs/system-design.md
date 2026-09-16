@@ -151,15 +151,20 @@ Web 创建 thread
 `server/src/store/`
 
 - `types.ts`：Store 接口。
-- `pgStore.ts`：PostgreSQL 实现。
+- `pgStore.ts`：基于 Prisma Client 的 PostgreSQL 实现；尚未迁移的长事务和子系统查询在同一
+  Store 内暂时保留原生 SQL。
 - `memoryStore.ts`：内存实现。
 - `index.ts`：根据配置选择 store。
 
 `server/src/db/`
 
-- `schema.sql`：PostgreSQL schema。
-- `migrate.ts`：幂等迁移入口。
+- `prisma.ts`：Prisma Client；与过渡期原生 SQL 共用现有 `pg.Pool`，不建立第二个连接池。
 - `pool.ts`：数据库连接池。
+
+`server/prisma/`
+
+- `schema.prisma`：PostgreSQL 数据模型。
+- `migrations/`：唯一 migration 来源；已执行 migration 只追加、不改写。
 
 ## 前端模块
 

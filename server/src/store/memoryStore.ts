@@ -426,6 +426,12 @@ export class MemoryStore implements Store {
     run.goal_state = goal;
     run.updated_at = this.now();
   }
+  async setRuntimeCapabilitiesSnapshot(scope: Scope, runId: string, snapshot: object) {
+    const run = this.runs.get(runId);
+    if (!this.runOwnedBy(run, scope)) return;
+    run.runtime_capabilities_snapshot = structuredClone(snapshot) as Record<string, unknown>;
+    run.updated_at = this.now();
+  }
   async getRunUnscoped(id: string): Promise<RunRow | null> {
     return this.runs.get(id) ?? null;
   }

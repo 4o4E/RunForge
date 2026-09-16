@@ -23,7 +23,7 @@ export interface TenantScope {
  *  (executor.ts/recovery.ts/api/runtime.ts)统一调用,避免各处重复实现,也避免
  *  各自用 `thread.user_id ?? ''` 悄悄拼出一个谁都匹配不上的空 scope——那样后续
  *  每个 Store 调用都会静默 0 行受影响而不报错(表现为 run 卡住/丢事件,而不是
- *  一个清晰的错误)。`user_id` 为空只发生在用户被删除后(schema.sql 的
+ *  一个清晰的错误)。`user_id` 为空只发生在用户被删除后(Prisma migration 的
  *  `ON DELETE SET NULL`),按设计这类 thread 之后对所有人都不可查,这里直接
  *  抛错,由调用方决定是跳过(recovery.ts 的批量恢复)还是让请求失败
  *  (executor.ts/runtime.ts 的单个 run)。 */
@@ -261,7 +261,7 @@ export interface AuthTokenRow {
 }
 
 // 系统管理员的 refresh token,不能复用 AuthTokenRow——那张表的 tenant_id/user_id
-// 是 NOT NULL,系统管理员两边都不在(server/src/db/schema.sql 的 system_admin_tokens)。
+// 是 NOT NULL,系统管理员两边都不在(Prisma schema 的 system_admin_tokens)。
 export interface SystemAdminTokenRow {
   id: string;
   system_admin_id: string;
@@ -306,6 +306,12 @@ export interface Store {
   setRunStatus(scope: Scope, id: string, status: RunStatus, fields?: { output?: string | null; error?: string | null }): Promise<void>;
   /** Persist the run's goal anchor (so it's inspectable and survives a restart). */
   setGoalState(scope: Scope, runId: string, goal: GoalState): Promise<void>;
+  /** 固定本次 run 可使用的运行时能力，后续恢复不得重新读取租户当前配置。 */
+  setRuntimeCapabilitiesSnapshot(
+    scope: Scope,
+    runId: string,
+    snapshot: object,
+  ): Promise<void>;
   /** 不做租户过滤——只给需要"从 runId 反推 scope"的内部代码用:executeRun 自己
    *  (见 executor.ts)、后台任务(recovery.ts)、以及 api/runtime.ts 的
    *  `scopeForRun`(容器脚本走 workload token,没有请求身份可用)。api/runtime.ts

@@ -243,7 +243,7 @@ CREATE INDEX idx_auth_tokens_user ON auth_tokens(user_id, kind, revoked_at);
 
 ### 默认租户与默认管理员引导(bootstrap)
 
-不管是**从现有单租户部署迁移**,还是**全新部署第一次启动**,系统都不能出现"没有任何 tenant、没有任何能登录的账号"这种状态——否则新装的系统连第一个用户都创建不了。做法是在服务启动时跑一段幂等的引导逻辑(风格与 `server/src/db/migrate.ts` 现有的启动期迁移一致,而不是要求运维手动执行一次性脚本):
+不管是**从现有单租户部署迁移**,还是**全新部署第一次启动**,系统都不能出现"没有任何 tenant、没有任何能登录的账号"这种状态——否则新装的系统连第一个用户都创建不了。数据库结构由 Prisma migration 先创建，服务启动时再跑幂等的业务引导逻辑；两者职责分开，不要求运维手动创建首个账号：
 
 ```text
 启动时:
@@ -289,7 +289,8 @@ CREATE INDEX idx_auth_tokens_user ON auth_tokens(user_id, kind, revoked_at);
 
 **Phase 2 现状**:加列 + 应用层过滤(`Store` 接口每个方法强制带 scope 参数)已经落地。**RLS 策略、`audit_access_log` 表和管理员审计功能本节下面描述的都还只是设计,尚未实现**——明确跳过的原因和影响见 §11 的"数据库层"残留风险条目。本节保留完整设计是为了让后续要补 RLS/审计时有现成的策略草案可参照,阅读时不要把下面的 SQL 当成"已经在库里"。
 
-以现有 `server/src/db/schema.sql` 为基准,改造方式(风格与现有的幂等 `ALTER TABLE ADD COLUMN IF NOT EXISTS` 迁移一致):
+以下 SQL 记录当时的字段设计；当前正式结构以 `server/prisma/schema.prisma` 和只追加的
+`server/prisma/migrations/` 为准：
 
 ```sql
 ALTER TABLE threads              ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default' REFERENCES tenants(id);
@@ -459,7 +460,7 @@ other tenants: ${TOOL_WORKSPACE_ROOT_BASE}/tenants/<tenant_id>/users/<user_id>/w
 
 改造完成后(即 §5-§9 都实施完)的隔离强度:
 
-- ⚠️ 数据库层:**只有应用层查询过滤,没有 Postgres RLS 兜底**。Phase 2 已经给 `threads`/`subagent_runs`/`shell_sessions`/`datasources`/`push_subscriptions` 等业务表加了 `tenant_id`/`user_id` 列,Store 层(`pgStore.ts`/`memoryStore.ts`)每个方法自己做 `WHERE tenant_id=$1 [AND user_id=$2]` 过滤,是当前唯一的强制边界。**明确跳过 RLS 的原因**:`server/src/db/pool.ts` 是裸 `pg.Pool`,`query()` 每次调用可能落在不同连接上,RLS 依赖的 `SET LOCAL app.tenant_id` 需要"同一个请求全程用同一个 client + 事务"才能保证生效,现在做需要先把 `pool.query()` 重构成"每请求 checkout client",范围超出本阶段。**这意味着**:任何绕过 Store 接口、直接用 `query()`/`pool` 手写 SQL 的新代码,如果忘记加 `tenant_id` 过滤,就是一个完整的跨租户数据泄露,且没有数据库层兜底会拦住它——`accountPool.ts` 里 `datasources`/`workload_tokens`/`datasource_account_leases` 等表目前就是这种"裸 query,自己在应用层小心过滤"的模式,新增/修改这些查询时必须手动核对 `tenant_id`/scope 校验,不能依赖数据库替你兜底。这是本阶段接受的已知残留风险,留给以后需要更高保证级别时再补 RLS。
+- ⚠️ 数据库层:**只有应用层查询过滤,没有 Postgres RLS 兜底**。Phase 2 已经给 `threads`/`subagent_runs`/`shell_sessions`/`datasources`/`push_subscriptions` 等业务表加了 `tenant_id`/`user_id` 列,Store 层(`pgStore.ts`/`memoryStore.ts`)每个方法按 scope 过滤,是当前唯一的强制边界。**明确跳过 RLS 的原因**:Prisma 和过渡期原生 SQL 共用 `server/src/db/pool.ts` 的 `pg.Pool`,当前没有“一个请求固定同一连接和事务”的执行上下文；RLS 所需的 `SET LOCAL app.tenant_id` 因此不能稳定覆盖整个请求。**这意味着**:任何绕过 Store/repository、直接用 `query()`/`pool` 手写 SQL 的新代码,如果忘记租户过滤,就是完整的跨租户数据泄露,且没有数据库层兜底会拦住它——`accountPool.ts` 里 `datasources`/`workload_tokens`/`datasource_account_leases` 等尚未迁移查询仍需逐条核对 scope。空间阶段不再新增散落原生 SQL，后续需要更高保证级别时再单独设计 RLS 请求事务边界。
 - ✅ 文件系统层:不同租户 workspace 是磁盘上完全不同的目录树(`resolveWorkspaceRoot`),应用层路径围栏 + bwrap bind mount 双保险;`workspaceRoot` 无论是从 `app_settings` 读出来还是调用方在请求体里塞进来的,`getToolSettings`/`saveToolSettings` 都强制用计算值覆盖,不信任存储值(见 §6)。
 - ✅ 事件流:WebSocket 订阅前按 `{tenantId, userId}` 查一次归属(`store.getRun`/`store.getThread`),查不到直接 1008 拒绝,不会走到 `subscribe`——实现方式和最初设想的"事件打 tenant_id 标签"不同,记录在 §7,但达到的隔离粒度更细(连 user_id 都校验了,不只是 tenant 边界)。
 - ✅ 用户可见性:所有 Tier 1 查询按 `(tenant_id, user_id)` 双重过滤,同租户内的普通用户看不到彼此的 thread;Tier 2 表(`runs`/`messages`/`events`/`shell_commands` 等)通过 JOIN 父表间接过滤(见 §5)。唯一的例外(管理员审计)目前还没实现,仍是设计态,不是已落地的旁路。

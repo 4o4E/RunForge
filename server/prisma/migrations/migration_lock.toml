@@ -1,0 +1,2 @@
+# 请勿手动修改。Prisma 用它固定 migration 的数据库方言。
+provider = "postgresql"

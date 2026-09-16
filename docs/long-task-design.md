@@ -154,7 +154,7 @@ ALTER TABLE messages ADD COLUMN summary_of INT[];      -- 若本行是摘要，�
 | [store/types.ts](../server/src/store/types.ts) + pgStore | runs 加 `goal_state`；messages 加折叠标记；取消状态；`loadThreadMessages` 返回压缩视图 |
 | tools/registry | 新增 `update_plan` 工具 |
 | 新建 `agent/compaction.ts` | 锚定摘要 prompt + masking 逻辑 + token 估算 |
-| db/schema.sql | 上述 ALTER |
+| prisma/schema.prisma + migration | 上述字段和约束 |
 
 ---
 
@@ -185,7 +185,7 @@ ALTER TABLE messages ADD COLUMN summary_of INT[];      -- 若本行是摘要，�
 - [agent/context.ts](../server/src/agent/context.ts) — `Context` → `ContextManager`：`items` 跟踪 `dbId`；`maybeCompact()` 返回 `collapsedIds`；`recordUsage()` 校准
 - [agent/executor.ts](../server/src/agent/executor.ts) — 循环改 `hardStepCap`；每步顶部检查取消；每步前 `maybeCompact()` 并 `markMessagesCollapsed(collapsedIds)`；捕获 `addMessage` 返回的 id 回填 `setLastDbId`；`recordUsage(result.usage)`
 - [store/types.ts](../server/src/store/types.ts) + [pgStore.ts](../server/src/store/pgStore.ts) / [memoryStore.ts](../server/src/store/memoryStore.ts) — `ThreadMessage`(带 `id/collapsed`)；`addMessage` 返回 id；`markMessagesCollapsed`；`loadThreadMessages` 返回压缩视图
-- [db/schema.sql](../server/src/db/schema.sql) — `messages.collapsed / summary_of / provider_state`（`ADD COLUMN IF NOT EXISTS`，幂等迁移）
+- [prisma/schema.prisma](../server/prisma/schema.prisma) + [prisma/migrations](../server/prisma/migrations) — `messages.collapsed / summary_of / provider_state`；migration 是唯一结构来源
 - [api/http.ts](../server/src/api/http.ts) — `POST /runs/:id/cancel`
 - [agent/types.ts](../server/src/agent/types.ts) / [llm/types.ts](../server/src/llm/types.ts) — `RunStatus` 加 `canceling/canceled`；`AgentEvent` 加 `compaction`；`LlmMessage` 加 `collapsed`
 

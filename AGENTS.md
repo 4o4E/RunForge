@@ -20,10 +20,13 @@
 每次改了 [server/src/agent/](server/src/agent/)（executor / context / compaction）或工具输出、
 存储层后，按这条链路验证：
 
-1. **测试 + 构建**：`cd server && npm run typecheck && npm test`
-2. **迁移**（改了 `server/src/db/schema.sql` 时必做，且必须先于重启）：`npm run db:migrate`
-   - 漏迁移会让新代码查不存在的列直接报错；迁移是幂等的（`ADD COLUMN IF NOT EXISTS`）。
-3. **重启前后端**：停掉旧进程再 `npm run dev`（旧进程是旧代码，不重启等于没改）。
+1. **测试 + 构建**：`pnpm --filter server typecheck && pnpm --filter server test`
+2. **迁移**（改了 `server/prisma/schema.prisma` 或新增 migration 时必做，且必须先于重启）：
+   `pnpm db:migrate`
+   - migration 只追加、不改写已执行文件。漏迁移会让新代码查询不存在的列直接报错。
+   - 从旧 `schema.sql` 升级且表结构已存在的数据库，只在首次切换 Prisma 时执行一次
+     `pnpm --filter server db:baseline`；全新数据库禁止跳过 baseline migration。
+3. **重启前后端**：停掉旧进程再 `pnpm dev`（旧进程是旧代码，不重启等于没改）。
    - 具体停/起命令见 `AGENTS.local.md`。
 4. **跑一个有代表性的对话**：短任务（< ~90k tokens 上下文）不会触发压缩；要验证压缩
    需要长任务（读大项目、多轮工具）。
@@ -38,7 +41,7 @@
 
 ## 工程约定
 
-- **提交**：Conventional Commits（`feat(server): …` / `fix(web): …`）。提交前 `npm test` 必须全绿。
+- **提交**：Conventional Commits（`feat(server): …` / `fix(web): …`）。提交前 `pnpm test` 必须全绿。
 - **提交时机**：仅在用户明确要求时提交/推送。
 - **前端组件**：能用组件库的控件一律用组件库，优先复用 `web/src/components/ui/` 已有 shadcn 组件；缺少组件时按 shadcn/Radix 官方模式补本地封装，不要手写外观相似但行为自造的替代组件。
 - **压缩不变式**（改压缩务必守住，见设计文档 §6）：

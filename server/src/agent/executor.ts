@@ -23,7 +23,6 @@ import {
   type McpActivation,
 } from '../mcp/client.js';
 import type { RuntimeCapabilityName } from '@runforge/contracts';
-import { query } from '../db/pool.js';
 import { withSpan } from '../telemetry.js';
 import type { AskUserAnswer, AskUserMode, AskUserOption, AskUserSpec, StreamStage, StreamStats } from './types.js';
 import { renderRuntimeContext } from './context.js';
@@ -372,11 +371,7 @@ async function loadRuntimeCapabilitiesSnapshot(store: Store, scope: Scope, runId
       };
   const snapshot: RuntimeCapabilitiesSnapshot = settings;
   if (store === defaultStore) {
-    await query(
-      `UPDATE runs SET runtime_capabilities_snapshot = $2::jsonb, updated_at = now()
-       WHERE id = $1 AND thread_id IN (SELECT id FROM threads WHERE tenant_id = $3 AND user_id = $4)`,
-      [runId, JSON.stringify(snapshot), scope.tenantId, scope.userId],
-    );
+    await store.setRuntimeCapabilitiesSnapshot(scope, runId, snapshot);
   }
   return snapshot;
 }

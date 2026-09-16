@@ -17,7 +17,7 @@
 
 前置条件：
 
-- Node.js >= 20
+- Node.js >= 24
 - pnpm 11.x
 - PostgreSQL，或直接使用 `docker compose up -d`
 - Linux 环境如需强制 bwrap 沙箱，需要提前安装 bubblewrap（常见包名为 `bubblewrap`）
@@ -54,7 +54,7 @@ DATABASE_URL=postgres://<user>:<password>@localhost:5432/runforge
 createdb runforge
 ```
 
-迁移会创建核心执行表：`threads`、`runs`、`steps`、`messages`、`events`、`app_settings`，以及 `subagent_runs`、`shell_sessions`、`shell_commands`、`shell_command_logs`、`shell_session_events` 和数据源账号池相关表。其中 `app_settings` 保存运行时工具配置；保存过设置后，数据库里的值会优先于 env 默认值。
+Prisma 7 migration 会创建核心执行表：`threads`、`runs`、`steps`、`messages`、`events`、`app_settings`，以及 `subagent_runs`、`shell_sessions`、`shell_commands`、`shell_command_logs`、`shell_session_events` 和数据源账号池相关表。其中 `app_settings` 保存运行时工具配置；保存过设置后，数据库里的值会优先于 env 默认值。
 
 ### 3. 配置 `.env`
 
@@ -106,6 +106,18 @@ Office 预览走后端转换：`doc/docx/ppt/pptx/xls/xlsx` 等文件先通过 `
 ```bash
 pnpm db:migrate
 ```
+
+上面的命令适用于全新数据库。若数据库已经由旧版 `schema.sql` 创建过完整表结构、但还没有
+`_prisma_migrations` 记录，首次升级时应先把等价的 Prisma baseline 登记为已执行，再部署后续
+migration：
+
+```bash
+pnpm --filter server db:baseline
+pnpm db:migrate
+```
+
+`db:baseline` 只用于已有完整旧结构的数据库，不能用于空库，否则会登记成功但不会创建表。
+可用 `pnpm --filter server db:status` 检查 migration 状态。
 
 如需确认表已创建：
 
