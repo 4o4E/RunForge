@@ -58,6 +58,16 @@ function registerSpaceRoutes(router: Router, resolveActor: ResolveActor): void {
     }
   });
 
+  router.get('/options', async (req, res) => {
+    const actor = resolveActor(req, res);
+    if (!actor) return;
+    try {
+      res.json(await spaceAccess.options(actor));
+    } catch (error) {
+      sendSpaceError(res, error);
+    }
+  });
+
   router.get('/:spaceId/callers', async (req, res) => {
     const actor = resolveActor(req, res);
     if (!actor) return;

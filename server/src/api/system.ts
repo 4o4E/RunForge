@@ -78,6 +78,13 @@ systemApi.get('/tenants', async (_req, res) => {
   res.json({ tenants: rows.map(toTenantSummary) });
 });
 
+systemApi.get('/tenants/:tenantId/users', async (req, res) => {
+  const scope = await systemTenantScope(req, res);
+  if (!scope) return;
+  const rows = await store.listUsersByTenant(scope.tenantId);
+  res.json({ users: rows.map(toUserSummary) });
+});
+
 // tenant、首个 owner、配置副本和 default space 由 Store 在同一事务中创建；任何一步
 // 失败都不留下无法登录或缺少运行配置的半成品 tenant。
 systemApi.post('/tenants', async (req, res) => {

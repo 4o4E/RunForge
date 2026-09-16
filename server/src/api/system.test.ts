@@ -184,6 +184,17 @@ test('系统设置接口: system admin 可按租户读取，租户身份不能�
     });
     assert.equal(systemRead.status, 200);
 
+    const systemUsers = await fetch(`${base}/system/tenants/tn_system_settings/users`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    assert.equal(systemUsers.status, 200);
+    const systemUsersText = await systemUsers.text();
+    assert.equal(systemUsersText.includes('password_hash'), false);
+    assert.deepEqual(
+      (JSON.parse(systemUsersText) as { users: Array<{ id: string }> }).users.map((user) => user.id),
+      [owner.id],
+    );
+
     const resolvedCapability = await fetch(`${base}/system/tenants/tn_system_settings/settings/llm/model-capability`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
@@ -196,6 +207,11 @@ test('系统设置接口: system admin 可按租户读取，租户身份不能�
       headers: { Authorization: `Bearer ${ownerJwt}` },
     });
     assert.equal(tenantEscalation.status, 403);
+
+    const tenantUsersEscalation = await fetch(`${base}/system/tenants/tn_system_settings/users`, {
+      headers: { Authorization: `Bearer ${ownerJwt}` },
+    });
+    assert.equal(tenantUsersEscalation.status, 403);
 
     const tenantWrite = await fetch(`${base}/settings/llm`, {
       method: 'PUT',

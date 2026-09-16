@@ -16,8 +16,13 @@ const catalog: TenantSpaceCapabilityCatalog = {
     'main:model-b': 20_000,
   },
   modelRefs: ['main:model-a', 'main:model-b'],
+  modelOptions: [
+    { ref: 'main:model-a', providerId: 'main', providerLabel: 'Main', provider: 'mock', model: 'model-a', label: 'Model A' },
+    { ref: 'main:model-b', providerId: 'main', providerLabel: 'Main', provider: 'mock', model: 'model-b', label: 'Model B' },
+  ],
   toolNames: ['file_read', 'file_write', 'ask_user'],
   mcpServerIds: ['browser', 'docs'],
+  mcpServers: [{ id: 'browser', label: 'Browser' }, { id: 'docs', label: 'Docs' }],
   runtimeCapabilities: ['datasource.credentials', 'image'],
   runtimeSettings: {
     llm: { enabled: false, defaultModelId: '', models: [] },

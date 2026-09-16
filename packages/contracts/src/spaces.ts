@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { RuntimeCapabilityName } from './settings.js';
+import type { LlmModelOption, RuntimeCapabilityName } from './settings.js';
 
 export type SpaceMode = 'web' | 'external';
 
@@ -46,6 +46,15 @@ export interface SpaceSummary {
   deletedAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/** 空间管理页使用的 tenant 能力目录，不包含供应商密钥或连接配置。 */
+export interface SpaceOptions {
+  defaultModelRef: string;
+  models: LlmModelOption[];
+  tools: string[];
+  mcpServers: Array<{ id: string; label: string }>;
+  runtimeCapabilities: RuntimeCapabilityName[];
 }
 
 export interface CreateSpaceInput {

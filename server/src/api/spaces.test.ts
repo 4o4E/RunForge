@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { config } from '../config.js';
 import { signSystemAccessToken, signTenantAccessToken } from '../auth/jwt.js';
 import { store } from '../store/index.js';
-import type { SpaceSummary } from '@runforge/contracts';
+import type { SpaceOptions, SpaceSummary } from '@runforge/contracts';
 import { buildApp, listen, seedOwner, seedSystemAdmin } from './testHelpers.js';
 import { newThreadId } from '../id.js';
 import type { ThreadRow } from '../store/types.js';
@@ -29,6 +29,13 @@ test('space API: 管理权限、可见名单、execution user 和软删除语义
   const { port, close } = await listen(buildApp());
   const base = `http://127.0.0.1:${port}/api`;
   try {
+    const optionsResponse = await fetch(`${base}/spaces/options`, { headers: bearer(ownerToken) });
+    assert.equal(optionsResponse.status, 200);
+    const options = (await optionsResponse.json()) as SpaceOptions;
+    assert.ok(options.defaultModelRef);
+    assert.ok(options.models.some((model) => model.ref === options.defaultModelRef));
+    assert.ok(options.tools.includes('file_read'));
+
     const createdWebResponse = await fetch(`${base}/spaces`, {
       method: 'POST',
       headers: bearer(ownerToken),
@@ -215,6 +222,13 @@ test('system space API: system admin 可管理指定 tenant，但 createdByUserI
   const token = signSystemAccessToken({ id: systemAdmin.id });
   const { port, close } = await listen(buildApp());
   try {
+    const optionsResponse = await fetch(
+      `http://127.0.0.1:${port}/api/system/tenants/${tenantId}/spaces/options`,
+      { headers: bearer(token) },
+    );
+    assert.equal(optionsResponse.status, 200);
+    assert.ok(((await optionsResponse.json()) as SpaceOptions).models.length > 0);
+
     const response = await fetch(`http://127.0.0.1:${port}/api/system/tenants/${tenantId}/spaces`, {
       method: 'POST',
       headers: bearer(token),

@@ -2,8 +2,10 @@ import {
   spaceConfigSchema,
   type RuntimeCapabilitiesSettings,
   type RuntimeCapabilityName,
+  type LlmModelOption,
   type SpaceConfig,
   type SpaceMode,
+  type SpaceOptions,
 } from '@runforge/contracts';
 import { agentContextSettings, config as instanceConfig } from '../config.js';
 import { listDatasources } from '../datasources/accountPool.js';
@@ -29,8 +31,10 @@ export interface TenantSpaceCapabilityCatalog {
   defaultModelRef: string;
   modelContextWindows: Record<string, number>;
   modelRefs: string[];
+  modelOptions: LlmModelOption[];
   toolNames: string[];
   mcpServerIds: string[];
+  mcpServers: Array<{ id: string; label: string }>;
   runtimeCapabilities: RuntimeCapabilityName[];
   runtimeSettings: RuntimeCapabilitiesSettings;
 }
@@ -146,8 +150,17 @@ async function loadCatalogFromTenant(tenantId: string): Promise<TenantSpaceCapab
       defaultModelRef: modelRef,
       modelContextWindows: { [modelRef]: instanceConfig.agent.modelContextWindow },
       modelRefs: [modelRef],
+      modelOptions: [{
+        ref: modelRef,
+        providerId: 'default',
+        providerLabel: 'Default',
+        provider: 'mock',
+        model: instanceConfig.llm.model,
+        label: instanceConfig.llm.model,
+      }],
       toolNames: builtinToolNames(),
       mcpServerIds: [],
+      mcpServers: [],
       runtimeCapabilities: [],
       runtimeSettings: {
         llm: { enabled: false, defaultModelId: '', models: [] },
@@ -163,12 +176,16 @@ async function loadCatalogFromTenant(tenantId: string): Promise<TenantSpaceCapab
     getRuntimeCapabilitiesSettings({ tenantId }),
     listDatasources({ tenantId }),
   ]);
+  const models = llmModelOptions(llm);
+  const enabledMcpServers = mcp.servers.filter((server) => server.enabled);
   return {
     defaultModelRef: llm.defaultModelRef,
     modelContextWindows: contextWindows(llm),
-    modelRefs: llmModelOptions(llm).map((model) => model.ref),
+    modelRefs: models.map((model) => model.ref),
+    modelOptions: models,
     toolNames: builtinToolNames(),
-    mcpServerIds: mcp.servers.filter((server) => server.enabled).map((server) => server.id),
+    mcpServerIds: enabledMcpServers.map((server) => server.id),
+    mcpServers: enabledMcpServers.map((server) => ({ id: server.id, label: server.label || server.id })),
     runtimeCapabilities: enabledRuntimeCapabilities(
       runtime,
       datasources.some((datasource) => datasource.enabled && datasource.status === 'active'),
@@ -226,6 +243,17 @@ export class SpaceConfigService {
     const config = normalizeSpaceConfig(value);
     this.resolve(mode, config, await this.loadCatalog(tenantId));
     return config;
+  }
+
+  async options(tenantId: string): Promise<SpaceOptions> {
+    const catalog = await this.loadCatalog(tenantId);
+    return {
+      defaultModelRef: catalog.defaultModelRef,
+      models: catalog.modelOptions,
+      tools: catalog.toolNames,
+      mcpServers: catalog.mcpServers,
+      runtimeCapabilities: catalog.runtimeCapabilities,
+    };
   }
 
   async resolveForRun(

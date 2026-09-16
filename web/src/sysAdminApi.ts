@@ -4,6 +4,7 @@ import type {
   CreateTenantResponse,
   SystemAdminSummary,
   TenantSummary,
+  TenantUserSummary,
 } from '@runforge/contracts';
 import { createAuthSession } from './lib/authSession.js';
 
@@ -73,6 +74,10 @@ export const updateSystemTenantStatus = (id: string, status: 'active' | 'suspend
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ status }),
   }).then(json<{ tenant: TenantSummary }>);
+
+export const listSystemTenantUsers = (tenantId: string) =>
+  sysAdminAuthFetch(`/api/system/tenants/${encodeURIComponent(tenantId)}/users`)
+    .then(json<{ users: TenantUserSummary[] }>);
 
 export const listSystemAdminAccounts = () =>
   sysAdminAuthFetch('/api/system/admins').then(json<{ admins: SystemAdminSummary[] }>);

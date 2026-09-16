@@ -149,6 +149,15 @@ export class SpaceAccessService {
     return this.toSummary(space, tenant.default_space_id);
   }
 
+  async options(actorContext: SpaceActorContext) {
+    if (actorContext.scope === 'system') {
+      await this.requireTenant(actorContext.tenantId);
+      return this.configService.options(actorContext.tenantId);
+    }
+    const actor = await this.resolveTenantActor(actorContext);
+    return this.configService.options(actor.tenantId);
+  }
+
   async create(actorContext: SpaceActorContext, input: CreateSpaceInput): Promise<SpaceSummary> {
     const actor = await this.resolveManagerActor(actorContext);
     return this.createManaged(actor.tenantId, actor.createdByUserId, input);

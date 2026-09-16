@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { ArrowLeft, KeyRound, LogOut, Users } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { ArrowLeft, KeyRound, Layers3, LogOut, Users } from 'lucide-react';
 import { getCurrentUser, logout } from '../api';
 import type { TenantUserSummary } from '@runforge/contracts';
 import { Card, CardContent } from '@/components/ui/card';
@@ -8,13 +8,19 @@ import { Spinner } from '@/components/ui/spinner';
 import { NavGroup, SectionButton } from '@/components/ui/settings-nav';
 import { AdminUsersPanel } from './panels/AdminUsersPanel';
 import { AdminTokensPanel } from './panels/AdminTokensPanel';
+import { SpaceManagementPanel } from '@/components/spaces/SpaceManagementPanel';
+import { createTenantSpaceControlApi } from '@/spaceControlApi';
 
-type AdminPanel = 'users' | 'tokens';
+type AdminPanel = 'users' | 'tokens' | 'spaces';
 
 export function AdminApp() {
   const [user, setUser] = useState<TenantUserSummary | null>(null);
   const [error, setError] = useState('');
   const [panel, setPanel] = useState<AdminPanel>('users');
+  const spaceControlApi = useMemo(
+    () => user ? createTenantSpaceControlApi(user.tenantId) : null,
+    [user?.tenantId],
+  );
 
   useEffect(() => {
     void getCurrentUser()
@@ -77,12 +83,18 @@ export function AdminApp() {
                 </SectionButton>
               )}
             </NavGroup>
+            <NavGroup label="运行空间">
+              <SectionButton active={panel === 'spaces'} icon={<Layers3 className="h-4 w-4" />} onClick={() => setPanel('spaces')}>
+                空间管理
+              </SectionButton>
+            </NavGroup>
           </CardContent>
         </Card>
 
         <div className="h-full min-h-0 overflow-hidden">
           {panel === 'users' && <AdminUsersPanel tenantId={user.tenantId} currentUserId={user.id} currentRole={user.role} />}
           {panel === 'tokens' && user.role === 'owner' && <AdminTokensPanel tenantId={user.tenantId} />}
+          {panel === 'spaces' && spaceControlApi && <SpaceManagementPanel api={spaceControlApi} />}
         </div>
       </div>
     </main>
