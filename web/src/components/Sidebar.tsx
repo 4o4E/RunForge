@@ -1,6 +1,6 @@
 import { useState, type MouseEvent } from 'react';
 import { Archive, Bot, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, PinOff, Search, Settings, ShieldCheck, SquarePen, Trash2 } from 'lucide-react';
-import type { Thread } from '../api';
+import type { SpaceSummary, Thread } from '../api';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -10,9 +10,13 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Separator } from '@/components/ui/separator';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 
 interface Props {
+  spaces: SpaceSummary[];
+  activeSpaceId: string | null;
+  readOnly: boolean;
   threads: Thread[];
   activeId: string | null;
   activeView: 'chat' | 'search';
@@ -24,6 +28,7 @@ interface Props {
   /** 当前登录账号是本租户 owner/admin 时才显示“租户设置”入口。 */
   showAdminEntry: boolean;
   onToggleCollapsed: () => void;
+  onSelectSpace: (spaceId: string) => void;
   onNew: () => void;
   onSearch: () => void;
   onSelect: (id: string) => void;
@@ -44,6 +49,9 @@ function shouldHandleAppLink(event: MouseEvent<HTMLAnchorElement>): boolean {
 }
 
 export function Sidebar({
+  spaces,
+  activeSpaceId,
+  readOnly,
   threads,
   activeId,
   activeView,
@@ -54,6 +62,7 @@ export function Sidebar({
   threadHref,
   showAdminEntry,
   onToggleCollapsed,
+  onSelectSpace,
   onNew,
   onSearch,
   onSelect,
@@ -77,35 +86,39 @@ export function Sidebar({
           <PanelLeftOpen className="absolute size-4 opacity-0 transition-opacity group-hover:opacity-100" />
           <span className="sr-only">展开会话列表</span>
         </button>
-        <a
-          href={newHref}
-          onClick={(event) => {
-            if (!shouldHandleAppLink(event)) return;
-            event.preventDefault();
-            onNew();
-          }}
-          className="mt-3 flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
-          title="新建会话"
-        >
-          <SquarePen className="size-4" />
-          <span className="sr-only">新建会话</span>
-        </a>
-        <a
-          href={searchHref}
-          onClick={(event) => {
-            if (!shouldHandleAppLink(event)) return;
-            event.preventDefault();
-            onSearch();
-          }}
-          className={cn(
-            'mt-2 flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground',
-            activeView === 'search' && 'bg-accent text-accent-foreground ring-1 ring-border',
-          )}
-          title="搜索会话"
-        >
-          <Search className="size-4" />
-          <span className="sr-only">搜索会话</span>
-        </a>
+        {!readOnly && (
+          <>
+            <a
+              href={newHref}
+              onClick={(event) => {
+                if (!shouldHandleAppLink(event)) return;
+                event.preventDefault();
+                onNew();
+              }}
+              className="mt-3 flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+              title="新建会话"
+            >
+              <SquarePen className="size-4" />
+              <span className="sr-only">新建会话</span>
+            </a>
+            <a
+              href={searchHref}
+              onClick={(event) => {
+                if (!shouldHandleAppLink(event)) return;
+                event.preventDefault();
+                onSearch();
+              }}
+              className={cn(
+                'mt-2 flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground',
+                activeView === 'search' && 'bg-accent text-accent-foreground ring-1 ring-border',
+              )}
+              title="搜索会话"
+            >
+              <Search className="size-4" />
+              <span className="sr-only">搜索会话</span>
+            </a>
+          </>
+        )}
         <div className="min-h-0 flex-1" />
         {showAdminEntry && (
           <a
@@ -149,32 +162,57 @@ export function Sidebar({
         </Button>
       </div>
 
+      <div className="px-2 pb-2">
+        {spaces.length > 0 ? (
+          <Select value={activeSpaceId ?? undefined} onValueChange={onSelectSpace}>
+            <SelectTrigger className="h-9 w-full">
+              <SelectValue placeholder="选择空间" />
+            </SelectTrigger>
+            <SelectContent>
+              {spaces.map((space) => (
+                <SelectItem key={space.id} value={space.id}>
+                  {space.name}{space.mode === 'external' ? ' · 外部只读' : ''}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : (
+          <div className="px-2 py-2 text-xs text-muted-foreground">没有可见空间</div>
+        )}
+      </div>
+
       <div className="grid gap-1 px-2">
-        <Button asChild variant="ghost" size="sm" className="h-9 w-full justify-start pl-2 pr-3 text-sm text-muted-foreground">
-          <a
-            href={newHref}
-            onClick={(event) => {
-              if (!shouldHandleAppLink(event)) return;
-              event.preventDefault();
-              onNew();
-            }}
-          >
-            <SquarePen className="h-4 w-4" /> 新建会话
-          </a>
-        </Button>
-        <Button asChild variant={activeView === 'search' ? 'secondary' : 'ghost'} size="sm" className="h-9 w-full justify-start pl-2 pr-3 text-sm text-muted-foreground data-[active=true]:text-foreground">
-          <a
-            href={searchHref}
-            data-active={activeView === 'search'}
-            onClick={(event) => {
-              if (!shouldHandleAppLink(event)) return;
-              event.preventDefault();
-              onSearch();
-            }}
-          >
-            <Search className="h-4 w-4" /> 搜索会话
-          </a>
-        </Button>
+        {!activeSpaceId ? null : readOnly ? (
+          <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">外部任务只读查看</div>
+        ) : (
+          <>
+            <Button asChild variant="ghost" size="sm" className="h-9 w-full justify-start pl-2 pr-3 text-sm text-muted-foreground">
+              <a
+                href={newHref}
+                onClick={(event) => {
+                  if (!shouldHandleAppLink(event)) return;
+                  event.preventDefault();
+                  onNew();
+                }}
+              >
+                <SquarePen className="h-4 w-4" /> 新建会话
+              </a>
+            </Button>
+            <Button asChild variant={activeView === 'search' ? 'secondary' : 'ghost'} size="sm" className="h-9 w-full justify-start pl-2 pr-3 text-sm text-muted-foreground data-[active=true]:text-foreground">
+              <a
+                href={searchHref}
+                data-active={activeView === 'search'}
+                onClick={(event) => {
+                  if (!shouldHandleAppLink(event)) return;
+                  event.preventDefault();
+                  onSearch();
+                }}
+              >
+                <Search className="h-4 w-4" /> 搜索会话
+              </a>
+            </Button>
+          </>
+        )}
       </div>
 
       <div className="mt-4 px-4 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">会话</div>
@@ -206,7 +244,7 @@ export function Sidebar({
                 {t.pinned_at && <Pin className="size-3 shrink-0 text-muted-foreground" />}
                 <span className="min-w-0 truncate">{threadLabel(t)}</span>
               </a>
-              <DropdownMenu
+              {!readOnly && <DropdownMenu
                 onOpenChange={(open) => {
                   if (!open && confirmingDelete) setPendingDeleteThreadId(null);
                 }}
@@ -255,7 +293,7 @@ export function Sidebar({
                     {confirmingDelete ? '确认删除' : '删除'}
                   </DropdownMenuItem>
                 </DropdownMenuContent>
-              </DropdownMenu>
+              </DropdownMenu>}
             </div>
           );
         })}

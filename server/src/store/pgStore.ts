@@ -312,6 +312,36 @@ export class PgStore implements Store {
     return rows.map((row) => toThreadRow(row, row.runs_runs_thread_idTothreads[0]?.input ?? null));
   }
 
+  async listThreadsForViewer(
+    scope: Scope,
+    limit = 50,
+    options: { archived?: boolean; webSpaceIds?: string[]; externalSpaceIds?: string[] } = {},
+  ): Promise<ThreadRow[]> {
+    const webSpaceIds = options.webSpaceIds ?? [];
+    const externalSpaceIds = options.externalSpaceIds ?? [];
+    if (!webSpaceIds.length && !externalSpaceIds.length) return [];
+    const rows = await prisma.threads.findMany({
+      where: {
+        tenant_id: scope.tenantId,
+        archived_at: options.archived === true ? { not: null } : null,
+        OR: [
+          ...(webSpaceIds.length ? [{ source_type: 'web' as const, user_id: scope.userId, space_id: { in: webSpaceIds } }] : []),
+          ...(externalSpaceIds.length ? [{ source_type: 'external' as const, space_id: { in: externalSpaceIds } }] : []),
+        ],
+      },
+      include: {
+        runs_runs_thread_idTothreads: {
+          select: { input: true },
+          orderBy: [{ created_at: 'asc' }, { id: 'asc' }],
+          take: 1,
+        },
+      },
+      orderBy: [{ pinned_at: { sort: 'desc', nulls: 'last' } }, { updated_at: 'desc' }, { created_at: 'desc' }],
+      take: limit,
+    });
+    return rows.map((row) => toThreadRow(row, row.runs_runs_thread_idTothreads[0]?.input ?? null));
+  }
+
   async updateThread(
     scope: Scope,
     id: string,

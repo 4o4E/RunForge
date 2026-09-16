@@ -907,6 +907,7 @@ function AssistantPart({
   onAskUserDraftChange,
   onAskUserSubmit,
   onAskUserCancel,
+  readOnly,
 }: {
   part: Part;
   answer?: AskUserAnswer;
@@ -922,6 +923,7 @@ function AssistantPart({
   onAskUserDraftChange: (runId: string, draft: AskUserDraft) => void;
   onAskUserSubmit: (runId: string, answer: AskUserAnswer) => void;
   onAskUserCancel: (runId: string) => void;
+  readOnly: boolean;
 }) {
   const notice = threadNoticeData(part);
   if (notice) return <ThreadNotice notice={notice} onOpenThread={onOpenThread} />;
@@ -950,7 +952,7 @@ function AssistantPart({
         draft={draft}
         answer={answer}
         canceled={canceled}
-        disabled={!runId}
+        disabled={!runId || readOnly}
         onDraftChange={(next) => runId && onAskUserDraftChange(runId, next)}
         onSubmit={(answer) => runId && onAskUserSubmit(runId, answer)}
         onCancel={() => runId && onAskUserCancel(runId)}
@@ -1005,6 +1007,7 @@ function ActivityGroup({
   onAskUserDraftChange,
   onAskUserSubmit,
   onAskUserCancel,
+  readOnly,
 }: {
   entries: ActivityEntry[];
   active: boolean;
@@ -1020,6 +1023,7 @@ function ActivityGroup({
   onAskUserDraftChange: (runId: string, draft: AskUserDraft) => void;
   onAskUserSubmit: (runId: string, answer: AskUserAnswer) => void;
   onAskUserCancel: (runId: string) => void;
+  readOnly: boolean;
 }) {
   const [override, setOverride] = useState<boolean | null>(null);
   const prevActive = useRef(active);
@@ -1059,6 +1063,7 @@ function ActivityGroup({
               onAskUserDraftChange={onAskUserDraftChange}
               onAskUserSubmit={onAskUserSubmit}
               onAskUserCancel={onAskUserCancel}
+              readOnly={readOnly}
             />
           );
         })}
@@ -1171,6 +1176,7 @@ function UserMessageFooter({
   onSwitchRunBranch,
   onEditRunInput,
   onForkFromRun,
+  readOnly,
 }: {
   message: UIMessage;
   runId: string | null;
@@ -1178,6 +1184,7 @@ function UserMessageFooter({
   onSwitchRunBranch: (runId: string) => void;
   onEditRunInput: (runId: string, currentText: string) => void;
   onForkFromRun: (runId: string) => void;
+  readOnly: boolean;
 }) {
   const text = userText(message);
   const time = messageTime(message);
@@ -1189,7 +1196,7 @@ function UserMessageFooter({
     <div className="ml-auto flex min-h-6 items-center justify-end gap-2 pr-1">
       {time && <span className="text-[11px] tabular-nums text-muted-foreground">{time}</span>}
       <MessageActions className="justify-end opacity-70 transition-opacity group-hover:opacity-100">
-        {branch && branch.count > 1 && (
+        {!readOnly && branch && branch.count > 1 && (
           <>
             <MessageAction
               tooltip="查看上一个分支"
@@ -1212,7 +1219,7 @@ function UserMessageFooter({
             </MessageAction>
           </>
         )}
-        {branch?.canEdit && (
+        {!readOnly && branch?.canEdit && (
           <MessageAction
             tooltip="修改后重新生成"
             label="修改后重新生成"
@@ -1222,14 +1229,16 @@ function UserMessageFooter({
             <Pencil className="size-3.5" />
           </MessageAction>
         )}
-        <MessageAction
-          tooltip="从此处继续"
-          label="从此处继续"
-          disabled={disabled || !runId}
-          onClick={() => runId && onForkFromRun(runId)}
-        >
-          <GitBranch className="size-3.5" />
-        </MessageAction>
+        {!readOnly && (
+          <MessageAction
+            tooltip="从此处继续"
+            label="从此处继续"
+            disabled={disabled || !runId}
+            onClick={() => runId && onForkFromRun(runId)}
+          >
+            <GitBranch className="size-3.5" />
+          </MessageAction>
+        )}
         <MessageAction
           tooltip={copiedText ? '已复制' : '复制消息文本'}
           label="复制消息文本"
@@ -1258,6 +1267,7 @@ function AssistantMessage({
   onAskUserDraftChange,
   onAskUserSubmit,
   onAskUserCancel,
+  readOnly,
 }: {
   message: UIMessage;
   active: boolean;
@@ -1271,6 +1281,7 @@ function AssistantMessage({
   onAskUserDraftChange: (runId: string, draft: AskUserDraft) => void;
   onAskUserSubmit: (runId: string, answer: AskUserAnswer) => void;
   onAskUserCancel: (runId: string) => void;
+  readOnly: boolean;
 }) {
   const timingMaps = buildTimingMaps(message.parts);
   const runId = runIdFromAssistant(message);
@@ -1297,6 +1308,7 @@ function AssistantMessage({
         onAskUserDraftChange={onAskUserDraftChange}
         onAskUserSubmit={onAskUserSubmit}
         onAskUserCancel={onAskUserCancel}
+        readOnly={readOnly}
       />,
     );
     group = null;
@@ -1335,6 +1347,7 @@ function AssistantMessage({
         onAskUserDraftChange={onAskUserDraftChange}
         onAskUserSubmit={onAskUserSubmit}
         onAskUserCancel={onAskUserCancel}
+        readOnly={readOnly}
       />,
     );
   });
@@ -1361,6 +1374,7 @@ export function Conversation({
   onSwitchRunBranch,
   onEditRunInput,
   onForkFromRun,
+  readOnly = false,
   contentRef,
   embedded = false,
   showToc = true,
@@ -1381,6 +1395,7 @@ export function Conversation({
   onSwitchRunBranch: (runId: string) => void;
   onEditRunInput: (runId: string, currentText: string) => void;
   onForkFromRun: (runId: string) => void;
+  readOnly?: boolean;
   embedded?: boolean;
   showToc?: boolean;
   emptyTitle?: string;
@@ -1440,6 +1455,7 @@ export function Conversation({
                           onSwitchRunBranch={onSwitchRunBranch}
                           onEditRunInput={onEditRunInput}
                           onForkFromRun={onForkFromRun}
+                          readOnly={readOnly}
                         />
                       </>
                     ) : (
@@ -1458,6 +1474,7 @@ export function Conversation({
                             onAskUserDraftChange={onAskUserDraftChange}
                             onAskUserSubmit={onAskUserSubmit}
                             onAskUserCancel={onAskUserCancel}
+                            readOnly={readOnly}
                           />
                         </MessageContent>
                       </>

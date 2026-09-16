@@ -1,8 +1,13 @@
 import type { AgentEvent, RunStatus } from './agent.js';
 import type { GoalState } from './goal.js';
+import type { SpaceSummary } from './spaces.js';
 
 export interface Thread {
   id: string;
+  space_id: string;
+  source_type: 'web' | 'external';
+  source_caller_id: string | null;
+  source_ref: Record<string, unknown>;
   title: string | null;
   fallback_title?: string | null;
   active_run_id: string | null;
@@ -77,6 +82,8 @@ export interface RunBranchInput {
 
 export interface ThreadDetailResponse {
   thread: Thread;
+  space: SpaceSummary;
+  readOnly: boolean;
   runs: RunWithEvents[];
   notices: ThreadNotice[];
   context_messages: ThreadContextMessage[];

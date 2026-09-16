@@ -36,6 +36,7 @@ import type {
   ShellCommandScanInput,
   ShellCommandScanResult,
   ShellSession,
+  SpaceSummary,
   SubagentRun,
   TenantUserSummary,
   Thread,
@@ -275,28 +276,35 @@ async function json<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export const listThreads = (options: { archived?: boolean } = {}) => {
+export const listSpaces = () => authFetch('/api/spaces').then(json<{ spaces: SpaceSummary[] }>);
+
+export const listThreads = (options: { archived?: boolean; spaceId?: string | null } = {}) => {
   const params = new URLSearchParams();
   if (options.archived) params.set('archived', '1');
+  if (options.spaceId) params.set('spaceId', options.spaceId);
   const query = params.toString();
   return authFetch(`/api/threads${query ? `?${query}` : ''}`).then(json<Thread[]>);
 };
 
-export const searchThreads = (query: string, limit = 50) => {
+export const searchThreads = (query: string, limit = 50, spaceId?: string | null) => {
   const params = new URLSearchParams({ q: query, limit: String(limit) });
+  if (spaceId) params.set('spaceId', spaceId);
   return authFetch(`/api/search?${params.toString()}`).then(json<ThreadSearchResponse>);
 };
 
-export const getThread = (id: string, options: { debug?: boolean } = {}) => {
-  const query = options.debug ? '?debug=1' : '';
-  return authFetch(`/api/threads/${id}${query}`).then(json<ThreadDetailResponse>);
+export const getThread = (id: string, options: { debug?: boolean; spaceId?: string | null } = {}) => {
+  const params = new URLSearchParams();
+  if (options.debug) params.set('debug', '1');
+  if (options.spaceId) params.set('spaceId', options.spaceId);
+  const query = params.toString();
+  return authFetch(`/api/threads/${id}${query ? `?${query}` : ''}`).then(json<ThreadDetailResponse>);
 };
 
-export const createThread = (title?: string) =>
+export const createThread = (title?: string, spaceId?: string | null) =>
   authFetch('/api/threads', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title }),
+    body: JSON.stringify({ title, spaceId: spaceId ?? undefined }),
   }).then(json<Thread>);
 
 export const deleteThread = (id: string) =>
@@ -622,8 +630,12 @@ export const answerRun = (runId: string, answer: AskUserAnswer) =>
 export const listShellSessions = (threadId: string) =>
   authFetch(`/api/shell-sessions?threadId=${encodeURIComponent(threadId)}`).then(json<{ sessions: ShellSession[] }>);
 
-export const listSubagentRuns = (threadId: string) =>
-  authFetch(`/api/threads/${threadId}/subagents`).then(json<{ subagents: SubagentRun[] }>);
+export const listSubagentRuns = (threadId: string, spaceId?: string | null) => {
+  const params = new URLSearchParams();
+  if (spaceId) params.set('spaceId', spaceId);
+  const query = params.toString();
+  return authFetch(`/api/threads/${threadId}/subagents${query ? `?${query}` : ''}`).then(json<{ subagents: SubagentRun[] }>);
+};
 
 export const createShellSession = (threadId: string, name?: string) =>
   authFetch('/api/shell-sessions', {

@@ -5,7 +5,7 @@ import { Composer, type ComposerAttachment } from './Composer';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Bell, BellOff, Bug, Maximize2, Menu, Minimize2, PanelRightClose, PanelRightOpen, RotateCw } from 'lucide-react';
-import type { AskUserAnswer } from '@/api';
+import type { AskUserAnswer, SpaceSummary, Thread } from '@/api';
 import type { AskUserDraft } from './AskUserCard';
 import { TableOfContents } from './TableOfContents';
 import { cn } from '@/lib/utils';
@@ -21,6 +21,9 @@ function latestUsageFromMessages(messages: UIMessage[]) {
 
 interface Props {
   title: string;
+  space: SpaceSummary | null;
+  thread: Thread | null;
+  readOnly: boolean;
   messages: UIMessage[];
   busy: boolean;
   waitingQuestion: string | null;
@@ -67,6 +70,9 @@ interface Props {
 
 export function ChatView({
   title,
+  space,
+  thread,
+  readOnly,
   messages,
   busy,
   waitingQuestion,
@@ -135,11 +141,13 @@ export function ChatView({
           </Button>
         )}
         <h1 className="truncate text-sm font-semibold">{title}</h1>
+        {space && <span className="ml-2 hidden truncate text-xs text-muted-foreground sm:inline">{space.name}</span>}
+        {readOnly && space && <Badge variant="outline" className="ml-3">外部只读</Badge>}
         <Badge variant={busy ? 'default' : 'secondary'} className="ml-3">
           {busy ? '运行中' : '空闲'}
         </Badge>
         <div className="ml-auto flex items-center gap-2">
-          {canContinueRun && (
+          {!readOnly && canContinueRun && (
             <Button
               type="button"
               variant="secondary"
@@ -197,6 +205,18 @@ export function ChatView({
         </div>
       </header>
 
+      {readOnly && thread && (
+        <div className="shrink-0 border-b bg-muted/20 px-3 py-2 text-xs text-muted-foreground sm:px-6">
+          <span className="font-medium text-foreground">外部来源</span>
+          <span className="ml-2">调用方 {thread.source_caller_id ?? '未知'}</span>
+          {Object.keys(thread.source_ref).length > 0 && (
+            <span className="ml-2 break-all" title={JSON.stringify(thread.source_ref)}>
+              {JSON.stringify(thread.source_ref)}
+            </span>
+          )}
+        </div>
+      )}
+
       {!rightPanelOpen && (
         <div
           className="pointer-events-none absolute bottom-28 right-6 top-16 z-30 hidden min-h-0 w-72 flex-col justify-center 2xl:flex"
@@ -221,11 +241,12 @@ export function ChatView({
           onSwitchRunBranch={onSwitchRunBranch}
           onEditRunInput={onEditRunInput}
           onForkFromRun={onForkFromRun}
+          readOnly={readOnly}
           showToc={false}
         />
       </div>
 
-      <Composer
+      {!readOnly && <Composer
         messages={messages}
         busy={busy}
         disabled={busy || !!waitingQuestion}
@@ -245,7 +266,7 @@ export function ChatView({
         onRemoveAttachment={onRemoveAttachment}
         onOpenRemoteFiles={onOpenRemoteFiles}
         onUploadLocal={onUploadLocal}
-      />
+      />}
     </main>
   );
 }

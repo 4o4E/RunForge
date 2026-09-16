@@ -115,13 +115,16 @@ export async function notifyRunCompleted(scope: Scope, runId: string, options: {
   if (!subscriptions.length) return;
 
   const threadTitle = thread?.title?.trim() || thread?.fallback_title?.trim() || '对话';
+  const threadUrl = thread
+    ? `/${encodeURIComponent(thread.space_id)}/${encodeURIComponent(thread.id)}`
+    : '/';
   const payload: PushPayload = {
     title: 'RunForge 对话已完成',
     body: textPreview(options.output || run.output || threadTitle),
     tag: `run-completed:${run.id}`,
-    url: `/chat/${encodeURIComponent(run.thread_id)}`,
+    url: threadUrl,
     data: {
-      url: `/chat/${encodeURIComponent(run.thread_id)}`,
+      url: threadUrl,
       runId: run.id,
       threadId: run.thread_id,
     },

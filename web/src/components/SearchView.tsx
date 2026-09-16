@@ -6,8 +6,10 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { buildSearchPath } from '@/router';
 
 interface Props {
+  spaceId: string;
   threadHref: (threadId: string) => string;
   onOpenThread: (threadId: string) => void;
   mobile?: boolean;
@@ -134,7 +136,7 @@ function shouldHandleAppLink(event: MouseEvent<HTMLAnchorElement>): boolean {
   return event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && !event.defaultPrevented;
 }
 
-export function SearchView({ threadHref, onOpenThread, mobile = false, onOpenMobileSidebar }: Props) {
+export function SearchView({ spaceId, threadHref, onOpenThread, mobile = false, onOpenMobileSidebar }: Props) {
   const [query, setQuery] = useState(searchParam);
   const [results, setResults] = useState<ThreadSearchResult[]>([]);
   const [loading, setLoading] = useState(false);
@@ -148,11 +150,11 @@ export function SearchView({ threadHref, onOpenThread, mobile = false, onOpenMob
   }, []);
 
   useEffect(() => {
-    const path = trimmedQuery ? `/search?q=${encodeURIComponent(trimmedQuery)}` : '/search';
+    const path = buildSearchPath(spaceId, trimmedQuery);
     if (`${window.location.pathname}${window.location.search}` !== path) {
       window.history.replaceState(null, '', path);
     }
-  }, [trimmedQuery]);
+  }, [spaceId, trimmedQuery]);
 
   useEffect(() => {
     if (!trimmedQuery) {
@@ -165,7 +167,7 @@ export function SearchView({ threadHref, onOpenThread, mobile = false, onOpenMob
     const timer = window.setTimeout(() => {
       setLoading(true);
       setError('');
-      searchThreads(trimmedQuery)
+      searchThreads(trimmedQuery, 50, spaceId)
         .then((data) => {
           if (!canceled) setResults(data.results);
         })
@@ -180,10 +182,10 @@ export function SearchView({ threadHref, onOpenThread, mobile = false, onOpenMob
       canceled = true;
       window.clearTimeout(timer);
     };
-  }, [trimmedQuery]);
+  }, [spaceId, trimmedQuery]);
 
   const statusText = useMemo(() => {
-    if (!trimmedQuery) return '输入关键词搜索所有会话内容';
+    if (!trimmedQuery) return '输入关键词搜索当前空间的会话内容';
     if (loading) return '搜索中...';
     if (error) return `搜索失败：${error}`;
     return `找到 ${groups.length} 个会话，${results.length} 条结果`;
@@ -210,7 +212,7 @@ export function SearchView({ threadHref, onOpenThread, mobile = false, onOpenMob
         <div className="mx-auto flex max-w-5xl flex-col gap-4 px-3 py-4 md:px-6 md:py-5">
           <div className={cn(mobile && 'hidden')}>
             <h1 className="text-xl font-semibold">搜索</h1>
-            <p className="mt-1 text-sm text-muted-foreground">全文搜索会话中的用户消息和助手回复</p>
+            <p className="mt-1 text-sm text-muted-foreground">全文搜索当前空间中的用户消息和助手回复</p>
           </div>
 
           <div className="relative">
@@ -219,7 +221,7 @@ export function SearchView({ threadHref, onOpenThread, mobile = false, onOpenMob
               autoFocus
               value={query}
               onChange={(event) => setQuery(event.currentTarget.value)}
-              placeholder="搜索全部会话内容"
+              placeholder="搜索当前空间会话内容"
               className="h-10 pl-9"
             />
           </div>

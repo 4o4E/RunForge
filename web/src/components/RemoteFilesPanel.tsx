@@ -67,6 +67,7 @@ interface Props {
   previewPath: string | null;
   embedded?: boolean;
   compact?: boolean;
+  readOnly?: boolean;
   shareAccess?: FileShareAccess;
   showAttach?: boolean;
   showShare?: boolean;
@@ -263,6 +264,7 @@ export function RemoteFilesPanel({
   previewPath,
   embedded = false,
   compact = false,
+  readOnly = false,
   shareAccess,
   showAttach = true,
   showShare = true,
@@ -352,11 +354,11 @@ export function RemoteFilesPanel({
       setRawUrl('');
       setDownloadUrl('');
       setShareOpen(false);
-      setPreviewMode(!shareAccess && !hexPreviewFile && !mediaKind && !officePreviewKindForPath(path) && !renderable ? 'edit' : 'preview');
+      setPreviewMode(!readOnly && !shareAccess && !hexPreviewFile && !mediaKind && !officePreviewKindForPath(path) && !renderable ? 'edit' : 'preview');
     } else {
       pendingPreviewStartsRef.current.add(startLine);
     }
-    if (!shareAccess && !hexPreviewFile && !mediaKind && !officePreviewKindForPath(path) && !renderable) {
+    if (!readOnly && !shareAccess && !hexPreviewFile && !mediaKind && !officePreviewKindForPath(path) && !renderable) {
       setLoading(false);
       setError(null);
       void openEditor(path);
@@ -415,7 +417,7 @@ export function RemoteFilesPanel({
   }
 
   async function openEditor(path = selectedPath) {
-    if (!path || editLoading) return;
+    if (readOnly || !path || editLoading) return;
     setPreviewMode('edit');
     setEditLoading(true);
     setEditError(null);
@@ -541,7 +543,7 @@ export function RemoteFilesPanel({
   const selectedIsHtml = ['html', 'htm'].includes(selectedExt);
   const selectedIsMarkdown = selectedExt === 'md';
   const selectedCanRender = selectedIsHtml || selectedIsMarkdown || selectedMediaKind != null || selectedOfficeKind != null;
-  const selectedCanEdit = Boolean(selectedPath && !shareAccess && !selectedUsesHexPreview && !selectedMediaKind && !selectedOfficeKind);
+  const selectedCanEdit = Boolean(selectedPath && !readOnly && !shareAccess && !selectedUsesHexPreview && !selectedMediaKind && !selectedOfficeKind);
   const selectedCanPreview = Boolean(selectedPath && (selectedCanRender || selectedUsesHexPreview || shareAccess));
   const editorDirty = editContent !== editOriginal;
   const editorTheme = typeof document !== 'undefined' && document.documentElement.classList.contains('dark') ? 'vs-dark' : 'light';
@@ -828,7 +830,7 @@ export function RemoteFilesPanel({
                     </Button>
                   </>
                 )}
-                {showAttach && (
+                {showAttach && !readOnly && (
                   <Button
                     variant="secondary"
                     size="icon-sm"
@@ -846,7 +848,7 @@ export function RemoteFilesPanel({
                     </a>
                   </Button>
                 )}
-                {showShare && (
+                {showShare && !readOnly && (
                   <Popover open={shareOpen} onOpenChange={setShareOpen}>
                     <PopoverTrigger asChild>
                       <Button

@@ -211,6 +211,16 @@ try {
   ))).length, artifactInput.size);
   assert.equal((await prisma.artifacts.findUnique({ where: { id: artifactId } }))?.status, 'materialized');
   assert.equal((await store.getThread(externalScope, externalCreated.response.threadId))?.source_caller_id, commandCaller.caller.id);
+  assert.equal(
+    (await store.listThreadsForViewer(scope, 50, { externalSpaceIds: [externalSpace.id] }))
+      .some((item) => item.id === externalCreated.response.threadId),
+    true,
+  );
+  assert.equal(
+    (await store.listThreadsForViewer(scope, 50, { webSpaceIds: [externalSpace.id] }))
+      .some((item) => item.id === externalCreated.response.threadId),
+    false,
+  );
   assert.deepEqual((await prisma.external_requests.findFirst({
     where: { run_id: externalCreated.response.runId },
   }))?.source_ref, {

@@ -34,8 +34,10 @@ function noticeThreadTitle(notice: ThreadNotice): string {
   return title.replace(/^打开(?:原|新)对话[:：]\s*/, '');
 }
 
-function noticeData(notice: ThreadNotice): ThreadNoticeData {
-  const href = notice.linked_thread_id ? `/chat/${encodeURIComponent(notice.linked_thread_id)}` : null;
+function noticeData(notice: ThreadNotice, spaceId: string | null): ThreadNoticeData {
+  const href = notice.linked_thread_id && spaceId
+    ? `/${encodeURIComponent(spaceId)}/${encodeURIComponent(notice.linked_thread_id)}`
+    : null;
   if (notice.kind === 'fork_from') {
     return {
       kind: notice.kind,
@@ -322,12 +324,12 @@ function branchInfoFor(run: RunWithEvents, runs: RunWithEvents[], editableRunId:
   };
 }
 
-function noticeMessage(notice: ThreadNotice): UIMessage {
+function noticeMessage(notice: ThreadNotice, spaceId: string | null): UIMessage {
   return {
     id: `notice-${notice.id}`,
     role: 'assistant',
     parts: [
-      { type: 'data-thread-notice', id: `thread-notice-${notice.id}`, data: noticeData(notice) } as unknown as Part,
+      { type: 'data-thread-notice', id: `thread-notice-${notice.id}`, data: noticeData(notice, spaceId) } as unknown as Part,
       { type: 'data-message-time', id: `time-notice-${notice.id}`, data: { completedAt: notice.created_at } } as unknown as Part,
     ],
   };
@@ -339,6 +341,7 @@ export function runsToUiMessages(
   activeRunId?: string | null,
   notices: ThreadNotice[] = [],
   contextMessages: ThreadContextMessage[] = [],
+  spaceId: string | null = null,
 ): UIMessage[] {
   const messages: UIMessage[] = [];
   const visibleRuns = activePathRuns(runs, activeRunId);
@@ -382,11 +385,11 @@ export function runsToUiMessages(
       messages.push({ id: `${run.id}:a`, role: 'assistant', parts });
     }
     for (const notice of noticesByRun.get(run.id) ?? []) {
-      messages.push(noticeMessage(notice));
+      messages.push(noticeMessage(notice, spaceId));
     }
   }
   for (const notice of trailingNotices) {
-    messages.push(noticeMessage(notice));
+    messages.push(noticeMessage(notice, spaceId));
   }
   return messages;
 }

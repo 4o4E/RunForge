@@ -15,6 +15,7 @@ import {
   getPageState,
   getRemoteFileInfo,
   getThread,
+  listSpaces,
   listThreads,
   subscribeRun,
   updatePageState,
@@ -26,6 +27,7 @@ import {
   type LlmModelOption,
   type PageState,
   type RunWithEvents,
+  type SpaceSummary,
   type Thread,
 } from './api';
 import { createAiSdkChatTransport, type ChatThreadHandle } from './transport/aiSdkChat';
@@ -37,7 +39,7 @@ import { RightSidebar, type RightTabId } from './components/RightSidebar';
 import { SearchView } from './components/SearchView';
 import type { ComposerAttachment } from './components/Composer';
 import type { AskUserDraft } from './components/AskUserCard';
-import { buildChatPath, currentBrowserPath, readChatRoute, type ChatRoute } from './router';
+import { buildChatPath, buildSearchPath, currentBrowserPath, readChatRoute, type ChatRoute } from './router';
 import { WorkspaceFileContextProvider } from './components/WorkspaceFileContext';
 import { useNotifications } from './components/GlobalNotifications';
 import { browserPushSupported, currentBrowserPushPermission, disableBrowserPush, enableBrowserPush, readBrowserPushState, type BrowserPushState } from './notifications';
@@ -97,9 +99,8 @@ function useViewportWidth(): number {
   return width;
 }
 
-function activeViewFromPath(pathname = window.location.pathname): ActiveView {
-  if (pathname === '/search') return 'search';
-  return 'chat';
+function activeViewFromLocation(loc: Location = window.location): ActiveView {
+  return new URLSearchParams(loc.search).get('view') === 'search' ? 'search' : 'chat';
 }
 
 function readStoredModelRef(): string {
@@ -420,8 +421,10 @@ export function App() {
   const isMobile = useIsMobileViewport();
   const viewportWidth = useViewportWidth();
   const [threads, setThreads] = useState<Thread[]>([]);
+  const [spaces, setSpaces] = useState<SpaceSummary[]>([]);
+  const [spacesLoaded, setSpacesLoaded] = useState(false);
   const [route, setRoute] = useState<ChatRoute>(() => readChatRoute());
-  const [activeView, setActiveView] = useState<ActiveView>(() => activeViewFromPath());
+  const [activeView, setActiveView] = useState<ActiveView>(() => activeViewFromLocation());
   const [composerDraft, setComposerDraft] = useState(route.draft);
   const [wide, setWide] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
@@ -458,6 +461,8 @@ export function App() {
     error: null,
   }));
   const activeThreadId = route.threadId;
+  const activeSpace = spaces.find((space) => space.id === route.spaceId) ?? null;
+  const readOnly = !activeSpace || activeSpace.mode === 'external';
   const sidebarFrameRef = useRef<HTMLDivElement>(null);
   const conversationContentRef = useRef<HTMLDivElement>(null);
   const previousPanelThreadIdRef = useRef(activeThreadId);
@@ -466,6 +471,7 @@ export function App() {
   const draftRef = useRef(route.draft);
   const modelOptionsRef = useRef<LlmModelOption[]>([]);
   const selectedModelRefRef = useRef(selectedModelRef);
+  const spaceIdRef = useRef<string | null>(route.spaceId);
   const reattachedEventsRef = useRef<AgentEvent[]>([]);
   const draftSyncTimerRef = useRef<number | null>(null);
   const draftRouteTimerRef = useRef<number | null>(null);
@@ -478,6 +484,7 @@ export function App() {
   const threadIdRef = useRef<string | null>(null);
   const skipNextHistoryLoadRef = useRef<string | null>(null);
   threadIdRef.current = activeThreadId;
+  spaceIdRef.current = route.spaceId;
   modelOptionsRef.current = modelOptions;
   selectedModelRefRef.current = selectedModelRef;
 
@@ -536,7 +543,7 @@ export function App() {
     if (draftRouteTimerRef.current) window.clearTimeout(draftRouteTimerRef.current);
     draftRouteTimerRef.current = window.setTimeout(() => {
       draftRouteTimerRef.current = null;
-      const path = buildChatPath({ draft: draftText, threadId });
+      const path = buildChatPath({ draft: draftText, spaceId: spaceIdRef.current, threadId });
       if (currentBrowserPath() !== path) window.history.replaceState(null, '', path);
     }, 150);
   }, []);
@@ -554,13 +561,54 @@ export function App() {
   }, []);
 
   const refreshThreads = useCallback(() => {
-    listThreads().then(setThreads).catch(() => {});
-  }, []);
+    if (!route.spaceId) {
+      setThreads([]);
+      return;
+    }
+    listThreads({ spaceId: route.spaceId }).then(setThreads).catch(() => setThreads([]));
+  }, [route.spaceId]);
   useEffect(refreshThreads, [refreshThreads]);
+
+  useEffect(() => {
+    let canceled = false;
+    listSpaces()
+      .then(({ spaces: visibleSpaces }) => {
+        if (!canceled) setSpaces(visibleSpaces);
+      })
+      .catch(() => {
+        if (!canceled) setSpaces([]);
+      })
+      .finally(() => {
+        if (!canceled) setSpacesLoaded(true);
+      });
+    return () => {
+      canceled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!spacesLoaded) return;
+    const selected = spaces.find((space) => space.id === route.spaceId) ?? null;
+    if (selected && !(selected.mode === 'external' && activeView === 'search')) return;
+    const fallback = selected ?? spaces.find((space) => space.isDefault) ?? spaces[0] ?? null;
+    const nextView: ActiveView = fallback?.mode === 'web' && activeView === 'search' ? 'search' : 'chat';
+    const nextRoute: ChatRoute = {
+      draft: route.draft,
+      spaceId: fallback?.id ?? null,
+      threadId: selected || route.spaceId === null ? route.threadId : null,
+    };
+    setRoute(nextRoute);
+    setActiveView(nextView);
+    const path = nextView === 'search'
+      ? buildSearchPath(nextRoute.spaceId, new URLSearchParams(window.location.search).get('q') ?? '')
+      : buildChatPath(nextRoute);
+    if (currentBrowserPath() !== path) window.history.replaceState(null, '', path);
+  }, [activeView, route.draft, route.spaceId, route.threadId, spaces, spacesLoaded]);
+
   const refreshThreadTitleAfterRun = useCallback((threadId: string) => {
     titleRefreshTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     titleRefreshTimersRef.current = TITLE_REFRESH_DELAYS_MS.map((delay) => window.setTimeout(() => {
-      void getThread(threadId)
+      void getThread(threadId, { spaceId: spaceIdRef.current })
         .then(({ thread }) => {
           setThreads((current) => current.map((item) => (item.id === thread.id ? thread : item)));
           if (thread.title?.trim()) {
@@ -575,6 +623,9 @@ export function App() {
   useEffect(() => {
     let canceled = false;
     setWorkspaceRoot(null);
+    if (!activeThreadId && !activeSpace?.isDefault) return () => {
+      canceled = true;
+    };
     getRemoteFileInfo(activeThreadId)
       .then((info) => {
         if (!canceled) setWorkspaceRoot(info.workspaceRoot);
@@ -585,7 +636,7 @@ export function App() {
     return () => {
       canceled = true;
     };
-  }, [activeThreadId]);
+  }, [activeSpace?.isDefault, activeThreadId]);
 
   // 只用来决定要不要在侧边栏显示"管理后台"入口；失败时静默保持 null(不显示入口)。
   useEffect(() => {
@@ -772,21 +823,24 @@ export function App() {
   }, []);
 
   const navigateSearch = useCallback(() => {
+    if (!spaceIdRef.current) return;
     flushPendingDraftSync();
-    if (currentBrowserPath() !== '/search') window.history.pushState(null, '', '/search');
+    const path = buildSearchPath(spaceIdRef.current);
+    if (currentBrowserPath() !== path) window.history.pushState(null, '', path);
     setActiveView('search');
   }, [flushPendingDraftSync]);
 
   const handle = useMemo<ChatThreadHandle>(
     () => ({
       getThreadId: () => threadIdRef.current,
+      getSpaceId: () => spaceIdRef.current,
       getSelectedModelRef: () =>
         modelOptionsRef.current.some((option) => option.ref === selectedModelRefRef.current)
           ? selectedModelRefRef.current
           : '',
       setThreadId: (id) => {
         skipNextHistoryLoadRef.current = id;
-        navigateChatRoute({ draft: '', threadId: id }, 'replace');
+        navigateChatRoute({ draft: '', spaceId: spaceIdRef.current, threadId: id }, 'replace');
       },
       onThreadCreated: (thread) => {
         setThreads((current) => [thread, ...current.filter((item) => item.id !== thread.id)]);
@@ -813,7 +867,7 @@ export function App() {
   useEffect(() => {
     if (busy || !activeThreadId) return;
     let canceled = false;
-    getThread(activeThreadId)
+    getThread(activeThreadId, { spaceId: route.spaceId })
       .then(({ thread, runs }) => {
         if (canceled) return;
         setWaitingRun(waitingRunFrom(activeBranchRuns(runs, thread.active_run_id)));
@@ -822,12 +876,13 @@ export function App() {
     return () => {
       canceled = true;
     };
-  }, [busy, activeThreadId]);
+  }, [busy, activeThreadId, route.spaceId]);
 
   useEffect(() => {
     const path = buildChatPath(route);
     if (activeView === 'search') {
-      if (window.location.pathname !== '/search') window.history.replaceState(null, '', '/search');
+      const searchPath = buildSearchPath(route.spaceId, new URLSearchParams(window.location.search).get('q') ?? '');
+      if (currentBrowserPath() !== searchPath) window.history.replaceState(null, '', searchPath);
       return;
     }
     if (currentBrowserPath() !== path) window.history.replaceState(null, '', path);
@@ -838,7 +893,7 @@ export function App() {
     const onPopState = () => {
       flushPendingDraftSync();
       stop();
-      setActiveView(activeViewFromPath());
+      setActiveView(activeViewFromLocation());
       const next = readChatRoute();
       setRoute(next);
       draftRef.current = next.draft;
@@ -871,14 +926,15 @@ export function App() {
       };
     }
 
-    getThread(activeThreadId, { debug: debugMode })
+    getThread(activeThreadId, { debug: debugMode, spaceId: route.spaceId })
       .then(({ thread, runs, notices, context_messages }) => {
         if (!canceled) {
+          setThreads((current) => [thread, ...current.filter((item) => item.id !== thread.id)]);
           const branchRuns = activeBranchRuns(runs, thread.active_run_id);
-          setMessages(runsToUiMessages(runs, thread.active_run_id, notices, context_messages));
-          setWaitingRun(waitingRunFrom(branchRuns));
+          setMessages(runsToUiMessages(runs, thread.active_run_id, notices, context_messages, thread.space_id));
+          setWaitingRun(readOnly ? null : waitingRunFrom(branchRuns));
           const liveRun = liveRunFrom(branchRuns);
-          const continuableRun = continuableRunFrom(branchRuns);
+          const continuableRun = readOnly ? null : continuableRunFrom(branchRuns);
           reattachedEventsRef.current = liveRun?.events ?? [];
           setReattachedRunId(liveRun?.id ?? null);
           setActiveRunId(liveRun?.id ?? null);
@@ -898,7 +954,7 @@ export function App() {
     return () => {
       canceled = true;
     };
-  }, [activeThreadId, debugMode, historyRevision, setMessages]);
+  }, [activeThreadId, debugMode, historyRevision, readOnly, route.spaceId, setMessages]);
 
   useEffect(() => {
     if (!activeThreadId || !reattachedRunId) return;
@@ -910,14 +966,14 @@ export function App() {
       setMessages((current) => replaceAssistantMessage(current, reattachedRunId, reattachedEventsRef.current));
     };
     const refreshLiveRun = () => {
-      void getThread(activeThreadId, { debug: debugMode })
+      void getThread(activeThreadId, { debug: debugMode, spaceId: route.spaceId })
         .then(({ thread, runs, notices, context_messages }) => {
           if (canceled) return;
           const branchRuns = activeBranchRuns(runs, thread.active_run_id);
-          setMessages(runsToUiMessages(runs, thread.active_run_id, notices, context_messages));
-          setWaitingRun(waitingRunFrom(branchRuns));
+          setMessages(runsToUiMessages(runs, thread.active_run_id, notices, context_messages, thread.space_id));
+          setWaitingRun(readOnly ? null : waitingRunFrom(branchRuns));
           const liveRun = liveRunFrom(branchRuns);
-          const continuableRun = continuableRunFrom(branchRuns);
+          const continuableRun = readOnly ? null : continuableRunFrom(branchRuns);
           reattachedEventsRef.current = liveRun?.events ?? [];
           setReattachedRunId(liveRun?.id ?? null);
           setActiveRunId(liveRun?.id ?? null);
@@ -927,7 +983,7 @@ export function App() {
         .catch(() => {});
     };
 
-    const unsubscribe = subscribeRun(
+    const unsubscribe = readOnly ? () => {} : subscribeRun(
       reattachedRunId,
       (event) => {
         reattachedEventsRef.current = [...reattachedEventsRef.current, event];
@@ -945,7 +1001,7 @@ export function App() {
       window.clearInterval(interval);
       unsubscribe();
     };
-  }, [activeThreadId, debugMode, reattachedRunId, refreshThreads, setMessages]);
+  }, [activeThreadId, debugMode, readOnly, reattachedRunId, refreshThreads, route.spaceId, setMessages]);
 
   const pushNotificationState = !pushState.supported
     ? 'unsupported'
@@ -994,12 +1050,13 @@ export function App() {
   }
 
   function newChat() {
+    if (readOnly || !route.spaceId) return;
     stop();
     setEditingRunId(null);
     setContinuableRunId(null);
     setMobileSidebarOpen(false);
     if (activeThreadId) rememberThreadDraft(activeThreadId, draftRef.current);
-    navigateChatRoute({ draft: '', threadId: null });
+    navigateChatRoute({ draft: '', spaceId: route.spaceId, threadId: null });
     setMessages([]);
   }
 
@@ -1009,7 +1066,21 @@ export function App() {
     setContinuableRunId(null);
     setMobileSidebarOpen(false);
     if (activeThreadId) rememberThreadDraft(activeThreadId, draftRef.current);
-    navigateChatRoute({ draft: threadDraftsRef.current[id] ?? '', threadId: id });
+    navigateChatRoute({ draft: threadDraftsRef.current[id] ?? '', spaceId: route.spaceId, threadId: id });
+  }
+
+  function selectSpace(spaceId: string) {
+    if (spaceId === route.spaceId) return;
+    stop();
+    setEditingRunId(null);
+    setWaitingRun(null);
+    setContinuableRunId(null);
+    setReattachedRunId(null);
+    setActiveRunId(null);
+    setMobileSidebarOpen(false);
+    if (activeThreadId) rememberThreadDraft(activeThreadId, draftRef.current);
+    navigateChatRoute({ draft: '', spaceId, threadId: null });
+    setMessages([]);
   }
 
   function openSearch() {
@@ -1021,6 +1092,7 @@ export function App() {
   }
 
   async function removeThread(id: string) {
+    if (readOnly) return;
     stop();
     await deleteThread(id);
     setThreads((current) => current.filter((t) => t.id !== id));
@@ -1038,12 +1110,13 @@ export function App() {
     });
     if (activeThreadId === id) {
       setContinuableRunId(null);
-      navigateChatRoute({ draft: '', threadId: null });
+      navigateChatRoute({ draft: '', spaceId: route.spaceId, threadId: null });
       setMessages([]);
     }
   }
 
   async function renameThread(id: string) {
+    if (readOnly) return;
     const current = threads.find((thread) => thread.id === id);
     const nextTitle = window.prompt('重命名会话', current?.title ?? '');
     if (nextTitle === null) return;
@@ -1052,18 +1125,20 @@ export function App() {
   }
 
   async function toggleThreadPin(id: string) {
+    if (readOnly) return;
     const current = threads.find((thread) => thread.id === id);
     await updateThread(id, { pinned: !current?.pinned_at });
     refreshThreads();
   }
 
   async function archiveThread(id: string) {
+    if (readOnly) return;
     stop();
     await updateThread(id, { archived: true });
     setThreads((current) => current.filter((thread) => thread.id !== id));
     if (activeThreadId === id) {
       setContinuableRunId(null);
-      navigateChatRoute({ draft: '', threadId: null });
+      navigateChatRoute({ draft: '', spaceId: route.spaceId, threadId: null });
       setMessages([]);
     }
   }
@@ -1079,18 +1154,18 @@ export function App() {
 
   const refreshActiveThread = useCallback(() => {
     if (!activeThreadId) return;
-    void getThread(activeThreadId, { debug: debugMode }).then(({ thread, runs, notices, context_messages }) => {
+    void getThread(activeThreadId, { debug: debugMode, spaceId: route.spaceId }).then(({ thread, runs, notices, context_messages }) => {
       const branchRuns = activeBranchRuns(runs, thread.active_run_id);
-      setMessages(runsToUiMessages(runs, thread.active_run_id, notices, context_messages));
-      setWaitingRun(waitingRunFrom(branchRuns));
+      setMessages(runsToUiMessages(runs, thread.active_run_id, notices, context_messages, thread.space_id));
+      setWaitingRun(readOnly ? null : waitingRunFrom(branchRuns));
       const liveRun = liveRunFrom(branchRuns);
-      const continuableRun = continuableRunFrom(branchRuns);
+      const continuableRun = readOnly ? null : continuableRunFrom(branchRuns);
       reattachedEventsRef.current = liveRun?.events ?? [];
       setReattachedRunId(liveRun?.id ?? null);
       setActiveRunId(liveRun?.id ?? null);
       setContinuableRunId(continuableRun?.id ?? null);
     });
-  }, [activeThreadId, debugMode, setMessages]);
+  }, [activeThreadId, debugMode, readOnly, route.spaceId, setMessages]);
 
   const resumeWithAnswer = useCallback((runId: string, answer: AskUserAnswer) => {
     setWaitingRun(null);
@@ -1275,7 +1350,7 @@ export function App() {
     void forkThreadFromRun(runId)
       .then(({ thread }) => {
         refreshThreads();
-        navigateChatRoute({ draft: '', threadId: thread.id });
+        navigateChatRoute({ draft: '', spaceId: thread.space_id, threadId: thread.id });
       })
       .catch((err) => {
         console.error('fork thread failed', err);
@@ -1308,7 +1383,7 @@ export function App() {
   }, [activeThreadId, rememberThreadDraftRef, replaceDraftRouteLater, scheduleThreadDraftSync]);
 
   function send(text: string, modelRef: string) {
-    if (waitingRun) return;
+    if (readOnly || waitingRun || !route.spaceId) return;
     const finalText = attachments.length
       ? [text.trim(), attachments.map(attachmentToken).join('\n')].filter(Boolean).join('\n\n')
       : text;
@@ -1317,7 +1392,7 @@ export function App() {
     if (activeThreadId) rememberThreadDraft(activeThreadId, '');
     draftRef.current = '';
     setComposerDraft('');
-    navigateChatRoute({ draft: '', threadId: activeThreadId }, 'replace');
+    navigateChatRoute({ draft: '', spaceId: route.spaceId, threadId: activeThreadId }, 'replace');
     setAttachments([]);
     if (editingRunId) {
       const runId = editingRunId;
@@ -1401,11 +1476,17 @@ export function App() {
   }
 
   const activeThread = threads.find((t) => t.id === activeThreadId);
-  const title = activeThread?.title?.trim() || activeThread?.fallback_title?.trim() || (activeThreadId ? '会话' : '新会话');
+  const title = activeThread?.title?.trim()
+    || activeThread?.fallback_title?.trim()
+    || (activeThreadId ? '会话' : activeSpace?.mode === 'external' ? '外部任务' : '新会话');
   const rightPanelVisible = activeView === 'chat' && rightPanelOpen && !isMobile;
   const conversationRightPanelOpen = rightPanelVisible || rightPanelClosing;
-  const threadHref = useCallback((threadId: string) => buildChatPath({ draft: '', threadId }), []);
-  const newChatHref = buildChatPath({ draft: '', threadId: null });
+  const threadHref = useCallback(
+    (threadId: string) => buildChatPath({ draft: '', spaceId: route.spaceId, threadId }),
+    [route.spaceId],
+  );
+  const newChatHref = buildChatPath({ draft: '', spaceId: route.spaceId, threadId: null });
+  const searchHref = buildSearchPath(route.spaceId);
   const mobileRightPanelWidth = Math.min(filesPanelWidth, viewportWidth, 520);
 
   useLayoutEffect(() => {
@@ -1450,16 +1531,20 @@ export function App() {
         style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth }}
       >
         <Sidebar
+          spaces={spaces}
+          activeSpaceId={route.spaceId}
+          readOnly={readOnly}
           threads={threads}
           activeId={activeThreadId}
           activeView={activeView}
           width="100%"
           collapsed={sidebarCollapsed}
           newHref={newChatHref}
-          searchHref="/search"
+          searchHref={searchHref}
           threadHref={threadHref}
           showAdminEntry={currentUserRole === 'owner' || currentUserRole === 'admin'}
           onToggleCollapsed={() => setSidebarCollapsed((collapsed) => !collapsed)}
+          onSelectSpace={selectSpace}
           onNew={newChat}
           onSearch={openSearch}
           onSelect={selectThread}
@@ -1483,8 +1568,9 @@ export function App() {
           })
         }
       />
-      {activeView === 'search' ? (
+      {activeView === 'search' && route.spaceId ? (
         <SearchView
+          spaceId={route.spaceId}
           threadHref={threadHref}
           onOpenThread={selectThread}
           mobile={isMobile}
@@ -1493,6 +1579,9 @@ export function App() {
       ) : (
         <ChatView
           title={title}
+          space={activeSpace}
+          thread={activeThread ?? null}
+          readOnly={readOnly}
           messages={messages}
           busy={busy}
           waitingQuestion={waitingRun?.spec.question ?? null}
@@ -1567,6 +1656,8 @@ export function App() {
           tabs={rightPanelTabs}
           activeTab={rightPanelMode}
           threadId={activeThreadId}
+          spaceId={route.spaceId}
+          readOnly={readOnly}
           workspaceRoot={workspaceRoot}
           onTabChange={setRightPanelMode}
           onOpenFileBrowser={() => openRightTab('files')}
@@ -1588,16 +1679,20 @@ export function App() {
           />
           <div className="relative h-full w-[min(86vw,340px)] animate-in slide-in-from-left-full duration-200 shadow-xl">
             <Sidebar
+              spaces={spaces}
+              activeSpaceId={route.spaceId}
+              readOnly={readOnly}
               threads={threads}
               activeId={activeThreadId}
               activeView={activeView}
               width="100%"
               collapsed={false}
               newHref={newChatHref}
-              searchHref="/search"
+              searchHref={searchHref}
               threadHref={threadHref}
               showAdminEntry={currentUserRole === 'owner' || currentUserRole === 'admin'}
               onToggleCollapsed={() => setMobileSidebarOpen(false)}
+              onSelectSpace={selectSpace}
               onNew={newChat}
               onSearch={openSearch}
               onSelect={selectThread}
@@ -1626,6 +1721,8 @@ export function App() {
               tabs={rightPanelTabs}
               activeTab={rightPanelMode}
               threadId={activeThreadId}
+              spaceId={route.spaceId}
+              readOnly={readOnly}
               workspaceRoot={workspaceRoot}
               onTabChange={setRightPanelMode}
               onOpenFileBrowser={() => openRightTab('files')}

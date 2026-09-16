@@ -229,6 +229,32 @@ export class MemoryStore implements Store {
       .map((thread) => this.threadWithFallbackTitle(thread))
       .slice(0, limit);
   }
+  async listThreadsForViewer(
+    scope: Scope,
+    limit = 50,
+    options: { archived?: boolean; webSpaceIds?: string[]; externalSpaceIds?: string[] } = {},
+  ) {
+    const archived = options.archived === true;
+    const webSpaces = new Set(options.webSpaceIds ?? []);
+    const externalSpaces = new Set(options.externalSpaceIds ?? []);
+    return [...this.threads.values()]
+      .filter((thread) => thread.tenant_id === scope.tenantId)
+      .filter((thread) => (
+        (thread.source_type === 'web' && thread.user_id === scope.userId && webSpaces.has(thread.space_id))
+        || (thread.source_type === 'external' && externalSpaces.has(thread.space_id))
+      ))
+      .filter((thread) => archived ? Boolean(thread.archived_at) : !thread.archived_at)
+      .sort((a, b) => {
+        if (a.pinned_at && !b.pinned_at) return -1;
+        if (!a.pinned_at && b.pinned_at) return 1;
+        const pinDiff = Date.parse(b.pinned_at ?? '') - Date.parse(a.pinned_at ?? '');
+        if (Number.isFinite(pinDiff) && pinDiff !== 0) return pinDiff;
+        const updateDiff = Date.parse(b.updated_at) - Date.parse(a.updated_at);
+        return updateDiff || Date.parse(b.created_at) - Date.parse(a.created_at);
+      })
+      .map((thread) => this.threadWithFallbackTitle(thread))
+      .slice(0, limit);
+  }
   async updateThread(scope: Scope, id: string, fields: { title?: string | null; pinned?: boolean; archived?: boolean; activeRunId?: string | null }) {
     const thread = this.threads.get(id);
     if (!this.threadOwnedBy(thread, scope)) return null;

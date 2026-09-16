@@ -17,6 +17,8 @@ interface Props {
   tabs: RightTabId[];
   activeTab: RightTabId | null;
   threadId: string | null;
+  spaceId: string | null;
+  readOnly?: boolean;
   workspaceRoot: string | null;
   compact?: boolean;
   onTabChange: (tab: RightTabId | null) => void;
@@ -134,12 +136,14 @@ function AddTabMenu({
   onOpenFileBrowser,
   onOpenShellTab,
   onOpenSubagentTab,
+  readOnly,
 }: {
   sessions: ShellSession[];
   subagents: SubagentRun[];
   onOpenFileBrowser: () => void;
   onOpenShellTab: (sessionId: string) => void;
   onOpenSubagentTab: (subagentId: string) => void;
+  readOnly: boolean;
 }) {
   const liveSessions = sessions.filter(isLiveSession);
   return (
@@ -155,14 +159,18 @@ function AddTabMenu({
           <FolderTree className="mr-2 size-4" />
           文件浏览器
         </DropdownMenuItem>
-        <MenuDivider label="Shell" />
-        {liveSessions.map((session) => (
-          <DropdownMenuItem key={session.id} onClick={() => onOpenShellTab(session.id)}>
-            <Terminal className="mr-2 size-4" />
-            {session.name}
-          </DropdownMenuItem>
-        ))}
-        {liveSessions.length === 0 && <div className="px-2 py-1.5 text-xs text-muted-foreground">暂无 Shell</div>}
+        {!readOnly && (
+          <>
+            <MenuDivider label="Shell" />
+            {liveSessions.map((session) => (
+              <DropdownMenuItem key={session.id} onClick={() => onOpenShellTab(session.id)}>
+                <Terminal className="mr-2 size-4" />
+                {session.name}
+              </DropdownMenuItem>
+            ))}
+            {liveSessions.length === 0 && <div className="px-2 py-1.5 text-xs text-muted-foreground">暂无 Shell</div>}
+          </>
+        )}
         <MenuDivider label="Subagent" />
         {subagents.map((subagent) => (
           <DropdownMenuItem key={subagent.id} onClick={() => onOpenSubagentTab(subagent.id)}>
@@ -182,8 +190,10 @@ export function RightSidebar({
   tabs,
   activeTab,
   threadId,
+  spaceId,
   workspaceRoot,
   compact = false,
+  readOnly = false,
   onTabChange,
   onOpenFileBrowser,
   onOpenFileTab,
@@ -199,20 +209,20 @@ export function RightSidebar({
   const tabRefs = useRef(new Map<RightTabId, HTMLDivElement>());
 
   const refreshShells = useCallback(() => {
-    if (!threadId) {
+    if (!threadId || readOnly) {
       setSessions([]);
       return;
     }
     listShellSessions(threadId).then((data) => setSessions(data.sessions)).catch(() => setSessions([]));
-  }, [threadId]);
+  }, [readOnly, threadId]);
 
   const refreshSubagents = useCallback(() => {
     if (!threadId) {
       setSubagents([]);
       return;
     }
-    listSubagentRuns(threadId).then((data) => setSubagents(data.subagents)).catch(() => setSubagents([]));
-  }, [threadId]);
+    listSubagentRuns(threadId, spaceId).then((data) => setSubagents(data.subagents)).catch(() => setSubagents([]));
+  }, [spaceId, threadId]);
 
   useEffect(refreshShells, [refreshShells]);
   useEffect(refreshSubagents, [refreshSubagents]);
@@ -226,17 +236,21 @@ export function RightSidebar({
   }, [open, refreshShells, refreshSubagents, threadId]);
 
   const shellNames = useMemo(() => new Map(sessions.map((session) => [session.id, session.name])), [sessions]);
-  const tabSpecs = useMemo(() => tabs.map((tab) => tabSpec(tab, shellNames)), [shellNames, tabs]);
+  const availableTabs = useMemo(
+    () => readOnly ? tabs.filter((tab) => !tab.startsWith('shell:')) : tabs,
+    [readOnly, tabs],
+  );
+  const tabSpecs = useMemo(() => availableTabs.map((tab) => tabSpec(tab, shellNames)), [availableTabs, shellNames]);
 
   useEffect(() => {
     if (!open) return;
-    if (!tabs.length) {
+    if (!availableTabs.length) {
       if (activeTab) onTabChange(null);
       return;
     }
-    if (activeTab && tabs.includes(activeTab)) return;
-    onTabChange(tabs[0]);
-  }, [activeTab, onTabChange, open, tabs]);
+    if (activeTab && availableTabs.includes(activeTab)) return;
+    onTabChange(availableTabs[0]);
+  }, [activeTab, availableTabs, onTabChange, open]);
 
   useEffect(() => {
     if (!open || !activeTab) return;
@@ -244,7 +258,7 @@ export function RightSidebar({
     tab?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
   }, [activeTab, open, tabs]);
 
-  const activeShellSessionId = activeTab?.startsWith('shell:') ? activeTab.slice('shell:'.length) : null;
+  const activeShellSessionId = !readOnly && activeTab?.startsWith('shell:') ? activeTab.slice('shell:'.length) : null;
   const activeSubagentId = activeTab?.startsWith('subagent:') ? activeTab.slice('subagent:'.length) : null;
   const activeFilePath = activeTab?.startsWith('file:') ? activeTab.slice('file:'.length) : null;
   const openFileAndCloseBrowser = useCallback((path: string) => {
@@ -291,6 +305,7 @@ export function RightSidebar({
             onOpenFileBrowser={onOpenFileBrowser}
             onOpenShellTab={onOpenShellTab}
             onOpenSubagentTab={onOpenSubagentTab}
+            readOnly={readOnly}
           />
           <Button variant="ghost" size="icon" className="size-8 shrink-0" onClick={onClose} title="关闭右侧栏">
             <X className="size-4" />
@@ -306,6 +321,7 @@ export function RightSidebar({
             previewPath={null}
             embedded
             compact={compact}
+            readOnly={readOnly}
             onClose={onClose}
             onAttach={onAttach}
             onOpenFile={openFileAndCloseBrowser}
@@ -318,6 +334,7 @@ export function RightSidebar({
             previewPath={activeFilePath}
             embedded
             compact={compact}
+            readOnly={readOnly}
             onClose={onClose}
             onAttach={onAttach}
             onOpenFile={onOpenFileTab}
@@ -352,6 +369,7 @@ export function RightSidebar({
               onOpenFileBrowser={onOpenFileBrowser}
               onOpenShellTab={onOpenShellTab}
               onOpenSubagentTab={onOpenSubagentTab}
+              readOnly={readOnly}
             />
           </div>
         )}

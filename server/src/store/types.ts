@@ -400,6 +400,13 @@ export interface Store {
    * 避免为了查看 external thread 冒充 execution user。 */
   getThreadInSpaces(tenantId: string, id: string, spaceIds: string[]): Promise<ThreadRow | null>;
   listThreads(scope: Scope, limit?: number, options?: { archived?: boolean; spaceIds?: string[] }): Promise<ThreadRow[]>;
+  /** Web 空间只返回当前用户自己的会话；external 空间返回该空间的外部会话。
+   * 两组空间 ID 都必须来自 SpaceAccessService 的可见空间结果。 */
+  listThreadsForViewer(
+    scope: Scope,
+    limit?: number,
+    options?: { archived?: boolean; webSpaceIds?: string[]; externalSpaceIds?: string[] },
+  ): Promise<ThreadRow[]>;
   updateThread(
     scope: Scope,
     id: string,

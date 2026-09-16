@@ -154,6 +154,7 @@ export function SubagentPanel({ open, threadId, subagentId, workspaceRoot, onOpe
         <Conversation
           messages={messages}
           busy={selected?.status === 'running'}
+          readOnly
           wide={false}
           embedded
           showToc={false}

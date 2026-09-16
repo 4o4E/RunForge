@@ -16,6 +16,7 @@ import type { UiEvent } from './types';
  *  may be created lazily on the first send. */
 export interface ChatThreadHandle {
   getThreadId(): string | null;
+  getSpaceId(): string | null;
   getSelectedModelRef(): string;
   setThreadId(id: string): void;
   onThreadCreated(thread: Thread): void;
@@ -310,7 +311,7 @@ export function createAiSdkChatTransport(handle: ChatThreadHandle): ChatTranspor
 
       let threadId = handle.getThreadId();
       if (!threadId) {
-        const thread = await createThread();
+        const thread = await createThread(undefined, handle.getSpaceId());
         threadId = thread.id;
         handle.setThreadId(thread.id);
         handle.onThreadCreated({ ...thread, fallback_title: text });

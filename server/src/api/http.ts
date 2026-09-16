@@ -32,6 +32,7 @@ import { SpaceConfigError } from '../spaces/config.js';
 import { runAdmission } from '../spaces/runAdmission.js';
 import { externalApi } from './external.js';
 import { threadWorkspaceAccess, ThreadWorkspaceAccessError } from '../files/threadWorkspace.js';
+import { threadReadAccess, ThreadReadAccessError } from '../threads/readAccess.js';
 
 export const api = Router();
 
@@ -78,6 +79,14 @@ function sendRunActiveConflict(res: Response, err: unknown): boolean {
     currentStatus: err.currentStatus,
   });
   return true;
+}
+
+function sendThreadReadError(res: Response, error: unknown): void {
+  if (error instanceof ThreadReadAccessError) {
+    res.status(error.status).json({ error: error.message, code: error.code });
+    return;
+  }
+  sendSpaceError(res, error);
 }
 
 // 登录/刷新/登出不需要已建立的身份，必须挂在 requireApiAccess 之前
@@ -193,7 +202,14 @@ api.get('/search', async (req, res) => {
   const q = String(req.query.q ?? '').trim();
   const limit = Math.min(100, Math.max(1, Number(req.query.limit ?? 50) || 50));
   try {
-    const visibleSpaceIds = (await spaceAccess.list(identity)).map((space) => space.id);
+    const spaces = await spaceAccess.list(identity);
+    const requestedSpaceId = optionalText(req.query.spaceId);
+    const visibleSpaceIds = requestedSpaceId
+      ? spaces.filter((space) => space.id === requestedSpaceId && space.mode === 'web').map((space) => space.id)
+      : spaces.filter((space) => space.mode === 'web').map((space) => space.id);
+    if (requestedSpaceId && !visibleSpaceIds.length) {
+      return res.status(404).json({ error: '空间不存在', code: 'SPACE_NOT_FOUND' });
+    }
     res.json({ query: q, results: await store.searchThreadMessages(scope, q, limit, { spaceIds: visibleSpaceIds }) });
   } catch (error) {
     sendSpaceError(res, error);
@@ -224,8 +240,17 @@ api.get('/threads', async (req, res) => {
   if (!identity) return;
   const archived = req.query.archived === '1' || req.query.archived === 'true';
   try {
-    const visibleSpaceIds = (await spaceAccess.list(identity)).map((space) => space.id);
-    res.json(await store.listThreads(scope, 50, { archived, spaceIds: visibleSpaceIds }));
+    const spaces = await spaceAccess.list(identity);
+    const requestedSpaceId = optionalText(req.query.spaceId);
+    const selectedSpaces = requestedSpaceId ? spaces.filter((space) => space.id === requestedSpaceId) : spaces;
+    if (requestedSpaceId && !selectedSpaces.length) {
+      return res.status(404).json({ error: '空间不存在', code: 'SPACE_NOT_FOUND' });
+    }
+    res.json(await store.listThreadsForViewer(scope, 50, {
+      archived,
+      webSpaceIds: selectedSpaces.filter((space) => space.mode === 'web').map((space) => space.id),
+      externalSpaceIds: selectedSpaces.filter((space) => space.mode === 'external').map((space) => space.id),
+    }));
   } catch (error) {
     sendSpaceError(res, error);
   }
@@ -233,13 +258,16 @@ api.get('/threads', async (req, res) => {
 
 // thread 详情：包含 run 和事件，用于恢复对话。
 api.get('/threads/:id', async (req, res) => {
-  const scope = scopeOrReject(res);
-  if (!scope) return;
   const identity = tenantIdentityOrReject(res);
   if (!identity) return;
-  const thread = await store.getThread(scope, req.params.id);
-  if (!thread) return res.status(404).json({ error: 'thread 不存在' });
-  if (!await checkThreadSpaceAccess(res, identity, thread.space_id, false)) return;
+  let access;
+  try {
+    access = await threadReadAccess.resolve(identity, req.params.id, optionalText(req.query.spaceId));
+  } catch (error) {
+    sendThreadReadError(res, error);
+    return;
+  }
+  const { thread, space, executionScope: scope, readOnly } = access;
   const runs = await store.listRuns(scope, thread.id);
   const withEvents = await Promise.all(
     runs.map(async (run) => ({ ...run, events: await store.getEvents(scope, run.id) })),
@@ -283,6 +311,8 @@ api.get('/threads/:id', async (req, res) => {
       }));
   res.json({
     thread,
+    space,
+    readOnly,
     runs: withEvents,
     notices: await store.listThreadNotices(scope, thread.id),
     context_messages: contextMessages,
@@ -319,14 +349,18 @@ api.patch('/threads/:id', async (req, res) => {
 
 // thread 下的 subagent 子任务列表。右侧资源栏用它恢复和打开历史 subagent。
 api.get('/threads/:id/subagents', async (req, res) => {
-  const scope = scopeOrReject(res);
-  if (!scope) return;
   const identity = tenantIdentityOrReject(res);
   if (!identity) return;
-  const thread = await store.getThread(scope, req.params.id);
-  if (!thread) return res.status(404).json({ error: 'thread 不存在' });
-  if (!await checkThreadSpaceAccess(res, identity, thread.space_id, false)) return;
-  res.json({ subagents: await store.listSubagentRunsByThread(scope, thread.id) });
+  try {
+    const { thread, executionScope } = await threadReadAccess.resolve(
+      identity,
+      req.params.id,
+      optionalText(req.query.spaceId),
+    );
+    res.json({ subagents: await store.listSubagentRunsByThread(executionScope, thread.id) });
+  } catch (error) {
+    sendThreadReadError(res, error);
+  }
 });
 
 // 删除 thread 及关联 run 数据，级联删除由 PostgreSQL 负责。

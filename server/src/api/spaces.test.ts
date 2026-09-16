@@ -5,6 +5,8 @@ import { signSystemAccessToken, signTenantAccessToken } from '../auth/jwt.js';
 import { store } from '../store/index.js';
 import type { SpaceSummary } from '@runforge/contracts';
 import { buildApp, listen, seedOwner, seedSystemAdmin } from './testHelpers.js';
+import { newThreadId } from '../id.js';
+import type { ThreadRow } from '../store/types.js';
 
 test.before(() => {
   config.auth.jwtSecret = config.auth.jwtSecret || 'test-jwt-secret';
@@ -45,12 +47,31 @@ test('space API: 管理权限、可见名单、execution user 和软删除语义
       body: JSON.stringify({
         mode: 'external',
         name: 'External Read Only',
-        executionUserId: member.id,
+        executionUserId: owner.id,
         visibleUserIds: [member.id],
       }),
     });
     assert.equal(externalResponse.status, 201);
     const externalSpace = (await externalResponse.json()) as SpaceSummary;
+    const externalStoredThread: ThreadRow = {
+      id: newThreadId(),
+      tenant_id: tenantId,
+      user_id: owner.id,
+      space_id: externalSpace.id,
+      source_type: 'external',
+      source_caller_id: 'ec_spaces_api',
+      source_ref: { externalThreadRef: 'trusted-app-thread-1' },
+      title: 'External Task',
+      active_run_id: null,
+      executing_run_id: null,
+      pinned_at: null,
+      archived_at: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    // 外部 Repository 在生产中直接事务写 Prisma；MemoryStore 测试没有对应写入口，
+    // 这里只注入已落库结果，验证 Web 查看边界而不是重复测试外部创建协议。
+    (store as unknown as { threads: Map<string, ThreadRow> }).threads.set(externalStoredThread.id, externalStoredThread);
 
     const crossTenantExecution = await fetch(`${base}/spaces`, {
       method: 'POST',
@@ -68,6 +89,42 @@ test('space API: 管理权限、可见名单、execution user 和软删除语义
     );
     const hiddenList = await fetch(`${base}/spaces`, { headers: bearer(hiddenToken) });
     assert.deepEqual(((await hiddenList.json()) as { spaces: SpaceSummary[] }).spaces, []);
+
+    const externalThreads = await fetch(`${base}/threads?spaceId=${externalSpace.id}`, { headers: bearer(memberToken) });
+    assert.equal(externalThreads.status, 200);
+    assert.deepEqual(
+      ((await externalThreads.json()) as Array<{ id: string }>).map((thread) => thread.id),
+      [externalStoredThread.id],
+    );
+    const externalDetail = await fetch(
+      `${base}/threads/${externalStoredThread.id}?spaceId=${externalSpace.id}`,
+      { headers: bearer(memberToken) },
+    );
+    assert.equal(externalDetail.status, 200);
+    const externalDetailBody = (await externalDetail.json()) as {
+      readOnly: boolean;
+      space: SpaceSummary;
+      thread: { source_ref: Record<string, unknown> };
+    };
+    assert.equal(externalDetailBody.readOnly, true);
+    assert.equal(externalDetailBody.space.id, externalSpace.id);
+    assert.equal(externalDetailBody.thread.source_ref.externalThreadRef, 'trusted-app-thread-1');
+    const mismatchedSpace = await fetch(
+      `${base}/threads/${externalStoredThread.id}?spaceId=${webSpace.id}`,
+      { headers: bearer(memberToken) },
+    );
+    assert.equal(mismatchedSpace.status, 404);
+    const hiddenExternalDetail = await fetch(
+      `${base}/threads/${externalStoredThread.id}?spaceId=${externalSpace.id}`,
+      { headers: bearer(hiddenToken) },
+    );
+    assert.equal(hiddenExternalDetail.status, 404);
+    const ownerCannotMutateExternal = await fetch(`${base}/threads/${externalStoredThread.id}`, {
+      method: 'PATCH',
+      headers: bearer(ownerToken),
+      body: JSON.stringify({ title: 'forbidden' }),
+    });
+    assert.equal(ownerCannotMutateExternal.status, 403);
 
     const staleRoleCreate = await fetch(`${base}/spaces`, {
       method: 'POST',
@@ -107,7 +164,10 @@ test('space API: 管理权限、可见名单、execution user 和软删除语义
     });
     assert.equal(removeVisibility.status, 200);
     const hiddenThreads = await fetch(`${base}/threads`, { headers: bearer(memberToken) });
-    assert.deepEqual(await hiddenThreads.json(), []);
+    assert.deepEqual(
+      ((await hiddenThreads.json()) as Array<{ id: string }>).map((thread) => thread.id),
+      [externalStoredThread.id],
+    );
     const hiddenThreadDetail = await fetch(`${base}/threads/${memberThreadBody.id}`, { headers: bearer(memberToken) });
     assert.equal(hiddenThreadDetail.status, 404);
     const restoreVisibility = await fetch(`${base}/spaces/${webSpace.id}`, {
