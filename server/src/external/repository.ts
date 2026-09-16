@@ -1,5 +1,7 @@
 import type {
   ExternalCallerSummary,
+  ExternalArtifactSummary,
+  ExternalArtifactUploadReceipt,
   ExternalCancelReceipt,
   ExternalRunReceipt,
   ExternalRunView,
@@ -22,6 +24,7 @@ import { requiredJson, timestamp, toRunRow, toSpaceRow } from '../store/prismaRo
 import { RunActiveError, SpaceConfigChangedError } from '../store/types.js';
 import type {
   ExternalAppendRunInput,
+  ExternalArtifactCreateInput,
   ExternalCallerAccess,
   ExternalCallerWithTokens,
   ExternalCancelInput,
@@ -72,6 +75,34 @@ function tokenSummary(row: {
     revokedAt: timestamp(row.revoked_at),
     lastUsedAt: timestamp(row.last_used_at),
     createdAt: timestamp(row.created_at)!,
+  };
+}
+
+function artifactSummary(row: {
+  id: string;
+  original_name: string;
+  mime_type: string;
+  size_bytes: bigint;
+  status: string;
+  metadata: unknown;
+  thread_id: string | null;
+  run_id: string | null;
+  created_at: Date;
+  materialized_at: Date | null;
+}): ExternalArtifactSummary {
+  const size = Number(row.size_bytes);
+  if (!Number.isSafeInteger(size)) throw new Error(`artifact 大小超出 JavaScript 安全整数范围：${row.size_bytes}`);
+  return {
+    id: row.id,
+    name: row.original_name,
+    mimeType: row.mime_type,
+    size,
+    status: row.status as ExternalArtifactSummary['status'],
+    metadata: row.metadata as Record<string, unknown>,
+    threadId: row.thread_id,
+    runId: row.run_id,
+    createdAt: timestamp(row.created_at)!,
+    materializedAt: timestamp(row.materialized_at),
   };
 }
 
@@ -614,6 +645,96 @@ export class PrismaExternalRepository implements ExternalRepository {
     }
   }
 
+  async createArtifact(
+    access: ExternalCallerAccess,
+    input: ExternalArtifactCreateInput,
+  ): Promise<{ response: ExternalArtifactUploadReceipt; replayed: boolean }> {
+    try {
+      return await prisma.$transaction(async (tx) => {
+        const replay = await existingRequest<ExternalArtifactUploadReceipt>(
+          tx, access.caller.id, 'artifact.upload', input.idempotencyKey, input.requestHash,
+        );
+        if (replay) return { response: replay, replayed: true };
+        const sourceDuplicate = await sourceReplay<ExternalArtifactUploadReceipt>(
+          tx, access.caller.id, undefined, input.source.externalEventId, input.requestHash,
+        );
+        if (sourceDuplicate) return { response: sourceDuplicate, replayed: true };
+        await requireLiveAccess(tx, access, false);
+        const requestId = newExternalRequestId();
+        await tx.external_requests.create({
+          data: {
+            id: requestId,
+            caller_id: access.caller.id,
+            operation: 'artifact.upload',
+            idempotency_key: input.idempotencyKey,
+            request_hash: input.requestHash,
+            status: 'processing',
+            external_event_id: input.source.externalEventId,
+            source_ref: requestSource(input),
+          },
+        });
+        const artifact = await tx.artifacts.create({
+          data: {
+            id: input.artifactId,
+            caller_id: access.caller.id,
+            space_id: access.caller.spaceId,
+            storage_key: input.storageKey,
+            original_name: input.name,
+            mime_type: input.mimeType,
+            size_bytes: BigInt(input.size),
+            metadata: requiredJson(input.metadata),
+          },
+        });
+        const response: ExternalArtifactUploadReceipt = {
+          operation: 'artifact.upload',
+          artifact: artifactSummary(artifact),
+        };
+        await tx.external_requests.update({
+          where: { id: requestId },
+          data: { status: 'succeeded', response: requiredJson(response), updated_at: new Date() },
+        });
+        return { response, replayed: false };
+      });
+    } catch (error) {
+      if (isUniqueConflict(error)) {
+        const replay = await this.findRequestOrSourceReplay<ExternalArtifactUploadReceipt>(
+          access, 'artifact.upload', input.idempotencyKey, input.requestHash, undefined, input.source.externalEventId,
+        );
+        if (replay) return { response: replay, replayed: true };
+      }
+      throw error;
+    }
+  }
+
+  async findArtifactUploadReplay(
+    access: ExternalCallerAccess,
+    input: Pick<ExternalArtifactCreateInput, 'idempotencyKey' | 'requestHash' | 'source'>,
+  ): Promise<ExternalArtifactUploadReceipt | null> {
+    return this.findRequestOrSourceReplay<ExternalArtifactUploadReceipt>(
+      access,
+      'artifact.upload',
+      input.idempotencyKey,
+      input.requestHash,
+      undefined,
+      input.source.externalEventId,
+    );
+  }
+
+  async getArtifact(
+    access: ExternalCallerAccess,
+    artifactId: string,
+  ): Promise<{ artifact: ExternalArtifactSummary; storageKey: string } | null> {
+    const row = await prisma.artifacts.findFirst({
+      where: {
+        id: artifactId,
+        caller_id: access.caller.id,
+        space_id: access.caller.spaceId,
+        status: { not: 'deleted' },
+      },
+    });
+    return row ? { artifact: artifactSummary(row), storageKey: row.storage_key } : null;
+  }
+
   async getRun(access: ExternalCallerAccess, runId: string): Promise<{ response: ExternalRunView; executionUserId: string } | null> {
     const row = await prisma.runs.findFirst({
       where: {
@@ -744,3 +865,9 @@ export class PrismaExternalRepository implements ExternalRepository {
 }
 
 export const externalRepository = new PrismaExternalRepository();
+
+/** 启动期文件对账只读取不透明 storage key，数据库访问仍收敛在 repository 层。 */
+export async function listArtifactStorageKeys(): Promise<Set<string>> {
+  const rows = await prisma.artifacts.findMany({ select: { storage_key: true } });
+  return new Set(rows.map((row) => row.storage_key));
+}

@@ -1,9 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { ExternalNextStepReceipt, ExternalRunReceipt } from '@runforge/contracts';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { ExternalArtifactSummary, ExternalNextStepReceipt, ExternalRunReceipt } from '@runforge/contracts';
 import type { SpaceWithVisibilityRow } from '../store/types.js';
 import { ExternalCommandService } from './service.js';
 import { ExternalApiError, type ExternalCallerAccess, type ExternalRepository } from './types.js';
+import { FileExternalArtifactStorage } from './artifactStorage.js';
 
 const uuidToken = '123e4567-e89b-42d3-a456-426614174000';
 const space: SpaceWithVisibilityRow = {
@@ -58,6 +62,9 @@ function fakeRepository(overrides: Partial<ExternalRepository>): ExternalReposit
     createRun: async () => unused(),
     appendRun: async () => unused(),
     appendNextStep: async () => unused(),
+    createArtifact: async () => unused(),
+    findArtifactUploadReplay: async () => null,
+    getArtifact: async () => unused(),
     getRun: async () => unused(),
     cancelRun: async () => unused(),
     ...overrides,
@@ -184,6 +191,87 @@ test('external command: next_step 返回持久化接纳回执，且不会启动�
   assert.equal(response.inputId, 'ri_accepted');
   assert.equal(response.version, 2);
   assert.equal(starts, 0);
+});
+
+test('external command: artifact 上传到受控存储并按 caller 授权读取', async () => {
+  const files = new Map<string, Buffer>();
+  let writes = 0;
+  let artifact: ExternalArtifactSummary | null = null;
+  let storageKey = '';
+  const repository = fakeRepository({
+    findArtifactUploadReplay: async () => artifact
+      ? { operation: 'artifact.upload', artifact }
+      : null,
+    createArtifact: async (callerAccess, input) => {
+      assert.equal(callerAccess.caller.id, access.caller.id);
+      storageKey = input.storageKey;
+      artifact = {
+        id: input.artifactId,
+        name: input.name,
+        mimeType: input.mimeType,
+        size: input.size,
+        status: 'staged',
+        metadata: input.metadata,
+        threadId: null,
+        runId: null,
+        createdAt: new Date(0).toISOString(),
+        materializedAt: null,
+      };
+      return { response: { operation: 'artifact.upload', artifact }, replayed: false };
+    },
+    getArtifact: async (_callerAccess, artifactId) => artifact?.id === artifactId
+      ? { artifact, storageKey }
+      : null,
+  });
+  const service = new ExternalCommandService(
+    repository,
+    () => {},
+    async () => {},
+    { resolveForRun: async () => structuredClone(resolvedConfig) },
+    {
+      write: async (key, content) => { writes += 1; files.set(key, Buffer.from(content)); },
+      read: async (key) => files.get(key) ?? Promise.reject(new Error('missing')),
+      remove: async (key) => { files.delete(key); },
+    },
+  );
+  const content = Buffer.from('artifact-content', 'utf8');
+  const uploadCommand = {
+    operation: 'artifact.upload',
+    idempotencyKey: 'artifact-1',
+    name: 'input.txt',
+    mimeType: 'text/plain',
+    contentBase64: content.toString('base64'),
+    metadata: { purpose: 'test' },
+  } as const;
+  const uploaded = await service.execute(uuidToken, uploadCommand) as { artifact: ExternalArtifactSummary };
+  assert.match(uploaded.artifact.id, /^ar_[0-9A-Za-z]+$/);
+  assert.equal(files.get(storageKey)?.toString('utf8'), 'artifact-content');
+  const replayed = await service.execute(uuidToken, uploadCommand) as { artifact: ExternalArtifactSummary };
+  assert.equal(replayed.artifact.id, uploaded.artifact.id);
+  assert.equal(writes, 1);
+
+  const fetched = await service.execute(uuidToken, {
+    operation: 'artifact.get',
+    artifactId: uploaded.artifact.id,
+  }) as { contentBase64: string };
+  assert.equal(Buffer.from(fetched.contentBase64, 'base64').toString('utf8'), 'artifact-content');
+});
+
+test('external artifact storage: storage key 不能逃出受控目录', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runforge-external-artifact-'));
+  const storage = new FileExternalArtifactStorage(root);
+  try {
+    await storage.write('ec_test/ar_keep', Buffer.from('keep'));
+    await storage.write('ec_test/ar_test', Buffer.from('safe'));
+    assert.equal((await storage.read('ec_test/ar_test')).toString('utf8'), 'safe');
+    await assert.rejects(storage.write('../escape', Buffer.from('unsafe')), /越界/);
+    assert.equal(await storage.reconcile(new Set(['ec_test/ar_keep'])), 1);
+    assert.equal((await storage.read('ec_test/ar_keep')).toString('utf8'), 'keep');
+    await assert.rejects(storage.read('ec_test/ar_test'));
+    await storage.remove('ec_test/ar_keep');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('external command: UUID Token 无效时不会进入命令处理', async () => {

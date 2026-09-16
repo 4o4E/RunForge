@@ -30,7 +30,12 @@ externalApi.post('/:uuidToken', async (req, res) => {
   try {
     const response = await externalCommands.execute(req.params.uuidToken, req.body);
     const operation = req.body?.operation;
-    res.status(operation === 'run.create' || operation === 'run.append' ? 202 : 200).json(response);
+    const status = operation === 'run.create' || operation === 'run.append'
+      ? 202
+      : operation === 'artifact.upload'
+        ? 201
+        : 200;
+    res.status(status).json(response);
   } catch (error) {
     sendExternalError(res, error);
   }

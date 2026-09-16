@@ -238,6 +238,12 @@ artifact ID；`run.create` 或 `run.append` 只引用 artifact ID。
 
 Web 现有文件上传接口保持不变；外部 artifact 契约是其上层资源协议，不接受任意 path。
 
+首版 `artifact.upload` 使用现有 command JSON 入口，字段为 `idempotencyKey`、`name`、
+`mimeType`、`contentBase64`、`metadata` 和通用 `source`，单个文件上限 25 MiB。`name` 只接受
+文件名，不接受目录或宿主机路径。成功后返回 `ar_` ID 和元数据；`artifact.get` 以该 ID
+读取同一 caller 的资源并返回 `contentBase64`。内容存入 RunForge 受控文件存储，数据库仅
+保存不透明 storage key、归属和元数据。
+
 ## 7. Workspace
 
 - default 空间继续使用现有按 tenant + user 派生的统一用户级 workspace，不迁移旧文件。

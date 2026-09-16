@@ -1,5 +1,7 @@
 import type {
   ExternalCallerSummary,
+  ExternalArtifactSummary,
+  ExternalArtifactUploadReceipt,
   ExternalCancelReceipt,
   ExternalRunReceipt,
   ExternalRunView,
@@ -55,6 +57,18 @@ export interface ExternalCancelInput {
   source: ExternalSource;
 }
 
+export interface ExternalArtifactCreateInput {
+  requestHash: string;
+  idempotencyKey: string;
+  artifactId: string;
+  storageKey: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  metadata: Record<string, unknown>;
+  source: ExternalSource;
+}
+
 export interface ExternalWriteResult<T> {
   response: T;
   replayed: boolean;
@@ -101,6 +115,18 @@ export interface ExternalRepository {
     access: ExternalCallerAccess,
     input: Omit<ExternalAppendRunInput, 'snapshot'>,
   ): Promise<ExternalWriteResult<ExternalNextStepReceipt>>;
+  createArtifact(
+    access: ExternalCallerAccess,
+    input: ExternalArtifactCreateInput,
+  ): Promise<{ response: ExternalArtifactUploadReceipt; replayed: boolean }>;
+  findArtifactUploadReplay(
+    access: ExternalCallerAccess,
+    input: Pick<ExternalArtifactCreateInput, 'idempotencyKey' | 'requestHash' | 'source'>,
+  ): Promise<ExternalArtifactUploadReceipt | null>;
+  getArtifact(
+    access: ExternalCallerAccess,
+    artifactId: string,
+  ): Promise<{ artifact: ExternalArtifactSummary; storageKey: string } | null>;
   getRun(access: ExternalCallerAccess, runId: string): Promise<{ response: ExternalRunView; executionUserId: string } | null>;
   cancelRun(access: ExternalCallerAccess, input: ExternalCancelInput): Promise<ExternalWriteResult<ExternalCancelReceipt> | null>;
 }

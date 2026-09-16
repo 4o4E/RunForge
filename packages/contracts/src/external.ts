@@ -3,6 +3,7 @@ import type { AgentEvent, RunStatus } from './agent.js';
 
 const optionalId = z.string().trim().min(1).max(256).optional();
 const idempotencyKey = z.string().trim().min(1).max(256);
+const artifactId = z.string().trim().regex(/^ar_[0-9A-Za-z]+$/);
 
 export const externalSourceSchema = z.object({
   applicationRef: optionalId,
@@ -43,6 +44,19 @@ export const externalCommandSchema = z.discriminatedUnion('operation', [
     idempotencyKey,
     runId: z.string().trim().regex(/^ru_[0-9A-Za-z]+$/),
     source: externalSourceSchema,
+  }).strict(),
+  z.object({
+    operation: z.literal('artifact.upload'),
+    idempotencyKey,
+    name: z.string().trim().min(1).max(255),
+    mimeType: z.string().trim().min(1).max(255).default('application/octet-stream'),
+    contentBase64: z.string().min(1).max(36 * 1024 * 1024),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+    source: externalSourceSchema,
+  }).strict(),
+  z.object({
+    operation: z.literal('artifact.get'),
+    artifactId,
   }).strict(),
 ]);
 
@@ -124,6 +138,30 @@ export interface ExternalNextStepReceipt {
   inputId: string;
   version: number;
   status: 'accepted';
+}
+
+export interface ExternalArtifactSummary {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  status: 'staged' | 'materialized';
+  metadata: Record<string, unknown>;
+  threadId: string | null;
+  runId: string | null;
+  createdAt: string;
+  materializedAt: string | null;
+}
+
+export interface ExternalArtifactUploadReceipt {
+  operation: 'artifact.upload';
+  artifact: ExternalArtifactSummary;
+}
+
+export interface ExternalArtifactGetResponse {
+  operation: 'artifact.get';
+  artifact: ExternalArtifactSummary;
+  contentBase64: string;
 }
 
 export type ExternalWebSocketFrame =

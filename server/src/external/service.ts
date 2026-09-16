@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
   externalCommandSchema,
+  type ExternalArtifactGetResponse,
   type ExternalCommand,
 } from '@runforge/contracts';
 import { executeRun } from '../agent/executor.js';
@@ -16,6 +17,12 @@ import { hashOpaqueToken } from '../auth/tokens.js';
 import { externalRepository } from './repository.js';
 import { ExternalApiError, type ExternalCallerAccess, type ExternalRepository, type ExternalRunSnapshot } from './types.js';
 import { isExternalUuidToken } from './token.js';
+import { newArtifactId } from '../id.js';
+import {
+  externalArtifactStorage,
+  MAX_EXTERNAL_ARTIFACT_BYTES,
+  type ExternalArtifactStorage,
+} from './artifactStorage.js';
 
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
@@ -44,6 +51,25 @@ function parseCommand(value: unknown): ExternalCommand {
   return parsed.data;
 }
 
+function decodeArtifactContent(contentBase64: string): Buffer {
+  if (contentBase64.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(contentBase64)) {
+    throw new ExternalApiError(400, 'INVALID_ARTIFACT_CONTENT', 'contentBase64 不是规范的 Base64');
+  }
+  const content = Buffer.from(contentBase64, 'base64');
+  if (content.length > MAX_EXTERNAL_ARTIFACT_BYTES) {
+    throw new ExternalApiError(413, 'ARTIFACT_TOO_LARGE', `artifact 不能超过 ${MAX_EXTERNAL_ARTIFACT_BYTES} 字节`);
+  }
+  return content;
+}
+
+function artifactFileName(value: string): string {
+  const name = value.trim();
+  if (name === '.' || name === '..' || /[\\/\0]/.test(name)) {
+    throw new ExternalApiError(400, 'INVALID_ARTIFACT_NAME', 'name 只能是文件名，不能包含路径');
+  }
+  return name;
+}
+
 function snapshotWithTrustedPrompt(
   base: RunSpaceConfigSnapshot,
   trustedPrompt: string | undefined,
@@ -62,6 +88,8 @@ type StartRun = (runId: string, scope: Scope) => void;
 type CancelRunShells = (scope: Scope, runId: string) => Promise<void>;
 
 export class ExternalCommandService {
+  private readonly artifactStorage: ExternalArtifactStorage;
+
   constructor(
     private readonly repository: ExternalRepository = externalRepository,
     private readonly startRun: StartRun = (runId, scope) => { void executeRun(runId, { scope }); },
@@ -69,7 +97,10 @@ export class ExternalCommandService {
       await shellManager.killRunCommands(scope, runId, 'run_cancel');
     },
     private readonly configService: Pick<SpaceConfigService, 'resolveForRun'> = spaceConfigService,
-  ) {}
+    artifactStorage: ExternalArtifactStorage = externalArtifactStorage,
+  ) {
+    this.artifactStorage = artifactStorage;
+  }
 
   async execute(uuidToken: string, value: unknown): Promise<unknown> {
     if (!isExternalUuidToken(uuidToken)) {
@@ -78,6 +109,60 @@ export class ExternalCommandService {
     let access = await this.repository.authenticateToken(hashOpaqueToken(uuidToken));
     if (!access) throw new ExternalApiError(401, 'EXTERNAL_TOKEN_INVALID', '外部访问凭证无效');
     const command = parseCommand(value);
+
+    if (command.operation === 'artifact.upload') {
+      const requestHash = commandHash(command);
+      const replay = await this.repository.findArtifactUploadReplay(access, {
+        idempotencyKey: command.idempotencyKey,
+        requestHash,
+        source: command.source,
+      });
+      if (replay) return replay;
+      const content = decodeArtifactContent(command.contentBase64);
+      const name = artifactFileName(command.name);
+      const artifactId = newArtifactId();
+      const storageKey = `${access.caller.id}/${artifactId}`;
+      await this.artifactStorage.write(storageKey, content);
+      try {
+        const created = await this.repository.createArtifact(access, {
+          requestHash,
+          idempotencyKey: command.idempotencyKey,
+          artifactId,
+          storageKey,
+          name,
+          mimeType: command.mimeType,
+          size: content.length,
+          metadata: command.metadata,
+          source: command.source,
+        });
+        if (created.response.artifact.id !== artifactId) {
+          await this.artifactStorage.remove(storageKey).catch(() => {});
+        }
+        return created.response;
+      } catch (error) {
+        await this.artifactStorage.remove(storageKey).catch(() => {});
+        throw error;
+      }
+    }
+    if (command.operation === 'artifact.get') {
+      const found = await this.repository.getArtifact(access, command.artifactId);
+      if (!found) throw new ExternalApiError(404, 'ARTIFACT_NOT_FOUND', 'artifact 不存在');
+      let content: Buffer;
+      try {
+        content = await this.artifactStorage.read(found.storageKey);
+      } catch {
+        throw new ExternalApiError(500, 'ARTIFACT_STORAGE_ERROR', 'artifact 内容当前不可用');
+      }
+      if (content.length !== found.artifact.size) {
+        throw new ExternalApiError(500, 'ARTIFACT_STORAGE_ERROR', 'artifact 内容大小与元数据不一致');
+      }
+      const response: ExternalArtifactGetResponse = {
+        operation: 'artifact.get',
+        artifact: found.artifact,
+        contentBase64: content.toString('base64'),
+      };
+      return response;
+    }
 
     if (command.operation === 'run.get') {
       const found = await this.repository.getRun(access, command.runId);

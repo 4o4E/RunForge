@@ -6,7 +6,7 @@ import { PgStore } from '../store/pgStore.js';
 import { findSetting, upsertSettings } from '../store/settingsRepository.js';
 import { tenantSettingsTemplateEntries } from '../settings.js';
 import { DefaultSpaceImmutableError, RunActiveError } from '../store/types.js';
-import { newSpaceId } from '../id.js';
+import { newArtifactId, newSpaceId } from '../id.js';
 import { SpaceAccessService } from '../spaces/access.js';
 import { SpaceConfigService } from '../spaces/config.js';
 import { RunAdmissionService } from '../spaces/runAdmission.js';
@@ -131,6 +131,26 @@ try {
   const commandAccess = await externalRepository.authenticateToken(hashOpaqueToken(commandTokenValue));
   assert.ok(commandAccess);
   assert.notEqual(commandAccess.token.lastUsedAt, null);
+  const artifactId = newArtifactId();
+  const artifactInput = {
+    requestHash: `artifact-hash-${suffix}`,
+    idempotencyKey: 'artifact-1',
+    artifactId,
+    storageKey: `${commandCaller.caller.id}/${artifactId}`,
+    name: 'verification.txt',
+    mimeType: 'text/plain',
+    size: 12,
+    metadata: { purpose: 'verification' },
+    source: { externalEventId: `artifact-event-${suffix}`, metadata: {} },
+  };
+  const artifactResults = await Promise.all([
+    externalRepository.createArtifact(commandAccess, artifactInput),
+    externalRepository.createArtifact(commandAccess, artifactInput),
+  ]);
+  assert.equal(artifactResults[0].response.artifact.id, artifactResults[1].response.artifact.id);
+  assert.equal(artifactResults.filter((item) => item.replayed).length, 1);
+  assert.equal((await externalRepository.getArtifact(commandAccess, artifactId))?.artifact.name, 'verification.txt');
+  assert.equal(await prisma.artifacts.count({ where: { caller_id: commandCaller.caller.id } }), 1);
   const currentExternalSpace = await store.findSpace(tenantId, externalSpace.id);
   assert.ok(currentExternalSpace);
   const resolvedExternal = await spaceConfig.resolveForRun(tenantId, currentExternalSpace);

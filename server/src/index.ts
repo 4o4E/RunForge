@@ -18,6 +18,8 @@ import { getToolSettings } from './settings.js';
 import { recoverInterruptedRuns } from './agent/recovery.js';
 import { startDatasourceLeaseReconciler } from './datasources/reconciler.js';
 import { shellManager } from './shell/manager.js';
+import { externalArtifactStorage } from './external/artifactStorage.js';
+import { listArtifactStorageKeys } from './external/repository.js';
 
 const app = express();
 assertJwtSecretConfigured();
@@ -34,6 +36,12 @@ attachWebSocket(server);
 // (docs/multi-tenancy-design.md §4)。不同于下面 listen 回调里那些 fire-and-forget
 // 的恢复逻辑，这一步会阻塞启动。
 await runBootstrap();
+try {
+  const removed = await externalArtifactStorage.reconcile(await listArtifactStorageKeys());
+  if (removed > 0) console.log(`   Removed orphaned external artifacts: ${removed}`);
+} catch (error) {
+  console.warn(`   External artifact reconciliation skipped: ${(error as Error).message}`);
+}
 startDatasourceLeaseReconciler();
 
 const displayHost = config.host.includes(':') ? `[${config.host}]` : config.host;
