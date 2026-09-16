@@ -15,6 +15,7 @@ import {
   saveRuntimeCapabilitiesSettings,
   saveToolSettings,
   shellPathForSettings,
+  tenantSettingsTemplateEntries,
 } from '../settings.js';
 import { getLlmSettingsOptions, getMcpSettingsOptions, getToolSettingsOptions, shellCommandOptions } from './settings.js';
 import { pingLlmProvider, probeLlmProviderModels, testLlmProviderChat } from '../llm/probe.js';
@@ -74,9 +75,8 @@ systemApi.get('/tenants', async (_req, res) => {
   res.json({ tenants: rows.map(toTenantSummary) });
 });
 
-// 新建租户必须同时建一个 owner,否则新租户没人能登录(参照 auth/bootstrap.ts
-// "tenant + owner 一起建"的现有模式)。不用事务包裹——这个代码库目前没有显式事务
-// 用法,bootstrap.ts 本身也是分两步裸调用,保持一致。
+// tenant、首个 owner、配置副本和 default space 由 Store 在同一事务中创建；任何一步
+// 失败都不留下无法登录或缺少运行配置的半成品 tenant。
 systemApi.post('/tenants', async (req, res) => {
   const body = req.body as Partial<CreateTenantInput> | undefined;
   const id = typeof body?.id === 'string' ? body.id.trim() : '';
@@ -98,12 +98,12 @@ systemApi.post('/tenants', async (req, res) => {
     return;
   }
 
-  const tenant = await store.createTenant({ id, name });
-  const owner = await store.createUser({
-    tenantId: id,
-    email: ownerEmail,
-    passwordHash: hashPassword(ownerPassword),
-    role: 'owner',
+  const { tenant, owner } = await store.createTenantWithOwner({
+    id,
+    name,
+    ownerEmail,
+    ownerPasswordHash: hashPassword(ownerPassword),
+    settingsTemplate: tenantSettingsTemplateEntries(),
   });
 
   const response: CreateTenantResponse = { tenant: toTenantSummary(tenant), owner: toUserSummary(owner) };

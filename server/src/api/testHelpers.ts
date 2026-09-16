@@ -28,8 +28,14 @@ export function listen(app: express.Express): Promise<{ port: number; close: () 
 }
 
 export async function seedOwner(tenantId: string, email: string, password: string) {
-  await store.createTenant({ id: tenantId, name: tenantId });
-  return store.createUser({ tenantId, email, passwordHash: hashPassword(password), role: 'owner' });
+  const provisioned = await store.createTenantWithOwner({
+    id: tenantId,
+    name: tenantId,
+    ownerEmail: email,
+    ownerPasswordHash: hashPassword(password),
+    settingsTemplate: [],
+  });
+  return provisioned.owner;
 }
 
 export async function seedSystemAdmin(email: string, password: string) {

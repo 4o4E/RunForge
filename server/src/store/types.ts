@@ -3,6 +3,11 @@ import type { GoalState } from '../agent/goal.js';
 import type { LlmMessage } from '../llm/types.js';
 import type { TenantUserRole, WebPushSubscriptionInput } from '@runforge/contracts';
 
+/** 只有这三种状态真正释放 thread 执行槽；canceling 仍由当前 executor 收口。 */
+export function isTerminalRunStatus(status: RunStatus): boolean {
+  return status === 'done' || status === 'error' || status === 'canceled';
+}
+
 // 多租户改造 Phase 2(docs/multi-tenancy-design.md §5)。Scope 统一放在每个方法的
 // 第一个参数,不追加在末尾——很多方法已经有带默认值的可选尾参,追加会打乱参数顺序规则。
 // Scope 结构上兼容 TenantScope(多一个 userId 字段无妨),持有 Scope 的调用方可以直接
@@ -38,9 +43,14 @@ export interface ThreadRow {
   id: string;
   tenant_id: string;
   user_id: string | null;
+  space_id: string;
+  source_type: 'web' | 'external';
+  source_caller_id: string | null;
+  source_ref: Record<string, unknown>;
   title: string | null;
   fallback_title?: string | null;
   active_run_id: string | null;
+  executing_run_id: string | null;
   pinned_at: string | null;
   archived_at: string | null;
   created_at: string;
@@ -69,6 +79,11 @@ export interface RunRow {
   error: string | null;
   goal_state: GoalState | null;
   runtime_capabilities_snapshot: Record<string, unknown> | null;
+  space_config_snapshot: Record<string, unknown> | null;
+  space_config_version: number | null;
+  plugin_lock: Record<string, unknown> | null;
+  external_input_open: boolean;
+  input_version: number;
   created_at: string;
   updated_at: string;
 }
@@ -225,7 +240,56 @@ export interface TenantRow {
   id: string;
   name: string;
   status: 'active' | 'suspended';
+  default_space_id: string | null;
   created_at: string;
+}
+
+export type SpaceMode = 'web' | 'external';
+
+export interface SpaceRow {
+  id: string;
+  tenant_id: string;
+  mode: SpaceMode;
+  name: string;
+  execution_user_id: string | null;
+  config: Record<string, unknown>;
+  config_version: number;
+  created_by_user_id: string | null;
+  deleted_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TenantConfigTemplateEntry {
+  key: string;
+  value: unknown;
+}
+
+export interface CreateTenantWithOwnerInput {
+  id: string;
+  name: string;
+  ownerEmail: string;
+  ownerPasswordHash: string;
+  settingsTemplate: readonly TenantConfigTemplateEntry[];
+}
+
+export interface TenantProvisioningResult {
+  tenant: TenantRow;
+  owner: UserRow;
+  defaultSpace: SpaceRow;
+}
+
+/** 同一 thread 已有非终态 run。API 用该结构化错误返回 409 和当前 run 信息。 */
+export class RunActiveError extends Error {
+  readonly code = 'RUN_ACTIVE';
+
+  constructor(
+    readonly currentRunId: string,
+    readonly currentStatus: RunStatus,
+  ) {
+    super(`thread 已有活动 run ${currentRunId}（${currentStatus}）`);
+    this.name = 'RunActiveError';
+  }
 }
 
 export interface UserRow {
@@ -276,7 +340,7 @@ export interface SystemAdminTokenRow {
  * so it can be unit-tested with an in-memory implementation.
  */
 export interface Store {
-  createThread(scope: Scope, title?: string): Promise<ThreadRow>;
+  createThread(scope: Scope, title?: string, options?: { spaceId?: string }): Promise<ThreadRow>;
   getThread(scope: Scope, id: string): Promise<ThreadRow | null>;
   listThreads(scope: Scope, limit?: number, options?: { archived?: boolean }): Promise<ThreadRow[]>;
   updateThread(
@@ -304,6 +368,14 @@ export interface Store {
   /** 跨租户扫描,只给启动期后台任务(recovery.ts)用,禁止在 api/*.ts 路由里调用。 */
   listRunsByStatusUnscoped(statuses: RunStatus[]): Promise<RunRow[]>;
   setRunStatus(scope: Scope, id: string, status: RunStatus, fields?: { output?: string | null; error?: string | null }): Promise<void>;
+  /** 从指定旧状态原子切回 pending 并重新占用 thread 执行槽；回答消息如有也在
+   * 同一事务落库，避免恢复到 pending 后丢失输入。状态已变化时返回 null。 */
+  resumeRun(
+    scope: Scope,
+    id: string,
+    expectedStatuses: RunStatus[],
+    fields?: { output?: string | null; error?: string | null; userMessageContent?: string },
+  ): Promise<RunRow | null>;
   /** Persist the run's goal anchor (so it's inspectable and survives a restart). */
   setGoalState(scope: Scope, runId: string, goal: GoalState): Promise<void>;
   /** 固定本次 run 可使用的运行时能力，后续恢复不得重新读取租户当前配置。 */
@@ -457,10 +529,12 @@ export interface Store {
   disablePushSubscription(endpoint: string, error?: string | null): Promise<void>;
 
   // 多租户改造 Phase 1(docs/multi-tenancy-design.md §4)。
-  createTenant(input: { id: string; name: string }): Promise<TenantRow>;
+  /** tenant、首个 owner、独立配置副本和 default space 必须在同一事务内创建。 */
+  createTenantWithOwner(input: CreateTenantWithOwnerInput): Promise<TenantProvisioningResult>;
   findTenant(id: string): Promise<TenantRow | null>;
   listTenants(): Promise<TenantRow[]>;
   updateTenantStatus(id: string, status: 'active' | 'suspended'): Promise<TenantRow | null>;
+  getDefaultSpace(tenantId: string): Promise<SpaceRow | null>;
 
   createUser(input: { tenantId: string; email: string; passwordHash: string; role: TenantUserRole }): Promise<UserRow>;
   findUserByEmail(tenantId: string, email: string): Promise<UserRow | null>;

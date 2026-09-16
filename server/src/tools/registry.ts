@@ -104,6 +104,9 @@ export async function runTool(
       if (!ctx.activeMcpServerIds?.has(mcpTool.serverId)) {
         return { text: `MCP server 尚未在当前 run 激活：${mcpTool.serverId}` };
       }
+      if (!ctx.mcpSettings) {
+        return { text: '当前 run 缺少 MCP 配置，拒绝回退到其它 tenant 的配置。' };
+      }
       const result = await callMcpTool(name, args, ctx.mcpSettings, {
         workspaceRoot: settings.workspaceRoot,
         runId: ctx.runId,

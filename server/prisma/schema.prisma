@@ -139,6 +139,68 @@ model events {
   @@index([run_id, id], map: "idx_events_run")
 }
 
+model external_callers {
+  id                String              @id
+  tenant_id         String
+  space_id          String
+  name              String
+  status            String              @default("active")
+  metadata          Json                @default("{}")
+  created_at        DateTime            @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime            @default(now()) @db.Timestamptz(6)
+  artifacts         artifacts[]
+  external_requests external_requests[]
+  external_tokens   external_tokens[]
+  run_inputs        run_inputs[]
+  spaces            spaces              @relation(fields: [space_id, tenant_id], references: [id, tenant_id], onDelete: Cascade, onUpdate: NoAction)
+  tenants           tenants             @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  threads           threads[]
+
+  @@index([space_id, status], map: "idx_external_callers_space")
+  @@index([tenant_id, status], map: "idx_external_callers_tenant")
+}
+
+model external_requests {
+  id                  String           @id
+  caller_id           String
+  operation           String
+  idempotency_key     String
+  request_hash        String
+  status              String           @default("processing")
+  response            Json?
+  external_thread_ref String?
+  external_event_id   String?
+  thread_id           String?
+  run_id              String?
+  error               String?
+  created_at          DateTime         @default(now()) @db.Timestamptz(6)
+  updated_at          DateTime         @default(now()) @db.Timestamptz(6)
+  external_callers    external_callers @relation(fields: [caller_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  runs                runs?            @relation(fields: [run_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  threads             threads?         @relation(fields: [thread_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  run_inputs          run_inputs[]
+
+  @@unique([caller_id, operation, idempotency_key], map: "uq_external_requests_idempotency")
+  @@unique([caller_id, external_thread_ref], map: "uq_external_requests_thread_ref")
+  @@unique([caller_id, external_event_id], map: "uq_external_requests_event_id")
+  @@index([run_id, created_at], map: "idx_external_requests_run")
+  @@index([thread_id, created_at], map: "idx_external_requests_thread")
+}
+
+model external_tokens {
+  id               String           @id
+  caller_id        String
+  token_hash       String           @unique
+  label            String?
+  expires_at       DateTime?        @db.Timestamptz(6)
+  revoked_at       DateTime?        @db.Timestamptz(6)
+  last_used_at     DateTime?        @db.Timestamptz(6)
+  created_at       DateTime         @default(now()) @db.Timestamptz(6)
+  external_callers external_callers @relation(fields: [caller_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([caller_id, revoked_at, expires_at], map: "idx_external_tokens_caller")
+}
+
 model messages {
   id             BigInt   @id @default(autoincrement())
   thread_id      String
@@ -180,36 +242,192 @@ model push_subscriptions {
 }
 
 model runs {
-  id                                  String                      @id
-  thread_id                           String
-  status                              String                      @default("pending")
-  input                               String
-  output                              String?
-  error                               String?
-  goal_state                          Json?
-  created_at                          DateTime                    @default(now()) @db.Timestamptz(6)
-  updated_at                          DateTime                    @default(now()) @db.Timestamptz(6)
-  model_ref                           String?
-  parent_run_id                       String?
-  runtime_capabilities_snapshot       Json?
-  datasource_account_leases           datasource_account_leases[]
-  datasource_accounts                 datasource_accounts[]
-  events                              events[]
-  messages                            messages[]
-  runs                                runs?                       @relation("runsToruns", fields: [parent_run_id], references: [id], onUpdate: NoAction)
-  other_runs                          runs[]                      @relation("runsToruns")
-  threads_runs_thread_idTothreads     threads                     @relation("runs_thread_idTothreads", fields: [thread_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  runtime_capability_calls            runtime_capability_calls[]
-  shell_commands                      shell_commands[]
-  shell_sessions                      shell_sessions[]
-  steps                               steps[]
-  subagent_runs                       subagent_runs[]
-  thread_notices                      thread_notices[]
-  threads_threads_active_run_idToruns threads[]                   @relation("threads_active_run_idToruns")
-  workload_tokens                     workload_tokens[]
+  id                                     String                      @id
+  thread_id                              String
+  status                                 String                      @default("pending")
+  input                                  String
+  output                                 String?
+  error                                  String?
+  goal_state                             Json?
+  created_at                             DateTime                    @default(now()) @db.Timestamptz(6)
+  updated_at                             DateTime                    @default(now()) @db.Timestamptz(6)
+  model_ref                              String?
+  parent_run_id                          String?
+  runtime_capabilities_snapshot          Json?
+  space_config_snapshot                  Json?
+  space_config_version                   Int?
+  plugin_lock                            Json?
+  external_input_open                    Boolean                     @default(false)
+  input_version                          Int                         @default(0)
+  external_requests                      external_requests[]
+  provider_invocations                   provider_invocations[]
+  run_inputs                             run_inputs[]
+  artifacts                              artifacts[]
+  datasource_account_leases              datasource_account_leases[]
+  datasource_accounts                    datasource_accounts[]
+  events                                 events[]
+  messages                               messages[]
+  runs                                   runs?                       @relation("runsToruns", fields: [parent_run_id], references: [id], onUpdate: NoAction)
+  other_runs                             runs[]                      @relation("runsToruns")
+  threads_runs_thread_idTothreads        threads                     @relation("runs_thread_idTothreads", fields: [thread_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  runtime_capability_calls               runtime_capability_calls[]
+  shell_commands                         shell_commands[]
+  shell_sessions                         shell_sessions[]
+  steps                                  steps[]
+  subagent_runs                          subagent_runs[]
+  thread_notices                         thread_notices[]
+  threads_threads_active_run_idToruns    threads[]                   @relation("threads_active_run_idToruns")
+  threads_threads_executing_run_idToruns threads[]                   @relation("threads_executing_run_idToruns")
+  workload_tokens                        workload_tokens[]
 
+  @@unique([id, thread_id])
   @@index([thread_id, created_at], map: "idx_runs_thread")
   @@index([thread_id, parent_run_id, created_at], map: "idx_runs_thread_parent")
+}
+
+model run_inputs {
+  id                  String            @id
+  run_id              String
+  caller_id           String
+  external_request_id String
+  version             Int
+  content             String
+  artifacts           Json              @default("[]")
+  status              String            @default("pending")
+  created_at          DateTime          @default(now()) @db.Timestamptz(6)
+  applied_at          DateTime?         @db.Timestamptz(6)
+  canceled_at         DateTime?         @db.Timestamptz(6)
+  external_callers    external_callers  @relation(fields: [caller_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  external_requests   external_requests @relation(fields: [external_request_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  runs                runs              @relation(fields: [run_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([external_request_id])
+  @@unique([run_id, version])
+  @@index([run_id, status, version], map: "idx_run_inputs_pending")
+}
+
+model artifacts {
+  id               String           @id
+  caller_id        String
+  space_id         String
+  thread_id        String?
+  run_id           String?
+  storage_key      String           @unique
+  original_name    String
+  mime_type        String
+  size_bytes       BigInt
+  status           String           @default("staged")
+  metadata         Json             @default("{}")
+  created_at       DateTime         @default(now()) @db.Timestamptz(6)
+  materialized_at  DateTime?        @db.Timestamptz(6)
+  external_callers external_callers @relation(fields: [caller_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  runs             runs?            @relation(fields: [run_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  spaces           spaces           @relation(fields: [space_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  threads          threads?         @relation(fields: [thread_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@index([caller_id, status, created_at], map: "idx_artifacts_caller")
+  @@index([space_id, thread_id, run_id], map: "idx_artifacts_scope")
+}
+
+model plugin_deployments {
+  id           String    @id
+  plugin_id    String
+  version      String
+  content_hash String
+  manifest     Json
+  status       String    @default("active")
+  deployed_at  DateTime  @default(now()) @db.Timestamptz(6)
+  deleted_at   DateTime? @db.Timestamptz(6)
+
+  @@unique([plugin_id, version, content_hash])
+  @@index([plugin_id, status], map: "idx_plugin_deployments_status")
+}
+
+model provider_invocations {
+  id                  String              @id
+  tenant_id           String
+  space_id            String
+  thread_id           String
+  run_id              String
+  step_id             String?
+  purpose             String
+  provider            String
+  model               String
+  logical_request     Json
+  normalized_response Json?
+  status              String              @default("running")
+  error               String?
+  started_at          DateTime            @default(now()) @db.Timestamptz(6)
+  ended_at            DateTime?           @db.Timestamptz(6)
+  provider_attempts   provider_attempts[]
+  runs                runs                @relation(fields: [run_id, thread_id], references: [id, thread_id], onDelete: Cascade, onUpdate: NoAction)
+  spaces              spaces              @relation(fields: [space_id, tenant_id], references: [id, tenant_id], onDelete: NoAction, onUpdate: NoAction)
+  steps               steps?              @relation(fields: [step_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  threads             threads             @relation(fields: [thread_id, space_id, tenant_id], references: [id, space_id, tenant_id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([run_id, started_at], map: "idx_provider_invocations_run")
+  @@index([tenant_id, space_id, started_at], map: "idx_provider_invocations_space")
+}
+
+model provider_attempts {
+  id                   String               @id
+  invocation_id        String
+  attempt              Int
+  url                  String
+  request_body         Json
+  http_status          Int?
+  provider_response_id String?
+  raw_stream           String?
+  normalized_response  Json?
+  finish_reason        String?
+  usage                Json?
+  status               String               @default("running")
+  error                String?
+  started_at           DateTime             @default(now()) @db.Timestamptz(6)
+  ended_at             DateTime?            @db.Timestamptz(6)
+  provider_invocations provider_invocations @relation(fields: [invocation_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([invocation_id, attempt])
+  @@index([provider_response_id], map: "idx_provider_attempts_response_id")
+}
+
+model spaces {
+  id                   String                 @id
+  tenant_id            String
+  mode                 String
+  name                 String
+  execution_user_id    String?
+  config               Json                   @default("{}")
+  config_version       Int                    @default(1)
+  created_by_user_id   String?
+  deleted_at           DateTime?              @db.Timestamptz(6)
+  created_at           DateTime               @default(now()) @db.Timestamptz(6)
+  updated_at           DateTime               @default(now()) @db.Timestamptz(6)
+  artifacts            artifacts[]
+  external_callers     external_callers[]
+  provider_invocations provider_invocations[]
+  space_visible_users  space_visible_users[]
+  tenants              tenants                @relation("spaces_tenant", fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  default_for_tenants  tenants[]              @relation("tenants_default_space")
+  execution_user       users?                 @relation("spaces_execution_user", fields: [execution_user_id, tenant_id], references: [id, tenant_id], onDelete: NoAction, onUpdate: NoAction)
+  created_by_user      users?                 @relation("spaces_created_by", fields: [created_by_user_id, tenant_id], references: [id, tenant_id], onDelete: NoAction, onUpdate: NoAction)
+  threads              threads[]
+
+  @@unique([id, tenant_id])
+  @@index([tenant_id, deleted_at, created_at], map: "idx_spaces_tenant")
+  @@index([execution_user_id], map: "idx_spaces_execution_user")
+}
+
+model space_visible_users {
+  space_id   String
+  user_id    String
+  tenant_id  String
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+  spaces     spaces   @relation(fields: [space_id, tenant_id], references: [id, tenant_id], onDelete: Cascade, onUpdate: NoAction)
+  users      users    @relation(fields: [user_id, tenant_id], references: [id, tenant_id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([space_id, user_id])
+  @@index([user_id, space_id], map: "idx_space_visible_users_user")
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
@@ -312,7 +530,7 @@ model shell_sessions {
   created_at           DateTime               @default(now()) @db.Timestamptz(6)
   updated_at           DateTime               @default(now()) @db.Timestamptz(6)
   cwd                  String
-  name                 String
+  name                 String                 @default("Default")
   owner                String                 @default("agent")
   config_snapshot      Json?
   deleted_at           DateTime?              @db.Timestamptz(6)
@@ -339,6 +557,7 @@ model steps {
   shell_commands           shell_commands[]
   runs                     runs                       @relation(fields: [run_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   subagent_runs            subagent_runs[]
+  provider_invocations     provider_invocations[]
 
   @@index([run_id, idx], map: "idx_steps_run")
 }
@@ -398,15 +617,19 @@ model tenants {
   name                     String
   status                   String                     @default("active")
   created_at               DateTime                   @default(now()) @db.Timestamptz(6)
+  default_space_id         String?                    @unique
   app_settings             app_settings[]
   auth_tokens              auth_tokens[]
   datasources              datasources[]
   push_subscriptions       push_subscriptions[]
   runtime_capability_calls runtime_capability_calls[]
+  external_callers         external_callers[]
   shell_sessions           shell_sessions[]
   subagent_runs            subagent_runs[]
   threads                  threads[]
   users                    users[]
+  spaces                   spaces[]                   @relation("spaces_tenant")
+  default_space            spaces?                    @relation("tenants_default_space", fields: [default_space_id, id], references: [id, tenant_id], onDelete: NoAction, onUpdate: NoAction)
 }
 
 model thread_notices {
@@ -426,44 +649,62 @@ model thread_notices {
 }
 
 model threads {
-  id                                                      String           @id
+  id                                                      String                 @id
   title                                                   String?
-  created_at                                              DateTime         @default(now()) @db.Timestamptz(6)
-  updated_at                                              DateTime         @default(now()) @db.Timestamptz(6)
-  pinned_at                                               DateTime?        @db.Timestamptz(6)
-  archived_at                                             DateTime?        @db.Timestamptz(6)
+  created_at                                              DateTime               @default(now()) @db.Timestamptz(6)
+  updated_at                                              DateTime               @default(now()) @db.Timestamptz(6)
+  pinned_at                                               DateTime?              @db.Timestamptz(6)
+  archived_at                                             DateTime?              @db.Timestamptz(6)
   active_run_id                                           String?
-  tenant_id                                               String           @default("default")
+  executing_run_id                                        String?
+  tenant_id                                               String                 @default("default")
   user_id                                                 String?
+  space_id                                                String
+  source_type                                             String                 @default("web")
+  source_caller_id                                        String?
+  source_ref                                              Json                   @default("{}")
+  artifacts                                               artifacts[]
+  external_requests                                       external_requests[]
+  provider_invocations                                    provider_invocations[]
   messages                                                messages[]
-  runs_runs_thread_idTothreads                            runs[]           @relation("runs_thread_idTothreads")
+  runs_runs_thread_idTothreads                            runs[]                 @relation("runs_thread_idTothreads")
   shell_sessions                                          shell_sessions[]
-  thread_notices_thread_notices_linked_thread_idTothreads thread_notices[] @relation("thread_notices_linked_thread_idTothreads")
-  thread_notices_thread_notices_thread_idTothreads        thread_notices[] @relation("thread_notices_thread_idTothreads")
-  runs_threads_active_run_idToruns                        runs?            @relation("threads_active_run_idToruns", fields: [active_run_id], references: [id], onUpdate: NoAction)
-  tenants                                                 tenants          @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  users                                                   users?           @relation(fields: [user_id], references: [id], onUpdate: NoAction)
+  thread_notices_thread_notices_linked_thread_idTothreads thread_notices[]       @relation("thread_notices_linked_thread_idTothreads")
+  thread_notices_thread_notices_thread_idTothreads        thread_notices[]       @relation("thread_notices_thread_idTothreads")
+  runs_threads_active_run_idToruns                        runs?                  @relation("threads_active_run_idToruns", fields: [active_run_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  runs_threads_executing_run_idToruns                     runs?                  @relation("threads_executing_run_idToruns", fields: [executing_run_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  external_callers                                        external_callers?      @relation(fields: [source_caller_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  spaces                                                  spaces                 @relation(fields: [space_id, tenant_id], references: [id, tenant_id], onDelete: NoAction, onUpdate: NoAction)
+  tenants                                                 tenants                @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users                                                   users?                 @relation(fields: [user_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
 
+  @@unique([id, space_id, tenant_id])
   @@index([created_at(sort: Desc)], map: "idx_threads_created")
   @@index([archived_at, pinned_at(sort: Desc), updated_at(sort: Desc), created_at(sort: Desc)], map: "idx_threads_sidebar")
   @@index([tenant_id, user_id, updated_at(sort: Desc)], map: "idx_threads_tenant_user")
+  @@index([space_id, updated_at(sort: Desc)], map: "idx_threads_space")
+  @@index([executing_run_id], map: "idx_threads_executing_run")
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model users {
-  id                 String               @id
-  tenant_id          String
-  email              String
-  password_hash      String
-  role               String               @default("member")
-  status             String               @default("active")
-  created_at         DateTime             @default(now()) @db.Timestamptz(6)
-  auth_tokens        auth_tokens[]
-  push_subscriptions push_subscriptions[]
-  threads            threads[]
-  tenants            tenants              @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  id                  String                @id
+  tenant_id           String
+  email               String
+  password_hash       String
+  role                String                @default("member")
+  status              String                @default("active")
+  created_at          DateTime              @default(now()) @db.Timestamptz(6)
+  auth_tokens         auth_tokens[]
+  push_subscriptions  push_subscriptions[]
+  threads             threads[]
+  spaces_execution    spaces[]              @relation("spaces_execution_user")
+  spaces_created      spaces[]              @relation("spaces_created_by")
+  space_visible_users space_visible_users[]
+  tenants             tenants               @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@unique([tenant_id, email])
+  @@unique([id, tenant_id])
 }
 
 model workload_tokens {

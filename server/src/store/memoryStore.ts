@@ -3,8 +3,10 @@ import type { LlmMessage } from '../llm/types.js';
 import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
 import { sanitizeThreadMessagesForModel } from './messageView.js';
+import { isTerminalRunStatus, RunActiveError } from './types.js';
 import type {
   AuthTokenRow,
+  CreateTenantWithOwnerInput,
   PushSubscriptionRow,
   RawThreadMessage,
   RunRow,
@@ -14,6 +16,7 @@ import type {
   ShellCommandRow,
   ShellLogStream,
   ShellSessionRow,
+  SpaceRow,
   Store,
   SubagentRunRow,
   StepRow,
@@ -33,6 +36,7 @@ import {
   newRunId,
   newShellCommandId,
   newShellSessionId,
+  newSpaceId,
   newStepId,
   newSubagentRunId,
   newSystemAdminId,
@@ -74,6 +78,7 @@ export class MemoryStore implements Store {
   private threadNotices = new Map<string, ThreadNoticeRow[]>();
   private pushSubscriptions = new Map<string, PushSubscriptionRow>();
   private tenants = new Map<string, TenantRow>();
+  private spaces = new Map<string, SpaceRow>();
   private users = new Map<string, UserRow>();
   private systemAdmins = new Map<string, SystemAdminRow>();
   private authTokens = new Map<string, AuthTokenRow>();
@@ -111,13 +116,60 @@ export class MemoryStore implements Store {
     return { ...thread, fallback_title: firstRun?.input ?? null };
   }
 
-  async createThread(scope: Scope, title?: string): Promise<ThreadRow> {
+  /** 大量纯单元测试直接从 createThread 开始，不需要先搭身份数据。只在 MemoryStore
+   *  内补一个最小 default space；真实 PgStore 始终要求 tenant/user 已存在。 */
+  private ensureDefaultSpaceForTests(scope: Scope): SpaceRow {
+    let tenant = this.tenants.get(scope.tenantId);
+    if (tenant?.default_space_id) {
+      const existing = this.spaces.get(tenant.default_space_id);
+      if (existing) return existing;
+    }
+    const now = this.now();
+    const space: SpaceRow = {
+      id: newSpaceId(),
+      tenant_id: scope.tenantId,
+      mode: 'web',
+      name: 'Default',
+      execution_user_id: null,
+      config: {},
+      config_version: 1,
+      created_by_user_id: null,
+      deleted_at: null,
+      created_at: now,
+      updated_at: now,
+    };
+    if (!tenant) {
+      tenant = {
+        id: scope.tenantId,
+        name: scope.tenantId,
+        status: 'active',
+        default_space_id: space.id,
+        created_at: now,
+      };
+      this.tenants.set(tenant.id, tenant);
+    } else {
+      tenant.default_space_id = space.id;
+    }
+    this.spaces.set(space.id, space);
+    return space;
+  }
+
+  async createThread(scope: Scope, title?: string, options: { spaceId?: string } = {}): Promise<ThreadRow> {
+    const space = options.spaceId ? this.spaces.get(options.spaceId) : this.ensureDefaultSpaceForTests(scope);
+    if (!space || space.tenant_id !== scope.tenantId || space.mode !== 'web' || space.deleted_at) {
+      throw new Error('space 不存在、已删除或不允许创建 Web 对话');
+    }
     const row: ThreadRow = {
       id: newThreadId(),
       tenant_id: scope.tenantId,
       user_id: scope.userId,
+      space_id: space.id,
+      source_type: 'web',
+      source_caller_id: null,
+      source_ref: {},
       title: title ?? null,
       active_run_id: null,
+      executing_run_id: null,
       pinned_at: null,
       archived_at: null,
       created_at: this.now(),
@@ -271,7 +323,11 @@ export class MemoryStore implements Store {
 
     // fork 出的新 thread 归属发起 fork 的 scope,不是复制源 thread 的归属——
     // 能走到这里说明 sourceRunId 已经属于 scope 了,两者本来就是同一个 tenant/user。
-    const newThread = await this.createThread(scope, sourceThread.title ? `${sourceThread.title} 的 fork` : 'Fork 对话');
+    const newThread = await this.createThread(
+      scope,
+      sourceThread.title ? `${sourceThread.title} 的 fork` : 'Fork 对话',
+      { spaceId: sourceThread.space_id },
+    );
     const runIdMap = new Map<string, string>();
     const stepIdMap = new Map<string, string>();
     const messageIdMap = new Map<number, number>();
@@ -281,10 +337,18 @@ export class MemoryStore implements Store {
       const parentRunId = oldRun.parent_run_id ? runIdMap.get(oldRun.parent_run_id) ?? null : null;
       const isSourceRun = oldRun.id === source.id;
       const newRun = await this.createRun(scope, newThread.id, oldRun.input, { modelRef: oldRun.model_ref, parentRunId });
-      newRun.status = isSourceRun ? 'done' : oldRun.status;
-      newRun.output = isSourceRun ? null : oldRun.output;
-      newRun.error = isSourceRun ? null : oldRun.error;
+      const copiedStatus = isSourceRun ? 'done' : isTerminalRunStatus(oldRun.status) ? oldRun.status : 'error';
+      await this.setRunStatus(scope, newRun.id, copiedStatus, {
+        output: isSourceRun ? null : oldRun.output,
+        error: isSourceRun ? null : copiedStatus === 'error' ? oldRun.error ?? 'fork 时停止了历史非终态 run。' : oldRun.error,
+      });
       newRun.goal_state = oldRun.goal_state;
+      newRun.runtime_capabilities_snapshot = structuredClone(oldRun.runtime_capabilities_snapshot);
+      newRun.space_config_snapshot = structuredClone(oldRun.space_config_snapshot);
+      newRun.space_config_version = oldRun.space_config_version;
+      newRun.plugin_lock = structuredClone(oldRun.plugin_lock);
+      newRun.external_input_open = false;
+      newRun.input_version = oldRun.input_version;
       newRun.created_at = oldRun.created_at;
       newRun.updated_at = oldRun.updated_at;
       runIdMap.set(oldRun.id, newRun.id);
@@ -349,6 +413,12 @@ export class MemoryStore implements Store {
   async createRun(scope: Scope, threadId: string, input: string, options: { modelRef?: string | null; parentRunId?: string | null; runtimeCapabilitiesSnapshot?: Record<string, unknown> | null } = {}): Promise<RunRow> {
     const thread = this.threads.get(threadId);
     if (!this.threadOwnedBy(thread, scope)) throw new Error('threadId 不存在或不属于当前用户');
+    const space = this.spaces.get(thread.space_id);
+    if (!space || space.deleted_at) throw new Error('space 已删除，不能创建新 run');
+    if (thread.executing_run_id) {
+      const current = this.runs.get(thread.executing_run_id);
+      throw new RunActiveError(thread.executing_run_id, current?.status ?? 'running');
+    }
     const threadRuns = [...this.runs.values()].filter((r) => r.thread_id === threadId);
     const parentRunId = options.parentRunId === undefined
       ? thread?.active_run_id ?? threadRuns[threadRuns.length - 1]?.id ?? null
@@ -365,12 +435,18 @@ export class MemoryStore implements Store {
       error: null,
       goal_state: null,
       runtime_capabilities_snapshot: options.runtimeCapabilitiesSnapshot ?? null,
+      space_config_snapshot: structuredClone(space.config),
+      space_config_version: space.config_version,
+      plugin_lock: null,
+      external_input_open: false,
+      input_version: 0,
       created_at: this.now(),
       updated_at: this.now(),
     };
     this.runs.set(row.id, row);
     if (thread) {
       thread.active_run_id = row.id;
+      thread.executing_run_id = row.id;
       thread.updated_at = this.now();
     }
     return row;
@@ -415,10 +491,55 @@ export class MemoryStore implements Store {
   async setRunStatus(scope: Scope, id: string, status: RunStatus, fields: { output?: string | null; error?: string | null } = {}) {
     const run = this.runs.get(id);
     if (!this.runOwnedBy(run, scope)) return;
+    const thread = this.threads.get(run.thread_id)!;
+    if (!isTerminalRunStatus(status)) {
+      if (thread.executing_run_id && thread.executing_run_id !== id) {
+        const current = this.runs.get(thread.executing_run_id);
+        throw new RunActiveError(thread.executing_run_id, current?.status ?? 'running');
+      }
+      thread.executing_run_id = id;
+    }
     run.status = status;
     if (fields.output !== undefined) run.output = fields.output;
     if (fields.error !== undefined) run.error = fields.error;
     run.updated_at = this.now();
+    if (isTerminalRunStatus(status) && thread.executing_run_id === id) {
+      thread.executing_run_id = null;
+    }
+  }
+  async resumeRun(
+    scope: Scope,
+    id: string,
+    expectedStatuses: RunStatus[],
+    fields: { output?: string | null; error?: string | null; userMessageContent?: string } = {},
+  ): Promise<RunRow | null> {
+    const run = this.runs.get(id);
+    if (!this.runOwnedBy(run, scope) || !expectedStatuses.includes(run.status)) return null;
+    const thread = this.threads.get(run.thread_id)!;
+    if (run.status === 'pending' && thread.executing_run_id === id) {
+      throw new RunActiveError(id, 'pending');
+    }
+    if (thread.executing_run_id && thread.executing_run_id !== id) {
+      const current = this.runs.get(thread.executing_run_id);
+      throw new RunActiveError(thread.executing_run_id, current?.status ?? 'running');
+    }
+    run.status = 'pending';
+    if (fields.output !== undefined) run.output = fields.output;
+    if (fields.error !== undefined) run.error = fields.error;
+    run.updated_at = this.now();
+    thread.executing_run_id = id;
+    if (fields.userMessageContent !== undefined) {
+      this.messages.push({
+        thread_id: run.thread_id,
+        run_id: run.id,
+        step_id: null,
+        role: 'user',
+        content: fields.userMessageContent,
+        seq: this.seq++,
+        created_at: this.now(),
+      });
+    }
+    return run;
   }
   async setGoalState(scope: Scope, runId: string, goal: GoalState) {
     const run = this.runs.get(runId);
@@ -893,11 +1014,42 @@ export class MemoryStore implements Store {
     this.pushSubscriptions.set(endpoint, { ...row, enabled: false, last_error: error ?? null, updated_at: this.now() });
   }
 
-  // 多租户改造 Phase 1(docs/multi-tenancy-design.md §4)。
-  async createTenant(input: { id: string; name: string }): Promise<TenantRow> {
-    const row: TenantRow = { id: input.id, name: input.name, status: 'active', created_at: this.now() };
-    this.tenants.set(row.id, row);
-    return row;
+  async createTenantWithOwner(input: CreateTenantWithOwnerInput) {
+    if (this.tenants.has(input.id)) throw new Error(`tenant ${input.id} 已存在`);
+    const createdAt = this.now();
+    const owner: UserRow = {
+      id: newUserId(),
+      tenant_id: input.id,
+      email: input.ownerEmail,
+      password_hash: input.ownerPasswordHash,
+      role: 'owner',
+      status: 'active',
+      created_at: createdAt,
+    };
+    const defaultSpace: SpaceRow = {
+      id: newSpaceId(),
+      tenant_id: input.id,
+      mode: 'web',
+      name: 'Default',
+      execution_user_id: null,
+      config: {},
+      config_version: 1,
+      created_by_user_id: owner.id,
+      deleted_at: null,
+      created_at: createdAt,
+      updated_at: createdAt,
+    };
+    const tenant: TenantRow = {
+      id: input.id,
+      name: input.name,
+      status: 'active',
+      default_space_id: defaultSpace.id,
+      created_at: createdAt,
+    };
+    this.tenants.set(tenant.id, tenant);
+    this.users.set(owner.id, owner);
+    this.spaces.set(defaultSpace.id, defaultSpace);
+    return { tenant, owner, defaultSpace };
   }
 
   async findTenant(id: string): Promise<TenantRow | null> {
@@ -913,6 +1065,11 @@ export class MemoryStore implements Store {
     if (!row) return null;
     row.status = status;
     return row;
+  }
+
+  async getDefaultSpace(tenantId: string): Promise<SpaceRow | null> {
+    const id = this.tenants.get(tenantId)?.default_space_id;
+    return id ? this.spaces.get(id) ?? null : null;
   }
 
   async createUser(input: { tenantId: string; email: string; passwordHash: string; role: TenantUserRole }): Promise<UserRow> {

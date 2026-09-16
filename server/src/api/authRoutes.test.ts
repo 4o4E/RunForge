@@ -31,8 +31,14 @@ function listen(app: express.Express): Promise<{ port: number; close: () => void
 }
 
 async function seedOwner(tenantId: string, email: string, password: string) {
-  await store.createTenant({ id: tenantId, name: tenantId });
-  return store.createUser({ tenantId, email, passwordHash: hashPassword(password), role: 'owner' });
+  const provisioned = await store.createTenantWithOwner({
+    id: tenantId,
+    name: tenantId,
+    ownerEmail: email,
+    ownerPasswordHash: hashPassword(password),
+    settingsTemplate: [],
+  });
+  return provisioned.owner;
 }
 
 test.before(() => {
@@ -324,6 +330,33 @@ test('GET /api/threads/:id: 原始工具载荷只在显式 Debug 模式返回', 
     assert.equal(debugBody.debug, true);
     assert.equal(debugBody.context_messages.some((message) => message.content === 'raw output'), true);
     assert.equal(debugBody.context_messages.some((message) => message.tool_calls.some((call) => call.arguments === '{"command":"echo raw"}')), true);
+  } finally {
+    close();
+  }
+});
+
+test('POST /api/threads/:id/runs: 活动 run 冲突返回结构化 RUN_ACTIVE', async () => {
+  const owner = await seedOwner('tn_run_active', 'owner@run-active.test', 'pw');
+  const scope = { tenantId: 'tn_run_active', userId: owner.id };
+  const jwt = signTenantAccessToken({ id: owner.id, tenantId: scope.tenantId, role: 'owner' });
+  const thread = await store.createThread(scope, 'run active');
+  const activeRun = await store.createRun(scope, thread.id, 'first');
+  const { port, close } = await listen(buildApp());
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/threads/${thread.id}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+      body: JSON.stringify({ input: 'second' }),
+    });
+    assert.equal(response.status, 409);
+    const body = (await response.json()) as {
+      code: string;
+      currentRunId: string;
+      currentStatus: string;
+    };
+    assert.equal(body.code, 'RUN_ACTIVE');
+    assert.equal(body.currentRunId, activeRun.id);
+    assert.equal(body.currentStatus, 'pending');
   } finally {
     close();
   }

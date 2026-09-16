@@ -361,7 +361,7 @@ ALTER TABLE app_settings DROP CONSTRAINT app_settings_pkey;
 ALTER TABLE app_settings ADD PRIMARY KEY (tenant_id, key);
 ```
 
-`getToolSettings`/`getMcpSettings`/`getLlmSettings` 读取时按 `(tenant_id, key)` 查询;若某租户没有覆盖某个 key,回退到 `('default', key)` 的全局默认值,再回退到 `config.ts` 里的 env 默认值——形成"env 默认值 -> 全局 default 租户覆盖 -> 具体租户覆盖"三层,与现在"env 默认值 -> app_settings 覆盖"的两层模型是自然扩展,不是推倒重来。
+`getToolSettings`/`getMcpSettings`/`getLlmSettings` 读取时只查询当前 `(tenant_id, key)`。创建 tenant 时在同一事务中复制系统模板，之后各 tenant 独立更新；缺项只回退 `config.ts` 的 env 默认值，不再动态读取 `default` tenant，避免模板后续变化悄悄影响已有 tenant。
 
 Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, userId}` 参数(`role` 只用于 API 层的操作权限判断,不参与数据查询过滤,见 §2),SQL 里对应加 `AND tenant_id = $n AND user_id = $m`,或者对间接表加等价的 `thread_id IN (...)` 子查询。RLS 作为兜底防线,不作为唯一防线——应用层显式过滤仍然要做,因为 RLS 依赖每个数据库连接正确 `SET app.tenant_id / app.user_id`,一旦连接池复用时忘记重置就会失效,不能单独依赖它。
 
@@ -470,7 +470,7 @@ other tenants: ${TOOL_WORKSPACE_ROOT_BASE}/tenants/<tenant_id>/users/<user_id>/w
 - ⚠️ 执行层:shell 工具仍是同进程 + namespace 隔离,不是容器级强隔离;理论上如果 bwrap 配置有疏漏(如白名单命令本身有越权能力,例如白名单里的 `psql` 如果连接串配置不当),仍可能造成跨租户影响。这是 §7 提到的"下一阶段"要解决的问题,当前设计里作为已知风险记录,而不是假装已经解决。
 - ⚠️ 资源配额:CPU/内存/磁盘配额目前仍未实现(与单租户现状一致),多租户下"一个租户跑满资源影响其他租户"(noisy neighbor)问题需要额外的 cgroup/rlimit 工作,不在本次范围。
 - ⚠️ 引导账号默认密码是固定值(`1234.RunForge.5678`),不是随运行环境随机生成的秘密——只要读过这份文档或代码就知道默认密码,生产/公网环境**必须**通过 `RUNFORGE_BOOTSTRAP_ADMIN_PASSWORD`/`RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD` 覆盖,或登录后立刻改密,否则默认密码本身就是一个公开的后门。
-- ⚠️ `mcp/client.ts`(`listMcpTools`/`callMcpTool`)在调用方没有显式传入 `mcpSettings` 时,会回退到查询 `default` 租户的 MCP 配置。当前所有生产调用路径(`executor.ts`/`tools/registry.ts`)都会显式传入按 scope 取到的 `mcpSettings`,这条回退分支实际不会被触发;但如果未来新增一个不传 `mcpSettings` 的调用点,会悄悄用错租户的 MCP server 配置,而不是报错。记录为已知的、影响面很小的技术债,不是当前生效的漏洞。
+- ✅ `mcp/client.ts` 的 `listMcpTools`/`callMcpTool` 强制调用方传入当前 scope 的 `mcpSettings`，不存在隐式查询 `default` tenant 的分支。
 - ⚠️ 数据源账号池(`server/src/datasources/accountPool.ts`)的 workload-token 鉴权路径(`acquireCredential`)本身没有请求身份,唯一的租户边界校验是"反查 token 对应 run 所在的 tenant_id,和数据源的 tenant_id 必须一致"——这个校验依赖 `runs`/`threads` 表已经有 `tenant_id`(Phase 2 完成),如果以后有代码绕开 `createWorkloadToken`/`acquireCredential` 直接操作 `workload_tokens`/`datasource_account_leases` 表,不会自动获得这层保护。
 
 ---

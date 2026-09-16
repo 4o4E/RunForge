@@ -19,12 +19,19 @@ test('runBootstrap: fresh install with no legacy access token generates a login 
 
   const tenant = await store.findTenant('default');
   assert.ok(tenant);
+  const defaultSpace = await store.getDefaultSpace('default');
+  assert.ok(defaultSpace);
+  assert.equal(tenant.default_space_id, defaultSpace.id);
+  assert.match(defaultSpace.id, /^sp_[0-9A-Za-z]+$/);
+  assert.equal(defaultSpace.mode, 'web');
+  assert.equal(defaultSpace.name, 'Default');
 
   const users = await store.listUsersByTenant('default');
   assert.equal(users.length, 1);
   assert.equal(users[0].role, 'owner');
   assert.equal(users[0].email, 'admin@local');
   assert.ok(verifyPassword('fresh-admin-pw', users[0].password_hash));
+  assert.equal(defaultSpace.created_by_user_id, users[0].id);
 
   const admins = await store.listSystemAdmins();
   assert.equal(admins.length, 1);

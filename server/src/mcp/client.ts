@@ -4,7 +4,7 @@ import { CallToolResultSchema, type CallToolResult, type Tool as McpSdkTool } fr
 import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname } from 'node:path';
 import type { LlmTool } from '../llm/types.js';
-import { getMcpSettings, type McpServerSettings, type McpSettings } from '../settings.js';
+import type { McpServerSettings, McpSettings } from '../settings.js';
 import { isImageMediaType, normalizeRemotePath, toRemotePath } from '../files/workspace.js';
 
 export interface McpMappedTool {
@@ -120,9 +120,8 @@ async function listServerTools(server: McpServerSettings): Promise<McpMappedTool
   }));
 }
 
-export async function listMcpTools(settings?: McpSettings): Promise<McpMappedTool[]> {
-  const mcpSettings = settings ?? await getMcpSettings({ tenantId: 'default' });
-  const settled = await Promise.allSettled(mcpSettings.servers.map((server) => listServerTools(server)));
+export async function listMcpTools(settings: McpSettings): Promise<McpMappedTool[]> {
+  const settled = await Promise.allSettled(settings.servers.map((server) => listServerTools(server)));
   return settled.flatMap((item) => item.status === 'fulfilled' ? item.value : []);
 }
 
@@ -265,13 +264,12 @@ export async function renderToolResult(result: CallToolResult, ctx: RenderContex
 export async function callMcpTool(
   mappedName: string,
   args: Record<string, unknown>,
-  settings?: McpSettings,
+  settings: McpSettings,
   ctx: { workspaceRoot?: string; runId?: string } = {},
 ): Promise<{ text: string; serverId: string; toolName: string }> {
   const parsed = parseMcpToolName(mappedName);
   if (!parsed) throw new Error(`不是 MCP 工具名：${mappedName}`);
-  const mcpSettings = settings ?? await getMcpSettings({ tenantId: 'default' });
-  const server = mcpSettings.servers.find((item) => item.id === parsed.serverId);
+  const server = settings.servers.find((item) => item.id === parsed.serverId);
   if (!server || !server.enabled) throw new Error(`MCP server 未启用：${parsed.serverId}`);
 
   const client = await connectServer(server);

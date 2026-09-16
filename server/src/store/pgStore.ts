@@ -6,8 +6,10 @@ import type { LlmMessage } from '../llm/types.js';
 import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
 import { sanitizeThreadMessagesForModel } from './messageView.js';
+import { isTerminalRunStatus, RunActiveError } from './types.js';
 import type {
   AuthTokenRow,
+  CreateTenantWithOwnerInput,
   PushSubscriptionRow,
   RawThreadMessage,
   RunRow,
@@ -18,6 +20,7 @@ import type {
   ShellLogStream,
   ShellSessionRow,
   Store,
+  SpaceRow,
   SubagentRunRow,
   StepRow,
   SystemAdminRow,
@@ -36,6 +39,7 @@ import {
   newRunId,
   newShellCommandId,
   newShellSessionId,
+  newSpaceId,
   newStepId,
   newSubagentRunId,
   newSystemAdminId,
@@ -49,6 +53,7 @@ import {
   serialId,
   toAuthTokenRow,
   toRunRow,
+  toSpaceRow,
   toStepRow,
   toSystemAdminRow,
   toSystemAdminTokenRow,
@@ -60,6 +65,23 @@ import {
 
 function isEphemeralSystemMessage(role: LlmMessage['role'], content: string | null): boolean {
   return role === 'system' && typeof content === 'string' && content.startsWith('已激活 Skill / Activated Skill:');
+}
+
+async function occupiedRunError(tx: Prisma.TransactionClient, threadId: string): Promise<Error> {
+  const occupied = await tx.threads.findUnique({
+    where: { id: threadId },
+    select: {
+      executing_run_id: true,
+      runs_threads_executing_run_idToruns: { select: { status: true } },
+    },
+  });
+  if (occupied?.executing_run_id) {
+    return new RunActiveError(
+      occupied.executing_run_id,
+      (occupied.runs_threads_executing_run_idToruns?.status as RunStatus | undefined) ?? 'running',
+    );
+  }
+  return new Error('未能占用 thread 执行槽，请重试');
 }
 
 export class PgStore implements Store {
@@ -110,10 +132,31 @@ export class PgStore implements Store {
     return result;
   }
 
-  async createThread(scope: Scope, title?: string): Promise<ThreadRow> {
-    return toThreadRow(await prisma.threads.create({
-      data: { id: newThreadId(), tenant_id: scope.tenantId, user_id: scope.userId, title: title ?? null },
-    }));
+  async createThread(scope: Scope, title?: string, options: { spaceId?: string } = {}): Promise<ThreadRow> {
+    const row = await prisma.$transaction(async (tx) => {
+      const space = options.spaceId
+        ? await tx.spaces.findFirst({
+            where: { id: options.spaceId, tenant_id: scope.tenantId, mode: 'web', deleted_at: null },
+          })
+        : (await tx.tenants.findUnique({
+            where: { id: scope.tenantId },
+            select: { default_space: true },
+          }))?.default_space;
+      if (!space || space.deleted_at || space.mode !== 'web') {
+        throw new Error('space 不存在、已删除或不允许创建 Web 对话');
+      }
+      return tx.threads.create({
+        data: {
+          id: newThreadId(),
+          tenant_id: scope.tenantId,
+          user_id: scope.userId,
+          space_id: space.id,
+          source_type: 'web',
+          title: title ?? null,
+        },
+      });
+    });
+    return toThreadRow(row);
   }
 
   async getThread(scope: Scope, id: string): Promise<ThreadRow | null> {
@@ -321,8 +364,9 @@ export class PgStore implements Store {
       // fork 出的新 thread 归属发起 fork 的用户(scope),不是复制源 thread 的归属——
       // 能走到这里说明 sourceRunId 已经属于 scope 了,两者本来就是同一个 tenant/user。
       const { rows: newThreadRows } = await client.query<ThreadRow>(
-        `INSERT INTO threads (id, tenant_id, user_id, title) VALUES ($1, $2, $3, $4) RETURNING *`,
-        [forkThreadId, scope.tenantId, scope.userId, forkTitle],
+        `INSERT INTO threads (id, tenant_id, user_id, space_id, source_type, title)
+         VALUES ($1, $2, $3, $4, 'web', $5) RETURNING *`,
+        [forkThreadId, scope.tenantId, scope.userId, sourceThread.space_id, forkTitle],
       );
       const newThread = newThreadRows[0];
       const runIdMap = new Map<string, string>();
@@ -335,22 +379,35 @@ export class PgStore implements Store {
         runIdMap.set(oldRun.id, newRunIdValue);
         const parentRunId = oldRun.parent_run_id ? runIdMap.get(oldRun.parent_run_id) ?? null : null;
         const isSourceRun = oldRun.id === sourceRunId;
+        // fork 只复制历史检查点，不复制执行权。异常旧数据里若祖先仍是非终态，
+        // 必须在副本中收口为 error，避免启动恢复把历史副本再次执行。
+        const copiedStatus = isSourceRun ? 'done' : isTerminalRunStatus(oldRun.status) ? oldRun.status : 'error';
         const { rows: runRows } = await client.query<RunRow>(
           `INSERT INTO runs (
-             id, thread_id, parent_run_id, status, input, model_ref, output, error, goal_state, created_at, updated_at
+             id, thread_id, parent_run_id, status, input, model_ref, output, error, goal_state,
+             runtime_capabilities_snapshot, space_config_snapshot, space_config_version, plugin_lock,
+             external_input_open, input_version, created_at, updated_at
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
+           VALUES (
+             $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb,
+             $10::jsonb, $11::jsonb, $12, $13::jsonb, false, $14, $15, $16
+           )
            RETURNING *`,
           [
             newRunIdValue,
             forkThreadId,
             parentRunId,
-            isSourceRun ? 'done' : oldRun.status,
+            copiedStatus,
             oldRun.input,
             oldRun.model_ref,
             isSourceRun ? null : oldRun.output,
-            isSourceRun ? null : oldRun.error,
+            isSourceRun ? null : copiedStatus === 'error' ? oldRun.error ?? 'fork 时停止了历史非终态 run。' : oldRun.error,
             oldRun.goal_state ? JSON.stringify(oldRun.goal_state) : null,
+            oldRun.runtime_capabilities_snapshot ? JSON.stringify(oldRun.runtime_capabilities_snapshot) : null,
+            oldRun.space_config_snapshot ? JSON.stringify(oldRun.space_config_snapshot) : null,
+            oldRun.space_config_version,
+            oldRun.plugin_lock ? JSON.stringify(oldRun.plugin_lock) : null,
+            oldRun.input_version,
             oldRun.created_at,
             oldRun.updated_at,
           ],
@@ -482,9 +539,13 @@ export class PgStore implements Store {
     const row = await prisma.$transaction(async (tx) => {
       const thread = await tx.threads.findFirst({
         where: { id: threadId, tenant_id: scope.tenantId, user_id: scope.userId },
-        select: { active_run_id: true },
+        select: {
+          active_run_id: true,
+          spaces: { select: { config: true, config_version: true, deleted_at: true } },
+        },
       });
       if (!thread) throw new Error('threadId 不存在或不属于当前用户');
+      if (thread.spaces.deleted_at) throw new Error('space 已删除，不能创建新 run');
 
       let parentRunId = options.parentRunId;
       if (parentRunId === undefined) {
@@ -510,9 +571,25 @@ export class PgStore implements Store {
           input,
           model_ref: options.modelRef ?? null,
           runtime_capabilities_snapshot: nullableJson(options.runtimeCapabilitiesSnapshot),
+          space_config_snapshot: requiredJson(thread.spaces.config),
+          space_config_version: thread.spaces.config_version,
         },
       });
-      await tx.threads.update({ where: { id: threadId }, data: { active_run_id: id, updated_at: new Date() } });
+
+      // executing_run_id 是 thread 的唯一执行槽。条件更新(CAS)让不同请求在短事务内
+      // 竞争，不需要显式行锁；失败时抛错会回滚上面刚创建的 pending run。
+      const claimed = await tx.threads.updateMany({
+        where: {
+          id: threadId,
+          tenant_id: scope.tenantId,
+          user_id: scope.userId,
+          executing_run_id: null,
+        },
+        data: { executing_run_id: id, active_run_id: id, updated_at: new Date() },
+      });
+      if (claimed.count === 0) {
+        throw await occupiedRunError(tx, threadId);
+      }
       return created;
     });
     return toRunRow(row);
@@ -547,18 +624,111 @@ export class PgStore implements Store {
   }
 
   async setRunStatus(scope: Scope, id: string, status: RunStatus, fields: { output?: string | null; error?: string | null } = {}): Promise<void> {
-    await prisma.runs.updateMany({
-      where: {
-        id,
-        threads_runs_thread_idTothreads: { tenant_id: scope.tenantId, user_id: scope.userId },
-      },
-      data: {
-        status,
-        output: Object.prototype.hasOwnProperty.call(fields, 'output') ? fields.output ?? null : undefined,
-        error: Object.prototype.hasOwnProperty.call(fields, 'error') ? fields.error ?? null : undefined,
-        updated_at: new Date(),
-      },
+    await prisma.$transaction(async (tx) => {
+      const run = await tx.runs.findFirst({
+        where: {
+          id,
+          threads_runs_thread_idTothreads: { tenant_id: scope.tenantId, user_id: scope.userId },
+        },
+        select: { thread_id: true },
+      });
+      if (!run) return;
+
+      if (!isTerminalRunStatus(status)) {
+        const claimed = await tx.threads.updateMany({
+          where: {
+            id: run.thread_id,
+            OR: [{ executing_run_id: null }, { executing_run_id: id }],
+          },
+          data: { executing_run_id: id },
+        });
+        if (claimed.count === 0) {
+          throw await occupiedRunError(tx, run.thread_id);
+        }
+      }
+
+      await tx.runs.update({
+        where: { id },
+        data: {
+          status,
+          output: Object.prototype.hasOwnProperty.call(fields, 'output') ? fields.output ?? null : undefined,
+          error: Object.prototype.hasOwnProperty.call(fields, 'error') ? fields.error ?? null : undefined,
+          updated_at: new Date(),
+        },
+      });
+
+      if (isTerminalRunStatus(status)) {
+        // 只允许当前 run 释放自己的槽，旧 run 的迟到收口不能清掉后来启动的 run。
+        await tx.threads.updateMany({
+          where: { id: run.thread_id, executing_run_id: id },
+          data: { executing_run_id: null },
+        });
+      }
     });
+  }
+
+  async resumeRun(
+    scope: Scope,
+    id: string,
+    expectedStatuses: RunStatus[],
+    fields: { output?: string | null; error?: string | null; userMessageContent?: string } = {},
+  ): Promise<RunRow | null> {
+    if (!expectedStatuses.length) return null;
+    const row = await prisma.$transaction(async (tx) => {
+      const current = await tx.runs.findFirst({
+        where: {
+          id,
+          threads_runs_thread_idTothreads: { tenant_id: scope.tenantId, user_id: scope.userId },
+        },
+        select: {
+          status: true,
+          thread_id: true,
+          threads_runs_thread_idTothreads: { select: { executing_run_id: true } },
+        },
+      });
+      if (!current || !expectedStatuses.includes(current.status as RunStatus)) return null;
+      if (current.status === 'pending' && current.threads_runs_thread_idTothreads.executing_run_id === id) {
+        throw new RunActiveError(id, 'pending');
+      }
+
+      // status 条件与执行槽 CAS 在同一短事务里：两个 continue/answer 并发时只有一个
+      // 能把旧状态切成 pending，另一个不会再启动第二个 executor。
+      const resumed = await tx.runs.updateMany({
+        where: { id, status: { in: expectedStatuses } },
+        data: {
+          status: 'pending',
+          output: Object.prototype.hasOwnProperty.call(fields, 'output') ? fields.output ?? null : undefined,
+          error: Object.prototype.hasOwnProperty.call(fields, 'error') ? fields.error ?? null : undefined,
+          updated_at: new Date(),
+        },
+      });
+      if (resumed.count === 0) return null;
+
+      const claimed = await tx.threads.updateMany({
+        where: {
+          id: current.thread_id,
+          OR: [{ executing_run_id: null }, { executing_run_id: id }],
+        },
+        data: { executing_run_id: id },
+      });
+      if (claimed.count === 0) throw await occupiedRunError(tx, current.thread_id);
+
+      // waiting_for_user 的回答必须和状态 CAS 一起提交；否则进程可能在状态改成
+      // pending 后、消息落库前退出，恢复时模型会在没有回答内容的情况下继续。
+      if (fields.userMessageContent !== undefined) {
+        await tx.messages.create({
+          data: {
+            thread_id: current.thread_id,
+            run_id: id,
+            role: 'user',
+            content: fields.userMessageContent,
+          },
+        });
+      }
+
+      return tx.runs.findUnique({ where: { id } });
+    });
+    return row ? toRunRow(row) : null;
   }
 
   async setGoalState(scope: Scope, runId: string, goal: GoalState): Promise<void> {
@@ -1239,9 +1409,61 @@ export class PgStore implements Store {
     );
   }
 
-  // 多租户改造 Phase 1(docs/multi-tenancy-design.md §4)。
-  async createTenant(input: { id: string; name: string }): Promise<TenantRow> {
-    return toTenantRow(await prisma.tenants.create({ data: { id: input.id, name: input.name } }));
+  async createTenantWithOwner(input: CreateTenantWithOwnerInput) {
+    const ownerId = newUserId();
+    const defaultSpaceId = newSpaceId();
+    const result = await prisma.$transaction(async (tx) => {
+      const tenant = await tx.tenants.create({ data: { id: input.id, name: input.name } });
+      const owner = await tx.users.create({
+        data: {
+          id: ownerId,
+          tenant_id: input.id,
+          email: input.ownerEmail,
+          password_hash: input.ownerPasswordHash,
+          role: 'owner',
+        },
+      });
+
+      // 静态模板保证全新 default tenant 可创建；创建其它 tenant 时，再用 default
+      // tenant 当前保存的运行配置覆盖同名键。复制后各 tenant 独立更新，不再动态回退。
+      const settings = new Map(input.settingsTemplate.map((entry) => [entry.key, entry.value]));
+      if (input.id !== 'default') {
+        const savedTemplate = await tx.app_settings.findMany({
+          where: { tenant_id: 'default', NOT: { key: { startsWith: 'ui.' } } },
+          select: { key: true, value: true },
+        });
+        for (const entry of savedTemplate) settings.set(entry.key, entry.value);
+      }
+      if (settings.size) {
+        await tx.app_settings.createMany({
+          data: [...settings].map(([key, value]) => ({
+            tenant_id: input.id,
+            key,
+            value: requiredJson(value),
+          })),
+        });
+      }
+
+      const defaultSpace = await tx.spaces.create({
+        data: {
+          id: defaultSpaceId,
+          tenant_id: input.id,
+          mode: 'web',
+          name: 'Default',
+          created_by_user_id: owner.id,
+        },
+      });
+      const provisionedTenant = await tx.tenants.update({
+        where: { id: input.id },
+        data: { default_space_id: defaultSpace.id },
+      });
+      return { tenant: provisionedTenant, owner, defaultSpace };
+    });
+    return {
+      tenant: toTenantRow(result.tenant),
+      owner: toUserRow(result.owner),
+      defaultSpace: toSpaceRow(result.defaultSpace),
+    };
   }
 
   async findTenant(id: string): Promise<TenantRow | null> {
@@ -1256,6 +1478,14 @@ export class PgStore implements Store {
   async updateTenantStatus(id: string, status: 'active' | 'suspended'): Promise<TenantRow | null> {
     const [row] = await prisma.tenants.updateManyAndReturn({ where: { id }, data: { status } });
     return row ? toTenantRow(row) : null;
+  }
+
+  async getDefaultSpace(tenantId: string): Promise<SpaceRow | null> {
+    const tenant = await prisma.tenants.findUnique({
+      where: { id: tenantId },
+      select: { default_space: true },
+    });
+    return tenant?.default_space ? toSpaceRow(tenant.default_space) : null;
   }
 
   async createUser(input: { tenantId: string; email: string; passwordHash: string; role: TenantUserRole }): Promise<UserRow> {

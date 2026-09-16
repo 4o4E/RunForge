@@ -4,6 +4,7 @@ import { ContextManager } from './context.js';
 import { config } from '../config.js';
 import { MemoryStore } from '../store/memoryStore.js';
 import { maskPlaceholder } from './compaction.js';
+import { RunActiveError } from '../store/types.js';
 import type { Scope, ThreadMessage } from '../store/types.js';
 
 // 持久压缩：mask 决策会落库，重载时 store 返回压缩视图，重启也不会丢原始数据。
@@ -114,6 +115,40 @@ test('store uses typed prefixes for thread, run and step ids', async () => {
   assert.match(step.id, /^st_[0-9A-Za-z]+$/);
 });
 
+test('store keeps one non-terminal run per thread and only releases its own execution slot', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread(scope);
+  const first = await store.createRun(scope, thread.id, 'first');
+
+  await assert.rejects(
+    store.createRun(scope, thread.id, 'conflict'),
+    (err: unknown) => err instanceof RunActiveError
+      && err.currentRunId === first.id
+      && err.currentStatus === 'pending',
+  );
+
+  await store.setRunStatus(scope, first.id, 'done');
+  const second = await store.createRun(scope, thread.id, 'second');
+  assert.equal((await store.getThread(scope, thread.id))?.executing_run_id, second.id);
+
+  // 旧 run 的迟到终态更新不能释放新 run 的执行槽。
+  await store.setRunStatus(scope, first.id, 'error');
+  assert.equal((await store.getThread(scope, thread.id))?.executing_run_id, second.id);
+  await assert.rejects(
+    store.createRun(scope, thread.id, 'still conflicts'),
+    (err: unknown) => err instanceof RunActiveError && err.currentRunId === second.id,
+  );
+
+  await store.setRunStatus(scope, second.id, 'error');
+  assert.equal((await store.resumeRun(scope, second.id, ['error'], { userMessageContent: '恢复输入' }))?.status, 'pending');
+  assert.equal((await store.loadRawThreadMessages(scope, thread.id, { runId: second.id })).at(-1)?.content, '恢复输入');
+  await assert.rejects(
+    store.resumeRun(scope, second.id, ['pending'], { userMessageContent: '重复输入' }),
+    (err: unknown) => err instanceof RunActiveError && err.currentRunId === second.id,
+  );
+  assert.equal((await store.loadRawThreadMessages(scope, thread.id, { runId: second.id })).filter((message) => message.content === '重复输入').length, 0);
+});
+
 test('store returns masked assistant tool-call args on reload', async () => {
   const store = new MemoryStore();
   const thread = await store.createThread(scope);
@@ -221,12 +256,15 @@ test('thread message view follows the active run branch only', async () => {
   const run1 = await store.createRun(scope, thread.id, 'first');
   await store.addMessage(scope, thread.id, run1.id, null, { role: 'user', content: 'first' });
   await store.addMessage(scope, thread.id, run1.id, null, { role: 'assistant', content: 'answer first' });
+  await store.setRunStatus(scope, run1.id, 'done');
 
   const oldRun = await store.createRun(scope, thread.id, 'second old');
   await store.addMessage(scope, thread.id, oldRun.id, null, { role: 'user', content: 'second old' });
   await store.addMessage(scope, thread.id, oldRun.id, null, { role: 'assistant', content: 'answer old' });
+  await store.setRunStatus(scope, oldRun.id, 'done');
   const oldLeaf = await store.createRun(scope, thread.id, 'third old');
   await store.addMessage(scope, thread.id, oldLeaf.id, null, { role: 'user', content: 'third old' });
+  await store.setRunStatus(scope, oldLeaf.id, 'done');
 
   const editedRun = await store.createRun(scope, thread.id, 'second edited', { parentRunId: run1.id });
   await store.addMessage(scope, thread.id, editedRun.id, null, { role: 'user', content: 'second edited' });
@@ -247,10 +285,12 @@ test('forkThreadAtRun copies history up to the selected user message and records
   const run1 = await store.createRun(scope, thread.id, 'first');
   await store.addMessage(scope, thread.id, run1.id, null, { role: 'user', content: 'first' });
   await store.addMessage(scope, thread.id, run1.id, null, { role: 'assistant', content: 'answer first' });
+  await store.setRunStatus(scope, run1.id, 'done');
 
   const run2 = await store.createRun(scope, thread.id, 'second');
   await store.addMessage(scope, thread.id, run2.id, null, { role: 'user', content: 'second' });
   await store.addMessage(scope, thread.id, run2.id, null, { role: 'assistant', content: 'answer second should not copy' });
+  await store.setRunStatus(scope, run2.id, 'done');
 
   const fork = await store.forkThreadAtRun(scope, run2.id);
   assert.ok(fork);

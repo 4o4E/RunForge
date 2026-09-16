@@ -1,6 +1,7 @@
 import { config } from '../config.js';
 import { store as defaultStore } from '../store/index.js';
 import type { Store } from '../store/types.js';
+import { tenantSettingsTemplateEntries } from '../settings.js';
 import { hashPassword } from './passwords.js';
 import { hashOpaqueToken } from './tokens.js';
 
@@ -43,26 +44,21 @@ export async function runBootstrap(storeArg: Store = defaultStore, options: Boot
 
   let tenant = await storeArg.findTenant(DEFAULT_TENANT_ID);
   if (!tenant) {
-    tenant = await storeArg.createTenant({ id: DEFAULT_TENANT_ID, name: 'Default' });
-    report.tenantCreated = true;
-  }
-
-  const existingUsers = await storeArg.listUsersByTenant(DEFAULT_TENANT_ID);
-  const hasActiveOwner = existingUsers.some((u) => u.role === 'owner' && u.status === 'active');
-  if (!hasActiveOwner) {
     const legacyToken = (options.legacyAccessToken ?? config.auth.accessToken).trim();
+    const loginPassword = adminPasswordOverride || DEFAULT_BOOTSTRAP_PASSWORD;
+    const provisioned = await storeArg.createTenantWithOwner({
+      id: DEFAULT_TENANT_ID,
+      name: 'Default',
+      ownerEmail: DEFAULT_ADMIN_EMAIL,
+      ownerPasswordHash: hashPassword(loginPassword),
+      settingsTemplate: tenantSettingsTemplateEntries(),
+    });
+    tenant = provisioned.tenant;
+    report.tenantCreated = true;
     if (legacyToken) {
-      // 老部署的静态 token 从未作为登录凭证使用，登录密码走默认凭证。
-      const loginPassword = adminPasswordOverride || DEFAULT_BOOTSTRAP_PASSWORD;
-      const owner = await storeArg.createUser({
-        tenantId: DEFAULT_TENANT_ID,
-        email: DEFAULT_ADMIN_EMAIL,
-        passwordHash: hashPassword(loginPassword),
-        role: 'owner',
-      });
       await storeArg.createAuthToken({
         tenantId: DEFAULT_TENANT_ID,
-        userId: owner.id,
+        userId: provisioned.owner.id,
         kind: 'api',
         tokenHash: hashOpaqueToken(legacyToken),
         label: 'migrated RUNFORGE_ACCESS_TOKEN',
@@ -72,6 +68,14 @@ export async function runBootstrap(storeArg: Store = defaultStore, options: Boot
       console.log(`[bootstrap] 已将现有 RUNFORGE_ACCESS_TOKEN 注册为 owner 账号 ${DEFAULT_ADMIN_EMAIL} 的 API token`);
       console.log(`[bootstrap] ${DEFAULT_ADMIN_EMAIL} 的登录密码: ${loginPassword}`);
     } else {
+      report.ownerCreated = true;
+      report.ownerSource = 'default-password';
+      console.log(`[bootstrap] 已创建 owner 账号 ${DEFAULT_ADMIN_EMAIL}，登录密码: ${loginPassword}`);
+    }
+  } else {
+    const existingUsers = await storeArg.listUsersByTenant(DEFAULT_TENANT_ID);
+    const hasActiveOwner = existingUsers.some((u) => u.role === 'owner' && u.status === 'active');
+    if (!hasActiveOwner) {
       const password = adminPasswordOverride || DEFAULT_BOOTSTRAP_PASSWORD;
       await storeArg.createUser({
         tenantId: DEFAULT_TENANT_ID,

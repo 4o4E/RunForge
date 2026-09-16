@@ -26,6 +26,7 @@ import { createPolicy } from '../tools/policy.js';
 import { isWithin } from '../tools/policy.js';
 import type { Response } from 'express';
 import type { LlmProviderState } from '../llm/types.js';
+import { RunActiveError } from '../store/types.js';
 
 export const api = Router();
 
@@ -36,6 +37,17 @@ function scopeOrReject(res: Response): Scope | null {
     return null;
   }
   return scope;
+}
+
+function sendRunActiveConflict(res: Response, err: unknown): boolean {
+  if (!(err instanceof RunActiveError)) return false;
+  res.status(409).json({
+    error: err.message,
+    code: err.code,
+    currentRunId: err.currentRunId,
+    currentStatus: err.currentStatus,
+  });
+  return true;
 }
 
 // 登录/刷新/登出不需要已建立的身份，必须挂在 requireApiAccess 之前
@@ -299,6 +311,7 @@ api.post('/threads/:id/runs', async (req, res) => {
       runtimeCapabilitiesSnapshot: await runtimeCapabilitiesSnapshotForNewRun(scope),
     });
   } catch (err) {
+    if (sendRunActiveConflict(res, err)) return;
     return res.status(400).json({ error: (err as Error).message });
   }
   // 后台执行：agent 循环在当前进程内运行，并通过 WebSocket 推送事件。
@@ -344,11 +357,17 @@ api.post('/runs/:id/branch', async (req, res) => {
   } catch (err) {
     return res.status(400).json({ error: (err as Error).message });
   }
-  const run = await store.createRun(scope, source.thread_id, input, {
-    modelRef,
-    parentRunId: source.parent_run_id,
-    runtimeCapabilitiesSnapshot: await runtimeCapabilitiesSnapshotForNewRun(scope),
-  });
+  let run;
+  try {
+    run = await store.createRun(scope, source.thread_id, input, {
+      modelRef,
+      parentRunId: source.parent_run_id,
+      runtimeCapabilitiesSnapshot: await runtimeCapabilitiesSnapshotForNewRun(scope),
+    });
+  } catch (err) {
+    if (sendRunActiveConflict(res, err)) return;
+    return res.status(400).json({ error: (err as Error).message });
+  }
   void executeRun(run.id, { scope });
   res.status(201).json({ id: run.id, threadId: source.thread_id, status: run.status });
 });
@@ -409,8 +428,14 @@ api.post('/runs/:id/continue', async (req, res) => {
   const message = lastStep > lastCompletedStep
     ? `正在继续生成：从第 ${lastCompletedStep} 个完整 step 后恢复；未完整落库的 step 只保留为事件审计，不进入模型上下文。`
     : '正在继续生成：从最近的持久化检查点恢复。';
+  try {
+    const resumed = await store.resumeRun(scope, run.id, ['error', 'pending'], { output: null, error: null });
+    if (!resumed) return res.status(409).json({ error: 'run 状态已变化，不能重复继续生成' });
+  } catch (err) {
+    if (sendRunActiveConflict(res, err)) return;
+    return res.status(500).json({ error: (err as Error).message });
+  }
   await store.addEvent(scope, run.id, null, { type: 'recovery', step: lastStep + 1, message });
-  await store.setRunStatus(scope, run.id, 'pending', { output: null, error: null });
   void executeRun(run.id, { resume: true, scope });
   res.json({ id: run.id, threadId: run.thread_id, status: 'running' });
 });
@@ -427,12 +452,15 @@ api.post('/runs/:id/answer', async (req, res) => {
   const answer = normalizeAnswer(req.body?.answer, spec);
   const invalid = validateAnswer(answer, spec);
   if (invalid) return res.status(400).json({ error: invalid });
-  await store.addMessage(scope, run.thread_id, run.id, null, {
-    role: 'user',
-    content: `用户回答：\n${formatAnswerForModel(answer)}`,
-  });
+  const answerContent = `用户回答：\n${formatAnswerForModel(answer)}`;
+  try {
+    const resumed = await store.resumeRun(scope, run.id, ['waiting_for_user'], { userMessageContent: answerContent });
+    if (!resumed) return res.status(409).json({ error: 'run 状态已变化，不能重复提交回答' });
+  } catch (err) {
+    if (sendRunActiveConflict(res, err)) return;
+    return res.status(500).json({ error: (err as Error).message });
+  }
   await store.addEvent(scope, run.id, null, { type: 'user_answer', step: (await store.getLastStepIndex(scope, run.id)) + 1, answer });
-  await store.setRunStatus(scope, run.id, 'pending');
   void executeRun(run.id, { resume: true, scope });
   res.json({ id: run.id, threadId: run.thread_id, status: 'running' });
 });

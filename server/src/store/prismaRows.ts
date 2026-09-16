@@ -1,6 +1,7 @@
 import type {
   auth_tokens,
   runs,
+  spaces,
   steps,
   system_admin_tokens,
   system_admins,
@@ -14,6 +15,7 @@ import type { GoalState } from '../agent/goal.js';
 import type {
   AuthTokenRow,
   RunRow,
+  SpaceRow,
   StepRow,
   SystemAdminRow,
   SystemAdminTokenRow,
@@ -52,9 +54,14 @@ export function toThreadRow(row: threads, fallbackTitle?: string | null): Thread
     id: row.id,
     tenant_id: row.tenant_id,
     user_id: row.user_id,
+    space_id: row.space_id,
+    source_type: row.source_type as ThreadRow['source_type'],
+    source_caller_id: row.source_caller_id,
+    source_ref: row.source_ref as Record<string, unknown>,
     title: row.title,
     fallback_title: fallbackTitle,
     active_run_id: row.active_run_id,
+    executing_run_id: row.executing_run_id,
     pinned_at: timestamp(row.pinned_at),
     archived_at: timestamp(row.archived_at),
     created_at: timestamp(row.created_at)!,
@@ -74,6 +81,11 @@ export function toRunRow(row: runs): RunRow {
     error: row.error,
     goal_state: row.goal_state as GoalState | null,
     runtime_capabilities_snapshot: row.runtime_capabilities_snapshot as Record<string, unknown> | null,
+    space_config_snapshot: row.space_config_snapshot as Record<string, unknown> | null,
+    space_config_version: row.space_config_version,
+    plugin_lock: row.plugin_lock as Record<string, unknown> | null,
+    external_input_open: row.external_input_open,
+    input_version: row.input_version,
     created_at: timestamp(row.created_at)!,
     updated_at: timestamp(row.updated_at)!,
   };
@@ -106,7 +118,24 @@ export function toTenantRow(row: tenants): TenantRow {
     id: row.id,
     name: row.name,
     status: row.status as TenantRow['status'],
+    default_space_id: row.default_space_id,
     created_at: timestamp(row.created_at)!,
+  };
+}
+
+export function toSpaceRow(row: spaces): SpaceRow {
+  return {
+    id: row.id,
+    tenant_id: row.tenant_id,
+    mode: row.mode as SpaceRow['mode'],
+    name: row.name,
+    execution_user_id: row.execution_user_id,
+    config: row.config as Record<string, unknown>,
+    config_version: row.config_version,
+    created_by_user_id: row.created_by_user_id,
+    deleted_at: timestamp(row.deleted_at),
+    created_at: timestamp(row.created_at)!,
+    updated_at: timestamp(row.updated_at)!,
   };
 }
 

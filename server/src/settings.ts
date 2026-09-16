@@ -264,6 +264,17 @@ function defaultRuntimeCapabilitiesSettings(): RuntimeCapabilitiesSettings {
   };
 }
 
+/** 新 tenant 创建事务使用的静态模板。PgStore 会再用 default tenant 当前已保存的
+ * 运行配置覆盖同名键，从而得到“当前系统模板”的独立副本；纯 UI 状态不在模板内。 */
+export function tenantSettingsTemplateEntries(): Array<{ key: string; value: unknown }> {
+  return [
+    ...toolSettingsToEntries(defaultToolSettings()).map(([key, value]) => ({ key, value })),
+    { key: MCP_SETTINGS_KEY, value: defaultMcpSettings() },
+    { key: LLM_SETTINGS_KEY, value: defaultLlmSettings() },
+    { key: RUNTIME_CAPABILITIES_SETTINGS_KEY, value: defaultRuntimeCapabilitiesSettings() },
+  ];
+}
+
 function rowsToMap(rows: SettingRow[]): Map<string, unknown> {
   return new Map(rows.map((row) => [row.key, row.value]));
 }
@@ -306,9 +317,8 @@ async function insertMissingDefaults(rows: SettingRow[]): Promise<void> {
   await insertMissingSettings(DEFAULT_TENANT_ID, missing);
 }
 
-/** 读取当前租户的工具配置:本租户覆盖 -> default 租户覆盖 -> env 默认值三层回退
- *  (docs/multi-tenancy-design.md §5)。配置表不可用时回退到 env 默认值,避免未迁移
- *  环境直接崩溃。 */
+/** 读取当前租户自己的工具配置。新 tenant 在创建事务中复制完整模板；若旧数据被
+ *  人工删成不完整，只回退 env 默认值，不再动态读取 default tenant，避免配置串租户。 */
 export async function getToolSettings(scope: TenantScope | Scope): Promise<ToolSettings> {
   try {
     const ownRows = await readSettingRows(scope.tenantId, TOOL_SETTING_KEYS);
@@ -316,12 +326,6 @@ export async function getToolSettings(scope: TenantScope | Scope): Promise<ToolS
     if (scope.tenantId === DEFAULT_TENANT_ID) {
       if (ownRows.length < TOOL_SETTING_KEYS.length) await insertMissingDefaults(ownRows);
       mergedMap = rowsToMap(await readSettingRows(DEFAULT_TENANT_ID, TOOL_SETTING_KEYS));
-    } else {
-      const missingKeys = TOOL_SETTING_KEYS.filter((key) => !mergedMap.has(key));
-      if (missingKeys.length) {
-        const defaultRows = await readSettingRows(DEFAULT_TENANT_ID, missingKeys);
-        mergedMap = new Map([...rowsToMap(defaultRows), ...mergedMap]);
-      }
     }
     const settings = mergeToolSettings(mergedMap);
     // workspaceRoot 永远按当前身份计算,不信任 app_settings 里存的字符串。
@@ -418,21 +422,13 @@ async function readTenantJsonSetting(tenantId: string, key: string): Promise<unk
   return findSetting(tenantId, key);
 }
 
-/** 本租户覆盖 -> default 租户覆盖 两层回退,给 mcp/llm 这类单行 JSON 配置用。 */
-async function readJsonSettingWithFallback(tenantId: string, key: string): Promise<unknown> {
-  const own = await readTenantJsonSetting(tenantId, key);
-  if (own !== undefined) return own;
-  if (tenantId === DEFAULT_TENANT_ID) return undefined;
-  return readTenantJsonSetting(DEFAULT_TENANT_ID, key);
-}
-
 async function upsertTenantJsonSetting(tenantId: string, key: string, value: unknown): Promise<void> {
   await upsertSettings(tenantId, [{ key, value }]);
 }
 
 export async function getMcpSettings(scope: TenantScope): Promise<McpSettings> {
   try {
-    const value = await readJsonSettingWithFallback(scope.tenantId, MCP_SETTINGS_KEY);
+    const value = await readTenantJsonSetting(scope.tenantId, MCP_SETTINGS_KEY);
     if (value === undefined) {
       const defaults = defaultMcpSettings();
       if (scope.tenantId === DEFAULT_TENANT_ID) {
@@ -527,7 +523,7 @@ export function normalizeLlmSettings(input: unknown): LlmSettings {
 
 export async function getLlmSettings(scope: TenantScope): Promise<LlmSettings> {
   try {
-    const value = await readJsonSettingWithFallback(scope.tenantId, LLM_SETTINGS_KEY);
+    const value = await readTenantJsonSetting(scope.tenantId, LLM_SETTINGS_KEY);
     if (value === undefined) {
       const defaults = defaultLlmSettings();
       if (scope.tenantId === DEFAULT_TENANT_ID) {

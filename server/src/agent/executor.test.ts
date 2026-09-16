@@ -1235,6 +1235,7 @@ test('executeRun: compacts bulky old history when finishing a run', async () => 
       toolCalls: [{ id: 'file-old', name: 'file_write', arguments: bigArgs }],
     });
     await store.addMessage(scope, thread.id, oldRun.id, null, { role: 'tool', content: 'x'.repeat(4000), toolCallId: 'file-old' });
+    await store.setRunStatus(scope, oldRun.id, 'done');
 
     const run = await store.createRun(scope, thread.id, 'new');
     const published: AgentEvent[] = [];

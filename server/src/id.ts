@@ -19,6 +19,15 @@ const ID_PREFIXES = {
   shellSession: 'ss',
   shellCommand: 'sc',
   subagentRun: 'sr',
+  space: 'sp',
+  externalCaller: 'ec',
+  externalToken: 'et',
+  externalRequest: 'er',
+  runInput: 'ri',
+  artifact: 'ar',
+  pluginDeployment: 'pd',
+  providerInvocation: 'pi',
+  providerAttempt: 'pa',
   tenant: 'tn',
   user: 'us',
   authToken: 'at',
@@ -136,6 +145,42 @@ export function newShellCommandId(): string {
 
 export function newSubagentRunId(): string {
   return newEntityId('subagentRun');
+}
+
+export function newSpaceId(): string {
+  return newEntityId('space');
+}
+
+export function newExternalCallerId(): string {
+  return newEntityId('externalCaller');
+}
+
+export function newExternalTokenId(): string {
+  return newEntityId('externalToken');
+}
+
+export function newExternalRequestId(): string {
+  return newEntityId('externalRequest');
+}
+
+export function newRunInputId(): string {
+  return newEntityId('runInput');
+}
+
+export function newArtifactId(): string {
+  return newEntityId('artifact');
+}
+
+export function newPluginDeploymentId(): string {
+  return newEntityId('pluginDeployment');
+}
+
+export function newProviderInvocationId(): string {
+  return newEntityId('providerInvocation');
+}
+
+export function newProviderAttemptId(): string {
+  return newEntityId('providerAttempt');
 }
 
 export function newTenantId(): string {
