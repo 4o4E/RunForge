@@ -276,6 +276,21 @@ export class PgStore implements Store {
     return row ? toThreadRow(row, row.runs_runs_thread_idTothreads[0]?.input ?? null) : null;
   }
 
+  async getThreadInSpaces(tenantId: string, id: string, spaceIds: string[]): Promise<ThreadRow | null> {
+    if (!spaceIds.length) return null;
+    const row = await prisma.threads.findFirst({
+      where: { id, tenant_id: tenantId, space_id: { in: spaceIds } },
+      include: {
+        runs_runs_thread_idTothreads: {
+          select: { input: true },
+          orderBy: [{ created_at: 'asc' }, { id: 'asc' }],
+          take: 1,
+        },
+      },
+    });
+    return row ? toThreadRow(row, row.runs_runs_thread_idTothreads[0]?.input ?? null) : null;
+  }
+
   async listThreads(scope: Scope, limit = 50, options: { archived?: boolean; spaceIds?: string[] } = {}): Promise<ThreadRow[]> {
     const rows = await prisma.threads.findMany({
       where: {

@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import type { FileShareAccess } from '@/api';
 import { RemoteFilesPanel } from './RemoteFilesPanel';
+import { WorkspaceFileContextProvider } from './WorkspaceFileContext';
 
 function readShareParams(): { path: string; share: FileShareAccess } | null {
   const params = new URLSearchParams(window.location.search);
@@ -9,8 +10,9 @@ function readShareParams(): { path: string; share: FileShareAccess } | null {
   const user = params.get('user')?.trim() ?? '';
   const expires = params.get('expires')?.trim() ?? '';
   const sig = params.get('sig')?.trim() ?? '';
+  const threadId = params.get('threadId')?.trim() || undefined;
   if (!path || !tenant || !user || !expires || !sig) return null;
-  return { path, share: { tenant, user, expires, sig } };
+  return { path, share: { tenant, user, threadId, expires, sig } };
 }
 
 export function ShareFileView() {
@@ -24,19 +26,21 @@ export function ShareFileView() {
   }
 
   return (
-    <main className="app-main-surface h-full min-h-0 overflow-hidden">
-      <RemoteFilesPanel
-        open
-        embedded
-        width={0}
-        previewPath={params.path}
-        shareAccess={params.share}
-        showAttach={false}
-        showShare={false}
-        showBrowser={false}
-        onClose={() => {}}
-        onAttach={() => {}}
-      />
-    </main>
+    <WorkspaceFileContextProvider threadId={params.share.threadId ?? null} shareAccess={params.share}>
+      <main className="app-main-surface h-full min-h-0 overflow-hidden">
+        <RemoteFilesPanel
+          open
+          embedded
+          width={0}
+          previewPath={params.path}
+          shareAccess={params.share}
+          showAttach={false}
+          showShare={false}
+          showBrowser={false}
+          onClose={() => {}}
+          onAttach={() => {}}
+        />
+      </main>
+    </WorkspaceFileContextProvider>
   );
 }

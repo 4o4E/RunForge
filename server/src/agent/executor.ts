@@ -38,7 +38,7 @@ import {
   type RunSpaceConfigSnapshot,
   type RuntimeCapabilitiesSnapshot,
 } from '../spaces/config.js';
-import { resolveThreadWorkspaceRoot } from '../files/workspaceRoot.js';
+import { resolveWorkspaceRootForThread } from '../files/workspaceRoot.js';
 import { externalArtifactMaterializer } from '../external/artifactMaterializer.js';
 import { attachExternalArtifactTokens, type ExternalArtifactTokenSource } from '../external/artifactProtocol.js';
 
@@ -669,10 +669,9 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     if (!deps.toolSettings) {
       const tenant = await store.findTenant(scope.tenantId);
       if (!tenant?.default_space_id) throw new Error(`tenant 缺少 default space：${scope.tenantId}`);
-      // 当前切片只让 external 空间切到 thread workspace；Web 文件 API/页面在阶段 6
-      // 一起切换，避免非 default Web 空间的上传仍落用户目录而 executor 已换目录。
-      if (spaceConfig?.mode === 'external' && initialThread.space_id !== tenant.default_space_id) {
-        toolSettings = { ...toolSettings, workspaceRoot: resolveThreadWorkspaceRoot(threadId) };
+      const workspace = resolveWorkspaceRootForThread(initialThread, tenant);
+      if (workspace.root !== toolSettings.workspaceRoot) {
+        toolSettings = { ...toolSettings, workspaceRoot: workspace.root };
         await mkdir(toolSettings.workspaceRoot, { recursive: true });
       }
     }

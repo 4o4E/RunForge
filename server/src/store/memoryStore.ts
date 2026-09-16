@@ -206,6 +206,11 @@ export class MemoryStore implements Store {
     if (!this.threadOwnedBy(thread, scope)) return null;
     return this.threadWithFallbackTitle(thread);
   }
+  async getThreadInSpaces(tenantId: string, id: string, spaceIds: string[]) {
+    const thread = this.threads.get(id);
+    if (!thread || thread.tenant_id !== tenantId || !spaceIds.includes(thread.space_id)) return null;
+    return this.threadWithFallbackTitle(thread);
+  }
   async listThreads(scope: Scope, limit = 50, options: { archived?: boolean; spaceIds?: string[] } = {}) {
     const archived = options.archived === true;
     const allowedSpaces = options.spaceIds ? new Set(options.spaceIds) : null;

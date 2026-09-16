@@ -10,6 +10,7 @@ import {
   type FileShareAccess,
 } from '@/api';
 import { Button } from '@/components/ui/button';
+import { useWorkspaceFileContext } from '@/components/WorkspaceFileContext';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -175,9 +176,10 @@ function PdfViewer({ url, title }: { url: string; title: string }) {
 }
 
 export function OfficePreview({ path, kind, shareAccess }: Props) {
+  const { threadId } = useWorkspaceFileContext();
   const url = kind === 'pdf'
-    ? shareAccess ? signedRemoteFileUrl(path, shareAccess) : remoteFileRawUrl(path)
-    : remoteFilePdfPreviewUrl(path, shareAccess);
+    ? shareAccess ? signedRemoteFileUrl(path, shareAccess) : remoteFileRawUrl(path, threadId)
+    : remoteFilePdfPreviewUrl(path, shareAccess, threadId);
 
   return <PdfViewer url={url} title={path} />;
 }

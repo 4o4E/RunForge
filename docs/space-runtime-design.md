@@ -265,6 +265,13 @@ Provider 调用前 materialize。文件写入和状态更新都可重试，进�
 - 文件工具路径围栏和 bwrap 只挂载当前执行 workspace。
 - 空间允许的 skill/workflow/plugin 由空间配置装配，不从其他 thread 的工作目录发现。
 
+当前实现约定：Web 文件接口使用 `threadId` 作为逻辑上下文参数，而不是接收真实目录。
+服务端先校验当前用户是否能访问该 thread/space，再按上述规则计算 workspace；不带
+`threadId` 的请求只兼容 default 空间的历史用户级 workspace。Web 空间的文件写入仍要求
+thread 属于当前用户，空间可见不代表能查看其他用户的 Web thread；external 空间允许可见
+用户读取产物，但拒绝文件写入和 Web shell。签名分享在非 default 空间会把 `threadId`
+纳入 HMAC，防止同一路径的链接被换到另一个 thread 重放。
+
 ## 8. Cordis 插件和能力注册
 
 Cordis 只负责业务插件的服务依赖和生命周期，不替换 Agent loop、Store、模型调用和事件
@@ -471,9 +478,9 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
 
 ### 阶段 6：Workspace 与文件能力
 
-- default 空间保持用户级 workspace。
-- 其他空间使用 `{workspaceBase}/{threadId}`。
-- 文件、shell、预览、artifact 和分享统一走 thread 归属校验。
+- ✅ default 空间保持用户级 workspace。
+- ✅ 其他空间使用 `{workspaceBase}/{threadId}`。
+- ✅ 文件、shell、预览、artifact 和分享统一走 thread 归属校验。
 
 ### 阶段 7：Web 页面
 

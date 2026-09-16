@@ -1,5 +1,6 @@
 import { join, resolve } from 'node:path';
 import { config } from '../config.js';
+import { scopeForThread, type TenantRow, type ThreadRow } from '../store/types.js';
 
 export interface WorkspaceScope {
   tenantId: string;
@@ -30,4 +31,17 @@ export function resolveWorkspaceRoot(scope: WorkspaceScope | string, base: strin
 /** 非 default 空间按全局唯一 thread ID 使用短路径，不重复 tenant/space/user 层级。 */
 export function resolveThreadWorkspaceRoot(threadId: string, base: string = config.tools.workspaceRoot): string {
   return resolve(join(base, safeSegment(threadId)));
+}
+
+/** default 空间沿用历史用户级 workspace；其他空间统一使用 thread 短路径。
+ * thread 创建后 space/user 均不可迁移，因此这个映射在整个 thread 生命周期内稳定。 */
+export function resolveWorkspaceRootForThread(
+  thread: ThreadRow,
+  tenant: Pick<TenantRow, 'default_space_id'>,
+  base: string = config.tools.workspaceRoot,
+): { kind: 'user' | 'thread'; root: string } {
+  if (thread.space_id === tenant.default_space_id) {
+    return { kind: 'user', root: resolveWorkspaceRoot(scopeForThread(thread), base) };
+  }
+  return { kind: 'thread', root: resolveThreadWorkspaceRoot(thread.id, base) };
 }

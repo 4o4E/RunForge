@@ -5,13 +5,12 @@ import { mkdir, open as openFile, readdir, readFile, rename, rm, stat, writeFile
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Request, Response } from 'express';
-import { getToolSettings } from '../settings.js';
-import { resolveWorkspaceRoot } from '../files/workspaceRoot.js';
+import { resolveThreadWorkspaceRoot, resolveWorkspaceRoot } from '../files/workspaceRoot.js';
+import { threadWorkspaceAccess, ThreadWorkspaceAccessError } from '../files/threadWorkspace.js';
 import { ensureOfficePdfPreview, isOfficeConvertiblePath } from '../files/officePreview.js';
 import { mediaTypeFromPath, normalizeRemotePath, streamWorkspaceFile, toRemotePath, workspaceRoot } from '../files/workspace.js';
 import { clampShareTtlSeconds, signFileShare, verifyFileShare } from './auth.js';
 import { resolveIdentityFromAuthorizationHeader } from '../auth/resolve.js';
-import { requireScope } from '../auth/context.js';
 import { requireTenantScope } from '../auth/guards.js';
 
 const SMALL_FILE_BYTES = 200 * 1024;
@@ -52,13 +51,15 @@ function canonicalRemotePath(abs: string, configuredRoot: string): string {
   return remotePath === '.' ? '' : remotePath;
 }
 
-function rawFileUrl(path: string, tenantId: string, userId: string, expires: number, sig: string): string {
+function rawFileUrl(path: string, tenantId: string, userId: string, expires: number, sig: string, threadId?: string | null): string {
   const params = new URLSearchParams({ path, tenant: tenantId, user: userId, expires: String(expires), sig });
+  if (threadId) params.set('threadId', threadId);
   return `/api/files/raw?${params.toString()}`;
 }
 
-function sharePageUrl(path: string, tenantId: string, userId: string, expires: number, sig: string): string {
+function sharePageUrl(path: string, tenantId: string, userId: string, expires: number, sig: string, threadId?: string | null): string {
   const params = new URLSearchParams({ path, tenant: tenantId, user: userId, expires: String(expires), sig });
+  if (threadId) params.set('threadId', threadId);
   return `/share/file?${params.toString()}`;
 }
 
@@ -67,32 +68,82 @@ function fileName(path: string): string {
   return parts.at(-1) || path || 'file';
 }
 
-/** 签名分享链接没有请求身份，tenantId/userId 只能来自调用方自己声明的 query，
- *  且必须和签名当时绑定的身份一致——否则改 query 就能把签名重放到别人的用户
- *  workspaceRoot。 */
+type FileAccessMode = 'read' | 'write';
+
+interface FileAccess {
+  tenantId: string;
+  userId: string;
+  threadId: string | null;
+  workspaceRoot: string;
+  workspaceKey: string;
+  file: string;
+}
+
+function requestedThreadId(req: Request): string | null {
+  const raw = req.method === 'GET' ? req.query.threadId : req.body?.threadId;
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+}
+
+function sendFileError(res: Response, error: unknown): void {
+  if (error instanceof ThreadWorkspaceAccessError) {
+    res.status(error.status).json({ error: error.message, code: error.code });
+    return;
+  }
+  res.status(400).json({ error: (error as Error).message });
+}
+
+/** 已登录请求先按可见空间和 thread 归属授权，再计算 workspace；签名分享没有身份，
+ *  因此 tenant/user/threadId 都必须进入 HMAC。带 threadId 的分享只表示非 default
+ *  thread workspace，default 空间仍生成历史用户级链接。 */
 async function resolveFileAccess(
   req: Request,
   res: Response,
   requestedPath: unknown,
-): Promise<{ tenantId: string; userId: string; workspaceRoot: string; file: string } | null> {
-  const identity = await resolveIdentityFromAuthorizationHeader(req.headers.authorization);
-  // 只有租户身份才能直接读工作区文件；系统管理员不能借着这条路径绕过审计去看任意租户的文件
-  // (docs/multi-tenancy-design.md §4)。免身份的签名分享链接不受影响，走下面的签名校验分支。
+  mode: FileAccessMode = 'read',
+): Promise<FileAccess | null> {
+  const signedRequest = req.method === 'GET'
+    && typeof req.query.sig === 'string'
+    && typeof req.query.expires === 'string';
+  const identity = signedRequest ? null : await resolveIdentityFromAuthorizationHeader(req.headers.authorization);
   if (identity?.scope === 'tenant') {
-    const root = resolveWorkspaceRoot(identity);
-    return { tenantId: identity.tenantId, userId: identity.userId, workspaceRoot: root, file: normalizeRemotePath(requestedPath, root) };
+    try {
+      // 系统管理员不能借这条普通文件路径绕过审计；这里只有租户身份可以进入。
+      const workspace = await threadWorkspaceAccess.resolveForWeb(identity, requestedThreadId(req), mode);
+      await mkdir(workspace.root, { recursive: true });
+      return {
+        tenantId: identity.tenantId,
+        userId: identity.userId,
+        threadId: workspace.threadId,
+        workspaceRoot: workspace.root,
+        workspaceKey: workspace.kind === 'thread' ? `thread:${workspace.threadId}` : `user:${identity.userId}`,
+        file: normalizeRemotePath(requestedPath, workspace.root),
+      };
+    } catch (error) {
+      sendFileError(res, error);
+      return null;
+    }
   }
   const tenantId = typeof req.query.tenant === 'string' && req.query.tenant.trim() ? req.query.tenant.trim() : 'default';
   const userId = typeof req.query.user === 'string' && req.query.user.trim() ? req.query.user.trim() : '';
+  const threadId = requestedThreadId(req);
   if (!userId) {
     res.status(403).json({ error: '文件分享缺少用户身份' });
     return null;
   }
-  const root = resolveWorkspaceRoot({ tenantId, userId });
+  const root = threadId
+    ? resolveThreadWorkspaceRoot(threadId)
+    : resolveWorkspaceRoot({ tenantId, userId });
   const file = normalizeRemotePath(requestedPath, root);
   const path = canonicalRemotePath(file, root);
-  if (verifyFileShare(path, tenantId, userId, req.query.expires, req.query.sig)) {
-    return { tenantId, userId, workspaceRoot: root, file };
+  if (verifyFileShare(path, tenantId, userId, req.query.expires, req.query.sig, undefined, threadId)) {
+    return {
+      tenantId,
+      userId,
+      threadId,
+      workspaceRoot: root,
+      workspaceKey: threadId ? `thread:${threadId}` : `user:${userId}`,
+      file,
+    };
   }
   res.status(403).json({ error: '文件分享签名无效或已过期' });
   return null;
@@ -139,20 +190,17 @@ export function parseByteRange(header: unknown, size: number): ByteRangeResult {
   return { start, end: Math.min(end, size - 1) };
 }
 
-filesApi.get('/info', requireTenantScope, async (_req, res) => {
-  const scope = requireScope();
-  if (!scope) return res.status(403).json({ error: '需要租户身份' });
-  const settings = await getToolSettings(scope);
-  const root = workspaceRoot(settings.workspaceRoot);
-  res.json({ workspaceRoot: root, rootPath: toRemotePath(root, settings.workspaceRoot) });
+filesApi.get('/info', requireTenantScope, async (req, res) => {
+  const access = await resolveFileAccess(req, res, '.');
+  if (!access) return;
+  res.json({ workspaceRoot: access.workspaceRoot, rootPath: '.' });
 });
 
 filesApi.get('/list', requireTenantScope, async (req, res) => {
-  const scope = requireScope();
-  if (!scope) return res.status(403).json({ error: '需要租户身份' });
   try {
-    const settings = await getToolSettings(scope);
-    const dir = normalizeRemotePath(req.query.path, settings.workspaceRoot);
+    const access = await resolveFileAccess(req, res, req.query.path);
+    if (!access) return;
+    const dir = access.file;
     const info = await stat(dir);
     if (!info.isDirectory()) return res.status(400).json({ error: 'path 不是目录' });
 
@@ -162,7 +210,7 @@ filesApi.get('/list', requireTenantScope, async (req, res) => {
         const s = await stat(abs);
         return {
           name,
-          path: toRemotePath(abs, settings.workspaceRoot),
+          path: toRemotePath(abs, access.workspaceRoot),
           type: s.isDirectory() ? 'dir' : 'file',
           size: s.size,
           updatedAt: s.mtime.toISOString(),
@@ -171,36 +219,34 @@ filesApi.get('/list', requireTenantScope, async (req, res) => {
     );
 
     entries.sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1));
-    res.json({ path: toRemotePath(dir, settings.workspaceRoot), parent: parentRemotePath(dir, settings.workspaceRoot), entries });
+    res.json({ path: toRemotePath(dir, access.workspaceRoot), parent: parentRemotePath(dir, access.workspaceRoot), entries });
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    sendFileError(res, err);
   }
 });
 
 filesApi.post('/upload', requireTenantScope, async (req, res) => {
-  const scope = requireScope();
-  if (!scope) return res.status(403).json({ error: '需要租户身份' });
   try {
-    const settings = await getToolSettings(scope);
-    const targetPath = normalizeRemotePath(req.body?.path, settings.workspaceRoot);
+    const access = await resolveFileAccess(req, res, req.body?.path, 'write');
+    if (!access) return;
+    const targetPath = access.file;
     const contentBase64 = String(req.body?.contentBase64 ?? '');
     if (!contentBase64) return res.status(400).json({ error: 'contentBase64 为必填' });
 
     const content = Buffer.from(contentBase64, 'base64');
     await mkdir(dirname(targetPath), { recursive: true });
     await writeFile(targetPath, content);
-    res.status(201).json({ path: toRemotePath(targetPath, settings.workspaceRoot), size: content.length });
+    res.status(201).json({ path: toRemotePath(targetPath, access.workspaceRoot), size: content.length });
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    sendFileError(res, err);
   }
 });
 
 filesApi.get('/content', requireTenantScope, async (req, res) => {
-  const scope = requireScope();
-  if (!scope) return res.status(403).json({ error: '需要租户身份' });
   try {
-    const root = resolveWorkspaceRoot(scope);
-    const file = normalizeRemotePath(req.query.path, root);
+    const access = await resolveFileAccess(req, res, req.query.path);
+    if (!access) return;
+    const { file, workspaceRoot: root } = access;
     const info = await stat(file);
     if (!info.isFile()) return res.status(400).json({ error: 'path 不是文件' });
     if (info.size > MAX_TEXT_FILE_BYTES) return res.status(413).json({ error: `文件超过文本编辑上限 ${MAX_TEXT_FILE_BYTES} 字节` });
@@ -210,17 +256,16 @@ filesApi.get('/content', requireTenantScope, async (req, res) => {
     const content = buffer.toString('utf8');
     res.json({ path: toRemotePath(file, root), content, version: textVersion(info, buffer) });
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    sendFileError(res, err);
   }
 });
 
 filesApi.put('/content', requireTenantScope, async (req, res) => {
-  const scope = requireScope();
-  if (!scope) return res.status(403).json({ error: '需要租户身份' });
   let tempPath = '';
   try {
-    const root = resolveWorkspaceRoot(scope);
-    const file = normalizeRemotePath(req.body?.path, root);
+    const access = await resolveFileAccess(req, res, req.body?.path, 'write');
+    if (!access) return;
+    const { file, workspaceRoot: root } = access;
     const content = typeof req.body?.content === 'string' ? req.body.content : null;
     const baseSha256 = typeof req.body?.baseSha256 === 'string' ? req.body.baseSha256 : '';
     const force = req.body?.force === true;
@@ -245,31 +290,30 @@ filesApi.put('/content', requireTenantScope, async (req, res) => {
     res.json({ path: toRemotePath(file, root), size: nextInfo.size, version: textVersion(nextInfo, Buffer.from(content, 'utf8')) });
   } catch (err) {
     if (tempPath) await rm(tempPath, { force: true }).catch(() => undefined);
-    res.status(400).json({ error: (err as Error).message });
+    sendFileError(res, err);
   }
 });
 
 filesApi.post('/share-link', requireTenantScope, async (req, res) => {
-  const scope = requireScope();
-  if (!scope) return res.status(403).json({ error: '需要租户身份' });
   try {
-    const settings = await getToolSettings(scope);
-    const file = normalizeRemotePath(req.body?.path, settings.workspaceRoot);
+    const access = await resolveFileAccess(req, res, req.body?.path);
+    if (!access) return;
+    const { file, workspaceRoot: root } = access;
     const info = await stat(file);
     if (!info.isFile()) return res.status(400).json({ error: 'path 不是文件' });
 
-    const path = canonicalRemotePath(file, settings.workspaceRoot);
+    const path = canonicalRemotePath(file, root);
     const ttlSeconds = clampShareTtlSeconds(req.body?.ttlSeconds);
     const expires = Math.floor(Date.now() / 1000) + ttlSeconds;
-    const sig = signFileShare(path, scope.tenantId, scope.userId, expires);
+    const sig = signFileShare(path, access.tenantId, access.userId, expires, access.threadId);
     res.status(201).json({
       path,
       expiresAt: new Date(expires * 1000).toISOString(),
-      url: sharePageUrl(path, scope.tenantId, scope.userId, expires, sig),
-      rawUrl: rawFileUrl(path, scope.tenantId, scope.userId, expires, sig),
+      url: sharePageUrl(path, access.tenantId, access.userId, expires, sig, access.threadId),
+      rawUrl: rawFileUrl(path, access.tenantId, access.userId, expires, sig, access.threadId),
     });
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    sendFileError(res, err);
   }
 });
 
@@ -328,7 +372,7 @@ filesApi.get('/preview', async (req, res) => {
       hasMore,
     });
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    sendFileError(res, err);
   }
 });
 
@@ -369,7 +413,7 @@ filesApi.get('/hex', async (req, res) => {
       hasMore,
     });
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    sendFileError(res, err);
   }
 });
 
@@ -377,13 +421,13 @@ filesApi.get('/pdf-preview', async (req, res) => {
   try {
     const access = await resolveFileAccess(req, res, req.query.path);
     if (!access) return;
-    const { file, workspaceRoot: root, tenantId, userId } = access;
+    const { file, workspaceRoot: root, tenantId, workspaceKey } = access;
     const info = await stat(file);
     if (!info.isFile()) return res.status(400).json({ error: 'path 不是文件' });
     if (!isOfficeConvertiblePath(file)) return res.status(415).json({ error: '当前文件类型不支持 PDF 预览' });
 
     const remotePath = canonicalRemotePath(file, root);
-    const pdfPath = await ensureOfficePdfPreview({ tenantId, userId, file, remotePath, size: info.size, mtimeMs: info.mtimeMs });
+    const pdfPath = await ensureOfficePdfPreview({ tenantId, workspaceKey, file, remotePath, size: info.size, mtimeMs: info.mtimeMs });
     const pdfInfo = await stat(pdfPath);
     const range = parseByteRange(req.headers.range, pdfInfo.size);
 
@@ -448,6 +492,6 @@ filesApi.get('/raw', async (req, res) => {
     res.setHeader('Content-Length', String(info.size));
     streamWorkspaceFile(file).pipe(res);
   } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
+    sendFileError(res, err);
   }
 });

@@ -380,7 +380,7 @@ other tenants: ${TOOL_WORKSPACE_ROOT_BASE}/tenants/<tenant_id>/users/<user_id>/w
 - 没有 `userId` 的 `resolveWorkspaceRoot({ tenantId })` 只返回租户基础目录,用于启动日志等不代表具体用户的场景;工具执行、文件 API、shell session 都必须传入完整 `{ tenantId, userId }`。
 - `normalizeRemotePath`/`isWithin`(`server/src/files/workspace.ts`)的围栏逻辑不需要改——它们已经是"给定一个 root,判断路径是否在 root 内",只要传入的 root 换成用户专属路径即可。
 - Office 预览缓存(`server/src/files/officePreview.ts`)的 `officeCacheDir` 同理按租户 + 用户分目录,`officePdfCacheKey` 的哈希输入也带 `tenantId`/`userId`(目录隔离和哈希隔离是两个独立的加固点,防止未来目录结构变化时退化成只靠哈希去重)。
-- 签名文件分享链接(`/api/files/{raw,preview,hex,pdf-preview}` 的免身份分支)本身不带身份,匿名访问时的 `tenantId`/`userId` 只能来自请求方自己在 query 里声明的 `tenant`/`user` 参数——`signFileShare`/`verifyFileShare` 把二者一起签进 HMAC,防止篡改 query 让同一个签名在另一个用户的 workspaceRoot 下"重放"。
+- 签名文件分享链接(`/api/files/{raw,preview,hex,pdf-preview}` 的免身份分支)本身不带身份,匿名访问时的 `tenantId`/`userId` 只能来自请求方自己在 query 里声明的 `tenant`/`user` 参数——`signFileShare`/`verifyFileShare` 把二者一起签进 HMAC；非 default 空间还会签入 `threadId`，防止篡改 query 让同一个签名在另一个用户或 thread workspace 下"重放"。
 - 单租户部署:`tenant_id = 'default'` 时不额外套 `tenants/default/` 前缀,但仍按 `users/<user_id>/workspace` 分离同租户用户;已有全局 workspace 文件需要按用户迁移或复制到对应用户目录。
 
 ---
@@ -430,7 +430,7 @@ other tenants: ${TOOL_WORKSPACE_ROOT_BASE}/tenants/<tenant_id>/users/<user_id>/w
 - `web/src/api.ts` 里的 `authHeaders` 从"读一个固定 token"变成"读内存里的 access token";access token 只存内存(page 生命周期内的变量),`refreshToken` 存 `localStorage`(与现状"token 存本地"的存储方式保持一致,权衡见下)。
 - 请求拦截逻辑:每次请求前检查 access token 是否临近过期(或收到 401 后),先用 `refreshToken` 调 `POST /api/auth/refresh` 静默换新 token 再重试一次;`refreshToken` 本身也失效(过期/被吊销)则清空本地状态,跳转登录页。
 - WebSocket 连接时用当前 access token 作为 `runforge-token.<base64>` 子协议值;access token 中途过期不会主动断连,但重连时(网络抖动、页面恢复)需要用最新 access token 重建连接。
-- `RemoteFilesPanel.tsx` 等文件类组件操作的 `path` 字符串保持"相对当前 workspace 根"的语义不变——隔离发生在后端把 `path` 解析成实际磁盘路径这一步(§6),前端不需要知道自己在哪个租户下,也不需要感知 `tenant_id`/`user_id` 字段本身,这些完全由 JWT 隐式携带。
+- `RemoteFilesPanel.tsx` 等文件类组件操作的 `path` 字符串保持"相对当前 workspace 根"的语义不变——隔离发生在后端把 `path` 解析成实际磁盘路径这一步(§6)。前端只传当前逻辑 `threadId`，不接触真实目录，也不需要感知 `tenant_id`/`user_id` 字段；后两者由 JWT 隐式携带。
 - 安全权衡:access token 存内存 + 短过期时间,是为了在"前端有 XSS 风险时,被偷到的 token 影响面尽量小"和"不引入 httpOnly cookie + CSRF 防护这一整套额外机制"之间选一个够用的折中;`refreshToken` 仍是长期有效凭证,若要进一步收紧,可以把它也换成 httpOnly cookie(需要后端配合处理 CORS/CSRF),这一步作为后续加固项,不在本次范围内展开。
 
 ### 管理界面(Phase 3):三层登录入口拓扑

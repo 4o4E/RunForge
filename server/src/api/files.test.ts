@@ -10,6 +10,8 @@ import { isOfficeConvertiblePath, officePdfCacheKey } from '../files/officePrevi
 import { resolveThreadWorkspaceRoot, resolveWorkspaceRoot } from '../files/workspaceRoot.js';
 import { signTenantAccessToken } from '../auth/jwt.js';
 import { buildApp, listen, seedOwner } from './testHelpers.js';
+import { spaceAccess } from '../spaces/access.js';
+import { store } from '../store/index.js';
 
 test('render preview keeps long lines intact', () => {
   const longLine = `const DATA = ${'x'.repeat(13_000)};`;
@@ -54,6 +56,10 @@ test('file share signature binds path and expiry', () => {
     assert.equal(verifyFileShare('artifacts/report.html', 'default', 'us_a', String(expires), sig, 2001), false);
     assert.equal(verifyFileShare('artifacts/report.html', 'other-tenant', 'us_a', String(expires), sig, 1000), false);
     assert.equal(verifyFileShare('artifacts/report.html', 'default', 'us_b', String(expires), sig, 1000), false);
+
+    const threadSig = signFileShare('artifacts/report.html', 'default', 'us_a', expires, 'th_a');
+    assert.equal(verifyFileShare('artifacts/report.html', 'default', 'us_a', String(expires), threadSig, 1000, 'th_a'), true);
+    assert.equal(verifyFileShare('artifacts/report.html', 'default', 'us_a', String(expires), threadSig, 1000, 'th_b'), false);
   } finally {
     config.auth.accessToken = previousAccessToken;
     config.auth.shareSecret = previousShareSecret;
@@ -77,12 +83,12 @@ test('office pdf preview only accepts office documents', () => {
 });
 
 test('office pdf cache key changes when source metadata changes', () => {
-  const base = { tenantId: 'default', userId: 'us_a', remotePath: 'artifacts/demo.pptx', size: 10, mtimeMs: 100, converterUrl: 'http://converter:3000' };
+  const base = { tenantId: 'default', workspaceKey: 'user:us_a', remotePath: 'artifacts/demo.pptx', size: 10, mtimeMs: 100, converterUrl: 'http://converter:3000' };
   assert.equal(officePdfCacheKey(base), officePdfCacheKey(base));
   assert.notEqual(officePdfCacheKey(base), officePdfCacheKey({ ...base, mtimeMs: 101 }));
   assert.notEqual(officePdfCacheKey(base), officePdfCacheKey({ ...base, cacheVersion: 'fonts-v2' }));
   assert.notEqual(officePdfCacheKey(base), officePdfCacheKey({ ...base, tenantId: 'other-tenant' }));
-  assert.notEqual(officePdfCacheKey(base), officePdfCacheKey({ ...base, userId: 'us_b' }));
+  assert.notEqual(officePdfCacheKey(base), officePdfCacheKey({ ...base, workspaceKey: 'thread:th_b' }));
 });
 
 test('file content API saves text with version conflict protection', async () => {
@@ -125,6 +131,104 @@ test('file content API saves text with version conflict protection', async () =>
     }
   } finally {
     config.tools.workspaceRoot = previousWorkspaceRoot;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('file API resolves non-default thread workspace and binds signed links to the thread', async () => {
+  const previousWorkspaceRoot = config.tools.workspaceRoot;
+  const previousShareSecret = config.auth.shareSecret;
+  const base = await mkdtemp(join(tmpdir(), 'runforge-thread-files-'));
+  config.tools.workspaceRoot = base;
+  config.auth.shareSecret = 'thread-file-share-secret';
+  try {
+    const tenantId = 'tn_thread_files';
+    const owner = await seedOwner(tenantId, 'owner@thread-files.test', 'pw');
+    const otherOwner = await seedOwner('tn_thread_files_other', 'owner@thread-files-other.test', 'pw');
+    const ownerIdentity = { scope: 'tenant' as const, tenantId, userId: owner.id, role: 'owner' as const };
+    const space = await spaceAccess.create(ownerIdentity, { mode: 'web', name: 'Isolated Files' });
+    const scope = { tenantId, userId: owner.id };
+    const thread = await store.createThread(scope, 'isolated', { spaceId: space.id });
+    const secondThread = await store.createThread(scope, 'isolated-2', { spaceId: space.id });
+    const defaultSpace = await store.getDefaultSpace(tenantId);
+    assert.ok(defaultSpace);
+    const defaultThread = await store.createThread(scope, 'default', { spaceId: defaultSpace.id });
+
+    const userRoot = resolveWorkspaceRoot(scope, base);
+    const threadRoot = resolveThreadWorkspaceRoot(thread.id, base);
+    const secondThreadRoot = resolveThreadWorkspaceRoot(secondThread.id, base);
+    await mkdir(userRoot, { recursive: true });
+    await mkdir(threadRoot, { recursive: true });
+    await mkdir(secondThreadRoot, { recursive: true });
+    await writeFile(join(userRoot, 'same.txt'), 'user workspace', 'utf8');
+    await writeFile(join(threadRoot, 'same.txt'), 'thread workspace', 'utf8');
+    await writeFile(join(secondThreadRoot, 'same.txt'), 'second thread workspace', 'utf8');
+
+    const ownerToken = signTenantAccessToken({ id: owner.id, tenantId, role: 'owner' });
+    const otherToken = signTenantAccessToken({ id: otherOwner.id, tenantId: 'tn_thread_files_other', role: 'owner' });
+    const { port, close } = await listen(buildApp());
+    const apiBase = `http://127.0.0.1:${port}/api/files`;
+    try {
+      const ownerHeaders = { Authorization: `Bearer ${ownerToken}` };
+      const isolated = await fetch(`${apiBase}/content?path=same.txt&threadId=${thread.id}`, { headers: ownerHeaders });
+      assert.equal(isolated.status, 200);
+      assert.equal(((await isolated.json()) as { content: string }).content, 'thread workspace');
+
+      const secondIsolated = await fetch(`${apiBase}/content?path=same.txt&threadId=${secondThread.id}`, { headers: ownerHeaders });
+      assert.equal(secondIsolated.status, 200);
+      assert.equal(((await secondIsolated.json()) as { content: string }).content, 'second thread workspace');
+
+      const legacy = await fetch(`${apiBase}/content?path=same.txt`, { headers: ownerHeaders });
+      assert.equal(legacy.status, 200);
+      assert.equal(((await legacy.json()) as { content: string }).content, 'user workspace');
+
+      const defaultByThread = await fetch(`${apiBase}/content?path=same.txt&threadId=${defaultThread.id}`, { headers: ownerHeaders });
+      assert.equal(defaultByThread.status, 200);
+      assert.equal(((await defaultByThread.json()) as { content: string }).content, 'user workspace');
+
+      const threadShells = await fetch(`http://127.0.0.1:${port}/api/shell-sessions?threadId=${thread.id}`, { headers: ownerHeaders });
+      assert.equal(threadShells.status, 200);
+      const threadShellBody = (await threadShells.json()) as { sessions: Array<{ workspace_root: string }> };
+      assert.equal(threadShellBody.sessions[0]?.workspace_root, threadRoot);
+
+      const defaultShells = await fetch(`http://127.0.0.1:${port}/api/shell-sessions?threadId=${defaultThread.id}`, { headers: ownerHeaders });
+      assert.equal(defaultShells.status, 200);
+      const defaultShellBody = (await defaultShells.json()) as { sessions: Array<{ workspace_root: string }> };
+      assert.equal(defaultShellBody.sessions[0]?.workspace_root, userRoot);
+
+      const crossTenant = await fetch(`${apiBase}/content?path=same.txt&threadId=${thread.id}`, {
+        headers: { Authorization: `Bearer ${otherToken}` },
+      });
+      assert.equal(crossTenant.status, 404);
+
+      const share = await fetch(`${apiBase}/share-link`, {
+        method: 'POST',
+        headers: { ...ownerHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: 'same.txt', threadId: thread.id, ttlSeconds: 600 }),
+      });
+      assert.equal(share.status, 201);
+      const shareBody = (await share.json()) as { rawUrl: string };
+      const sharedUrl = new URL(shareBody.rawUrl, `http://127.0.0.1:${port}`);
+      assert.equal(sharedUrl.searchParams.get('threadId'), thread.id);
+      const shared = await fetch(sharedUrl);
+      assert.equal(shared.status, 200);
+      assert.equal(await shared.text(), 'thread workspace');
+
+      const sharedWhileLoggedInElsewhere = await fetch(sharedUrl, {
+        headers: { Authorization: `Bearer ${otherToken}` },
+      });
+      assert.equal(sharedWhileLoggedInElsewhere.status, 200);
+      assert.equal(await sharedWhileLoggedInElsewhere.text(), 'thread workspace');
+
+      sharedUrl.searchParams.set('threadId', secondThread.id);
+      const tampered = await fetch(sharedUrl);
+      assert.equal(tampered.status, 403);
+    } finally {
+      close();
+    }
+  } finally {
+    config.tools.workspaceRoot = previousWorkspaceRoot;
+    config.auth.shareSecret = previousShareSecret;
     await rm(base, { recursive: true, force: true });
   }
 });

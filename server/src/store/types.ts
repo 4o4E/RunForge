@@ -395,6 +395,10 @@ export interface SystemAdminTokenRow {
 export interface Store {
   createThread(scope: Scope, title?: string, options?: { spaceId?: string }): Promise<ThreadRow>;
   getThread(scope: Scope, id: string): Promise<ThreadRow | null>;
+  /** Web 只读入口使用的空间视图查询。调用方必须先通过 SpaceAccessService 得到
+   * 可见空间列表；Store 再把 tenant、thread 和这些 space 一起放进查询条件，
+   * 避免为了查看 external thread 冒充 execution user。 */
+  getThreadInSpaces(tenantId: string, id: string, spaceIds: string[]): Promise<ThreadRow | null>;
   listThreads(scope: Scope, limit?: number, options?: { archived?: boolean; spaceIds?: string[] }): Promise<ThreadRow[]>;
   updateThread(
     scope: Scope,

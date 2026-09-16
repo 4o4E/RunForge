@@ -72,6 +72,7 @@ export interface FileShareLink {
 export interface FileShareAccess {
   tenant: string;
   user: string;
+  threadId?: string;
   expires: string;
   sig: string;
 }
@@ -310,88 +311,106 @@ export const updateThread = (id: string, input: ThreadUpdateInput) =>
     body: JSON.stringify(input),
   }).then(json<Thread>);
 
-export const listRemoteFiles = (path = '.') =>
-  authFetch(`/api/files/list?path=${encodeURIComponent(path)}`).then(json<RemoteFileList>);
+function fileQuery(path: string, threadId?: string | null): URLSearchParams {
+  const params = new URLSearchParams({ path });
+  if (threadId) params.set('threadId', threadId);
+  return params;
+}
 
-export const getRemoteFileInfo = () => authFetch('/api/files/info').then(json<RemoteFileInfo>);
+export const listRemoteFiles = (path = '.', threadId?: string | null) =>
+  authFetch(`/api/files/list?${fileQuery(path, threadId).toString()}`).then(json<RemoteFileList>);
 
-export const previewRemoteFile = (path: string, startLine = 1, limit = 200, options: { render?: boolean; share?: FileShareAccess } = {}) => {
+export const getRemoteFileInfo = (threadId?: string | null) => {
+  const params = fileQuery('.', threadId);
+  params.delete('path');
+  const query = params.toString();
+  return authFetch(`/api/files/info${query ? `?${query}` : ''}`).then(json<RemoteFileInfo>);
+};
+
+export const previewRemoteFile = (path: string, startLine = 1, limit = 200, options: { render?: boolean; share?: FileShareAccess; threadId?: string | null } = {}) => {
   const params = new URLSearchParams({
     path,
     startLine: String(startLine),
     limit: String(limit),
   });
+  if (options.threadId) params.set('threadId', options.threadId);
   if (options.render) params.set('render', '1');
   if (options.share) {
     params.set('tenant', options.share.tenant);
     params.set('user', options.share.user);
     params.set('expires', options.share.expires);
     params.set('sig', options.share.sig);
+    if (options.share.threadId) params.set('threadId', options.share.threadId);
   }
   return authFetch(`/api/files/preview?${params.toString()}`).then(json<FilePreview>);
 };
 
-export const previewRemoteFileHex = (path: string, offset = 0, limit = 4096, options: { share?: FileShareAccess } = {}) => {
+export const previewRemoteFileHex = (path: string, offset = 0, limit = 4096, options: { share?: FileShareAccess; threadId?: string | null } = {}) => {
   const params = new URLSearchParams({
     path,
     offset: String(offset),
     limit: String(limit),
   });
+  if (options.threadId) params.set('threadId', options.threadId);
   if (options.share) {
     params.set('tenant', options.share.tenant);
     params.set('user', options.share.user);
     params.set('expires', options.share.expires);
     params.set('sig', options.share.sig);
+    if (options.share.threadId) params.set('threadId', options.share.threadId);
   }
   return authFetch(`/api/files/hex?${params.toString()}`).then(json<FileHexPreview>);
 };
 
-export const remoteFileRawUrl = (path: string) => `/api/files/raw?path=${encodeURIComponent(path)}`;
+export const remoteFileRawUrl = (path: string, threadId?: string | null) => `/api/files/raw?${fileQuery(path, threadId).toString()}`;
 
-export const remoteFilePdfPreviewUrl = (path: string, share?: FileShareAccess) => {
+export const remoteFilePdfPreviewUrl = (path: string, share?: FileShareAccess, threadId?: string | null) => {
   const params = new URLSearchParams({ path });
+  if (threadId) params.set('threadId', threadId);
   if (share) {
     params.set('tenant', share.tenant);
     params.set('user', share.user);
     params.set('expires', share.expires);
     params.set('sig', share.sig);
+    if (share.threadId) params.set('threadId', share.threadId);
   }
   return `/api/files/pdf-preview?${params.toString()}`;
 };
 
 export const signedRemoteFileUrl = (path: string, share: FileShareAccess, options: { download?: boolean } = {}) => {
   const params = new URLSearchParams({ path, tenant: share.tenant, user: share.user, expires: share.expires, sig: share.sig });
+  if (share.threadId) params.set('threadId', share.threadId);
   if (options.download) params.set('download', '1');
   return `/api/files/raw?${params.toString()}`;
 };
 
-export const createRemoteFileShareLink = (path: string, ttlSeconds: number) =>
+export const createRemoteFileShareLink = (path: string, ttlSeconds: number, threadId?: string | null) =>
   authFetch('/api/files/share-link', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path, ttlSeconds }),
+    body: JSON.stringify({ path, ttlSeconds, threadId: threadId ?? undefined }),
   }).then(json<FileShareLink>);
 
-export const signedRemoteFileRawUrl = (path: string, ttlSeconds = 24 * 60 * 60) =>
-  createRemoteFileShareLink(path, ttlSeconds).then((link) => link.rawUrl);
+export const signedRemoteFileRawUrl = (path: string, ttlSeconds = 24 * 60 * 60, threadId?: string | null) =>
+  createRemoteFileShareLink(path, ttlSeconds, threadId).then((link) => link.rawUrl);
 
-export const getRemoteFileContent = (path: string) => {
-  const params = new URLSearchParams({ path });
+export const getRemoteFileContent = (path: string, threadId?: string | null) => {
+  const params = fileQuery(path, threadId);
   return authFetch(`/api/files/content?${params.toString()}`).then(json<FileTextContent>);
 };
 
-export const saveRemoteFileContent = (path: string, content: string, baseSha256: string, options: { force?: boolean } = {}) =>
+export const saveRemoteFileContent = (path: string, content: string, baseSha256: string, options: { force?: boolean; threadId?: string | null } = {}) =>
   authFetch('/api/files/content', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path, content, baseSha256, force: options.force === true }),
+    body: JSON.stringify({ path, content, baseSha256, force: options.force === true, threadId: options.threadId ?? undefined }),
   }).then(json<FileTextSaveResponse>);
 
-export const uploadLocalFile = (path: string, contentBase64: string) =>
+export const uploadLocalFile = (path: string, contentBase64: string, threadId?: string | null) =>
   authFetch('/api/files/upload', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path, contentBase64 }),
+    body: JSON.stringify({ path, contentBase64, threadId: threadId ?? undefined }),
   }).then(json<{ path: string; size: number }>);
 
 export const getToolSettings = () => authFetch('/api/settings/tools').then(json<ToolSettings>);

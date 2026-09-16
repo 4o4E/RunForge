@@ -219,6 +219,9 @@ export class ShellManager {
       const session = await store.getShellSession(input.scope, input.sessionId);
       if (!session) throw new Error(`shell session 不存在：${input.sessionId}`);
       if (session.thread_id !== input.threadId) throw new Error('shell session 不属于当前 thread');
+      if (resolve(session.workspace_root) !== resolve(input.settings.workspaceRoot)) {
+        throw new Error('shell session 不属于当前 thread workspace');
+      }
       if (session.deleted_at) throw new Error('shell session 已删除');
       if (session.status === 'closed' || session.status === 'orphaned') throw new Error(`shell session 当前状态为 ${session.status}`);
       return session;
@@ -252,6 +255,9 @@ export class ShellManager {
     const session = await store.getShellSession(input.scope, input.sessionId);
     if (!session) throw new Error(`shell session 不存在：${input.sessionId}`);
     if (session.thread_id !== input.context.threadId) throw new Error('shell session 不属于当前 thread');
+    if (resolve(session.workspace_root) !== resolve(input.settings.workspaceRoot)) {
+      throw new Error('shell session 不属于当前 thread workspace');
+    }
     if (session.deleted_at) throw new Error('shell session 已删除');
     const recent = await store.listShellCommandsBySession(input.scope, session.id, 10);
     const running = recent.find((cmd) => cmd.status === 'queued' || cmd.status === 'running');

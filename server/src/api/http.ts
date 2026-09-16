@@ -17,14 +17,13 @@ import { systemApi } from './system.js';
 import { sendSpaceError, tenantSpacesApi } from './spaces.js';
 import { requireSystemScope, requireTenantScope } from '../auth/guards.js';
 import { getIdentity, requireScope, type IdentityContext } from '../auth/context.js';
-import type { Scope } from '../store/types.js';
+import type { Scope, ShellSessionRow } from '../store/types.js';
 import { releaseRunLeases } from '../datasources/accountPool.js';
 import type { AskUserAnswer, AskUserOption, AskUserSpec } from '../agent/types.js';
 import { shellManager } from '../shell/manager.js';
 import { shellBus } from '../shell/bus.js';
-import { getToolSettings } from '../settings.js';
+import { getToolSettings, type ToolSettings } from '../settings.js';
 import { createPolicy } from '../tools/policy.js';
-import { isWithin } from '../tools/policy.js';
 import type { Response } from 'express';
 import type { LlmProviderState } from '../llm/types.js';
 import { RunActiveError } from '../store/types.js';
@@ -32,6 +31,7 @@ import { spaceAccess } from '../spaces/access.js';
 import { SpaceConfigError } from '../spaces/config.js';
 import { runAdmission } from '../spaces/runAdmission.js';
 import { externalApi } from './external.js';
+import { threadWorkspaceAccess, ThreadWorkspaceAccessError } from '../files/threadWorkspace.js';
 
 export const api = Router();
 
@@ -541,14 +541,47 @@ api.post('/runs/:id/answer', async (req, res) => {
 
 // --- Managed shell ---
 
+async function webThreadToolSettings(
+  res: Response,
+  identity: Extract<IdentityContext, { scope: 'tenant' }>,
+  threadId: string,
+): Promise<ToolSettings | null> {
+  try {
+    const workspace = await threadWorkspaceAccess.resolveForWeb(identity, threadId, 'write');
+    await mkdir(workspace.root, { recursive: true });
+    return { ...(await getToolSettings({ tenantId: identity.tenantId, userId: identity.userId })), workspaceRoot: workspace.root };
+  } catch (error) {
+    if (error instanceof ThreadWorkspaceAccessError) {
+      res.status(error.status).json({ error: error.message, code: error.code });
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function webShellSessionSettings(
+  res: Response,
+  identity: Extract<IdentityContext, { scope: 'tenant' }>,
+  session: ShellSessionRow,
+): Promise<ToolSettings | null> {
+  const settings = await webThreadToolSettings(res, identity, session.thread_id);
+  if (!settings) return null;
+  if (resolve(session.workspace_root) !== resolve(settings.workspaceRoot)) {
+    res.status(409).json({ error: 'shell session 不属于当前 thread workspace，请重新打开 session' });
+    return null;
+  }
+  return settings;
+}
+
 api.get('/shell-sessions', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
   const threadId = String(req.query.threadId ?? '').trim();
   if (!threadId) return res.status(400).json({ error: 'threadId 为必填' });
-  const thread = await store.getThread(scope, threadId);
-  if (!thread) return res.status(404).json({ error: 'thread 不存在' });
-  const settings = await getToolSettings(scope);
+  const settings = await webThreadToolSettings(res, identity, threadId);
+  if (!settings) return;
   const sessions = await shellManager.listSessions(scope, threadId, settings);
   const result = await Promise.all(
     sessions.map(async (session) => ({
@@ -562,11 +595,12 @@ api.get('/shell-sessions', async (req, res) => {
 api.post('/shell-sessions', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
   const threadId = String(req.body?.threadId ?? '').trim();
   if (!threadId) return res.status(400).json({ error: 'threadId 为必填' });
-  const thread = await store.getThread(scope, threadId);
-  if (!thread) return res.status(404).json({ error: 'thread 不存在' });
-  const settings = await getToolSettings(scope);
+  const settings = await webThreadToolSettings(res, identity, threadId);
+  if (!settings) return;
   const decision = createPolicy(settings).check('shell_session_open', { command: '' });
   if (!decision.ok) return res.status(403).json({ error: decision.reason });
   const session = await shellManager.openSession({
@@ -582,8 +616,11 @@ api.post('/shell-sessions', async (req, res) => {
 api.patch('/shell-sessions/:id', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
   const session = await store.getShellSession(scope, req.params.id);
   if (!session) return res.status(404).json({ error: 'shell session 不存在' });
+  if (!await webShellSessionSettings(res, identity, session)) return;
   if (session.deleted_at) return res.status(404).json({ error: 'shell session 已删除' });
   if (session.name === 'Default' || session.owner === 'system') return res.status(403).json({ error: 'Default shell 不支持改名' });
   if (session.owner !== 'user') return res.status(403).json({ error: '用户不能改名 agent 创建的 shell' });
@@ -611,8 +648,11 @@ api.get('/shell-sessions/:id/commands', async (req, res) => {
 api.post('/shell-sessions/:id/close', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
   const session = await store.getShellSession(scope, req.params.id);
   if (!session) return res.status(404).json({ error: 'shell session 不存在' });
+  if (!await webShellSessionSettings(res, identity, session)) return;
   if (session.name === 'Default' || session.owner === 'system') return res.status(403).json({ error: 'Default shell 不支持删除' });
   if (session.owner !== 'user') return res.status(403).json({ error: '用户不能删除 agent 创建的 shell' });
   const commands = await store.listShellCommandsBySession(scope, session.id, 50);
@@ -632,11 +672,14 @@ api.post('/shell-sessions/:id/close', async (req, res) => {
 api.post('/shell-sessions/:id/commands', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
   const session = await store.getShellSession(scope, req.params.id);
   if (!session) return res.status(404).json({ error: 'shell session 不存在' });
   const command = String(req.body?.command ?? '').trim();
   if (!command) return res.status(400).json({ error: 'command 为必填' });
-  const settings = await getToolSettings(scope);
+  const settings = await webShellSessionSettings(res, identity, session);
+  if (!settings) return;
   const policy = createPolicy(settings);
   const decision = policy.check('shell_exec', { command });
   if (!decision.ok) return res.status(403).json({ error: decision.reason });
@@ -668,6 +711,8 @@ api.get('/shell-commands/:id/logs', async (req, res) => {
 api.post('/shell-commands/:id/mark', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
   const command = await store.getShellCommand(scope, req.params.id);
   if (!command) return res.status(404).json({ error: 'shell command 不存在' });
   if (command.status === 'queued' || command.status === 'running') {
@@ -675,10 +720,8 @@ api.post('/shell-commands/:id/mark', async (req, res) => {
   }
   const session = await store.getShellSession(scope, command.session_id);
   if (!session) return res.status(404).json({ error: 'shell session 不存在' });
-  const settings = await getToolSettings(scope);
-  if (!isWithin(settings.workspaceRoot, session.workspace_root)) {
-    return res.status(403).json({ error: 'shell session 不属于当前 workspace' });
-  }
+  const settings = await webShellSessionSettings(res, identity, session);
+  if (!settings) return;
 
   const logs = await readAllShellCommandLogs(scope, command.id);
   const output = renderShellLogs(logs);
@@ -725,6 +768,13 @@ api.post('/shell-commands/:id/mark', async (req, res) => {
 api.post('/shell-commands/:id/kill', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
+  const existing = await store.getShellCommand(scope, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'shell command 不存在' });
+  const session = await store.getShellSession(scope, existing.session_id);
+  if (!session) return res.status(404).json({ error: 'shell session 不存在' });
+  if (!await webShellSessionSettings(res, identity, session)) return;
   const signal = normalizeShellSignal(req.body?.signal, 'SIGTERM');
   const command = await shellManager.kill(scope, req.params.id, String(req.body?.reason ?? 'user_requested_kill'), signal);
   res.json({ command });

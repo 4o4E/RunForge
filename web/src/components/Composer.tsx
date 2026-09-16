@@ -23,6 +23,7 @@ import type { LlmModelOption } from '@/api';
 import { ConversationProgressBar, type UsageSnapshot } from './Conversation';
 import { ModelSearchSelect } from './ModelSearchSelect';
 import { useNotifications } from './GlobalNotifications';
+import { useWorkspaceFileContext } from './WorkspaceFileContext';
 
 export interface ComposerAttachment {
   kind: 'remote' | 'local' | 'shell';
@@ -173,6 +174,7 @@ export function Composer({
   onOpenRemoteFiles,
   onUploadLocal,
 }: Props) {
+  const { threadId } = useWorkspaceFileContext();
   const { notify } = useNotifications();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const promptFrameRef = useRef<HTMLDivElement>(null);
@@ -328,7 +330,7 @@ export function Composer({
     setDirLoading(true);
     setDirError(null);
     try {
-      const data = await listRemoteFiles(path || '.');
+      const data = await listRemoteFiles(path || '.', threadId);
       setUploadDir(data.path === '.' ? '' : data.path);
       setDirParent(data.parent);
       setDirEntries(data.entries.filter((entry) => entry.type === 'dir'));
@@ -343,7 +345,7 @@ export function Composer({
 
   useEffect(() => {
     if (localFile) void loadUploadDirs(uploadDir || '.');
-  }, [localFile]);
+  }, [localFile, threadId]);
 
   const modelSelect = (
     <ModelSearchSelect

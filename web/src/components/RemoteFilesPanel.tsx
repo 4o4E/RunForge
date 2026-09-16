@@ -26,6 +26,7 @@ import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
+import { useWorkspaceFileContext } from '@/components/WorkspaceFileContext';
 
 const MonacoTextEditor = lazy(() => import('@/components/MonacoTextEditor').then((module) => ({ default: module.MonacoTextEditor })));
 
@@ -270,6 +271,8 @@ export function RemoteFilesPanel({
   onAttach,
   onOpenFile,
 }: Props) {
+  const workspaceContext = useWorkspaceFileContext();
+  const threadId = shareAccess?.threadId ?? workspaceContext.threadId;
   const { notify } = useNotifications();
   const [currentPath, setCurrentPath] = useState('.');
   const [treeWidth, setTreeWidth] = useState(270);
@@ -303,7 +306,7 @@ export function RemoteFilesPanel({
   const pendingHexOffsetsRef = useRef<Set<number>>(new Set());
 
   async function loadTreeDir(path: string) {
-    const data = await listRemoteFiles(path);
+    const data = await listRemoteFiles(path, threadId);
     setTreeEntries((current) => ({ ...current, [data.path]: data.entries }));
     return data;
   }
@@ -363,7 +366,7 @@ export function RemoteFilesPanel({
     setError(null);
     try {
       if (hexPreviewFile) {
-        const data = await previewRemoteFileHex(path, 0, INITIAL_HEX_BYTES, { share: shareAccess });
+        const data = await previewRemoteFileHex(path, 0, INITIAL_HEX_BYTES, { share: shareAccess, threadId });
         if (previewRequestRef.current !== requestId) return;
         setSelectedPath(data.path);
         setSelectedSize(size ?? data.size);
@@ -373,7 +376,7 @@ export function RemoteFilesPanel({
       }
 
       const limit = startLine === 1 ? INITIAL_PREVIEW_LINES : MORE_PREVIEW_LINES;
-      const data = await previewRemoteFile(path, startLine, limit, { render: startLine === 1 && renderable, share: shareAccess });
+      const data = await previewRemoteFile(path, startLine, limit, { render: startLine === 1 && renderable, share: shareAccess, threadId });
       if (previewRequestRef.current !== requestId) return;
       setSelectedPath(data.path);
       setSelectedSize(size ?? data.size);
@@ -397,7 +400,7 @@ export function RemoteFilesPanel({
     setLoading(true);
     setError(null);
     try {
-      const data = await previewRemoteFileHex(selectedPath, offset, MORE_HEX_BYTES, { share: shareAccess });
+      const data = await previewRemoteFileHex(selectedPath, offset, MORE_HEX_BYTES, { share: shareAccess, threadId });
       if (previewRequestRef.current !== requestId) return;
       setSelectedSize(data.size);
       setHexPreview(data);
@@ -417,7 +420,7 @@ export function RemoteFilesPanel({
     setEditLoading(true);
     setEditError(null);
     try {
-      const data = await getRemoteFileContent(path);
+      const data = await getRemoteFileContent(path, threadId);
       setSelectedPath(data.path);
       setSelectedSize(data.version.size);
       setEditContent(data.content);
@@ -435,7 +438,7 @@ export function RemoteFilesPanel({
     setEditSaving(true);
     setEditError(null);
     try {
-      const saved = await saveRemoteFileContent(selectedPath, editContent, editVersion.sha256, { force });
+      const saved = await saveRemoteFileContent(selectedPath, editContent, editVersion.sha256, { force, threadId });
       const lines = editContent.split(/\r?\n/);
       setSelectedPath(saved.path);
       setSelectedSize(saved.size);
@@ -513,13 +516,17 @@ export function RemoteFilesPanel({
   }
 
   useEffect(() => {
-    if (open && showBrowser) void loadDir(currentPath);
-    // 打开面板时刷新当前目录，保留用户所在位置。
-  }, [open, showBrowser]);
+    if (!open || !showBrowser) return;
+    setCurrentPath('.');
+    setExpanded(new Set(['.']));
+    setTreeEntries({});
+    void loadDir('.');
+    // thread 切换必须清空旧目录缓存，避免在新 workspace 面板里短暂展示上一会话文件。
+  }, [open, showBrowser, threadId]);
 
   useEffect(() => {
     if (open && previewPath) void openFile(previewPath);
-  }, [open, previewPath]);
+  }, [open, previewPath, threadId]);
 
   useEffect(() => {
     if (!compact) return;
@@ -577,7 +584,7 @@ export function RemoteFilesPanel({
     };
     const rawUrlPromise = shareAccess
       ? Promise.resolve(signedRemoteFileUrl(selectedPath, shareAccess))
-      : signedRemoteFileRawUrl(selectedPath, RAW_URL_TTL_SECONDS);
+      : signedRemoteFileRawUrl(selectedPath, RAW_URL_TTL_SECONDS, threadId);
     rawUrlPromise
       .then((url) => {
         if (!canceled) setRawUrl(url);
@@ -588,7 +595,7 @@ export function RemoteFilesPanel({
     return () => {
       canceled = true;
     };
-  }, [selectedMediaKind, selectedPath, shareAccess]);
+  }, [selectedMediaKind, selectedPath, shareAccess, threadId]);
 
   useEffect(() => {
     let canceled = false;
@@ -598,7 +605,7 @@ export function RemoteFilesPanel({
     };
     const rawUrlPromise = shareAccess
       ? Promise.resolve(signedRemoteFileUrl(selectedPath, shareAccess))
-      : signedRemoteFileRawUrl(selectedPath, RAW_URL_TTL_SECONDS);
+      : signedRemoteFileRawUrl(selectedPath, RAW_URL_TTL_SECONDS, threadId);
     rawUrlPromise
       .then((url) => {
         if (!canceled) setDownloadUrl(withDownloadParam(url));
@@ -609,14 +616,14 @@ export function RemoteFilesPanel({
     return () => {
       canceled = true;
     };
-  }, [selectedPath, shareAccess]);
+  }, [selectedPath, shareAccess, threadId]);
 
   async function copyShareLink(ttlSeconds: number) {
     if (!selectedPath || shareBusy) return;
     setShareBusy(true);
     setError(null);
     try {
-      const link = await createRemoteFileShareLink(selectedPath, clampShareTtl(ttlSeconds));
+      const link = await createRemoteFileShareLink(selectedPath, clampShareTtl(ttlSeconds), threadId);
       await navigator.clipboard?.writeText(new URL(link.url, window.location.origin).toString());
       setShareOpen(false);
       notify({

@@ -28,7 +28,8 @@ import {
 } from 'streamdown';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
-import { remoteFileRawUrl, signedRemoteFileRawUrl } from '@/api';
+import { remoteFileRawUrl, signedRemoteFileRawUrl, signedRemoteFileUrl } from '@/api';
+import { useWorkspaceFileContext } from '@/components/WorkspaceFileContext';
 
 interface MarkdownRenderOptions {
   streaming?: boolean;
@@ -966,6 +967,7 @@ function workspacePathFromRawUrl(src: string | undefined): string | null {
 }
 
 function StreamdownImage({ className, src, alt = '', ...props }: MarkdownImageProps) {
+  const { threadId, shareAccess } = useWorkspaceFileContext();
   const resolvedSrc = src ? normalizeImageSrc(src) : src;
   const [signedSrc, setSignedSrc] = useState<string | undefined>(resolvedSrc);
 
@@ -979,7 +981,10 @@ function StreamdownImage({ className, src, alt = '', ...props }: MarkdownImagePr
       };
     }
     setSignedSrc(undefined);
-    signedRemoteFileRawUrl(workspacePath, RAW_URL_TTL_SECONDS)
+    const signedUrl = shareAccess
+      ? Promise.resolve(signedRemoteFileUrl(workspacePath, shareAccess))
+      : signedRemoteFileRawUrl(workspacePath, RAW_URL_TTL_SECONDS, threadId);
+    signedUrl
       .then((url) => {
         if (!canceled) setSignedSrc(url);
       })
@@ -989,7 +994,7 @@ function StreamdownImage({ className, src, alt = '', ...props }: MarkdownImagePr
     return () => {
       canceled = true;
     };
-  }, [resolvedSrc]);
+  }, [resolvedSrc, shareAccess, threadId]);
 
   return (
     <img

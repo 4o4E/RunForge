@@ -38,6 +38,7 @@ import { SearchView } from './components/SearchView';
 import type { ComposerAttachment } from './components/Composer';
 import type { AskUserDraft } from './components/AskUserCard';
 import { buildChatPath, currentBrowserPath, readChatRoute, type ChatRoute } from './router';
+import { WorkspaceFileContextProvider } from './components/WorkspaceFileContext';
 import { useNotifications } from './components/GlobalNotifications';
 import { browserPushSupported, currentBrowserPushPermission, disableBrowserPush, enableBrowserPush, readBrowserPushState, type BrowserPushState } from './notifications';
 
@@ -571,10 +572,20 @@ export function App() {
     }, delay));
   }, []);
 
-  const refreshWorkspaceRoot = useCallback(() => {
-    getRemoteFileInfo().then((info) => setWorkspaceRoot(info.workspaceRoot)).catch(() => setWorkspaceRoot(null));
-  }, []);
-  useEffect(refreshWorkspaceRoot, [refreshWorkspaceRoot]);
+  useEffect(() => {
+    let canceled = false;
+    setWorkspaceRoot(null);
+    getRemoteFileInfo(activeThreadId)
+      .then((info) => {
+        if (!canceled) setWorkspaceRoot(info.workspaceRoot);
+      })
+      .catch(() => {
+        if (!canceled) setWorkspaceRoot(null);
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [activeThreadId]);
 
   // 只用来决定要不要在侧边栏显示"管理后台"入口；失败时静默保持 null(不显示入口)。
   useEffect(() => {
@@ -698,6 +709,7 @@ export function App() {
     if (previousThreadId === activeThreadId) return;
     if (previousThreadId) rememberThreadPanelState(previousThreadId, currentThreadPanelState());
     previousPanelThreadIdRef.current = activeThreadId;
+    setAttachments([]);
     applyThreadPanelState(activeThreadId ? threadPanelStatesRef.current[activeThreadId] ?? EMPTY_THREAD_PANEL_STATE : EMPTY_THREAD_PANEL_STATE);
   }, [activeThreadId, applyThreadPanelState, currentThreadPanelState, pageStateLoaded, rememberThreadPanelState]);
 
@@ -1324,8 +1336,12 @@ export function App() {
   }
 
   async function uploadLocalAttachment(file: File, path: string) {
+    const targetThreadId = activeThreadId;
     const contentBase64 = await fileToBase64(file);
-    const uploaded = await uploadLocalFile(path, contentBase64);
+    const uploaded = await uploadLocalFile(path, contentBase64, targetThreadId);
+    if (threadIdRef.current !== targetThreadId) {
+      throw new Error('上传期间会话已切换，文件仍保存在原会话，请在当前会话重新上传');
+    }
     addAttachment({ kind: 'local', path: uploaded.path, name: file.name, size: uploaded.size });
   }
 
@@ -1426,6 +1442,7 @@ export function App() {
   }, [rightPanelVisible]);
 
   return (
+    <WorkspaceFileContextProvider threadId={activeThreadId}>
     <div className="app-main-surface flex h-full min-h-0 min-w-0 overflow-hidden">
       <div
         ref={sidebarFrameRef}
@@ -1544,6 +1561,7 @@ export function App() {
         aria-hidden={!rightPanelVisible}
       >
         <RightSidebar
+          key={activeThreadId ?? 'default-workspace'}
           open={rightPanelVisible}
           width={filesPanelWidth}
           tabs={rightPanelTabs}
@@ -1601,6 +1619,7 @@ export function App() {
           />
           <div className="relative h-full w-full max-w-[520px] animate-in slide-in-from-right-full duration-200 shadow-xl">
             <RightSidebar
+              key={activeThreadId ?? 'default-workspace'}
               open
               width={mobileRightPanelWidth}
               compact
@@ -1621,5 +1640,6 @@ export function App() {
         </div>
       )}
     </div>
+    </WorkspaceFileContextProvider>
   );
 }

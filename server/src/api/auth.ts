@@ -66,12 +66,19 @@ export function clampShareTtlSeconds(value: unknown): number {
   return Math.min(MAX_SHARE_TTL_SECONDS, Math.max(MIN_SHARE_TTL_SECONDS, Math.floor(raw)));
 }
 
-// tenantId/userId 进签名输入:分享链接本身不带身份，匿名访问时 tenant/user 只能来自
-// 请求方自己声明的 query 参数，必须和签名当时的身份绑在一起校验，否则改 query
-// 就能让签名在另一个用户 workspaceRoot 下"重放"。
-export function signFileShare(canonicalPath: string, tenantId: string, userId: string, expiresEpochSeconds: number): string {
+// tenantId/userId/threadId 进签名输入:分享链接本身不带身份，匿名访问时这些定位字段
+// 只能来自 query。非 default 空间的 threadId 必须被签名绑定，否则同一路径的签名
+// 可以被换到另一个 thread workspace 重放。threadId 为空时保持历史签名格式兼容旧链接。
+export function signFileShare(
+  canonicalPath: string,
+  tenantId: string,
+  userId: string,
+  expiresEpochSeconds: number,
+  threadId?: string | null,
+): string {
+  const scope = threadId ? `${tenantId}\n${userId}\n${threadId}` : `${tenantId}\n${userId}`;
   return createHmac('sha256', shareSecret())
-    .update(`${tenantId}\n${userId}\n${canonicalPath}\n${expiresEpochSeconds}`)
+    .update(`${scope}\n${canonicalPath}\n${expiresEpochSeconds}`)
     .digest('base64url');
 }
 
@@ -82,10 +89,11 @@ export function verifyFileShare(
   expiresRaw: unknown,
   signatureRaw: unknown,
   nowSeconds = Math.floor(Date.now() / 1000),
+  threadId?: string | null,
 ): boolean {
   if (typeof expiresRaw !== 'string' || typeof signatureRaw !== 'string') return false;
   const expires = Number(expiresRaw);
   if (!Number.isInteger(expires) || expires < nowSeconds) return false;
-  const expected = signFileShare(canonicalPath, tenantId, userId, expires);
+  const expected = signFileShare(canonicalPath, tenantId, userId, expires, threadId);
   return safeEqual(signatureRaw, expected);
 }
