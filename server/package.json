@@ -17,6 +17,8 @@
     "verify:agent-core": "tsx src/evals/agentCoreVerification.ts",
     "preverify:prisma-store": "pnpm prisma:generate",
     "verify:prisma-store": "tsx src/evals/prismaStoreVerification.ts",
+    "preverify:space-runtime": "pnpm prisma:generate",
+    "verify:space-runtime": "tsx src/evals/spaceRuntimeVerification.ts",
     "pretypecheck": "pnpm prisma:generate",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "db:baseline": "prisma migrate resolve --applied 20260916000000_baseline",

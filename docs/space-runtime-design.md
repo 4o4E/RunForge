@@ -506,12 +506,16 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
 
 ### 阶段 9：端到端验收与文档更新
 
-- default Web 空间和两个不同外部模拟应用并发验收。
-- 验证权限、配置副本、execution user、插件/MCP/文件隔离和软删除。
-- 验证 `RUN_ACTIVE`、幂等并发、可靠 `next_step`、取消和重启恢复。
-- 验证外部空间不出现 `ask_user`。
-- 验证 WebSocket cursor、artifact、Provider attempt 和 7 天 trace。
-- 更新系统设计、多租户设计、外部协议和运维文档。
+- ✅ default Web 空间和两个不同外部模拟应用完成同链路验收，两个外部 run 并发执行。
+- ✅ 验证权限、配置副本、execution user、插件/MCP/文件隔离和软删除；插件/MCP 隔离由
+  Cordis 并发空间验收覆盖，其余边界由空间运行端到端脚本覆盖。
+- ✅ 验证 `RUN_ACTIVE`、幂等并发、可靠 `next_step`、取消和重启恢复。
+- ✅ 验证外部空间不出现 `ask_user`。
+- ✅ 验证 WebSocket cursor、artifact、Provider attempt 和 7 天 trace。
+- ✅ 更新系统设计、空间运行设计和分阶段实施记录。
+
+可重复执行入口为 `pnpm --filter server verify:space-runtime`；验收矩阵和证据见
+[空间运行端到端验收日志](impl-log/space-runtime-e2e.md)。
 
 ## 15. 验收重点
 
