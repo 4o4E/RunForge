@@ -653,6 +653,30 @@ export class PgStore implements Store {
     return toRunRow(row);
   }
 
+  async beginRunExecution(scope: Scope, id: string): Promise<boolean> {
+    return prisma.$transaction(async (tx) => {
+      const run = await tx.runs.findFirst({
+        where: {
+          id,
+          status: { in: ['pending', 'running'] },
+          threads_runs_thread_idTothreads: { tenant_id: scope.tenantId, user_id: scope.userId },
+        },
+        select: { thread_id: true },
+      });
+      if (!run) return false;
+      const claimed = await tx.threads.updateMany({
+        where: { id: run.thread_id, OR: [{ executing_run_id: null }, { executing_run_id: id }] },
+        data: { executing_run_id: id },
+      });
+      if (!claimed.count) throw await occupiedRunError(tx, run.thread_id);
+      const started = await tx.runs.updateMany({
+        where: { id, status: { in: ['pending', 'running'] } },
+        data: { status: 'running', updated_at: new Date() },
+      });
+      return started.count === 1;
+    });
+  }
+
   async getRun(scope: Scope, id: string): Promise<RunRow | null> {
     const row = await prisma.runs.findFirst({
       where: {

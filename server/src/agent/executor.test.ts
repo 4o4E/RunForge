@@ -203,9 +203,11 @@ test('executeRun: external 空间即使模型伪造 ask_user 调用也不会进�
   const store = new MemoryStore();
   const thread = await store.createThread(scope);
   let turn = 0;
+  let observedSystemPrompt = '';
   const provider: Provider = {
     name: 'external-ask-user-guard',
-    async complete() {
+    async complete(messages) {
+      observedSystemPrompt = messages.find((message) => message.role === 'system')?.content ?? '';
       turn += 1;
       if (turn === 1) {
         return {
@@ -232,7 +234,11 @@ test('executeRun: external 空间即使模型伪造 ask_user 调用也不会进�
         contextBudgetSource: 'space-config',
       },
       capabilities: { tools: ['file_read'], mcpServers: [], runtime: [] },
-      external: { allowTrustedPrompt: false, allowNextStep: false },
+      external: {
+        allowTrustedPrompt: true,
+        allowNextStep: false,
+        trustedPrompt: 'TRUSTED-CALLER-MARKER',
+      },
     },
     runtimeCapabilitiesSnapshot: {
       allowedCapabilities: [],
@@ -251,6 +257,7 @@ test('executeRun: external 空间即使模型伪造 ask_user 调用也不会进�
   });
 
   assert.equal((await store.getRun(scope, run.id))?.status, 'done');
+  assert.match(observedSystemPrompt, /TRUSTED-CALLER-MARKER/);
   assert.equal(published.some((event) => event.type === 'user_question'), false);
   assert.ok(published.some((event) => event.type === 'tool_result' && /未被当前 run 的空间配置授权/.test(event.result)));
 });

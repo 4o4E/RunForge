@@ -494,6 +494,20 @@ export class MemoryStore implements Store {
     return row;
   }
 
+  async beginRunExecution(scope: Scope, id: string): Promise<boolean> {
+    const run = this.runs.get(id);
+    if (!this.runOwnedBy(run, scope) || (run.status !== 'pending' && run.status !== 'running')) return false;
+    const thread = this.threads.get(run.thread_id)!;
+    if (thread.executing_run_id && thread.executing_run_id !== id) {
+      const current = this.runs.get(thread.executing_run_id);
+      throw new RunActiveError(thread.executing_run_id, current?.status ?? 'running');
+    }
+    thread.executing_run_id = id;
+    run.status = 'running';
+    run.updated_at = this.now();
+    return true;
+  }
+
   private resolveBranchLeafRunId(threadId: string, selectedRunId: string): string | null {
     const selected = this.runs.get(selectedRunId);
     if (!selected || selected.thread_id !== threadId) return null;

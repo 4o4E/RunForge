@@ -169,6 +169,13 @@ export class SpaceAccessService {
     return this.restoreManaged(actor.tenantId, spaceId);
   }
 
+  /** caller/Token 等空间控制面复用同一管理权限，不在各业务服务重复判断角色。 */
+  async requireManagedSpace(actorContext: SpaceActorContext, spaceId: string): Promise<SpaceSummary> {
+    const actor = await this.resolveManagerActor(actorContext);
+    const tenant = await this.requireTenant(actor.tenantId);
+    return this.toSummary(await this.requireSpace(actor.tenantId, spaceId), tenant.default_space_id);
+  }
+
   /** Web 创建和修改 thread 前统一走这里；external 空间即使管理员可见也始终只读。 */
   async requireWritableWebSpace(identity: TenantIdentity, requestedSpaceId?: string | null): Promise<SpaceSummary> {
     const actor = await this.resolveTenantActor(identity);

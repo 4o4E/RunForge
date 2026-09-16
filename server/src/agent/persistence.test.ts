@@ -149,6 +149,16 @@ test('store keeps one non-terminal run per thread and only releases its own exec
   assert.equal((await store.loadRawThreadMessages(scope, thread.id, { runId: second.id })).filter((message) => message.content === '重复输入').length, 0);
 });
 
+test('store beginRunExecution 不会用 running 覆盖并发写入的 canceling', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'cancel before start');
+  await store.setRunStatus(scope, run.id, 'canceling');
+
+  assert.equal(await store.beginRunExecution(scope, run.id), false);
+  assert.equal((await store.getRun(scope, run.id))?.status, 'canceling');
+});
+
 test('store returns masked assistant tool-call args on reload', async () => {
   const store = new MemoryStore();
   const thread = await store.createThread(scope);

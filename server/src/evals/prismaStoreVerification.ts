@@ -6,10 +6,13 @@ import { PgStore } from '../store/pgStore.js';
 import { findSetting, upsertSettings } from '../store/settingsRepository.js';
 import { tenantSettingsTemplateEntries } from '../settings.js';
 import { DefaultSpaceImmutableError, RunActiveError } from '../store/types.js';
-import { newExternalCallerId, newExternalTokenId, newSpaceId } from '../id.js';
+import { newSpaceId } from '../id.js';
 import { SpaceAccessService } from '../spaces/access.js';
 import { SpaceConfigService } from '../spaces/config.js';
 import { RunAdmissionService } from '../spaces/runAdmission.js';
+import { hashOpaqueToken } from '../auth/tokens.js';
+import { PrismaExternalRepository } from '../external/repository.js';
+import { ExternalApiError } from '../external/types.js';
 
 const suffix = randomUUID().replaceAll('-', '').slice(0, 12);
 const tenantId = `prisma-verify-${suffix}`;
@@ -20,6 +23,7 @@ const store = new PgStore();
 const spaceConfig = new SpaceConfigService();
 const spaceAccess = new SpaceAccessService(store, spaceConfig);
 const runAdmission = new RunAdmissionService(store, spaceConfig);
+const externalRepository = new PrismaExternalRepository();
 
 try {
   const provisioned = await store.createTenantWithOwner({
@@ -90,13 +94,18 @@ try {
   });
   assert.equal(updatedExternalSpace.configVersion, 2);
 
-  const callerId = newExternalCallerId();
-  await prisma.external_callers.create({
-    data: { id: callerId, tenant_id: tenantId, space_id: externalSpace.id, name: 'Prisma 验证调用方' },
+  const externalTokenValue = randomUUID();
+  const externalCaller = await externalRepository.createCaller({
+    tenantId,
+    spaceId: externalSpace.id,
+    name: 'Prisma 验证调用方',
+    metadata: { applicationRef: 'prisma-verifier' },
+    tokenHash: hashOpaqueToken(externalTokenValue),
+    tokenLabel: 'initial',
+    tokenExpiresAt: null,
   });
-  const externalToken = await prisma.external_tokens.create({
-    data: { id: newExternalTokenId(), caller_id: callerId, token_hash: `external-hash-${suffix}` },
-  });
+  const callerId = externalCaller.caller.id;
+  const externalToken = externalCaller.tokens[0];
   const deletedExternalSpace = await spaceAccess.delete(ownerIdentity, externalSpace.id);
   assert.notEqual(deletedExternalSpace.deletedAt, null);
   assert.notEqual((await prisma.external_tokens.findUnique({ where: { id: externalToken.id } }))?.revoked_at, null);
@@ -108,6 +117,99 @@ try {
     store.softDeleteSpaceAndRevokeTokens(tenantId, defaultSpace.id),
     (error: unknown) => error instanceof DefaultSpaceImmutableError,
   );
+
+  const commandTokenValue = randomUUID();
+  const commandCaller = await externalRepository.createCaller({
+    tenantId,
+    spaceId: externalSpace.id,
+    name: 'Prisma Command 调用方',
+    metadata: {},
+    tokenHash: hashOpaqueToken(commandTokenValue),
+    tokenLabel: 'command',
+    tokenExpiresAt: null,
+  });
+  const commandAccess = await externalRepository.authenticateToken(hashOpaqueToken(commandTokenValue));
+  assert.ok(commandAccess);
+  assert.notEqual(commandAccess.token.lastUsedAt, null);
+  const currentExternalSpace = await store.findSpace(tenantId, externalSpace.id);
+  assert.ok(currentExternalSpace);
+  const resolvedExternal = await spaceConfig.resolveForRun(tenantId, currentExternalSpace);
+  const externalSnapshot = {
+    configVersion: resolvedExternal.configVersion,
+    modelRef: resolvedExternal.modelRef,
+    spaceConfig: resolvedExternal.snapshot,
+    runtimeCapabilities: resolvedExternal.runtimeCapabilitiesSnapshot,
+  };
+  const externalCreated = await externalRepository.createRun(commandAccess, {
+    requestHash: `create-hash-${suffix}`,
+    idempotencyKey: 'create-1',
+    input: '外部创建输入',
+    title: '外部任务',
+    source: {
+      applicationRef: 'verification-app',
+      externalThreadRef: `external-thread-${suffix}`,
+      externalEventId: `external-event-${suffix}`,
+      triggerRef: 'trigger-1',
+      correlationRef: 'correlation-1',
+      metadata: { channel: 'verification' },
+    },
+    snapshot: externalSnapshot,
+  });
+  assert.equal(externalCreated.replayed, false);
+  const externalScope = { tenantId, userId: visibleMember.id };
+  assert.equal((await store.getThread(externalScope, externalCreated.response.threadId))?.source_caller_id, commandCaller.caller.id);
+  assert.deepEqual((await prisma.external_requests.findFirst({
+    where: { run_id: externalCreated.response.runId },
+  }))?.source_ref, {
+    applicationRef: 'verification-app',
+    externalThreadRef: `external-thread-${suffix}`,
+    externalEventId: `external-event-${suffix}`,
+    triggerRef: 'trigger-1',
+    correlationRef: 'correlation-1',
+    metadata: { channel: 'verification' },
+  });
+  await store.setRunStatus(externalScope, externalCreated.response.runId, 'done', { output: '外部完成' });
+  assert.equal((await externalRepository.getRun(commandAccess, externalCreated.response.runId))?.response.output, '外部完成');
+
+  const concurrentExternalAppend = {
+    requestHash: `append-hash-${suffix}`,
+    idempotencyKey: 'append-same',
+    threadId: externalCreated.response.threadId,
+    input: '外部追加输入',
+    source: { externalEventId: `append-event-${suffix}`, metadata: {} },
+    snapshot: externalSnapshot,
+  };
+  const appendResults = await Promise.all([
+    externalRepository.appendRun(commandAccess, concurrentExternalAppend),
+    externalRepository.appendRun(commandAccess, concurrentExternalAppend),
+  ]);
+  assert.equal(appendResults[0].response.runId, appendResults[1].response.runId);
+  assert.equal(appendResults.filter((item) => item.replayed).length, 1);
+  await assert.rejects(
+    externalRepository.appendRun(commandAccess, { ...concurrentExternalAppend, requestHash: 'different-request' }),
+    (error: unknown) => error instanceof ExternalApiError && error.code === 'IDEMPOTENCY_CONFLICT',
+  );
+  const externalCanceled = await externalRepository.cancelRun(commandAccess, {
+    requestHash: `cancel-hash-${suffix}`,
+    idempotencyKey: 'cancel-1',
+    runId: appendResults[0].response.runId,
+    source: { externalEventId: `cancel-event-${suffix}`, metadata: {} },
+  });
+  assert.equal(externalCanceled?.response.status, 'canceling');
+  await store.setRunStatus(externalScope, appendResults[0].response.runId, 'canceled');
+
+  const rotatedTokenValue = randomUUID();
+  const rotatedToken = await externalRepository.issueToken({
+    tenantId,
+    spaceId: externalSpace.id,
+    callerId: commandCaller.caller.id,
+    tokenHash: hashOpaqueToken(rotatedTokenValue),
+    label: 'rotated',
+    expiresAt: null,
+  });
+  assert.ok(rotatedToken);
+  await externalRepository.revokeToken(tenantId, externalSpace.id, commandCaller.caller.id, rotatedToken.id);
+  assert.equal(await externalRepository.authenticateToken(hashOpaqueToken(rotatedTokenValue)), null);
 
   const guardedWebSpace = await spaceAccess.create(ownerIdentity, {
     mode: 'web',
@@ -140,6 +242,8 @@ try {
   assert.equal((await store.listRuns(scope, thread.id)).length, 1);
   assert.equal((await store.listRunsByStatusUnscoped(['pending'])).some((item) => item.id === run.id), true);
   assert.equal((await store.getThread(scope, thread.id))?.executing_run_id, run.id);
+  assert.equal(await store.beginRunExecution(scope, run.id), true);
+  assert.equal((await store.getRun(scope, run.id))?.status, 'running');
   await store.setGoalState(scope, run.id, {
     intent: '验证 Prisma Store',
     plan: [],

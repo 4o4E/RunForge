@@ -55,6 +55,7 @@ export interface RunSpaceConfigSnapshot {
   external: {
     allowTrustedPrompt: boolean;
     allowNextStep: boolean;
+    trustedPrompt?: string;
   };
 }
 

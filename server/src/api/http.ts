@@ -31,6 +31,7 @@ import { RunActiveError } from '../store/types.js';
 import { spaceAccess } from '../spaces/access.js';
 import { SpaceConfigError } from '../spaces/config.js';
 import { runAdmission } from '../spaces/runAdmission.js';
+import { externalApi } from './external.js';
 
 export const api = Router();
 
@@ -83,6 +84,8 @@ function sendRunActiveConflict(res: Response, err: unknown): boolean {
 // (docs/multi-tenancy-design.md §4"请求校验路径")。
 api.use('/auth', authApi);
 api.use('/system/auth', systemAuthApi);
+// 外部调用方只通过秘密 UUID 路径鉴权，不得进入 JWT/API Token 身份解析。
+api.use('/external', externalApi);
 
 api.use(requireApiAccess);
 

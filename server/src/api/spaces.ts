@@ -7,6 +7,8 @@ import {
   SpaceAccessError,
   type SpaceActorContext,
 } from '../spaces/access.js';
+import { externalCallers } from '../external/callers.js';
+import { ExternalApiError } from '../external/types.js';
 
 export const tenantSpacesApi = Router();
 export const systemSpacesApi = Router({ mergeParams: true });
@@ -15,6 +17,10 @@ type TenantIdentity = Extract<IdentityContext, { scope: 'tenant' }>;
 type ResolveActor = (req: Request, res: Response) => SpaceActorContext | null;
 
 export function sendSpaceError(res: Response, error: unknown): void {
+  if (error instanceof ExternalApiError) {
+    res.status(error.status).json({ error: error.message, code: error.code, ...error.details });
+    return;
+  }
   if (error instanceof SpaceAccessError) {
     res.status(error.status).json({ error: error.message, code: error.code });
     return;
@@ -47,6 +53,61 @@ function registerSpaceRoutes(router: Router, resolveActor: ResolveActor): void {
     if (!actor) return;
     try {
       res.json({ spaces: await spaceAccess.list(actor, includeDeleted(req.query.includeDeleted)) });
+    } catch (error) {
+      sendSpaceError(res, error);
+    }
+  });
+
+  router.get('/:spaceId/callers', async (req, res) => {
+    const actor = resolveActor(req, res);
+    if (!actor) return;
+    try {
+      res.json({ callers: await externalCallers.list(actor, req.params.spaceId) });
+    } catch (error) {
+      sendSpaceError(res, error);
+    }
+  });
+
+  router.post('/:spaceId/callers', async (req, res) => {
+    const actor = resolveActor(req, res);
+    if (!actor) return;
+    try {
+      res.status(201).json(await externalCallers.create(actor, req.params.spaceId, req.body));
+    } catch (error) {
+      sendSpaceError(res, error);
+    }
+  });
+
+  router.patch('/:spaceId/callers/:callerId', async (req, res) => {
+    const actor = resolveActor(req, res);
+    if (!actor) return;
+    try {
+      res.json(await externalCallers.update(actor, req.params.spaceId, req.params.callerId, req.body));
+    } catch (error) {
+      sendSpaceError(res, error);
+    }
+  });
+
+  router.post('/:spaceId/callers/:callerId/tokens', async (req, res) => {
+    const actor = resolveActor(req, res);
+    if (!actor) return;
+    try {
+      res.status(201).json(await externalCallers.issueToken(actor, req.params.spaceId, req.params.callerId, req.body));
+    } catch (error) {
+      sendSpaceError(res, error);
+    }
+  });
+
+  router.delete('/:spaceId/callers/:callerId/tokens/:tokenId', async (req, res) => {
+    const actor = resolveActor(req, res);
+    if (!actor) return;
+    try {
+      res.json(await externalCallers.revokeToken(
+        actor,
+        req.params.spaceId,
+        req.params.callerId,
+        req.params.tokenId,
+      ));
     } catch (error) {
       sendSpaceError(res, error);
     }

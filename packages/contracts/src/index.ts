@@ -9,4 +9,5 @@ export type * from './runtime.js';
 export type * from './notifications.js';
 export type * from './auth.js';
 export * from './spaces.js';
+export * from './external.js';
 export * from './schemas.js';

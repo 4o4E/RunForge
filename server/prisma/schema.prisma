@@ -170,6 +170,7 @@ model external_requests {
   response            Json?
   external_thread_ref String?
   external_event_id   String?
+  source_ref          Json             @default("{}")
   thread_id           String?
   run_id              String?
   error               String?

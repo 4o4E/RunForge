@@ -140,6 +140,12 @@ test('SpaceAccessService: external space 只接受本 tenant 的 active executio
   assert.equal(updated.executionUserId, ctx.hiddenMember.id);
   assert.equal(updated.configVersion, 2);
   assert.deepEqual(updated.visibleUserIds, [ctx.hiddenMember.id]);
+  assert.equal((await ctx.service.requireManagedSpace(ctx.adminIdentity, external.id)).id, external.id);
+  assert.equal((await ctx.service.requireManagedSpace({ scope: 'system', tenantId: ctx.provisioned.tenant.id }, external.id)).id, external.id);
+  await assert.rejects(
+    ctx.service.requireManagedSpace(ctx.memberIdentity, external.id),
+    (error: unknown) => error instanceof SpaceAccessError && error.code === 'SPACE_MANAGE_FORBIDDEN',
+  );
 });
 
 test('SpaceAccessService: default 不可重命名删除，普通空间软删除和恢复保留名单', async () => {

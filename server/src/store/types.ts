@@ -409,6 +409,8 @@ export interface Store {
   forkThreadAtRun(scope: Scope, sourceRunId: string): Promise<{ thread: ThreadRow; activeRun: RunRow } | null>;
 
   createRun(scope: Scope, threadId: string, input: string, options?: CreateRunOptions): Promise<RunRow>;
+  /** 只有 pending/running 能进入执行；与 canceling 竞争时返回 false，避免启动覆盖取消。 */
+  beginRunExecution(scope: Scope, id: string): Promise<boolean>;
   getRun(scope: Scope, id: string): Promise<RunRow | null>;
   listRuns(scope: Scope, threadId: string): Promise<RunRow[]>;
   /** 跨租户扫描,只给启动期后台任务(recovery.ts)用,禁止在 api/*.ts 路由里调用。 */

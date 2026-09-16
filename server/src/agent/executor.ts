@@ -607,7 +607,14 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
   let currentCtx: ContextManager | null = null;
   let currentStepIdx = 0;
 
-  await store.setRunStatus(scope, runId, 'running');
+  if (!await store.beginRunExecution(scope, runId)) {
+    const current = await store.getRun(scope, runId);
+    if (current?.status === 'canceling') {
+      await emit(null, { type: 'error', step: 0, message: '用户已取消 run。' });
+      await store.setRunStatus(scope, runId, 'canceled');
+    }
+    return;
+  }
 
   try {
     await withSpan(
@@ -704,7 +711,12 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       userInputPrefix: capabilityCatalog,
       activationContext: renderRunActivationContext(activeSkills, activeMcp),
       systemPrompt: renderSystemPrompt({
-        spacePrompt: spaceConfig?.systemPrompt,
+        spacePrompt: [
+          spaceConfig?.systemPrompt,
+          spaceConfig?.external.trustedPrompt
+            ? `可信外部调用方指令 / Trusted caller instruction:\n${spaceConfig.external.trustedPrompt}`
+            : '',
+        ].filter(Boolean).join('\n\n'),
         runtimeContext,
         runtimeCapabilitiesContext: renderRuntimeCapabilitiesContext(capabilitySnapshot),
       }),
