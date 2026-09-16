@@ -90,7 +90,7 @@ try {
   assert.equal((await store.findSpace(tenantId, externalSpace.id))?.execution_user_id, visibleMember.id);
   assert.deepEqual((await store.findSpace(tenantId, externalSpace.id))?.visible_user_ids, [visibleMember.id]);
   const updatedExternalSpace = await spaceAccess.update(ownerIdentity, externalSpace.id, {
-    config: { systemPrompt: 'v2' },
+    config: { systemPrompt: 'v2', external: { allowNextStep: true } },
   });
   assert.equal(updatedExternalSpace.configVersion, 2);
 
@@ -189,14 +189,103 @@ try {
     externalRepository.appendRun(commandAccess, { ...concurrentExternalAppend, requestHash: 'different-request' }),
     (error: unknown) => error instanceof ExternalApiError && error.code === 'IDEMPOTENCY_CONFLICT',
   );
+
+  const activeExternalRunId = appendResults[0].response.runId;
+  const sameNextStep = {
+    requestHash: `next-step-same-hash-${suffix}`,
+    idempotencyKey: 'next-step-same',
+    threadId: externalCreated.response.threadId,
+    input: '同键并发注入',
+    source: { externalEventId: `next-step-same-event-${suffix}`, metadata: {} },
+  };
+  const sameNextStepResults = await Promise.all([
+    externalRepository.appendNextStep(commandAccess, sameNextStep),
+    externalRepository.appendNextStep(commandAccess, sameNextStep),
+  ]);
+  assert.equal(sameNextStepResults[0].response.inputId, sameNextStepResults[1].response.inputId);
+  assert.equal(sameNextStepResults.filter((item) => item.replayed).length, 1);
+
+  const distinctNextStepResults = await Promise.all([
+    externalRepository.appendNextStep(commandAccess, {
+      ...sameNextStep,
+      idempotencyKey: 'next-step-a',
+      requestHash: `next-step-a-hash-${suffix}`,
+      input: '不同键注入 A',
+      source: { externalEventId: `next-step-a-event-${suffix}`, metadata: {} },
+    }),
+    externalRepository.appendNextStep(commandAccess, {
+      ...sameNextStep,
+      idempotencyKey: 'next-step-b',
+      requestHash: `next-step-b-hash-${suffix}`,
+      input: '不同键注入 B',
+      source: { externalEventId: `next-step-b-event-${suffix}`, metadata: {} },
+    }),
+  ]);
+  assert.deepEqual(
+    [sameNextStepResults[0], ...distinctNextStepResults].map((item) => item.response.version).sort((a, b) => a - b),
+    [1, 2, 3],
+  );
+  const appliedNextSteps = await store.applyPendingRunInputs(externalScope, activeExternalRunId);
+  assert.deepEqual(appliedNextSteps.map((input) => input.version), [1, 2, 3]);
+  assert.equal(await prisma.run_inputs.count({ where: { run_id: activeExternalRunId, status: 'applied' } }), 3);
+
+  // append 与正常终态收口竞争同一 run 行：追加若成功，收口事务必须同时应用它；
+  // 否则追加只能得到 RUN_INPUT_CLOSED，不能出现成功回执对应 pending 输入被遗漏。
+  const [closedRace, appendedRace] = await Promise.allSettled([
+    store.closeExternalInputAndApplyPending(externalScope, activeExternalRunId),
+    externalRepository.appendNextStep(commandAccess, {
+      ...sameNextStep,
+      idempotencyKey: 'next-step-race',
+      requestHash: `next-step-race-hash-${suffix}`,
+      input: '终态竞争注入',
+      source: { externalEventId: `next-step-race-event-${suffix}`, metadata: {} },
+    }),
+  ]);
+  assert.equal(closedRace.status, 'fulfilled');
+  if (closedRace.status === 'fulfilled') assert.equal(closedRace.value.closed, true);
+  if (appendedRace.status === 'fulfilled') {
+    assert.equal(
+      closedRace.status === 'fulfilled'
+        && closedRace.value.inputs.some((input) => input.inputId === appendedRace.value.response.inputId),
+      true,
+    );
+  } else {
+    assert.equal(appendedRace.reason instanceof ExternalApiError && appendedRace.reason.code === 'RUN_INPUT_CLOSED', true);
+  }
+
+  // 模拟进程重启：beginRunExecution 根据 run 配置副本重新打开接纳，新 Store 实例仍能
+  // 从数据库应用已确认的 pending 输入。
+  assert.equal(await store.beginRunExecution(externalScope, activeExternalRunId), true);
+  const restartPending = await externalRepository.appendNextStep(commandAccess, {
+    ...sameNextStep,
+    idempotencyKey: 'next-step-restart',
+    requestHash: `next-step-restart-hash-${suffix}`,
+    input: '重启后注入',
+    source: { externalEventId: `next-step-restart-event-${suffix}`, metadata: {} },
+  });
+  const restartedStore = new PgStore();
+  assert.equal(
+    (await restartedStore.applyPendingRunInputs(externalScope, activeExternalRunId))[0]?.inputId,
+    restartPending.response.inputId,
+  );
+
+  const cancelPending = await externalRepository.appendNextStep(commandAccess, {
+    ...sameNextStep,
+    idempotencyKey: 'next-step-cancel',
+    requestHash: `next-step-cancel-hash-${suffix}`,
+    input: '取消前注入',
+    source: { externalEventId: `next-step-cancel-event-${suffix}`, metadata: {} },
+  });
   const externalCanceled = await externalRepository.cancelRun(commandAccess, {
     requestHash: `cancel-hash-${suffix}`,
     idempotencyKey: 'cancel-1',
-    runId: appendResults[0].response.runId,
+    runId: activeExternalRunId,
     source: { externalEventId: `cancel-event-${suffix}`, metadata: {} },
   });
   assert.equal(externalCanceled?.response.status, 'canceling');
-  await store.setRunStatus(externalScope, appendResults[0].response.runId, 'canceled');
+  assert.equal((await prisma.run_inputs.findUnique({ where: { id: cancelPending.response.inputId } }))?.status, 'canceled');
+  assert.notEqual((await prisma.run_inputs.findUnique({ where: { id: cancelPending.response.inputId } }))?.canceled_at, null);
+  await store.setRunStatus(externalScope, activeExternalRunId, 'canceled');
 
   const rotatedTokenValue = randomUUID();
   const rotatedToken = await externalRepository.issueToken({

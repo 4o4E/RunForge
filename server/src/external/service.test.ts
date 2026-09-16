@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { ExternalRunReceipt } from '@runforge/contracts';
+import type { ExternalNextStepReceipt, ExternalRunReceipt } from '@runforge/contracts';
 import type { SpaceWithVisibilityRow } from '../store/types.js';
 import { ExternalCommandService } from './service.js';
 import { ExternalApiError, type ExternalCallerAccess, type ExternalRepository } from './types.js';
@@ -57,6 +57,7 @@ function fakeRepository(overrides: Partial<ExternalRepository>): ExternalReposit
     revokeToken: async () => unused(),
     createRun: async () => unused(),
     appendRun: async () => unused(),
+    appendNextStep: async () => unused(),
     getRun: async () => unused(),
     cancelRun: async () => unused(),
     ...overrides,
@@ -148,20 +149,41 @@ test('external command: 幂等键不进入请求 hash，重放回执不会再次
   assert.equal(starts, 1);
 });
 
-test('external command: next_step 在持久化执行链完成前明确拒绝', async () => {
-  const service = new ExternalCommandService(fakeRepository({}), () => {}, async () => {}, {
+test('external command: next_step 返回持久化接纳回执，且不会启动第二个 executor', async () => {
+  let starts = 0;
+  let capturedInput = '';
+  const service = new ExternalCommandService(fakeRepository({
+    appendNextStep: async (_access, input) => {
+      capturedInput = input.input;
+      return {
+        response: {
+          operation: 'run.append',
+          delivery: 'next_step',
+          threadId: input.threadId,
+          runId: 'ru_active',
+          inputId: 'ri_accepted',
+          version: 2,
+          status: 'accepted',
+        },
+        replayed: false,
+        executionUserId: 'us_execution',
+      };
+    },
+  }), () => { starts += 1; }, async () => {}, {
     resolveForRun: async () => structuredClone(resolvedConfig),
   });
-  await assert.rejects(
-    service.execute(uuidToken, {
-      operation: 'run.append',
-      idempotencyKey: 'append-1',
-      threadId: 'th_abc',
-      delivery: 'next_step',
-      input: '追加',
-    }),
-    (error: unknown) => error instanceof ExternalApiError && error.code === 'NEXT_STEP_NOT_READY',
-  );
+  const response = await service.execute(uuidToken, {
+    operation: 'run.append',
+    idempotencyKey: 'append-1',
+    threadId: 'th_abc',
+    delivery: 'next_step',
+    input: '追加',
+  }) as ExternalNextStepReceipt;
+
+  assert.equal(capturedInput, '追加');
+  assert.equal(response.inputId, 'ri_accepted');
+  assert.equal(response.version, 2);
+  assert.equal(starts, 0);
 });
 
 test('external command: UUID Token 无效时不会进入命令处理', async () => {

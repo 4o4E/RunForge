@@ -88,6 +88,14 @@ export interface RunRow {
   updated_at: string;
 }
 
+/** 已从持久化注入队列转换成 user message 的外部输入。 */
+export interface AppliedRunInput {
+  inputId: string;
+  version: number;
+  content: string;
+  messageId: number;
+}
+
 export interface StepRow {
   id: string;
   run_id: string;
@@ -416,6 +424,16 @@ export interface Store {
   /** 跨租户扫描,只给启动期后台任务(recovery.ts)用,禁止在 api/*.ts 路由里调用。 */
   listRunsByStatusUnscoped(statuses: RunStatus[]): Promise<RunRow[]>;
   setRunStatus(scope: Scope, id: string, status: RunStatus, fields?: { output?: string | null; error?: string | null }): Promise<void>;
+  /** 在 provider 调用前，把已接纳的 next_step 输入按版本顺序原子转换成 user message。 */
+  applyPendingRunInputs(scope: Scope, id: string): Promise<AppliedRunInput[]>;
+  /**
+   * 正常结束 external run 前先关闭输入接纳，再原子吸收已经排队的输入。
+   * 有输入时会重新打开接纳，由 executor 继续下一 step；无输入时保持关闭以阻止迟到请求。
+   */
+  closeExternalInputAndApplyPending(
+    scope: Scope,
+    id: string,
+  ): Promise<{ closed: boolean; inputs: AppliedRunInput[] }>;
   /** 从指定旧状态原子切回 pending 并重新占用 thread 执行槽；回答消息如有也在
    * 同一事务落库，避免恢复到 pending 后丢失输入。状态已变化时返回 null。 */
   resumeRun(

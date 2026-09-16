@@ -5,6 +5,7 @@ import type { GoalState } from '../agent/goal.js';
 import { sanitizeThreadMessagesForModel } from './messageView.js';
 import { DefaultSpaceImmutableError, isTerminalRunStatus, RunActiveError, SpaceConfigChangedError } from './types.js';
 import type {
+  AppliedRunInput,
   AuthTokenRow,
   CreateRunOptions,
   CreateSpaceRecordInput,
@@ -504,6 +505,8 @@ export class MemoryStore implements Store {
     }
     thread.executing_run_id = id;
     run.status = 'running';
+    const snapshot = run.space_config_snapshot as { mode?: unknown; external?: { allowNextStep?: unknown } } | null;
+    run.external_input_open = snapshot?.mode === 'external' && snapshot.external?.allowNextStep === true;
     run.updated_at = this.now();
     return true;
   }
@@ -558,10 +561,27 @@ export class MemoryStore implements Store {
     run.status = status;
     if (fields.output !== undefined) run.output = fields.output;
     if (fields.error !== undefined) run.error = fields.error;
+    if (status !== 'pending' && status !== 'running') run.external_input_open = false;
     run.updated_at = this.now();
     if (isTerminalRunStatus(status) && thread.executing_run_id === id) {
       thread.executing_run_id = null;
     }
+  }
+  async applyPendingRunInputs(_scope: Scope, _id: string): Promise<AppliedRunInput[]> {
+    // MemoryStore 不承接 external repository；executor 单测可通过子类覆盖此方法注入队列。
+    return [];
+  }
+  async closeExternalInputAndApplyPending(
+    scope: Scope,
+    id: string,
+  ): Promise<{ closed: boolean; inputs: AppliedRunInput[] }> {
+    const run = this.runs.get(id);
+    if (!this.runOwnedBy(run, scope) || (run.status !== 'pending' && run.status !== 'running') || !run.external_input_open) {
+      return { closed: false, inputs: [] };
+    }
+    run.external_input_open = false;
+    run.updated_at = this.now();
+    return { closed: true, inputs: [] };
   }
   async resumeRun(
     scope: Scope,

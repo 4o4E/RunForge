@@ -13,7 +13,7 @@ import { finishGoal, initGoal, mergeGoal, parseGoalPatch, renderGoal } from './g
 import { runBus } from './bus.js';
 import type { AgentEvent, FinishReason } from './types.js';
 import { store as defaultStore } from '../store/index.js';
-import { scopeForThread, type Scope, type Store } from '../store/types.js';
+import { scopeForThread, type AppliedRunInput, type Scope, type Store } from '../store/types.js';
 import { getMcpSettings, getToolSettings } from '../settings.js';
 import type { McpSettings, ToolSettings } from '../settings.js';
 import {
@@ -745,6 +745,50 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     const recentToolSignatures: string[] = [];
     const recentFailures: string[] = [];
     let noActionTurns = 0;
+    const acceptsNextStep = spaceConfig?.mode === 'external' && spaceConfig.external.allowNextStep;
+
+    const addAppliedExternalInputs = async (
+      inputs: AppliedRunInput[],
+      stepId: string,
+      stepIdx: number,
+    ): Promise<void> => {
+      for (const input of inputs) {
+        const message = { role: 'user' as const, content: input.content };
+        ctx.add(message);
+        ctx.setLastDbId(input.messageId);
+        await emit(stepId, {
+          type: 'external_input_applied',
+          step: stepIdx,
+          inputId: input.inputId,
+          version: input.version,
+        });
+      }
+      if (inputs.length) {
+        // 新输入代表调用方提供了新的推进信息，旧的空转/重复检测不能跨边界误判。
+        noActionTurns = 0;
+        recentToolSignatures.length = 0;
+        recentFailures.length = 0;
+      }
+    };
+
+    const applyPendingExternalInputs = async (stepId: string, stepIdx: number): Promise<void> => {
+      if (!acceptsNextStep) return;
+      await addAppliedExternalInputs(await store.applyPendingRunInputs(scope, runId), stepId, stepIdx);
+    };
+
+    const prepareExternalStop = async (
+      stepId: string,
+      stepIdx: number,
+    ): Promise<'finish' | 'continue'> => {
+      if (!acceptsNextStep) return 'finish';
+      const result = await store.closeExternalInputAndApplyPending(scope, runId);
+      if (!result.closed) {
+        // canceling 等状态变化赢得了同一行上的竞争；回到循环顶部按最新状态收口。
+        return 'continue';
+      }
+      await addAppliedExternalInputs(result.inputs, stepId, stepIdx);
+      return result.inputs.length ? 'continue' : 'finish';
+    };
 
     const envForStep = (stepId: string): Record<string, string> => ({
       ...toolEnv,
@@ -1098,6 +1142,9 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       const step = await store.createStep(scope, runId, stepIdx);
       stepIds.set(stepIdx, step.id);
       await emit(step.id, { type: 'step_start', step: stepIdx });
+      // next_step 只能出现在完整 step 之间；落库事务已经先创建 user message，
+      // 这里再把同一内容加入内存上下文，重启时仍可从 messages 恢复。
+      await applyPendingExternalInputs(step.id, stepIdx);
       streamStats.mark(stepIdx, 'llm_waiting', undefined, true);
 
       ctx.setActivationContext(renderRunActivationContext(activeSkills, activeMcp));
@@ -1282,6 +1329,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           return;
         }
         if (finalText) {
+          if (await prepareExternalStop(step.id, stepIdx) === 'continue') continue;
           // 无工具的可见正文就是本轮对话的终点。计划状态只做收敛记录，
           // 不能再反向驱动模型补跑一轮，否则会用后续短摘要覆盖真实最终输出。
           goal = finishGoal(goal);
@@ -1305,6 +1353,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         if (noActionTurns >= 3) {
           const reason = `连续 ${noActionTurns} 个 step 没有工具调用，也没有有效最终汇报。`;
           if (spaceConfig?.mode === 'external') {
+            if (await prepareExternalStop(step.id, stepIdx) === 'continue') continue;
             await emit(step.id, { type: 'error', step: stepIdx, message: reason });
             await store.setRunStatus(scope, runId, 'error', { error: reason });
             return;
@@ -1568,12 +1617,14 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       }
       const guardHit = detectLoopGuard(recentToolSignatures, recentFailures);
       if (guardHit) {
-        await emit(step.id, { type: 'progress_stalled', step: stepIdx, reason: guardHit.reason, question: guardHit.question });
         if (spaceConfig?.mode === 'external') {
+          if (await prepareExternalStop(step.id, stepIdx) === 'continue') continue;
+          await emit(step.id, { type: 'progress_stalled', step: stepIdx, reason: guardHit.reason, question: guardHit.question });
           await emit(step.id, { type: 'error', step: stepIdx, message: guardHit.reason });
           await store.setRunStatus(scope, runId, 'error', { error: guardHit.reason });
           return;
         }
+        await emit(step.id, { type: 'progress_stalled', step: stepIdx, reason: guardHit.reason, question: guardHit.question });
         await emit(step.id, { type: 'user_question', step: stepIdx, question: guardHit.question });
         await store.setRunStatus(scope, runId, 'waiting_for_user');
         return;

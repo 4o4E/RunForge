@@ -107,3 +107,13 @@ export interface ExternalCancelReceipt {
   runId: string;
   status: RunStatus;
 }
+
+export interface ExternalNextStepReceipt {
+  operation: 'run.append';
+  delivery: 'next_step';
+  threadId: string;
+  runId: string;
+  inputId: string;
+  version: number;
+  status: 'accepted';
+}

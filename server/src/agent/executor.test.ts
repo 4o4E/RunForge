@@ -11,7 +11,7 @@ import { config } from '../config.js';
 import { maskPlaceholder } from './compaction.js';
 import type { ToolSettings } from '../settings.js';
 import { maybeGenerateThreadTitleAfterFirstRun } from './threadTitle.js';
-import type { Scope } from '../store/types.js';
+import type { AppliedRunInput, Scope } from '../store/types.js';
 
 const scope: Scope = { tenantId: 'default', userId: 'us_test' };
 
@@ -63,6 +63,47 @@ async function captureWarnings(fn: () => Promise<void>): Promise<string[]> {
     console.warn = original;
   }
   return warnings;
+}
+
+class NextStepMemoryStore extends MemoryStore {
+  private readonly pending = new Map<string, Array<{ inputId: string; version: number; content: string }>>();
+  private version = 0;
+
+  async enqueue(scopeValue: Scope, runId: string, content: string): Promise<void> {
+    const run = await this.getRun(scopeValue, runId);
+    assert.equal(run?.external_input_open, true, 'run 应处于 next_step 接纳窗口');
+    this.version += 1;
+    const list = this.pending.get(runId) ?? [];
+    list.push({ inputId: `ri_test_${this.version}`, version: this.version, content });
+    this.pending.set(runId, list);
+  }
+
+  override async applyPendingRunInputs(scopeValue: Scope, runId: string): Promise<AppliedRunInput[]> {
+    const run = await this.getRun(scopeValue, runId);
+    if (!run) return [];
+    const inputs = this.pending.get(runId) ?? [];
+    this.pending.delete(runId);
+    const applied: AppliedRunInput[] = [];
+    for (const input of inputs) {
+      const messageId = await this.addMessage(scopeValue, run.thread_id, runId, null, {
+        role: 'user',
+        content: input.content,
+      });
+      applied.push({ ...input, messageId });
+    }
+    return applied;
+  }
+
+  override async closeExternalInputAndApplyPending(scopeValue: Scope, runId: string) {
+    const closed = await super.closeExternalInputAndApplyPending(scopeValue, runId);
+    if (!closed.closed) return closed;
+    const inputs = await this.applyPendingRunInputs(scopeValue, runId);
+    if (inputs.length) {
+      const run = await this.getRun(scopeValue, runId);
+      if (run) run.external_input_open = true;
+    }
+    return { closed: true, inputs };
+  }
 }
 
 // 一个先调用工具、再直接输出最终汇报的 provider。
@@ -260,6 +301,71 @@ test('executeRun: external 空间即使模型伪造 ask_user 调用也不会进�
   assert.match(observedSystemPrompt, /TRUSTED-CALLER-MARKER/);
   assert.equal(published.some((event) => event.type === 'user_question'), false);
   assert.ok(published.some((event) => event.type === 'tool_result' && /未被当前 run 的空间配置授权/.test(event.result)));
+});
+
+test('executeRun: 正常结束前原子吸收 next_step 输入并继续下一轮', async () => {
+  const store = new NextStepMemoryStore();
+  const thread = await store.createThread(scope);
+  let runId = '';
+  let turn = 0;
+  let secondTurnSawInput = false;
+  const provider: Provider = {
+    name: 'external-next-step',
+    async complete(messages) {
+      turn += 1;
+      if (turn === 1) {
+        await store.enqueue(scope, runId, '请同时补充回滚方案');
+        return { content: '第一版结果', toolCalls: [], finishReason: 'stop' };
+      }
+      secondTurnSawInput = messages.some((message) => message.role === 'user' && message.content === '请同时补充回滚方案');
+      return { content: '已补充回滚方案的最终结果', toolCalls: [], finishReason: 'stop' };
+    },
+  };
+  const run = await store.createRun(scope, thread.id, '制定发布方案', {
+    modelRef: 'main:model-a',
+    spaceConfigSnapshot: {
+      schemaVersion: 1,
+      spaceId: thread.space_id,
+      mode: 'external',
+      systemPrompt: '',
+      model: {
+        modelRef: 'main:model-a',
+        allowedModelRefs: ['main:model-a'],
+        contextWindow: 40_000,
+        contextBudget: 20_000,
+        contextBudgetSource: 'space-config',
+      },
+      capabilities: { tools: [], mcpServers: [], runtime: [] },
+      external: { allowTrustedPrompt: false, allowNextStep: true },
+    },
+  });
+  runId = run.id;
+
+  const published: AgentEvent[] = [];
+  await executeRun(run.id, {
+    store,
+    provider,
+    publish: (_id, event) => published.push(event),
+    hardStepCap: 3,
+    toolSettings: testToolSettings(),
+  });
+
+  const finished = await store.getRun(scope, run.id);
+  assert.equal(turn, 2);
+  assert.equal(secondTurnSawInput, true);
+  assert.equal(finished?.status, 'done');
+  assert.equal(finished?.output, '已补充回滚方案的最终结果');
+  assert.equal(finished?.external_input_open, false);
+  assert.equal(published.filter((event) => event.type === 'external_input_applied').length, 1);
+  assert.deepEqual(
+    (await store.loadRawThreadMessages(scope, thread.id, { runId: run.id })).map((message) => [message.role, message.content]),
+    [
+      ['user', '制定发布方案'],
+      ['assistant', '第一版结果'],
+      ['user', '请同时补充回滚方案'],
+      ['assistant', '已补充回滚方案的最终结果'],
+    ],
+  );
 });
 
 test('thread title: uses first input as fallback and generates for an empty-title branch', async () => {

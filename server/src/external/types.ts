@@ -3,6 +3,7 @@ import type {
   ExternalCancelReceipt,
   ExternalRunReceipt,
   ExternalRunView,
+  ExternalNextStepReceipt,
   ExternalSource,
   ExternalTokenSummary,
 } from '@runforge/contracts';
@@ -96,6 +97,10 @@ export interface ExternalRepository {
   revokeToken(tenantId: string, spaceId: string, callerId: string, tokenId: string): Promise<ExternalTokenSummary | null>;
   createRun(access: ExternalCallerAccess, input: ExternalRunWriteInput): Promise<ExternalWriteResult<ExternalRunReceipt>>;
   appendRun(access: ExternalCallerAccess, input: ExternalAppendRunInput): Promise<ExternalWriteResult<ExternalRunReceipt>>;
+  appendNextStep(
+    access: ExternalCallerAccess,
+    input: Omit<ExternalAppendRunInput, 'snapshot'>,
+  ): Promise<ExternalWriteResult<ExternalNextStepReceipt>>;
   getRun(access: ExternalCallerAccess, runId: string): Promise<{ response: ExternalRunView; executionUserId: string } | null>;
   cancelRun(access: ExternalCallerAccess, input: ExternalCancelInput): Promise<ExternalWriteResult<ExternalCancelReceipt> | null>;
 }

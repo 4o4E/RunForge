@@ -174,6 +174,7 @@ export type AgentEvent =
   | { type: 'user_question'; step: number; question: string; toolCallId?: string; spec?: AskUserSpec }
   | { type: 'user_answer'; step: number; answer: AskUserAnswer }
   | { type: 'user_cancel'; step: number; reason?: string }
+  | { type: 'external_input_applied'; step: number; inputId: string; version: number }
   | { type: 'progress_stalled'; step: number; reason: string; question?: string }
   | { type: 'recovery'; step: number; message: string }
   | { type: 'stream_retry'; step: number; provider: string; message: string }

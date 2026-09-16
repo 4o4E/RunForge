@@ -3,12 +3,21 @@ import type {
   ExternalCancelReceipt,
   ExternalRunReceipt,
   ExternalRunView,
+  ExternalNextStepReceipt,
+  ExternalSource,
   ExternalTokenSummary,
   RunStatus,
 } from '@runforge/contracts';
 import { prisma } from '../db/prisma.js';
 import type { Prisma } from '../generated/prisma/client.js';
-import { newExternalCallerId, newExternalRequestId, newExternalTokenId, newRunId, newThreadId } from '../id.js';
+import {
+  newExternalCallerId,
+  newExternalRequestId,
+  newExternalTokenId,
+  newRunId,
+  newRunInputId,
+  newThreadId,
+} from '../id.js';
 import { requiredJson, timestamp, toRunRow, toSpaceRow } from '../store/prismaRows.js';
 import { RunActiveError, SpaceConfigChangedError } from '../store/types.js';
 import type {
@@ -95,7 +104,7 @@ async function occupiedRunError(tx: Transaction, threadId: string): Promise<Erro
   return new ExternalApiError(409, 'THREAD_STATE_CHANGED', 'thread 状态已变化，请重试');
 }
 
-function requestSource(input: ExternalRunWriteInput | ExternalCancelInput): Prisma.InputJsonValue {
+function requestSource(input: { source: ExternalSource }): Prisma.InputJsonValue {
   return requiredJson(input.source) as Prisma.InputJsonValue;
 }
 
@@ -373,6 +382,7 @@ export class PrismaExternalRepository implements ExternalRepository {
             runtime_capabilities_snapshot: requiredJson(input.snapshot.runtimeCapabilities),
             space_config_snapshot: requiredJson(input.snapshot.spaceConfig),
             space_config_version: input.snapshot.configVersion,
+            external_input_open: input.snapshot.spaceConfig.external.allowNextStep,
           },
         });
         await tx.threads.update({
@@ -454,6 +464,7 @@ export class PrismaExternalRepository implements ExternalRepository {
             runtime_capabilities_snapshot: requiredJson(input.snapshot.runtimeCapabilities),
             space_config_snapshot: requiredJson(input.snapshot.spaceConfig),
             space_config_version: input.snapshot.configVersion,
+            external_input_open: input.snapshot.spaceConfig.external.allowNextStep,
           },
         });
         const claimed = await tx.threads.updateMany({
@@ -491,6 +502,113 @@ export class PrismaExternalRepository implements ExternalRepository {
           access, 'run.append', input.idempotencyKey, input.requestHash, undefined, input.source.externalEventId,
         );
         if (source) return { response: source, replayed: true, executionUserId: access.space.execution_user_id! };
+      }
+      throw error;
+    }
+  }
+
+  async appendNextStep(
+    access: ExternalCallerAccess,
+    input: Omit<ExternalAppendRunInput, 'snapshot'>,
+  ): Promise<ExternalWriteResult<ExternalNextStepReceipt>> {
+    try {
+      return await prisma.$transaction(async (tx) => {
+        const replay = await existingRequest<ExternalNextStepReceipt>(
+          tx, access.caller.id, 'run.append', input.idempotencyKey, input.requestHash,
+        );
+        if (replay) return { response: replay, replayed: true, executionUserId: access.space.execution_user_id! };
+        const sourceDuplicate = await sourceReplay<ExternalNextStepReceipt>(
+          tx, access.caller.id, undefined, input.source.externalEventId, input.requestHash,
+        );
+        if (sourceDuplicate) return { response: sourceDuplicate, replayed: true, executionUserId: access.space.execution_user_id! };
+        await requireLiveAccess(tx, access, false);
+        const thread = await tx.threads.findFirst({
+          where: {
+            id: input.threadId,
+            tenant_id: access.caller.tenantId,
+            space_id: access.caller.spaceId,
+            source_type: 'external',
+            source_caller_id: access.caller.id,
+          },
+          select: { executing_run_id: true, user_id: true },
+        });
+        if (!thread?.user_id) {
+          throw new ExternalApiError(404, 'THREAD_NOT_FOUND', 'thread 不存在');
+        }
+        if (!thread.executing_run_id) {
+          throw new ExternalApiError(409, 'RUN_NOT_ACTIVE', 'thread 当前没有可接收 next_step 的活动 run');
+        }
+        const run = await tx.runs.findUnique({
+          where: { id: thread.executing_run_id },
+          select: { space_config_snapshot: true },
+        });
+        const snapshot = run?.space_config_snapshot as { external?: { allowNextStep?: unknown } } | null;
+        if (snapshot?.external?.allowNextStep !== true) {
+          throw new ExternalApiError(403, 'NEXT_STEP_DISABLED', '目标 run 的空间配置未允许 next_step');
+        }
+        const accepted = await tx.runs.updateMany({
+          where: {
+            id: thread.executing_run_id,
+            status: { in: ['pending', 'running'] },
+            external_input_open: true,
+          },
+          data: { input_version: { increment: 1 }, updated_at: new Date() },
+        });
+        if (!accepted.count) {
+          throw new ExternalApiError(409, 'RUN_INPUT_CLOSED', '目标 run 已停止接收 next_step 输入');
+        }
+        const updated = await tx.runs.findUnique({
+          where: { id: thread.executing_run_id },
+          select: { input_version: true },
+        });
+        if (!updated) throw new ExternalApiError(404, 'RUN_NOT_FOUND', 'run 不存在');
+        const requestId = newExternalRequestId();
+        await tx.external_requests.create({
+          data: {
+            id: requestId,
+            caller_id: access.caller.id,
+            operation: 'run.append',
+            idempotency_key: input.idempotencyKey,
+            request_hash: input.requestHash,
+            status: 'processing',
+            external_event_id: input.source.externalEventId,
+            source_ref: requestSource(input),
+            thread_id: input.threadId,
+            run_id: thread.executing_run_id,
+          },
+        });
+        const inputId = newRunInputId();
+        await tx.run_inputs.create({
+          data: {
+            id: inputId,
+            run_id: thread.executing_run_id,
+            caller_id: access.caller.id,
+            external_request_id: requestId,
+            version: updated.input_version,
+            content: input.input,
+          },
+        });
+        const response: ExternalNextStepReceipt = {
+          operation: 'run.append',
+          delivery: 'next_step',
+          threadId: input.threadId,
+          runId: thread.executing_run_id,
+          inputId,
+          version: updated.input_version,
+          status: 'accepted',
+        };
+        await tx.external_requests.update({
+          where: { id: requestId },
+          data: { status: 'succeeded', response: requiredJson(response), updated_at: new Date() },
+        });
+        return { response, replayed: false, executionUserId: thread.user_id };
+      });
+    } catch (error) {
+      if (isUniqueConflict(error)) {
+        const replay = await this.findRequestOrSourceReplay<ExternalNextStepReceipt>(
+          access, 'run.append', input.idempotencyKey, input.requestHash, undefined, input.source.externalEventId,
+        );
+        if (replay) return { response: replay, replayed: true, executionUserId: access.space.execution_user_id! };
       }
       throw error;
     }
@@ -556,8 +674,16 @@ export class PrismaExternalRepository implements ExternalRepository {
         if (!row || !executionUserId) return null;
         const current = row.status as RunStatus;
         const status: RunStatus = current === 'pending' || current === 'running' ? 'canceling' : current;
-        if (status !== current) {
-          await tx.runs.update({ where: { id: row.id }, data: { status, updated_at: new Date() } });
+        if (status === 'canceling') {
+          const now = new Date();
+          await tx.runs.update({
+            where: { id: row.id },
+            data: { status, external_input_open: false, updated_at: now },
+          });
+          await tx.run_inputs.updateMany({
+            where: { run_id: row.id, status: 'pending' },
+            data: { status: 'canceled', canceled_at: now },
+          });
         }
         const response: ExternalCancelReceipt = {
           operation: 'run.cancel', threadId: row.thread_id, runId: row.id, status,

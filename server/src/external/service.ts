@@ -98,7 +98,14 @@ export class ExternalCommandService {
       return canceled.response;
     }
     if (command.operation === 'run.append' && command.delivery === 'next_step') {
-      throw new ExternalApiError(409, 'NEXT_STEP_NOT_READY', 'next_step 持久化注入将在下一协议切片启用');
+      const appended = await this.repository.appendNextStep(access, {
+        idempotencyKey: command.idempotencyKey,
+        requestHash: commandHash(command),
+        input: command.input,
+        threadId: command.threadId,
+        source: command.source,
+      });
+      return appended.response;
     }
 
     for (let attempt = 0; attempt < 2; attempt += 1) {

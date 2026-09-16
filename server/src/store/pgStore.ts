@@ -9,6 +9,7 @@ import { sanitizeThreadMessagesForModel } from './messageView.js';
 import { DefaultSpaceImmutableError, isTerminalRunStatus, RunActiveError, SpaceConfigChangedError } from './types.js';
 import type {
   AuthTokenRow,
+  AppliedRunInput,
   CreateRunOptions,
   CreateSpaceRecordInput,
   CreateTenantWithOwnerInput,
@@ -69,6 +70,49 @@ import {
 
 function isEphemeralSystemMessage(role: LlmMessage['role'], content: string | null): boolean {
   return role === 'system' && typeof content === 'string' && content.startsWith('已激活 Skill / Activated Skill:');
+}
+
+function allowsExternalNextStep(snapshot: unknown): boolean {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return false;
+  const value = snapshot as { mode?: unknown; external?: { allowNextStep?: unknown } };
+  return value.mode === 'external' && value.external?.allowNextStep === true;
+}
+
+async function applyPendingRunInputsInTransaction(
+  tx: Prisma.TransactionClient,
+  runId: string,
+  threadId: string,
+): Promise<AppliedRunInput[]> {
+  const pending = await tx.run_inputs.findMany({
+    where: { run_id: runId, status: 'pending' },
+    select: { id: true, version: true, content: true },
+    orderBy: { version: 'asc' },
+  });
+  const applied: AppliedRunInput[] = [];
+  for (const input of pending) {
+    // status CAS 使意外并发的两个 executor 也只有一个能创建对应 user message。
+    const claimed = await tx.run_inputs.updateMany({
+      where: { id: input.id, status: 'pending' },
+      data: { status: 'applied', applied_at: new Date() },
+    });
+    if (!claimed.count) continue;
+    const message = await tx.messages.create({
+      data: {
+        thread_id: threadId,
+        run_id: runId,
+        role: 'user',
+        content: input.content,
+      },
+      select: { id: true },
+    });
+    applied.push({
+      inputId: input.id,
+      version: input.version,
+      content: input.content,
+      messageId: serialId(message.id),
+    });
+  }
+  return applied;
 }
 
 async function occupiedRunError(tx: Prisma.TransactionClient, threadId: string): Promise<Error> {
@@ -661,7 +705,7 @@ export class PgStore implements Store {
           status: { in: ['pending', 'running'] },
           threads_runs_thread_idTothreads: { tenant_id: scope.tenantId, user_id: scope.userId },
         },
-        select: { thread_id: true },
+        select: { thread_id: true, space_config_snapshot: true },
       });
       if (!run) return false;
       const claimed = await tx.threads.updateMany({
@@ -671,7 +715,11 @@ export class PgStore implements Store {
       if (!claimed.count) throw await occupiedRunError(tx, run.thread_id);
       const started = await tx.runs.updateMany({
         where: { id, status: { in: ['pending', 'running'] } },
-        data: { status: 'running', updated_at: new Date() },
+        data: {
+          status: 'running',
+          external_input_open: allowsExternalNextStep(run.space_config_snapshot),
+          updated_at: new Date(),
+        },
       });
       return started.count === 1;
     });
@@ -735,9 +783,18 @@ export class PgStore implements Store {
           status,
           output: Object.prototype.hasOwnProperty.call(fields, 'output') ? fields.output ?? null : undefined,
           error: Object.prototype.hasOwnProperty.call(fields, 'error') ? fields.error ?? null : undefined,
+          external_input_open: status === 'pending' || status === 'running' ? undefined : false,
           updated_at: new Date(),
         },
       });
+
+      if (status !== 'pending' && status !== 'running') {
+        const now = new Date();
+        await tx.run_inputs.updateMany({
+          where: { run_id: id, status: 'pending' },
+          data: { status: 'canceled', canceled_at: now },
+        });
+      }
 
       if (isTerminalRunStatus(status)) {
         // 只允许当前 run 释放自己的槽，旧 run 的迟到收口不能清掉后来启动的 run。
@@ -746,6 +803,58 @@ export class PgStore implements Store {
           data: { executing_run_id: null },
         });
       }
+    });
+  }
+
+  async applyPendingRunInputs(scope: Scope, id: string): Promise<AppliedRunInput[]> {
+    return prisma.$transaction(async (tx) => {
+      const run = await tx.runs.findFirst({
+        where: {
+          id,
+          status: { in: ['pending', 'running'] },
+          threads_runs_thread_idTothreads: { tenant_id: scope.tenantId, user_id: scope.userId },
+        },
+        select: { thread_id: true },
+      });
+      if (!run) return [];
+      return applyPendingRunInputsInTransaction(tx, id, run.thread_id);
+    });
+  }
+
+  async closeExternalInputAndApplyPending(
+    scope: Scope,
+    id: string,
+  ): Promise<{ closed: boolean; inputs: AppliedRunInput[] }> {
+    return prisma.$transaction(async (tx) => {
+      const run = await tx.runs.findFirst({
+        where: {
+          id,
+          threads_runs_thread_idTothreads: { tenant_id: scope.tenantId, user_id: scope.userId },
+        },
+        select: { thread_id: true },
+      });
+      if (!run) return { closed: false, inputs: [] };
+
+      // 关闭与 appendNextStep 对同一 run 行做 CAS。两者并发时，数据库只会选定
+      // “先接纳后应用”或“先关闭后拒绝”其中一个顺序，不存在成功回执后漏注入。
+      const closed = await tx.runs.updateMany({
+        where: {
+          id,
+          status: { in: ['pending', 'running'] },
+          external_input_open: true,
+        },
+        data: { external_input_open: false, updated_at: new Date() },
+      });
+      if (!closed.count) return { closed: false, inputs: [] };
+
+      const inputs = await applyPendingRunInputsInTransaction(tx, id, run.thread_id);
+      if (inputs.length) {
+        await tx.runs.updateMany({
+          where: { id, status: { in: ['pending', 'running'] } },
+          data: { external_input_open: true, updated_at: new Date() },
+        });
+      }
+      return { closed: true, inputs };
     });
   }
 
