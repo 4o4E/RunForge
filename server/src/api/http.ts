@@ -14,8 +14,9 @@ import { authApi } from './authRoutes.js';
 import { systemAuthApi } from './systemAuth.js';
 import { tenantsApi } from './tenants.js';
 import { systemApi } from './system.js';
+import { sendSpaceError, tenantSpacesApi } from './spaces.js';
 import { requireSystemScope, requireTenantScope } from '../auth/guards.js';
-import { requireScope } from '../auth/context.js';
+import { getIdentity, requireScope, type IdentityContext } from '../auth/context.js';
 import type { Scope } from '../store/types.js';
 import { listDatasources, releaseRunLeases } from '../datasources/accountPool.js';
 import type { AskUserAnswer, AskUserOption, AskUserSpec } from '../agent/types.js';
@@ -27,6 +28,7 @@ import { isWithin } from '../tools/policy.js';
 import type { Response } from 'express';
 import type { LlmProviderState } from '../llm/types.js';
 import { RunActiveError } from '../store/types.js';
+import { spaceAccess } from '../spaces/access.js';
 
 export const api = Router();
 
@@ -37,6 +39,31 @@ function scopeOrReject(res: Response): Scope | null {
     return null;
   }
   return scope;
+}
+
+function tenantIdentityOrReject(res: Response): Extract<IdentityContext, { scope: 'tenant' }> | null {
+  const identity = getIdentity();
+  if (!identity || identity.scope !== 'tenant') {
+    res.status(403).json({ error: '需要租户身份' });
+    return null;
+  }
+  return identity;
+}
+
+async function checkThreadSpaceAccess(
+  res: Response,
+  identity: Extract<IdentityContext, { scope: 'tenant' }>,
+  spaceId: string,
+  writable: boolean,
+): Promise<boolean> {
+  try {
+    if (writable) await spaceAccess.requireWritableWebSpace(identity, spaceId);
+    else await spaceAccess.get(identity, spaceId);
+    return true;
+  } catch (error) {
+    sendSpaceError(res, error);
+    return false;
+  }
 }
 
 function sendRunActiveConflict(res: Response, err: unknown): boolean {
@@ -74,6 +101,7 @@ api.use('/runtime-capabilities', runtimeCapabilitiesApi);
 api.use(requireTenantScope);
 
 api.use('/tenants', tenantsApi);
+api.use('/spaces', tenantSpacesApi);
 api.use('/settings', settingsApi);
 api.use('/datasources', datasourcesApi);
 api.use('/notifications', notificationsApi);
@@ -170,34 +198,58 @@ function encryptedReasoningStats(providerState: LlmProviderState | undefined): {
 api.get('/search', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
   const q = String(req.query.q ?? '').trim();
   const limit = Math.min(100, Math.max(1, Number(req.query.limit ?? 50) || 50));
-  res.json({ query: q, results: await store.searchThreadMessages(scope, q, limit) });
+  try {
+    const visibleSpaceIds = (await spaceAccess.list(identity)).map((space) => space.id);
+    res.json({ query: q, results: await store.searchThreadMessages(scope, q, limit, { spaceIds: visibleSpaceIds }) });
+  } catch (error) {
+    sendSpaceError(res, error);
+  }
 });
 
 // 创建 thread。
 api.post('/threads', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
   const title = req.body?.title ? String(req.body.title) : undefined;
-  const thread = await store.createThread(scope, title);
-  res.status(201).json(thread);
+  try {
+    const space = await spaceAccess.requireWritableWebSpace(identity, optionalText(req.body?.spaceId));
+    const thread = await store.createThread(scope, title, { spaceId: space.id });
+    res.status(201).json(thread);
+  } catch (error) {
+    sendSpaceError(res, error);
+  }
 });
 
 // 列出 thread。默认只返回未归档列表；设置页通过 archived=1 查看归档列表。
 api.get('/threads', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
   const archived = req.query.archived === '1' || req.query.archived === 'true';
-  res.json(await store.listThreads(scope, 50, { archived }));
+  try {
+    const visibleSpaceIds = (await spaceAccess.list(identity)).map((space) => space.id);
+    res.json(await store.listThreads(scope, 50, { archived, spaceIds: visibleSpaceIds }));
+  } catch (error) {
+    sendSpaceError(res, error);
+  }
 });
 
 // thread 详情：包含 run 和事件，用于恢复对话。
 api.get('/threads/:id', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
   const thread = await store.getThread(scope, req.params.id);
   if (!thread) return res.status(404).json({ error: 'thread 不存在' });
+  if (!await checkThreadSpaceAccess(res, identity, thread.space_id, false)) return;
   const runs = await store.listRuns(scope, thread.id);
   const withEvents = await Promise.all(
     runs.map(async (run) => ({ ...run, events: await store.getEvents(scope, run.id) })),
@@ -252,6 +304,11 @@ api.get('/threads/:id', async (req, res) => {
 api.patch('/threads/:id', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
+  const existing = await store.getThread(scope, req.params.id);
+  if (!existing) return res.status(404).json({ error: 'thread 不存在' });
+  if (!await checkThreadSpaceAccess(res, identity, existing.space_id, true)) return;
   const fields: { title?: string | null; pinned?: boolean; archived?: boolean; activeRunId?: string | null } = {};
   if (Object.prototype.hasOwnProperty.call(req.body ?? {}, 'title')) {
     const title = typeof req.body.title === 'string' ? req.body.title.trim() : '';
@@ -274,8 +331,11 @@ api.patch('/threads/:id', async (req, res) => {
 api.get('/threads/:id/subagents', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
   const thread = await store.getThread(scope, req.params.id);
   if (!thread) return res.status(404).json({ error: 'thread 不存在' });
+  if (!await checkThreadSpaceAccess(res, identity, thread.space_id, false)) return;
   res.json({ subagents: await store.listSubagentRunsByThread(scope, thread.id) });
 });
 
@@ -283,6 +343,11 @@ api.get('/threads/:id/subagents', async (req, res) => {
 api.delete('/threads/:id', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
+  const thread = await store.getThread(scope, req.params.id);
+  if (!thread) return res.status(404).json({ error: 'thread 不存在' });
+  if (!await checkThreadSpaceAccess(res, identity, thread.space_id, true)) return;
   const deleted = await store.deleteThread(scope, req.params.id);
   if (!deleted) return res.status(404).json({ error: 'thread 不存在' });
   res.status(204).send();
@@ -292,8 +357,11 @@ api.delete('/threads/:id', async (req, res) => {
 api.post('/threads/:id/runs', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
   const thread = await store.getThread(scope, req.params.id);
   if (!thread) return res.status(404).json({ error: 'thread 不存在' });
+  if (!await checkThreadSpaceAccess(res, identity, thread.space_id, true)) return;
   const input = String(req.body?.input ?? '').trim();
   if (!input) return res.status(400).json({ error: 'input 为必填' });
   let modelRef: string | null = null;
@@ -325,8 +393,12 @@ api.post('/threads/:id/runs', async (req, res) => {
 api.get('/runs/:id', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
   const run = await store.getRun(scope, req.params.id);
   if (!run) return res.status(404).json({ error: 'run 不存在' });
+  const thread = await store.getThread(scope, run.thread_id);
+  if (!thread || !await checkThreadSpaceAccess(res, identity, thread.space_id, false)) return;
   const events = await store.getEvents(scope, run.id);
   res.json({ run, events });
 });
@@ -335,10 +407,13 @@ api.get('/runs/:id', async (req, res) => {
 api.post('/runs/:id/branch', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
   const source = await store.getRun(scope, req.params.id);
   if (!source) return res.status(404).json({ error: 'run 不存在' });
   const thread = await store.getThread(scope, source.thread_id);
   if (!thread) return res.status(404).json({ error: 'thread 不存在' });
+  if (!await checkThreadSpaceAccess(res, identity, thread.space_id, true)) return;
   if (thread.active_run_id !== source.id) {
     return res.status(409).json({ error: '只能修改当前分支最后一条用户消息' });
   }
@@ -376,6 +451,13 @@ api.post('/runs/:id/branch', async (req, res) => {
 api.post('/runs/:id/fork', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
+  const source = await store.getRun(scope, req.params.id);
+  if (!source) return res.status(404).json({ error: 'run 不存在' });
+  const sourceThread = await store.getThread(scope, source.thread_id);
+  if (!sourceThread) return res.status(404).json({ error: 'thread 不存在' });
+  if (!await checkThreadSpaceAccess(res, identity, sourceThread.space_id, true)) return;
   const fork = await store.forkThreadAtRun(scope, req.params.id);
   if (!fork) return res.status(404).json({ error: 'run 不存在' });
   res.status(201).json({
@@ -389,8 +471,12 @@ api.post('/runs/:id/fork', async (req, res) => {
 api.post('/runs/:id/cancel', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
   const run = await store.getRun(scope, req.params.id);
   if (!run) return res.status(404).json({ error: 'run 不存在' });
+  const thread = await store.getThread(scope, run.thread_id);
+  if (!thread || !await checkThreadSpaceAccess(res, identity, thread.space_id, true)) return;
   if (run.status === 'waiting_for_user') {
     const step = (await store.getLastStepIndex(scope, run.id)) + 1;
     await killRunShellCommands(scope, run.id);
@@ -412,10 +498,13 @@ api.post('/runs/:id/cancel', async (req, res) => {
 api.post('/runs/:id/continue', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
   const run = await store.getRun(scope, req.params.id);
   if (!run) return res.status(404).json({ error: 'run 不存在' });
   const thread = await store.getThread(scope, run.thread_id);
   if (!thread) return res.status(404).json({ error: 'thread 不存在' });
+  if (!await checkThreadSpaceAccess(res, identity, thread.space_id, true)) return;
   if (thread.active_run_id !== run.id) {
     return res.status(409).json({ error: '只能继续当前分支最后一条 run' });
   }
@@ -444,8 +533,12 @@ api.post('/runs/:id/continue', async (req, res) => {
 api.post('/runs/:id/answer', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
   const run = await store.getRun(scope, req.params.id);
   if (!run) return res.status(404).json({ error: 'run 不存在' });
+  const thread = await store.getThread(scope, run.thread_id);
+  if (!thread || !await checkThreadSpaceAccess(res, identity, thread.space_id, true)) return;
   if (run.status !== 'waiting_for_user') return res.status(409).json({ error: `run 当前状态为 ${run.status}，不是 waiting_for_user` });
 
   const spec = latestAskUserSpec(await store.getEvents(scope, run.id));

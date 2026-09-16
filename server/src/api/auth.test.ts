@@ -10,6 +10,7 @@ import { attachWebSocket } from './ws.js';
 import { getIdentity } from '../auth/context.js';
 import { signSystemAccessToken, signTenantAccessToken } from '../auth/jwt.js';
 import { store } from '../store/index.js';
+import { spaceAccess } from '../spaces/access.js';
 
 function listen(server: ReturnType<typeof createServer>): Promise<number> {
   return new Promise((resolve) => {
@@ -161,9 +162,16 @@ test('Phase 2: websocket 订阅前按 scope 校验归属，跨租户/跨用户�
   attachWebSocket(server);
   const port = await listen(server);
   try {
-    const scopeA = { tenantId: 'tn_ws_a', userId: 'us_ws_a' };
+    const provisioned = await store.createTenantWithOwner({
+      id: 'tn_ws_a',
+      name: 'WS A',
+      ownerEmail: 'owner@ws-a.test',
+      ownerPasswordHash: 'test-only',
+      settingsTemplate: [],
+    });
+    const scopeA = { tenantId: provisioned.tenant.id, userId: provisioned.owner.id };
     const thread = await store.createThread(scopeA, 'ws-isolation-thread');
-    const ownerTokenA = signTenantAccessToken({ id: 'us_ws_a', tenantId: 'tn_ws_a', role: 'owner' });
+    const ownerTokenA = signTenantAccessToken({ id: provisioned.owner.id, tenantId: provisioned.tenant.id, role: 'owner' });
     const otherTenantToken = signTenantAccessToken({ id: 'us_ws_b', tenantId: 'tn_ws_b', role: 'owner' });
 
     // 自己 thread 的订阅正常建立，不会被 1008 关闭。
@@ -199,6 +207,66 @@ test('Phase 2: websocket 订阅前按 scope 校验归属，跨租户/跨用户�
       });
       ws.on('error', reject);
     });
+  } finally {
+    server.close();
+    config.auth.jwtSecret = previousJwtSecret;
+  }
+});
+
+test('websocket 订阅会复核最新空间可见名单', async () => {
+  const previousJwtSecret = config.auth.jwtSecret;
+  config.auth.jwtSecret = 'test-jwt-secret';
+  const provisioned = await store.createTenantWithOwner({
+    id: 'tn_ws_space_visibility',
+    name: 'WS Space Visibility',
+    ownerEmail: 'owner@ws-space.test',
+    ownerPasswordHash: 'test-only',
+    settingsTemplate: [],
+  });
+  const member = await store.createUser({
+    tenantId: provisioned.tenant.id,
+    email: 'member@ws-space.test',
+    passwordHash: 'test-only',
+    role: 'member',
+  });
+  const ownerIdentity = {
+    scope: 'tenant' as const,
+    tenantId: provisioned.tenant.id,
+    userId: provisioned.owner.id,
+    role: 'owner' as const,
+  };
+  const space = await spaceAccess.create(ownerIdentity, {
+    mode: 'web',
+    name: 'WS Visible Space',
+    visibleUserIds: [member.id],
+  });
+  const scope = { tenantId: provisioned.tenant.id, userId: member.id };
+  const thread = await store.createThread(scope, 'visible before revoke', { spaceId: space.id });
+  const run = await store.createRun(scope, thread.id, 'visible before revoke');
+  await spaceAccess.update(ownerIdentity, space.id, { visibleUserIds: [] });
+
+  const server = createServer();
+  attachWebSocket(server);
+  const port = await listen(server);
+  const token = signTenantAccessToken({ id: member.id, tenantId: provisioned.tenant.id, role: 'member' });
+  try {
+    for (const target of [
+      `channel=shell&threadId=${thread.id}`,
+      `runId=${run.id}`,
+    ]) {
+      await new Promise<void>((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?${target}`, ['runforge-auth', tokenProtocol(token)]);
+        ws.on('close', (code) => {
+          try {
+            assert.equal(code, 1008);
+            resolve();
+          } catch (error) {
+            reject(error);
+          }
+        });
+        ws.on('error', reject);
+      });
+    }
   } finally {
     server.close();
     config.auth.jwtSecret = previousJwtSecret;

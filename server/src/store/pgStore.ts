@@ -6,9 +6,10 @@ import type { LlmMessage } from '../llm/types.js';
 import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
 import { sanitizeThreadMessagesForModel } from './messageView.js';
-import { isTerminalRunStatus, RunActiveError } from './types.js';
+import { DefaultSpaceImmutableError, isTerminalRunStatus, RunActiveError } from './types.js';
 import type {
   AuthTokenRow,
+  CreateSpaceRecordInput,
   CreateTenantWithOwnerInput,
   PushSubscriptionRow,
   RawThreadMessage,
@@ -21,6 +22,7 @@ import type {
   ShellSessionRow,
   Store,
   SpaceRow,
+  SpaceWithVisibilityRow,
   SubagentRunRow,
   StepRow,
   SystemAdminRow,
@@ -32,6 +34,7 @@ import type {
   ThreadSearchResultRow,
   ThreadRow,
   UserRow,
+  UpdateSpaceRecordInput,
 } from './types.js';
 import type { TenantUserRole, WebPushSubscriptionInput } from '@runforge/contracts';
 import {
@@ -84,6 +87,15 @@ async function occupiedRunError(tx: Prisma.TransactionClient, threadId: string):
   return new Error('未能占用 thread 执行槽，请重试');
 }
 
+function toSpaceWithVisibility(
+  row: Parameters<typeof toSpaceRow>[0] & { space_visible_users: Array<{ user_id: string }> },
+): SpaceWithVisibilityRow {
+  return {
+    ...toSpaceRow(row),
+    visible_user_ids: row.space_visible_users.map((entry) => entry.user_id).sort(),
+  };
+}
+
 export class PgStore implements Store {
   // 多租户改造 Phase 2(docs/multi-tenancy-design.md §5)。这两个私有帮助方法只给
   // 结构复杂、不方便直接把 scope 塞进查询本身的方法用(递归 CTE、多步聚合)——
@@ -134,15 +146,27 @@ export class PgStore implements Store {
 
   async createThread(scope: Scope, title?: string, options: { spaceId?: string } = {}): Promise<ThreadRow> {
     const row = await prisma.$transaction(async (tx) => {
-      const space = options.spaceId
-        ? await tx.spaces.findFirst({
-            where: { id: options.spaceId, tenant_id: scope.tenantId, mode: 'web', deleted_at: null },
-          })
-        : (await tx.tenants.findUnique({
-            where: { id: scope.tenantId },
-            select: { default_space: true },
-          }))?.default_space;
-      if (!space || space.deleted_at || space.mode !== 'web') {
+      const user = await tx.users.findFirst({
+        where: { id: scope.userId, tenant_id: scope.tenantId, status: 'active' },
+        select: { id: true, role: true },
+      });
+      if (!user) throw new Error('当前用户不存在或已禁用');
+      const targetSpaceId = options.spaceId ?? (await tx.tenants.findUnique({
+        where: { id: scope.tenantId },
+        select: { default_space_id: true },
+      }))?.default_space_id;
+      const space = targetSpaceId ? await tx.spaces.findFirst({
+        where: {
+          id: targetSpaceId,
+          tenant_id: scope.tenantId,
+          mode: 'web',
+          deleted_at: null,
+          ...((user.role === 'owner' || user.role === 'admin')
+            ? {}
+            : { space_visible_users: { some: { user_id: user.id } } }),
+        },
+      }) : null;
+      if (!space) {
         throw new Error('space 不存在、已删除或不允许创建 Web 对话');
       }
       return tx.threads.create({
@@ -173,11 +197,12 @@ export class PgStore implements Store {
     return row ? toThreadRow(row, row.runs_runs_thread_idTothreads[0]?.input ?? null) : null;
   }
 
-  async listThreads(scope: Scope, limit = 50, options: { archived?: boolean } = {}): Promise<ThreadRow[]> {
+  async listThreads(scope: Scope, limit = 50, options: { archived?: boolean; spaceIds?: string[] } = {}): Promise<ThreadRow[]> {
     const rows = await prisma.threads.findMany({
       where: {
         tenant_id: scope.tenantId,
         user_id: scope.userId,
+        space_id: options.spaceIds ? { in: options.spaceIds } : undefined,
         archived_at: options.archived === true ? { not: null } : null,
       },
       include: {
@@ -253,14 +278,23 @@ export class PgStore implements Store {
     return result.count > 0;
   }
 
-  async searchThreadMessages(scope: Scope, searchText: string, limit = 50): Promise<ThreadSearchResultRow[]> {
+  async searchThreadMessages(
+    scope: Scope,
+    searchText: string,
+    limit = 50,
+    options: { spaceIds?: string[] } = {},
+  ): Promise<ThreadSearchResultRow[]> {
     const q = searchText.trim();
     if (!q) return [];
     const rows = await prisma.messages.findMany({
       where: {
         content: { not: null, contains: q, mode: 'insensitive' },
         role: { in: ['user', 'assistant'] },
-        threads: { tenant_id: scope.tenantId, user_id: scope.userId },
+        threads: {
+          tenant_id: scope.tenantId,
+          user_id: scope.userId,
+          space_id: options.spaceIds ? { in: options.spaceIds } : undefined,
+        },
       },
       select: {
         thread_id: true,
@@ -541,11 +575,28 @@ export class PgStore implements Store {
         where: { id: threadId, tenant_id: scope.tenantId, user_id: scope.userId },
         select: {
           active_run_id: true,
-          spaces: { select: { config: true, config_version: true, deleted_at: true } },
+          spaces: {
+            select: {
+              config: true,
+              config_version: true,
+              deleted_at: true,
+              mode: true,
+              space_visible_users: { where: { user_id: scope.userId }, select: { user_id: true } },
+            },
+          },
         },
       });
       if (!thread) throw new Error('threadId 不存在或不属于当前用户');
       if (thread.spaces.deleted_at) throw new Error('space 已删除，不能创建新 run');
+      if (thread.spaces.mode !== 'web') throw new Error('外部空间在 Web 中只读');
+      const user = await tx.users.findFirst({
+        where: { id: scope.userId, tenant_id: scope.tenantId, status: 'active' },
+        select: { role: true },
+      });
+      const canManage = user?.role === 'owner' || user?.role === 'admin';
+      if (!user || (!canManage && thread.spaces.space_visible_users.length === 0)) {
+        throw new Error('space 不存在或当前用户不可写');
+      }
 
       let parentRunId = options.parentRunId;
       if (parentRunId === undefined) {
@@ -1486,6 +1537,137 @@ export class PgStore implements Store {
       select: { default_space: true },
     });
     return tenant?.default_space ? toSpaceRow(tenant.default_space) : null;
+  }
+
+  async listSpaces(tenantId: string, options: { includeDeleted?: boolean } = {}): Promise<SpaceWithVisibilityRow[]> {
+    const rows = await prisma.spaces.findMany({
+      where: { tenant_id: tenantId, ...(options.includeDeleted ? {} : { deleted_at: null }) },
+      include: { space_visible_users: { select: { user_id: true } } },
+      orderBy: [{ created_at: 'asc' }, { id: 'asc' }],
+    });
+    return rows.map(toSpaceWithVisibility);
+  }
+
+  async findSpace(tenantId: string, id: string): Promise<SpaceWithVisibilityRow | null> {
+    const row = await prisma.spaces.findFirst({
+      where: { id, tenant_id: tenantId },
+      include: { space_visible_users: { select: { user_id: true } } },
+    });
+    return row ? toSpaceWithVisibility(row) : null;
+  }
+
+  async createSpace(input: CreateSpaceRecordInput): Promise<SpaceWithVisibilityRow> {
+    const row = await prisma.$transaction(async (tx) => {
+      const created = await tx.spaces.create({
+        data: {
+          id: newSpaceId(),
+          tenant_id: input.tenantId,
+          mode: input.mode,
+          name: input.name,
+          execution_user_id: input.executionUserId,
+          config: requiredJson(input.config),
+          created_by_user_id: input.createdByUserId,
+        },
+      });
+      if (input.visibleUserIds.length) {
+        await tx.space_visible_users.createMany({
+          data: input.visibleUserIds.map((userId) => ({
+            space_id: created.id,
+            user_id: userId,
+            tenant_id: input.tenantId,
+          })),
+        });
+      }
+      return tx.spaces.findUniqueOrThrow({
+        where: { id: created.id },
+        include: { space_visible_users: { select: { user_id: true } } },
+      });
+    });
+    return toSpaceWithVisibility(row);
+  }
+
+  async updateSpace(
+    tenantId: string,
+    id: string,
+    fields: UpdateSpaceRecordInput,
+  ): Promise<SpaceWithVisibilityRow | null> {
+    const row = await prisma.$transaction(async (tx) => {
+      const current = await tx.spaces.findFirst({ where: { id, tenant_id: tenantId } });
+      if (!current) return null;
+      const tenant = await tx.tenants.findUnique({ where: { id: tenantId }, select: { default_space_id: true } });
+      if (tenant?.default_space_id === id && fields.name !== undefined && fields.name !== current.name) {
+        throw new DefaultSpaceImmutableError('default 空间不能重命名');
+      }
+      const updated = await tx.spaces.updateMany({
+        // Service 层先给出“已删除，请先恢复”的稳定错误；这里的 deleted_at 条件处理
+        // 更新与软删除并发的窄窗口，避免已经删除的空间被随后到达的更新写穿。
+        where: { id, tenant_id: tenantId, deleted_at: null },
+        data: {
+          name: fields.name,
+          execution_user_id: fields.executionUserId !== undefined
+            ? fields.executionUserId ?? null
+            : undefined,
+          config: fields.config === undefined ? undefined : requiredJson(fields.config),
+          config_version: fields.config === undefined ? undefined : { increment: 1 },
+          updated_at: new Date(),
+        },
+      });
+      if (updated.count === 0) return null;
+      if (fields.visibleUserIds !== undefined) {
+        await tx.space_visible_users.deleteMany({ where: { space_id: id } });
+        if (fields.visibleUserIds.length) {
+          await tx.space_visible_users.createMany({
+            data: fields.visibleUserIds.map((userId) => ({ space_id: id, user_id: userId, tenant_id: tenantId })),
+          });
+        }
+      }
+      return tx.spaces.findUniqueOrThrow({
+        where: { id },
+        include: { space_visible_users: { select: { user_id: true } } },
+      });
+    });
+    return row ? toSpaceWithVisibility(row) : null;
+  }
+
+  async softDeleteSpaceAndRevokeTokens(tenantId: string, id: string): Promise<SpaceWithVisibilityRow | null> {
+    const row = await prisma.$transaction(async (tx) => {
+      const tenant = await tx.tenants.findUnique({ where: { id: tenantId }, select: { default_space_id: true } });
+      const current = await tx.spaces.findFirst({ where: { id, tenant_id: tenantId } });
+      if (!current) return null;
+      if (tenant?.default_space_id === id) throw new DefaultSpaceImmutableError('default 空间不能删除');
+      const now = new Date();
+      await tx.spaces.update({
+        where: { id },
+        data: { deleted_at: current.deleted_at ?? now, updated_at: now },
+      });
+      await tx.external_tokens.updateMany({
+        where: {
+          revoked_at: null,
+          external_callers: { space_id: id, tenant_id: tenantId },
+        },
+        data: { revoked_at: now },
+      });
+      return tx.spaces.findUniqueOrThrow({
+        where: { id },
+        include: { space_visible_users: { select: { user_id: true } } },
+      });
+    });
+    return row ? toSpaceWithVisibility(row) : null;
+  }
+
+  async restoreSpace(tenantId: string, id: string): Promise<SpaceWithVisibilityRow | null> {
+    const row = await prisma.$transaction(async (tx) => {
+      const updated = await tx.spaces.updateMany({
+        where: { id, tenant_id: tenantId },
+        data: { deleted_at: null, updated_at: new Date() },
+      });
+      if (updated.count === 0) return null;
+      return tx.spaces.findUniqueOrThrow({
+        where: { id },
+        include: { space_visible_users: { select: { user_id: true } } },
+      });
+    });
+    return row ? toSpaceWithVisibility(row) : null;
   }
 
   async createUser(input: { tenantId: string; email: string; passwordHash: string; role: TenantUserRole }): Promise<UserRow> {

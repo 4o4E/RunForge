@@ -1,7 +1,7 @@
 import type { AgentEvent, RunStatus } from '../agent/types.js';
 import type { GoalState } from '../agent/goal.js';
 import type { LlmMessage } from '../llm/types.js';
-import type { TenantUserRole, WebPushSubscriptionInput } from '@runforge/contracts';
+import type { SpaceMode, TenantUserRole, WebPushSubscriptionInput } from '@runforge/contracts';
 
 /** 只有这三种状态真正释放 thread 执行槽；canceling 仍由当前 executor 收口。 */
 export function isTerminalRunStatus(status: RunStatus): boolean {
@@ -244,8 +244,6 @@ export interface TenantRow {
   created_at: string;
 }
 
-export type SpaceMode = 'web' | 'external';
-
 export interface SpaceRow {
   id: string;
   tenant_id: string;
@@ -258,6 +256,37 @@ export interface SpaceRow {
   deleted_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface SpaceWithVisibilityRow extends SpaceRow {
+  visible_user_ids: string[];
+}
+
+export interface CreateSpaceRecordInput {
+  tenantId: string;
+  mode: SpaceMode;
+  name: string;
+  executionUserId: string | null;
+  config: Record<string, unknown>;
+  createdByUserId: string | null;
+  visibleUserIds: string[];
+}
+
+export interface UpdateSpaceRecordInput {
+  name?: string;
+  executionUserId?: string | null;
+  config?: Record<string, unknown>;
+  visibleUserIds?: string[];
+}
+
+/** default space 的名称和生命周期是 tenant 不变量，持久化层必须再次防守。 */
+export class DefaultSpaceImmutableError extends Error {
+  readonly code = 'DEFAULT_SPACE_IMMUTABLE';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'DefaultSpaceImmutableError';
+  }
 }
 
 export interface TenantConfigTemplateEntry {
@@ -342,7 +371,7 @@ export interface SystemAdminTokenRow {
 export interface Store {
   createThread(scope: Scope, title?: string, options?: { spaceId?: string }): Promise<ThreadRow>;
   getThread(scope: Scope, id: string): Promise<ThreadRow | null>;
-  listThreads(scope: Scope, limit?: number, options?: { archived?: boolean }): Promise<ThreadRow[]>;
+  listThreads(scope: Scope, limit?: number, options?: { archived?: boolean; spaceIds?: string[] }): Promise<ThreadRow[]>;
   updateThread(
     scope: Scope,
     id: string,
@@ -350,7 +379,7 @@ export interface Store {
   ): Promise<ThreadRow | null>;
   setThreadTitleIfEmpty(scope: Scope, id: string, title: string): Promise<ThreadRow | null>;
   deleteThread(scope: Scope, id: string): Promise<boolean>;
-  searchThreadMessages(scope: Scope, query: string, limit?: number): Promise<ThreadSearchResultRow[]>;
+  searchThreadMessages(scope: Scope, query: string, limit?: number, options?: { spaceIds?: string[] }): Promise<ThreadSearchResultRow[]>;
   listThreadNotices(scope: Scope, threadId: string): Promise<ThreadNoticeRow[]>;
   addThreadNotice(scope: Scope, input: {
     threadId: string;
@@ -535,6 +564,12 @@ export interface Store {
   listTenants(): Promise<TenantRow[]>;
   updateTenantStatus(id: string, status: 'active' | 'suspended'): Promise<TenantRow | null>;
   getDefaultSpace(tenantId: string): Promise<SpaceRow | null>;
+  listSpaces(tenantId: string, options?: { includeDeleted?: boolean }): Promise<SpaceWithVisibilityRow[]>;
+  findSpace(tenantId: string, id: string): Promise<SpaceWithVisibilityRow | null>;
+  createSpace(input: CreateSpaceRecordInput): Promise<SpaceWithVisibilityRow>;
+  updateSpace(tenantId: string, id: string, fields: UpdateSpaceRecordInput): Promise<SpaceWithVisibilityRow | null>;
+  softDeleteSpaceAndRevokeTokens(tenantId: string, id: string): Promise<SpaceWithVisibilityRow | null>;
+  restoreSpace(tenantId: string, id: string): Promise<SpaceWithVisibilityRow | null>;
 
   createUser(input: { tenantId: string; email: string; passwordHash: string; role: TenantUserRole }): Promise<UserRow>;
   findUserByEmail(tenantId: string, email: string): Promise<UserRow | null>;

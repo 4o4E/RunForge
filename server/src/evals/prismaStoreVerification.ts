@@ -5,8 +5,9 @@ import { prisma } from '../db/prisma.js';
 import { PgStore } from '../store/pgStore.js';
 import { findSetting, upsertSettings } from '../store/settingsRepository.js';
 import { tenantSettingsTemplateEntries } from '../settings.js';
-import { RunActiveError } from '../store/types.js';
-import { newSpaceId } from '../id.js';
+import { DefaultSpaceImmutableError, RunActiveError } from '../store/types.js';
+import { newExternalCallerId, newExternalTokenId, newSpaceId } from '../id.js';
+import { SpaceAccessService } from '../spaces/access.js';
 
 const suffix = randomUUID().replaceAll('-', '').slice(0, 12);
 const tenantId = `prisma-verify-${suffix}`;
@@ -14,6 +15,7 @@ const otherTenantId = `prisma-verify-other-${suffix}`;
 const systemAdminEmail = `prisma-verify-${suffix}@system.test`;
 const toolResult = `验证工具结果：${'原始内容'.repeat(60)}`;
 const store = new PgStore();
+const spaceAccess = new SpaceAccessService(store);
 
 try {
   const provisioned = await store.createTenantWithOwner({
@@ -62,6 +64,62 @@ try {
     status: 'active',
     passwordHash: 'verification-updated',
   }))?.password_hash, 'verification-updated');
+
+  const visibleMember = await store.createUser({
+    tenantId,
+    email: `member-${suffix}@tenant.test`,
+    passwordHash: 'verification-only',
+    role: 'member',
+  });
+  const ownerIdentity = { scope: 'tenant' as const, tenantId, userId: user.id, role: 'owner' as const };
+  const externalSpace = await spaceAccess.create(ownerIdentity, {
+    mode: 'external',
+    name: 'Prisma 外部空间',
+    executionUserId: visibleMember.id,
+    visibleUserIds: [visibleMember.id],
+    config: { prompt: 'v1' },
+  });
+  assert.equal((await store.findSpace(tenantId, externalSpace.id))?.execution_user_id, visibleMember.id);
+  assert.deepEqual((await store.findSpace(tenantId, externalSpace.id))?.visible_user_ids, [visibleMember.id]);
+  const updatedExternalSpace = await spaceAccess.update(ownerIdentity, externalSpace.id, {
+    config: { prompt: 'v2' },
+  });
+  assert.equal(updatedExternalSpace.configVersion, 2);
+
+  const callerId = newExternalCallerId();
+  await prisma.external_callers.create({
+    data: { id: callerId, tenant_id: tenantId, space_id: externalSpace.id, name: 'Prisma 验证调用方' },
+  });
+  const externalToken = await prisma.external_tokens.create({
+    data: { id: newExternalTokenId(), caller_id: callerId, token_hash: `external-hash-${suffix}` },
+  });
+  const deletedExternalSpace = await spaceAccess.delete(ownerIdentity, externalSpace.id);
+  assert.notEqual(deletedExternalSpace.deletedAt, null);
+  assert.notEqual((await prisma.external_tokens.findUnique({ where: { id: externalToken.id } }))?.revoked_at, null);
+  const restoredExternalSpace = await spaceAccess.restore(ownerIdentity, externalSpace.id);
+  assert.equal(restoredExternalSpace.deletedAt, null);
+  assert.deepEqual(restoredExternalSpace.visibleUserIds, [visibleMember.id]);
+  assert.notEqual((await prisma.external_tokens.findUnique({ where: { id: externalToken.id } }))?.revoked_at, null);
+  await assert.rejects(
+    store.softDeleteSpaceAndRevokeTokens(tenantId, defaultSpace.id),
+    (error: unknown) => error instanceof DefaultSpaceImmutableError,
+  );
+
+  const guardedWebSpace = await spaceAccess.create(ownerIdentity, {
+    mode: 'web',
+    name: 'Prisma 权限兜底空间',
+    visibleUserIds: [visibleMember.id],
+  });
+  const memberScope = { tenantId, userId: visibleMember.id };
+  const guardedThread = await store.createThread(memberScope, 'Prisma 权限兜底会话', {
+    spaceId: guardedWebSpace.id,
+  });
+  await spaceAccess.update(ownerIdentity, guardedWebSpace.id, { visibleUserIds: [] });
+  await assert.rejects(
+    store.createThread(memberScope, '不可创建', { spaceId: guardedWebSpace.id }),
+    /不可写|不允许创建/,
+  );
+  await assert.rejects(store.createRun(memberScope, guardedThread.id, '不可追加'), /不可写/);
 
   const thread = await store.createThread(scope, 'Prisma 验证会话');
   assert.equal(thread.space_id, defaultSpace.id);

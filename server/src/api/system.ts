@@ -40,8 +40,11 @@ import {
 } from '../datasources/accountPool.js';
 import { testDatasourceById, testDatasourceDraft } from '../datasources/introspection.js';
 import type { DatasourceRow } from '../datasources/types.js';
+import { systemSpacesApi } from './spaces.js';
 
 export const systemApi = Router();
+
+systemApi.use('/tenants/:tenantId/spaces', systemSpacesApi);
 
 const TENANT_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
 

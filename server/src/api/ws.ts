@@ -7,6 +7,26 @@ import { tokenFromWebSocketProtocols } from './auth.js';
 import { looksLikeJwt, verifyAccessToken } from '../auth/jwt.js';
 import type { AgentEvent } from '../agent/types.js';
 import type { Scope } from '../store/types.js';
+import { spaceAccess } from '../spaces/access.js';
+
+async function canViewThreadSpace(
+  claims: Extract<NonNullable<ReturnType<typeof verifyAccessToken>>, { scope: 'tenant' }>,
+  spaceId: string,
+): Promise<boolean> {
+  try {
+    // JWT 中的 role 只作为身份结构传入；SpaceAccessService 会重新读取用户状态和角色，
+    // 因此用户被禁用、降权或移出空间名单后，旧 token 也不能继续订阅事件。
+    await spaceAccess.get({
+      scope: 'tenant',
+      tenantId: claims.tenant_id,
+      userId: claims.sub,
+      role: claims.role,
+    }, spaceId);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * WebSocket 端点:
@@ -47,7 +67,7 @@ export function attachWebSocket(server: Server): void {
       // 订阅前先按 scope 查一次归属，查不到就直接拒绝——这是完整的 {tenantId, userId}
       // 私有性规则，不只是租户边界(docs/multi-tenancy-design.md §7 的偏离记录)。
       const thread = await store.getThread(scope, threadId);
-      if (!thread) {
+      if (!thread || !await canViewThreadSpace(claims, thread.space_id)) {
         socket.close(1008, '无权订阅该 thread');
         return;
       }
@@ -68,6 +88,11 @@ export function attachWebSocket(server: Server): void {
 
     const run = await store.getRun(scope, runId);
     if (!run) {
+      socket.close(1008, '无权订阅该 run');
+      return;
+    }
+    const thread = await store.getThread(scope, run.thread_id);
+    if (!thread || !await canViewThreadSpace(claims, thread.space_id)) {
       socket.close(1008, '无权订阅该 run');
       return;
     }

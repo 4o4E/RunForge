@@ -3,9 +3,10 @@ import type { LlmMessage } from '../llm/types.js';
 import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
 import { sanitizeThreadMessagesForModel } from './messageView.js';
-import { isTerminalRunStatus, RunActiveError } from './types.js';
+import { DefaultSpaceImmutableError, isTerminalRunStatus, RunActiveError } from './types.js';
 import type {
   AuthTokenRow,
+  CreateSpaceRecordInput,
   CreateTenantWithOwnerInput,
   PushSubscriptionRow,
   RawThreadMessage,
@@ -17,6 +18,7 @@ import type {
   ShellLogStream,
   ShellSessionRow,
   SpaceRow,
+  SpaceWithVisibilityRow,
   Store,
   SubagentRunRow,
   StepRow,
@@ -29,6 +31,7 @@ import type {
   ThreadSearchResultRow,
   ThreadRow,
   UserRow,
+  UpdateSpaceRecordInput,
 } from './types.js';
 import type { TenantUserRole, WebPushSubscriptionInput } from '@runforge/contracts';
 import {
@@ -79,6 +82,7 @@ export class MemoryStore implements Store {
   private pushSubscriptions = new Map<string, PushSubscriptionRow>();
   private tenants = new Map<string, TenantRow>();
   private spaces = new Map<string, SpaceRow>();
+  private spaceVisibleUsers = new Map<string, Set<string>>();
   private users = new Map<string, UserRow>();
   private systemAdmins = new Map<string, SystemAdminRow>();
   private authTokens = new Map<string, AuthTokenRow>();
@@ -116,6 +120,14 @@ export class MemoryStore implements Store {
     return { ...thread, fallback_title: firstRun?.input ?? null };
   }
 
+  private spaceWithVisibility(space: SpaceRow): SpaceWithVisibilityRow {
+    return {
+      ...space,
+      config: structuredClone(space.config),
+      visible_user_ids: [...(this.spaceVisibleUsers.get(space.id) ?? [])].sort(),
+    };
+  }
+
   /** 大量纯单元测试直接从 createThread 开始，不需要先搭身份数据。只在 MemoryStore
    *  内补一个最小 default space；真实 PgStore 始终要求 tenant/user 已存在。 */
   private ensureDefaultSpaceForTests(scope: Scope): SpaceRow {
@@ -151,6 +163,7 @@ export class MemoryStore implements Store {
       tenant.default_space_id = space.id;
     }
     this.spaces.set(space.id, space);
+    this.spaceVisibleUsers.set(space.id, new Set());
     return space;
   }
 
@@ -158,6 +171,12 @@ export class MemoryStore implements Store {
     const space = options.spaceId ? this.spaces.get(options.spaceId) : this.ensureDefaultSpaceForTests(scope);
     if (!space || space.tenant_id !== scope.tenantId || space.mode !== 'web' || space.deleted_at) {
       throw new Error('space 不存在、已删除或不允许创建 Web 对话');
+    }
+    const user = this.users.get(scope.userId);
+    if (user) {
+      const canManage = user.status === 'active' && (user.role === 'owner' || user.role === 'admin');
+      const isVisible = user.status === 'active' && this.spaceVisibleUsers.get(space.id)?.has(user.id);
+      if (!canManage && !isVisible) throw new Error('space 不存在或当前用户不可写');
     }
     const row: ThreadRow = {
       id: newThreadId(),
@@ -183,10 +202,12 @@ export class MemoryStore implements Store {
     if (!this.threadOwnedBy(thread, scope)) return null;
     return this.threadWithFallbackTitle(thread);
   }
-  async listThreads(scope: Scope, limit = 50, options: { archived?: boolean } = {}) {
+  async listThreads(scope: Scope, limit = 50, options: { archived?: boolean; spaceIds?: string[] } = {}) {
     const archived = options.archived === true;
+    const allowedSpaces = options.spaceIds ? new Set(options.spaceIds) : null;
     return [...this.threads.values()]
       .filter((thread) => thread.tenant_id === scope.tenantId && thread.user_id === scope.userId)
+      .filter((thread) => !allowedSpaces || allowedSpaces.has(thread.space_id))
       .filter((thread) => archived ? Boolean(thread.archived_at) : !thread.archived_at)
       .sort((a, b) => {
         if (a.pinned_at && !b.pinned_at) return -1;
@@ -251,11 +272,21 @@ export class MemoryStore implements Store {
     return true;
   }
 
-  async searchThreadMessages(scope: Scope, searchText: string, limit = 50): Promise<ThreadSearchResultRow[]> {
+  async searchThreadMessages(
+    scope: Scope,
+    searchText: string,
+    limit = 50,
+    options: { spaceIds?: string[] } = {},
+  ): Promise<ThreadSearchResultRow[]> {
     const q = searchText.trim().toLowerCase();
     if (!q) return [];
+    const allowedSpaces = options.spaceIds ? new Set(options.spaceIds) : null;
     return this.messages
       .filter((message) => this.threadOwnedBy(this.threads.get(message.thread_id), scope))
+      .filter((message) => {
+        const thread = this.threads.get(message.thread_id);
+        return !allowedSpaces || Boolean(thread && allowedSpaces.has(thread.space_id));
+      })
       .filter((message) => (
         (message.role === 'user' || message.role === 'assistant')
         && typeof message.content === 'string'
@@ -415,6 +446,13 @@ export class MemoryStore implements Store {
     if (!this.threadOwnedBy(thread, scope)) throw new Error('threadId 不存在或不属于当前用户');
     const space = this.spaces.get(thread.space_id);
     if (!space || space.deleted_at) throw new Error('space 已删除，不能创建新 run');
+    if (space.mode !== 'web') throw new Error('外部空间在 Web 中只读');
+    const user = this.users.get(scope.userId);
+    if (user) {
+      const canManage = user.status === 'active' && (user.role === 'owner' || user.role === 'admin');
+      const isVisible = user.status === 'active' && this.spaceVisibleUsers.get(space.id)?.has(user.id);
+      if (!canManage && !isVisible) throw new Error('space 不存在或当前用户不可写');
+    }
     if (thread.executing_run_id) {
       const current = this.runs.get(thread.executing_run_id);
       throw new RunActiveError(thread.executing_run_id, current?.status ?? 'running');
@@ -1049,6 +1087,7 @@ export class MemoryStore implements Store {
     this.tenants.set(tenant.id, tenant);
     this.users.set(owner.id, owner);
     this.spaces.set(defaultSpace.id, defaultSpace);
+    this.spaceVisibleUsers.set(defaultSpace.id, new Set());
     return { tenant, owner, defaultSpace };
   }
 
@@ -1070,6 +1109,81 @@ export class MemoryStore implements Store {
   async getDefaultSpace(tenantId: string): Promise<SpaceRow | null> {
     const id = this.tenants.get(tenantId)?.default_space_id;
     return id ? this.spaces.get(id) ?? null : null;
+  }
+
+  async listSpaces(tenantId: string, options: { includeDeleted?: boolean } = {}): Promise<SpaceWithVisibilityRow[]> {
+    return [...this.spaces.values()]
+      .filter((space) => space.tenant_id === tenantId && (options.includeDeleted || !space.deleted_at))
+      .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
+      .map((space) => this.spaceWithVisibility(space));
+  }
+
+  async findSpace(tenantId: string, id: string): Promise<SpaceWithVisibilityRow | null> {
+    const space = this.spaces.get(id);
+    return space?.tenant_id === tenantId ? this.spaceWithVisibility(space) : null;
+  }
+
+  async createSpace(input: CreateSpaceRecordInput): Promise<SpaceWithVisibilityRow> {
+    if (!this.tenants.has(input.tenantId)) throw new Error('tenant 不存在');
+    const now = this.now();
+    const space: SpaceRow = {
+      id: newSpaceId(),
+      tenant_id: input.tenantId,
+      mode: input.mode,
+      name: input.name,
+      execution_user_id: input.executionUserId,
+      config: structuredClone(input.config),
+      config_version: 1,
+      created_by_user_id: input.createdByUserId,
+      deleted_at: null,
+      created_at: now,
+      updated_at: now,
+    };
+    this.spaces.set(space.id, space);
+    this.spaceVisibleUsers.set(space.id, new Set(input.visibleUserIds));
+    return this.spaceWithVisibility(space);
+  }
+
+  async updateSpace(tenantId: string, id: string, fields: UpdateSpaceRecordInput): Promise<SpaceWithVisibilityRow | null> {
+    const space = this.spaces.get(id);
+    if (!space || space.tenant_id !== tenantId) return null;
+    const tenant = this.tenants.get(tenantId);
+    if (tenant?.default_space_id === id && fields.name !== undefined && fields.name !== space.name) {
+      throw new DefaultSpaceImmutableError('default 空间不能重命名');
+    }
+    if (fields.name !== undefined) space.name = fields.name;
+    if (fields.executionUserId !== undefined) {
+      space.execution_user_id = fields.executionUserId ?? null;
+    }
+    if (fields.config !== undefined) {
+      space.config = structuredClone(fields.config);
+      space.config_version += 1;
+    }
+    if (fields.visibleUserIds !== undefined) {
+      this.spaceVisibleUsers.set(id, new Set(fields.visibleUserIds));
+    }
+    space.updated_at = this.now();
+    return this.spaceWithVisibility(space);
+  }
+
+  async softDeleteSpaceAndRevokeTokens(tenantId: string, id: string): Promise<SpaceWithVisibilityRow | null> {
+    const space = this.spaces.get(id);
+    if (!space || space.tenant_id !== tenantId) return null;
+    if (this.tenants.get(tenantId)?.default_space_id === id) {
+      throw new DefaultSpaceImmutableError('default 空间不能删除');
+    }
+    space.deleted_at ??= this.now();
+    space.updated_at = this.now();
+    // MemoryStore 当前没有外部 Token 写入入口；真实 PgStore 在同一事务内完成吊销。
+    return this.spaceWithVisibility(space);
+  }
+
+  async restoreSpace(tenantId: string, id: string): Promise<SpaceWithVisibilityRow | null> {
+    const space = this.spaces.get(id);
+    if (!space || space.tenant_id !== tenantId) return null;
+    space.deleted_at = null;
+    space.updated_at = this.now();
+    return this.spaceWithVisibility(space);
   }
 
   async createUser(input: { tenantId: string; email: string; passwordHash: string; role: TenantUserRole }): Promise<UserRow> {
