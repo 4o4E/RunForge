@@ -244,6 +244,16 @@ Web 现有文件上传接口保持不变；外部 artifact 契约是其上层资
 读取同一 caller 的资源并返回 `contentBase64`。内容存入 RunForge 受控文件存储，数据库仅
 保存不透明 storage key、归属和元数据。
 
+`run.create` 与 `run.append` 可携带去重后的 `artifactIds`，单次最多 20 个。接纳事务会同时
+校验 caller、space、`staged` 状态和单文件 25 MiB 上限，并把 artifact 绑定到本次
+thread/run；同一 artifact 不能被另一个输入再次绑定。服务端把引用转换成现有
+`[[file:{...}]]` 内部文件 token，目标路径固定为 `uploads/{artifactId}-{safeName}`，调用方
+不能指定实际路径。`runs.input` 和 `run_inputs.content` 保留调用方原文，artifact 关系/ID
+单独持久化；写入模型消息时再派生内部 token。executor 在第一次 Provider 调用前
+materialize 初始附件；`next_step` 在应用为持久化 user message 后、加入内存上下文和下一次
+Provider 调用前 materialize。文件写入和状态更新都可重试，进程在两者之间退出不会产生
+半文件或丢失引用。
+
 ## 7. Workspace
 
 - default 空间继续使用现有按 tenant + user 派生的统一用户级 workspace，不迁移旧文件。

@@ -309,11 +309,15 @@ test('executeRun: 正常结束前原子吸收 next_step 输入并继续下一轮
   let runId = '';
   let turn = 0;
   let secondTurnSawInput = false;
+  let firstTurnSawArtifact = false;
+  let materializations = 0;
   const provider: Provider = {
     name: 'external-next-step',
     async complete(messages) {
       turn += 1;
+      assert.equal(materializations, turn, 'provider 调用前应完成当前输入的 artifact materialize');
       if (turn === 1) {
+        firstTurnSawArtifact = messages.some((message) => message.role === 'user' && message.content?.includes('ar_executor_input'));
         await store.enqueue(scope, runId, '请同时补充回滚方案');
         return { content: '第一版结果', toolCalls: [], finishReason: 'stop' };
       }
@@ -348,19 +352,27 @@ test('executeRun: 正常结束前原子吸收 next_step 输入并继续下一轮
     publish: (_id, event) => published.push(event),
     hardStepCap: 3,
     toolSettings: testToolSettings(),
+    materializeRunArtifacts: async () => {
+      materializations += 1;
+      return [{ id: 'ar_executor_input', name: 'input.txt', mimeType: 'text/plain', size: 5 }];
+    },
   });
 
   const finished = await store.getRun(scope, run.id);
   assert.equal(turn, 2);
+  assert.equal(materializations, 2);
+  assert.equal(firstTurnSawArtifact, true);
   assert.equal(secondTurnSawInput, true);
   assert.equal(finished?.status, 'done');
   assert.equal(finished?.output, '已补充回滚方案的最终结果');
   assert.equal(finished?.external_input_open, false);
   assert.equal(published.filter((event) => event.type === 'external_input_applied').length, 1);
+  const persistedMessages = (await store.loadRawThreadMessages(scope, thread.id, { runId: run.id }))
+    .map((message) => [message.role, message.content]);
+  assert.match(persistedMessages[0]?.[1] ?? '', /ar_executor_input/);
   assert.deepEqual(
-    (await store.loadRawThreadMessages(scope, thread.id, { runId: run.id })).map((message) => [message.role, message.content]),
+    persistedMessages.slice(1),
     [
-      ['user', '制定发布方案'],
       ['assistant', '第一版结果'],
       ['user', '请同时补充回滚方案'],
       ['assistant', '已补充回滚方案的最终结果'],

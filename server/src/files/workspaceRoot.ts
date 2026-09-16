@@ -26,3 +26,8 @@ export function resolveWorkspaceRoot(scope: WorkspaceScope | string, base: strin
   if (!userId) return tenantRoot;
   return resolve(join(tenantRoot, 'users', safeSegment(userId), 'workspace'));
 }
+
+/** 非 default 空间按全局唯一 thread ID 使用短路径，不重复 tenant/space/user 层级。 */
+export function resolveThreadWorkspaceRoot(threadId: string, base: string = config.tools.workspaceRoot): string {
+  return resolve(join(base, safeSegment(threadId)));
+}

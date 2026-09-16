@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ExternalArtifactSummary, ExternalNextStepReceipt, ExternalRunReceipt } from '@runforge/contracts';
@@ -8,6 +8,8 @@ import type { SpaceWithVisibilityRow } from '../store/types.js';
 import { ExternalCommandService } from './service.js';
 import { ExternalApiError, type ExternalCallerAccess, type ExternalRepository } from './types.js';
 import { FileExternalArtifactStorage } from './artifactStorage.js';
+import { ExternalArtifactMaterializer } from './artifactMaterializer.js';
+import { attachExternalArtifactTokens, externalArtifactRemotePath } from './artifactProtocol.js';
 
 const uuidToken = '123e4567-e89b-42d3-a456-426614174000';
 const space: SpaceWithVisibilityRow = {
@@ -104,6 +106,7 @@ test('external command: run.create 固化可信提示词，只启动一次 execu
     createRun: async (_access, input) => {
       capturedHash = input.requestHash;
       assert.equal(input.snapshot.spaceConfig.external.trustedPrompt, '只返回机器可读结果');
+      assert.deepEqual(input.artifactIds, ['ar_input']);
       return {
         response: { operation: 'run.create', threadId: 'th_created', runId: 'ru_created', status: 'pending' },
         replayed: false,
@@ -121,6 +124,7 @@ test('external command: run.create 固化可信提示词，只启动一次 execu
     operation: 'run.create',
     idempotencyKey: 'create-1',
     input: '执行任务',
+    artifactIds: ['ar_input'],
     trustedPrompt: '只返回机器可读结果',
     source: { externalThreadRef: 'conversation-1' },
   }) as ExternalRunReceipt;
@@ -263,6 +267,8 @@ test('external artifact storage: storage key 不能逃出受控目录', async ()
   try {
     await storage.write('ec_test/ar_keep', Buffer.from('keep'));
     await storage.write('ec_test/ar_test', Buffer.from('safe'));
+    await assert.rejects(storage.write('ec_test/ar_keep', Buffer.from('overwrite')));
+    assert.equal((await storage.read('ec_test/ar_keep')).toString('utf8'), 'keep');
     assert.equal((await storage.read('ec_test/ar_test')).toString('utf8'), 'safe');
     await assert.rejects(storage.write('../escape', Buffer.from('unsafe')), /越界/);
     assert.equal(await storage.reconcile(new Set(['ec_test/ar_keep'])), 1);
@@ -272,6 +278,65 @@ test('external artifact storage: storage key 不能逃出受控目录', async ()
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('external artifact materializer: 使用确定路径写入 workspace 并在文件完成后提交状态', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runforge-external-materialize-'));
+  const storage = new FileExternalArtifactStorage(join(root, 'storage'));
+  const workspace = join(root, 'workspace');
+  const artifact = {
+    id: 'ar_materialize',
+    storageKey: 'ec_test/ar_materialize',
+    name: '分析 报告.pdf',
+    mimeType: 'application/pdf',
+    size: 7,
+    status: 'staged' as 'staged' | 'materialized',
+    initialInput: true,
+  };
+  let marks = 0;
+  const materializer = new ExternalArtifactMaterializer({
+    list: async () => [artifact],
+    mark: async (_scope, runId, artifactId) => {
+      assert.equal(runId, 'ru_materialize');
+      assert.equal(artifactId, artifact.id);
+      marks += 1;
+      artifact.status = 'materialized';
+    },
+  }, storage);
+  try {
+    await storage.write(artifact.storageKey, Buffer.from('content'));
+    assert.equal((await materializer.materializeRun({ tenantId: 'tn_test', userId: 'us_test' }, 'ru_materialize', workspace)).length, 1);
+    const remotePath = externalArtifactRemotePath({ id: artifact.id, name: artifact.name });
+    assert.equal((await readFile(join(workspace, remotePath))).toString('utf8'), 'content');
+    assert.equal((await materializer.materializeRun({ tenantId: 'tn_test', userId: 'us_test' }, 'ru_materialize', workspace)).length, 1);
+    assert.equal(marks, 1);
+    assert.match(attachExternalArtifactTokens('处理附件', [artifact]), /\[\[file:/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('external command: artifact 拒绝非法 MIME 类型且不会写盘', async () => {
+  let writes = 0;
+  const service = new ExternalCommandService(
+    fakeRepository({}),
+    () => {},
+    async () => {},
+    { resolveForRun: async () => structuredClone(resolvedConfig) },
+    {
+      write: async () => { writes += 1; },
+      read: async () => Buffer.alloc(0),
+      remove: async () => {},
+    },
+  );
+  await assert.rejects(service.execute(uuidToken, {
+    operation: 'artifact.upload',
+    idempotencyKey: 'artifact-invalid-mime',
+    name: 'input.txt',
+    mimeType: 'not-a-mime',
+    contentBase64: Buffer.from('content').toString('base64'),
+  }), (error: unknown) => error instanceof ExternalApiError && error.code === 'INVALID_ARTIFACT_MIME_TYPE');
+  assert.equal(writes, 0);
 });
 
 test('external command: UUID Token 无效时不会进入命令处理', async () => {

@@ -41,6 +41,7 @@ export interface ExternalRunWriteInput {
   requestHash: string;
   idempotencyKey: string;
   input: string;
+  artifactIds?: string[];
   title?: string;
   source: ExternalSource;
   snapshot: ExternalRunSnapshot;

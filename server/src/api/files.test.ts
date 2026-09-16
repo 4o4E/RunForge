@@ -7,7 +7,7 @@ import { formatHexRows, parseByteRange, previewTextLines } from './files.js';
 import { signFileShare, verifyFileShare } from './auth.js';
 import { config } from '../config.js';
 import { isOfficeConvertiblePath, officePdfCacheKey } from '../files/officePreview.js';
-import { resolveWorkspaceRoot } from '../files/workspaceRoot.js';
+import { resolveThreadWorkspaceRoot, resolveWorkspaceRoot } from '../files/workspaceRoot.js';
 import { signTenantAccessToken } from '../auth/jwt.js';
 import { buildApp, listen, seedOwner } from './testHelpers.js';
 
@@ -66,6 +66,7 @@ test('workspace root is isolated by tenant and user', () => {
   assert.equal(resolveWorkspaceRoot({ tenantId: 'default', userId: 'us_b' }, base), '/srv/runforge/workspace/users/us_b/workspace');
   assert.equal(resolveWorkspaceRoot({ tenantId: 'tn_a', userId: 'us_a' }, base), '/srv/runforge/workspace/tenants/tn_a/users/us_a/workspace');
   assert.notEqual(resolveWorkspaceRoot({ tenantId: 'tn_a', userId: 'us_a' }, base), resolveWorkspaceRoot({ tenantId: 'tn_a', userId: 'us_b' }, base));
+  assert.equal(resolveThreadWorkspaceRoot('th_abc123', base), '/srv/runforge/workspace/th_abc123');
 });
 
 test('office pdf preview only accepts office documents', () => {

@@ -41,3 +41,21 @@ test('hydrateImageAttachments: leaves non-image attachments as text', async () =
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('hydrateImageAttachments: file token 的 MIME 可识别无扩展名图片', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runforge-attachment-mime-'));
+  try {
+    await writeFile(join(root, 'image-without-extension'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const token = `[[file:${JSON.stringify({
+      kind: 'local',
+      path: 'image-without-extension',
+      name: 'image',
+      mimeType: 'image/png',
+    })}]]`;
+    const hydrated = await hydrateImageAttachments([{ role: 'user', content: token }], root);
+    assert.equal(hydrated[0]?.contentParts?.[0]?.type, 'text');
+    assert.equal(hydrated[0]?.contentParts?.[1]?.type, 'image');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

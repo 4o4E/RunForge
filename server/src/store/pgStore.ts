@@ -68,6 +68,7 @@ import {
   toThreadRow,
   toUserRow,
 } from './prismaRows.js';
+import { attachExternalArtifactTokens } from '../external/artifactProtocol.js';
 
 function isEphemeralSystemMessage(role: LlmMessage['role'], content: string | null): boolean {
   return role === 'system' && typeof content === 'string' && content.startsWith('已激活 Skill / Activated Skill:');
@@ -79,6 +80,37 @@ function allowsExternalNextStep(snapshot: unknown): boolean {
   return value.mode === 'external' && value.external?.allowNextStep === true;
 }
 
+function runInputArtifactIds(value: unknown): string[] {
+  if (!Array.isArray(value)) throw new Error('run input 的 artifacts 不是数组');
+  const ids = value.filter((item): item is string => typeof item === 'string' && /^ar_[0-9A-Za-z]+$/.test(item));
+  if (ids.length !== value.length || new Set(ids).size !== ids.length) {
+    throw new Error('run input 的 artifact ID 无效或重复');
+  }
+  return ids;
+}
+
+async function contentWithRunInputArtifacts(
+  tx: Prisma.TransactionClient,
+  runId: string,
+  content: string,
+  value: unknown,
+): Promise<string> {
+  const ids = runInputArtifactIds(value);
+  if (!ids.length) return content;
+  const rows = await tx.artifacts.findMany({
+    where: { id: { in: ids }, run_id: runId, status: { in: ['staged', 'materialized'] } },
+    select: { id: true, original_name: true, mime_type: true, size_bytes: true },
+  });
+  if (rows.length !== ids.length) throw new Error('run input 引用的 artifact 不存在或绑定关系已变化');
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  return attachExternalArtifactTokens(content, ids.map((id) => {
+    const row = byId.get(id)!;
+    const size = Number(row.size_bytes);
+    if (!Number.isSafeInteger(size)) throw new Error(`artifact 大小超出 JavaScript 安全整数范围：${row.size_bytes}`);
+    return { id, name: row.original_name, mimeType: row.mime_type, size };
+  }));
+}
+
 async function applyPendingRunInputsInTransaction(
   tx: Prisma.TransactionClient,
   runId: string,
@@ -86,7 +118,7 @@ async function applyPendingRunInputsInTransaction(
 ): Promise<AppliedRunInput[]> {
   const pending = await tx.run_inputs.findMany({
     where: { run_id: runId, status: 'pending' },
-    select: { id: true, version: true, content: true },
+    select: { id: true, version: true, content: true, artifacts: true },
     orderBy: { version: 'asc' },
   });
   const applied: AppliedRunInput[] = [];
@@ -97,19 +129,20 @@ async function applyPendingRunInputsInTransaction(
       data: { status: 'applied', applied_at: new Date() },
     });
     if (!claimed.count) continue;
+    const content = await contentWithRunInputArtifacts(tx, runId, input.content, input.artifacts);
     const message = await tx.messages.create({
       data: {
         thread_id: threadId,
         run_id: runId,
         role: 'user',
-        content: input.content,
+        content,
       },
       select: { id: true },
     });
     applied.push({
       inputId: input.id,
       version: input.version,
-      content: input.content,
+      content,
       messageId: serialId(message.id),
     });
   }

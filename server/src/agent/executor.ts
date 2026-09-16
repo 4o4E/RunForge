@@ -1,4 +1,5 @@
 import { agentContextSettings, config, type AgentContextSettings } from '../config.js';
+import { mkdir } from 'node:fs/promises';
 import { getConfiguredProvider } from '../llm/index.js';
 import type { LlmDelta, LlmMessage, LlmUsage, Provider } from '../llm/types.js';
 import { parseToolArguments } from '../llm/toolArgs.js';
@@ -37,6 +38,9 @@ import {
   type RunSpaceConfigSnapshot,
   type RuntimeCapabilitiesSnapshot,
 } from '../spaces/config.js';
+import { resolveThreadWorkspaceRoot } from '../files/workspaceRoot.js';
+import { externalArtifactMaterializer } from '../external/artifactMaterializer.js';
+import { attachExternalArtifactTokens, type ExternalArtifactTokenSource } from '../external/artifactProtocol.js';
 
 const ASK_USER_TOOL_NAME = 'ask_user';
 const DATABASE_ACCESS_SKILL_NAME = 'database-access';
@@ -95,6 +99,11 @@ export interface ExecutorDeps {
   databaseRuntimeEnv?: (scope: Scope, runId: string, allowedCapabilities: RuntimeCapabilityName[]) => Promise<DatabaseRuntimeEnv>;
   generateThreadTitle: boolean;
   contextSettings: AgentContextSettings;
+  materializeRunArtifacts?: (
+    scope: Scope,
+    runId: string,
+    workspaceRoot: string,
+  ) => Promise<ExternalArtifactTokenSource[]>;
 }
 
 interface DatabaseRuntimeEnv {
@@ -242,6 +251,7 @@ async function defaultDeps(
       contextBudget: config.agent.contextBudget,
       contextBudgetSource: config.agent.contextBudgetSource,
     }),
+    materializeRunArtifacts: overrides.materializeRunArtifacts,
   };
 }
 
@@ -530,6 +540,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
   if (!run) throw new Error(`run 不存在：${runId}`);
   const owningThread = await store.getThreadUnscoped(run.thread_id);
   if (!owningThread) throw new Error(`thread 不存在：${run.thread_id}`);
+  const initialThread = owningThread;
   const scope: Scope = scopeOverride ?? scopeForThread(owningThread);
   let spaceConfig: RunSpaceConfigSnapshot | null = null;
   let deps: ExecutorDeps;
@@ -654,7 +665,29 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     // Goal 锚点每步重新注入；恢复时优先使用已落库状态，避免目标回退。
     let goal = initialRun.goal_state ?? initGoal(userInput);
     if (!initialRun.goal_state) await store.setGoalState(scope, runId, goal);
-    const toolSettings = deps.toolSettings ?? (await getToolSettings(scope));
+    let toolSettings = deps.toolSettings ?? (await getToolSettings(scope));
+    if (!deps.toolSettings) {
+      const tenant = await store.findTenant(scope.tenantId);
+      if (!tenant?.default_space_id) throw new Error(`tenant 缺少 default space：${scope.tenantId}`);
+      // 当前切片只让 external 空间切到 thread workspace；Web 文件 API/页面在阶段 6
+      // 一起切换，避免非 default Web 空间的上传仍落用户目录而 executor 已换目录。
+      if (spaceConfig?.mode === 'external' && initialThread.space_id !== tenant.default_space_id) {
+        toolSettings = { ...toolSettings, workspaceRoot: resolveThreadWorkspaceRoot(threadId) };
+        await mkdir(toolSettings.workspaceRoot, { recursive: true });
+      }
+    }
+    const materializeRunArtifacts = deps.materializeRunArtifacts
+      ?? (store === defaultStore
+        ? (targetScope: Scope, targetRunId: string, workspaceRoot: string) => (
+            externalArtifactMaterializer.materializeRun(targetScope, targetRunId, workspaceRoot)
+          )
+        : null);
+    const materializeExternalArtifacts = async (): Promise<ExternalArtifactTokenSource[]> => {
+      if (spaceConfig?.mode !== 'external' || !materializeRunArtifacts) return [];
+      return materializeRunArtifacts(scope, runId, toolSettings.workspaceRoot);
+    };
+    const initialArtifacts = await materializeExternalArtifacts();
+    const runtimeUserInput = attachExternalArtifactTokens(userInput, initialArtifacts);
     const toolPolicy = createPolicy(toolSettings);
     const tenantMcpSettings = deps.mcpSettings ?? (deps.store === defaultStore ? await getMcpSettings(scope) : { servers: [] });
     const allowedMcpServerIds = spaceConfig ? new Set(spaceConfig.capabilities.mcpServers) : null;
@@ -706,7 +739,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       ? '当前 run 来自 external 空间：不能向 Web 用户提问或进入 waiting_for_user；信息不足时采用合理假设，或在最终结果中明确说明缺失信息。'
       : '';
     const runtimeContext = `${renderRuntimeContext(toolSettings)}\n\n${spaceRuntimeRules}\n\n${databaseRuntimeSummary}\n\n${workflowRuntimeContext}\n\n${skillRuntimeContext}\n\n${renderMcpSystemRules()}`;
-    const ctx = new ContextManager(prior, userInput, renderGoal(goal), {
+    const ctx = new ContextManager(prior, runtimeUserInput, renderGoal(goal), {
       appendUserInput: !hasPersistedMessages,
       userInputPrefix: capabilityCatalog,
       activationContext: renderRunActivationContext(activeSkills, activeMcp),
@@ -725,7 +758,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     currentCtx = ctx;
     if (!hasPersistedMessages) {
       // 新 run 或尚未写入任何消息的 pending run，必须先落用户输入。
-      await store.addMessage(scope, threadId, runId, null, { role: 'user', content: userInput });
+      await store.addMessage(scope, threadId, runId, null, { role: 'user', content: runtimeUserInput });
     }
 
     const stepIds = new Map<number, string>();
@@ -752,6 +785,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       stepId: string,
       stepIdx: number,
     ): Promise<void> => {
+      if (inputs.length) await materializeExternalArtifacts();
       for (const input of inputs) {
         const message = { role: 'user' as const, content: input.content };
         ctx.add(message);

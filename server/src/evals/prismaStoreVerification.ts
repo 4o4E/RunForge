@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { pool } from '../db/pool.js';
 import { prisma } from '../db/prisma.js';
 import { PgStore } from '../store/pgStore.js';
@@ -11,8 +14,11 @@ import { SpaceAccessService } from '../spaces/access.js';
 import { SpaceConfigService } from '../spaces/config.js';
 import { RunAdmissionService } from '../spaces/runAdmission.js';
 import { hashOpaqueToken } from '../auth/tokens.js';
-import { PrismaExternalRepository } from '../external/repository.js';
+import { listRunArtifactsForMaterialization, PrismaExternalRepository } from '../external/repository.js';
 import { ExternalApiError } from '../external/types.js';
+import { FileExternalArtifactStorage } from '../external/artifactStorage.js';
+import { ExternalArtifactMaterializer } from '../external/artifactMaterializer.js';
+import { externalArtifactRemotePath } from '../external/artifactProtocol.js';
 
 const suffix = randomUUID().replaceAll('-', '').slice(0, 12);
 const tenantId = `prisma-verify-${suffix}`;
@@ -24,6 +30,7 @@ const spaceConfig = new SpaceConfigService();
 const spaceAccess = new SpaceAccessService(store, spaceConfig);
 const runAdmission = new RunAdmissionService(store, spaceConfig);
 const externalRepository = new PrismaExternalRepository();
+const artifactVerificationRoot = await mkdtemp(join(tmpdir(), 'runforge-prisma-artifact-'));
 
 try {
   const provisioned = await store.createTenantWithOwner({
@@ -160,10 +167,11 @@ try {
     spaceConfig: resolvedExternal.snapshot,
     runtimeCapabilities: resolvedExternal.runtimeCapabilitiesSnapshot,
   };
-  const externalCreated = await externalRepository.createRun(commandAccess, {
+  const externalCreateInput = {
     requestHash: `create-hash-${suffix}`,
     idempotencyKey: 'create-1',
     input: '外部创建输入',
+    artifactIds: [artifactId],
     title: '外部任务',
     source: {
       applicationRef: 'verification-app',
@@ -174,9 +182,34 @@ try {
       metadata: { channel: 'verification' },
     },
     snapshot: externalSnapshot,
-  });
-  assert.equal(externalCreated.replayed, false);
+  };
+  const externalCreateResults = await Promise.all([
+    externalRepository.createRun(commandAccess, externalCreateInput),
+    externalRepository.createRun(commandAccess, externalCreateInput),
+  ]);
+  assert.equal(externalCreateResults[0].response.runId, externalCreateResults[1].response.runId);
+  assert.equal(externalCreateResults.filter((item) => item.replayed).length, 1);
+  const externalCreated = externalCreateResults[0];
   const externalScope = { tenantId, userId: visibleMember.id };
+  assert.equal((await store.getRun(externalScope, externalCreated.response.runId))?.input, '外部创建输入');
+  assert.equal((await prisma.artifacts.findUnique({ where: { id: artifactId } }))?.thread_id, externalCreated.response.threadId);
+  assert.equal((await listRunArtifactsForMaterialization(externalScope, externalCreated.response.runId))[0]?.id, artifactId);
+  const verificationStorage = new FileExternalArtifactStorage(join(artifactVerificationRoot, 'storage'));
+  await verificationStorage.write(artifactInput.storageKey, Buffer.alloc(artifactInput.size, 1));
+  const materializedArtifacts = await new ExternalArtifactMaterializer(undefined, verificationStorage).materializeRun(
+    externalScope,
+    externalCreated.response.runId,
+    join(artifactVerificationRoot, 'workspace'),
+  );
+  const materializedArtifact = materializedArtifacts[0];
+  assert.ok(materializedArtifact);
+  assert.equal(materializedArtifact.id, artifactId);
+  assert.equal((await readFile(join(
+    artifactVerificationRoot,
+    'workspace',
+    externalArtifactRemotePath(materializedArtifact),
+  ))).length, artifactInput.size);
+  assert.equal((await prisma.artifacts.findUnique({ where: { id: artifactId } }))?.status, 'materialized');
   assert.equal((await store.getThread(externalScope, externalCreated.response.threadId))?.source_caller_id, commandCaller.caller.id);
   assert.deepEqual((await prisma.external_requests.findFirst({
     where: { run_id: externalCreated.response.runId },
@@ -211,11 +244,21 @@ try {
   );
 
   const activeExternalRunId = appendResults[0].response.runId;
+  const nextStepArtifactId = newArtifactId();
+  await externalRepository.createArtifact(commandAccess, {
+    ...artifactInput,
+    requestHash: `artifact-next-step-hash-${suffix}`,
+    idempotencyKey: 'artifact-next-step',
+    artifactId: nextStepArtifactId,
+    storageKey: `${commandCaller.caller.id}/${nextStepArtifactId}`,
+    source: { externalEventId: `artifact-next-step-event-${suffix}`, metadata: {} },
+  });
   const sameNextStep = {
     requestHash: `next-step-same-hash-${suffix}`,
     idempotencyKey: 'next-step-same',
     threadId: externalCreated.response.threadId,
     input: '同键并发注入',
+    artifactIds: [nextStepArtifactId],
     source: { externalEventId: `next-step-same-event-${suffix}`, metadata: {} },
   };
   const sameNextStepResults = await Promise.all([
@@ -224,10 +267,14 @@ try {
   ]);
   assert.equal(sameNextStepResults[0].response.inputId, sameNextStepResults[1].response.inputId);
   assert.equal(sameNextStepResults.filter((item) => item.replayed).length, 1);
+  const storedNextStep = await prisma.run_inputs.findUnique({ where: { id: sameNextStepResults[0].response.inputId } });
+  assert.deepEqual(storedNextStep?.artifacts, [nextStepArtifactId]);
+  assert.equal(storedNextStep?.content, '同键并发注入');
 
   const distinctNextStepResults = await Promise.all([
     externalRepository.appendNextStep(commandAccess, {
       ...sameNextStep,
+      artifactIds: [],
       idempotencyKey: 'next-step-a',
       requestHash: `next-step-a-hash-${suffix}`,
       input: '不同键注入 A',
@@ -235,6 +282,7 @@ try {
     }),
     externalRepository.appendNextStep(commandAccess, {
       ...sameNextStep,
+      artifactIds: [],
       idempotencyKey: 'next-step-b',
       requestHash: `next-step-b-hash-${suffix}`,
       input: '不同键注入 B',
@@ -247,6 +295,7 @@ try {
   );
   const appliedNextSteps = await store.applyPendingRunInputs(externalScope, activeExternalRunId);
   assert.deepEqual(appliedNextSteps.map((input) => input.version), [1, 2, 3]);
+  assert.match(appliedNextSteps[0]?.content ?? '', new RegExp(nextStepArtifactId));
   assert.equal(await prisma.run_inputs.count({ where: { run_id: activeExternalRunId, status: 'applied' } }), 3);
 
   // append 与正常终态收口竞争同一 run 行：追加若成功，收口事务必须同时应用它；
@@ -255,6 +304,7 @@ try {
     store.closeExternalInputAndApplyPending(externalScope, activeExternalRunId),
     externalRepository.appendNextStep(commandAccess, {
       ...sameNextStep,
+      artifactIds: [],
       idempotencyKey: 'next-step-race',
       requestHash: `next-step-race-hash-${suffix}`,
       input: '终态竞争注入',
@@ -278,6 +328,7 @@ try {
   assert.equal(await store.beginRunExecution(externalScope, activeExternalRunId), true);
   const restartPending = await externalRepository.appendNextStep(commandAccess, {
     ...sameNextStep,
+    artifactIds: [],
     idempotencyKey: 'next-step-restart',
     requestHash: `next-step-restart-hash-${suffix}`,
     input: '重启后注入',
@@ -291,6 +342,7 @@ try {
 
   const cancelPending = await externalRepository.appendNextStep(commandAccess, {
     ...sameNextStep,
+    artifactIds: [],
     idempotencyKey: 'next-step-cancel',
     requestHash: `next-step-cancel-hash-${suffix}`,
     input: '取消前注入',
@@ -451,6 +503,7 @@ try {
     messageCount: await store.countRunMessages(scope, run.id),
   }));
 } finally {
+  await rm(artifactVerificationRoot, { recursive: true, force: true });
   await prisma.app_settings.deleteMany({ where: { tenant_id: tenantId } });
   await prisma.threads.deleteMany({ where: { tenant_id: tenantId } });
   await prisma.auth_tokens.deleteMany({ where: { tenant_id: tenantId } });

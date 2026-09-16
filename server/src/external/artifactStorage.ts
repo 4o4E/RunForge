@@ -1,15 +1,39 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, rm, rmdir, writeFile } from 'node:fs/promises';
+import { link, mkdir, readFile, readdir, rename, rm, rmdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { config } from '../config.js';
 import { isWithin } from '../tools/policy.js';
-
-export const MAX_EXTERNAL_ARTIFACT_BYTES = 25 * 1024 * 1024;
 
 export interface ExternalArtifactStorage {
   write(storageKey: string, content: Buffer): Promise<void>;
   read(storageKey: string): Promise<Buffer>;
   remove(storageKey: string): Promise<void>;
+}
+
+/** 同目录临时文件 + rename，保证读取方不会看到半写入内容。 */
+export async function writeFileAtomically(target: string, content: Buffer, stableTemp?: string): Promise<void> {
+  const temp = stableTemp ?? `${target}.${randomUUID()}.tmp`;
+  await mkdir(dirname(target), { recursive: true });
+  try {
+    if (stableTemp) await rm(temp, { force: true });
+    await writeFile(temp, content, { flag: 'wx' });
+    await rename(temp, target);
+  } catch (error) {
+    await rm(temp, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+/** 上传暂存区禁止覆盖既有 storage key；hard link 在目标名上提供原子排他创建。 */
+async function writeNewFileAtomically(target: string, content: Buffer): Promise<void> {
+  const temp = `${target}.${randomUUID()}.tmp`;
+  await mkdir(dirname(target), { recursive: true });
+  try {
+    await writeFile(temp, content, { flag: 'wx' });
+    await link(temp, target);
+  } finally {
+    await rm(temp, { force: true }).catch(() => undefined);
+  }
 }
 
 /** 外部附件先进入独立受控存储，不能把调用方文件名当作宿主机路径。 */
@@ -26,15 +50,7 @@ export class FileExternalArtifactStorage implements ExternalArtifactStorage {
 
   async write(storageKey: string, content: Buffer): Promise<void> {
     const target = this.path(storageKey);
-    const temp = `${target}.${randomUUID()}.tmp`;
-    await mkdir(dirname(target), { recursive: true });
-    try {
-      await writeFile(temp, content, { flag: 'wx' });
-      await rename(temp, target);
-    } catch (error) {
-      await rm(temp, { force: true }).catch(() => undefined);
-      throw error;
-    }
+    await writeNewFileAtomically(target, content);
   }
 
   read(storageKey: string): Promise<Buffer> {

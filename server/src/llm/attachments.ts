@@ -10,19 +10,21 @@ interface FileToken {
   path: string;
   name?: string;
   kind?: string;
+  mimeType?: string;
 }
 
 function parseFileTokens(text: string): FileToken[] {
   const tokens: FileToken[] = [];
   for (const match of text.matchAll(FILE_TOKEN_RE)) {
     try {
-      const parsed = JSON.parse(match[1]) as { path?: unknown; name?: unknown; kind?: unknown };
+      const parsed = JSON.parse(match[1]) as { path?: unknown; name?: unknown; kind?: unknown; mimeType?: unknown };
       if (typeof parsed.path !== 'string' || !parsed.path.trim()) continue;
       tokens.push({
         raw: match[0],
         path: parsed.path,
         name: typeof parsed.name === 'string' ? parsed.name : undefined,
         kind: typeof parsed.kind === 'string' ? parsed.kind : undefined,
+        mimeType: typeof parsed.mimeType === 'string' ? parsed.mimeType : undefined,
       });
     } catch {
       // 附件 token 是前端生成的内部标记；解析失败时保留原文，避免误删用户输入。
@@ -45,7 +47,7 @@ function cleanAttachmentText(text: string, images: LlmContentPart[]): string {
 
 async function loadImageToken(token: FileToken, workspaceRoot: string): Promise<LlmContentPart | null> {
   const absolute = normalizeRemotePath(token.path, workspaceRoot);
-  const mediaType = mediaTypeFromPath(absolute);
+  const mediaType = token.mimeType?.trim() || mediaTypeFromPath(absolute);
   if (!isImageMediaType(mediaType)) return null;
 
   const info = await stat(absolute);

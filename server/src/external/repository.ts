@@ -33,6 +33,10 @@ import type {
   ExternalWriteResult,
 } from './types.js';
 import { ExternalApiError } from './types.js';
+import {
+  MAX_EXTERNAL_ARTIFACT_BYTES,
+  type ExternalArtifactTokenSource,
+} from './artifactProtocol.js';
 
 type Transaction = Prisma.TransactionClient;
 
@@ -173,6 +177,69 @@ async function requireLiveAccess(tx: Transaction, access: ExternalCallerAccess, 
   });
   if (!user) throw new ExternalApiError(409, 'EXECUTION_USER_DISABLED', '空间 execution user 当前不可用');
   return { configVersion: space.config_version, executionUserId: user.id };
+}
+
+async function bindableArtifacts(
+  tx: Transaction,
+  access: ExternalCallerAccess,
+  artifactIds: readonly string[],
+): Promise<ExternalArtifactTokenSource[]> {
+  if (!artifactIds.length) return [];
+  const rows = await tx.artifacts.findMany({
+    where: {
+      id: { in: [...artifactIds] },
+      caller_id: access.caller.id,
+      space_id: access.caller.spaceId,
+    },
+    select: {
+      id: true,
+      original_name: true,
+      mime_type: true,
+      size_bytes: true,
+      status: true,
+      thread_id: true,
+      run_id: true,
+    },
+  });
+  if (rows.length !== artifactIds.length) {
+    throw new ExternalApiError(404, 'ARTIFACT_NOT_FOUND', 'artifact 不存在或不属于当前调用方');
+  }
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  return artifactIds.map((id) => {
+    const row = byId.get(id)!;
+    if (row.status !== 'staged' || row.thread_id || row.run_id) {
+      throw new ExternalApiError(409, 'ARTIFACT_ALREADY_BOUND', `artifact 已被其他输入绑定：${id}`);
+    }
+    const size = Number(row.size_bytes);
+    if (!Number.isSafeInteger(size) || size < 0 || size > MAX_EXTERNAL_ARTIFACT_BYTES) {
+      throw new ExternalApiError(409, 'ARTIFACT_SIZE_INVALID', `artifact 大小无效：${id}`);
+    }
+    return { id: row.id, name: row.original_name, mimeType: row.mime_type, size };
+  });
+}
+
+async function claimArtifacts(
+  tx: Transaction,
+  access: ExternalCallerAccess,
+  artifacts: readonly ExternalArtifactTokenSource[],
+  threadId: string,
+  runId: string,
+): Promise<void> {
+  if (!artifacts.length) return;
+  const claimed = await tx.artifacts.updateMany({
+    where: {
+      id: { in: artifacts.map((artifact) => artifact.id) },
+      caller_id: access.caller.id,
+      space_id: access.caller.spaceId,
+      status: 'staged',
+      thread_id: null,
+      run_id: null,
+    },
+    data: { thread_id: threadId, run_id: runId },
+  });
+  if (claimed.count !== artifacts.length) {
+    throw new ExternalApiError(409, 'ARTIFACT_ALREADY_BOUND', 'artifact 已被其他并发请求绑定');
+  }
 }
 
 async function existingRequest<T>(
@@ -389,6 +456,8 @@ export class PrismaExternalRepository implements ExternalRepository {
         const live = await requireLiveAccess(tx, access, true);
         if (live.configVersion !== input.snapshot.configVersion) throw new SpaceConfigChangedError();
 
+        const artifacts = await bindableArtifacts(tx, access, input.artifactIds ?? []);
+
         const threadId = newThreadId();
         const runId = newRunId();
         await tx.threads.create({
@@ -416,6 +485,7 @@ export class PrismaExternalRepository implements ExternalRepository {
             external_input_open: input.snapshot.spaceConfig.external.allowNextStep,
           },
         });
+        await claimArtifacts(tx, access, artifacts, threadId, runId);
         await tx.threads.update({
           where: { id: threadId },
           data: { active_run_id: runId, executing_run_id: runId, updated_at: new Date() },
@@ -440,7 +510,14 @@ export class PrismaExternalRepository implements ExternalRepository {
         return { response, replayed: false, executionUserId: live.executionUserId! };
       });
     } catch (error) {
-      if (isUniqueConflict(error)) {
+      const replay = await this.findIdempotentResponse<ExternalRunReceipt>(
+        access.caller.id, 'run.create', input.idempotencyKey, input.requestHash,
+      );
+      if (replay) return { response: replay, replayed: true, executionUserId: access.space.execution_user_id! };
+      if (
+        isUniqueConflict(error)
+        || (error instanceof ExternalApiError && error.code === 'ARTIFACT_ALREADY_BOUND')
+      ) {
         const replay = await this.findRequestOrSourceReplay<ExternalRunReceipt>(
           access, 'run.create', input.idempotencyKey, input.requestHash, input.source.externalThreadRef, input.source.externalEventId,
         );
@@ -483,6 +560,8 @@ export class PrismaExternalRepository implements ExternalRepository {
         }
         if (thread.executing_run_id) throw await occupiedRunError(tx, input.threadId);
 
+        const artifacts = await bindableArtifacts(tx, access, input.artifactIds ?? []);
+
         const runId = newRunId();
         await tx.runs.create({
           data: {
@@ -503,6 +582,7 @@ export class PrismaExternalRepository implements ExternalRepository {
           data: { active_run_id: runId, executing_run_id: runId, updated_at: new Date() },
         });
         if (!claimed.count) throw await occupiedRunError(tx, input.threadId);
+        await claimArtifacts(tx, access, artifacts, input.threadId, runId);
         const response: ExternalRunReceipt = {
           operation: 'run.append', threadId: input.threadId, runId, status: 'pending',
         };
@@ -528,7 +608,11 @@ export class PrismaExternalRepository implements ExternalRepository {
         access.caller.id, 'run.append', input.idempotencyKey, input.requestHash,
       );
       if (replay) return { response: replay, replayed: true, executionUserId: access.space.execution_user_id! };
-      if (isUniqueConflict(error)) {
+      if (
+        isUniqueConflict(error)
+        || (error instanceof ExternalApiError && error.code === 'ARTIFACT_ALREADY_BOUND')
+        || error instanceof RunActiveError
+      ) {
         const source = await this.findRequestOrSourceReplay<ExternalRunReceipt>(
           access, 'run.append', input.idempotencyKey, input.requestHash, undefined, input.source.externalEventId,
         );
@@ -577,6 +661,7 @@ export class PrismaExternalRepository implements ExternalRepository {
         if (snapshot?.external?.allowNextStep !== true) {
           throw new ExternalApiError(403, 'NEXT_STEP_DISABLED', '目标 run 的空间配置未允许 next_step');
         }
+        const artifacts = await bindableArtifacts(tx, access, input.artifactIds ?? []);
         const accepted = await tx.runs.updateMany({
           where: {
             id: thread.executing_run_id,
@@ -617,8 +702,10 @@ export class PrismaExternalRepository implements ExternalRepository {
             external_request_id: requestId,
             version: updated.input_version,
             content: input.input,
+            artifacts: requiredJson(artifacts.map((artifact) => artifact.id)),
           },
         });
+        await claimArtifacts(tx, access, artifacts, input.threadId, thread.executing_run_id);
         const response: ExternalNextStepReceipt = {
           operation: 'run.append',
           delivery: 'next_step',
@@ -870,4 +957,98 @@ export const externalRepository = new PrismaExternalRepository();
 export async function listArtifactStorageKeys(): Promise<Set<string>> {
   const rows = await prisma.artifacts.findMany({ select: { storage_key: true } });
   return new Set(rows.map((row) => row.storage_key));
+}
+
+export interface RunArtifactForMaterialization {
+  id: string;
+  storageKey: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  status: 'staged' | 'materialized';
+  initialInput: boolean;
+}
+
+/** executor 内部入口：返回当前执行 scope/run 的附件；staged 项需要落盘，全部项用于派生文件 token。 */
+export async function listRunArtifactsForMaterialization(
+  scope: { tenantId: string; userId: string },
+  runId: string,
+): Promise<RunArtifactForMaterialization[]> {
+  return prisma.$transaction(async (tx) => {
+    // 先读 artifact、再读 run_inputs：并发接纳的 next_step 要么两边都可见，要么本轮
+    // 两边都不处理，不能把 next_step 附件误挂到初始 user message。
+    const rows = await tx.artifacts.findMany({
+      where: {
+        run_id: runId,
+        status: { in: ['staged', 'materialized'] },
+        runs: {
+          threads_runs_thread_idTothreads: {
+            tenant_id: scope.tenantId,
+            user_id: scope.userId,
+          },
+        },
+      },
+      select: { id: true, storage_key: true, original_name: true, mime_type: true, size_bytes: true, status: true },
+      orderBy: { created_at: 'asc' },
+    });
+    const inputs = await tx.run_inputs.findMany({
+      where: { run_id: runId },
+      select: { artifacts: true },
+    });
+    const nextStepArtifactIds = new Set(inputs.flatMap((input) => (
+      Array.isArray(input.artifacts)
+        ? input.artifacts.filter((id): id is string => typeof id === 'string')
+        : []
+    )));
+    return rows.map((row) => {
+      const size = Number(row.size_bytes);
+      if (!Number.isSafeInteger(size)) throw new Error(`artifact 大小超出 JavaScript 安全整数范围：${row.size_bytes}`);
+      return {
+        id: row.id,
+        storageKey: row.storage_key,
+        name: row.original_name,
+        mimeType: row.mime_type,
+        size,
+        status: row.status as RunArtifactForMaterialization['status'],
+        initialInput: !nextStepArtifactIds.has(row.id),
+      };
+    });
+  });
+}
+
+export async function markRunArtifactMaterialized(
+  scope: { tenantId: string; userId: string },
+  runId: string,
+  artifactId: string,
+): Promise<void> {
+  const updated = await prisma.artifacts.updateMany({
+    where: {
+      id: artifactId,
+      run_id: runId,
+      status: 'staged',
+      runs: {
+        threads_runs_thread_idTothreads: {
+          tenant_id: scope.tenantId,
+          user_id: scope.userId,
+        },
+      },
+    },
+    data: { status: 'materialized', materialized_at: new Date() },
+  });
+  if (!updated.count) {
+    const alreadyDone = await prisma.artifacts.count({
+      where: {
+        id: artifactId,
+        run_id: runId,
+        status: 'materialized',
+        runs: {
+          threads_runs_thread_idTothreads: {
+            tenant_id: scope.tenantId,
+            user_id: scope.userId,
+          },
+        },
+      },
+    });
+    if (!alreadyDone) throw new Error(`artifact materialize 状态已变化：${artifactId}`);
+  }
 }

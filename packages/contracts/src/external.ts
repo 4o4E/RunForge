@@ -4,6 +4,11 @@ import type { AgentEvent, RunStatus } from './agent.js';
 const optionalId = z.string().trim().min(1).max(256).optional();
 const idempotencyKey = z.string().trim().min(1).max(256);
 const artifactId = z.string().trim().regex(/^ar_[0-9A-Za-z]+$/);
+export const MAX_EXTERNAL_ARTIFACTS_PER_INPUT = 20;
+const artifactIds = z.array(artifactId)
+  .max(MAX_EXTERNAL_ARTIFACTS_PER_INPUT)
+  .refine((ids) => new Set(ids).size === ids.length, 'artifactIds 不能重复')
+  .optional();
 
 export const externalSourceSchema = z.object({
   applicationRef: optionalId,
@@ -26,6 +31,7 @@ export const externalCommandSchema = z.discriminatedUnion('operation', [
     operation: z.literal('run.create'),
     idempotencyKey,
     title: z.string().trim().min(1).max(200).optional(),
+    artifactIds,
     ...runInputFields,
   }).strict(),
   z.object({
@@ -33,6 +39,7 @@ export const externalCommandSchema = z.discriminatedUnion('operation', [
     idempotencyKey,
     threadId: z.string().trim().regex(/^th_[0-9A-Za-z]+$/),
     delivery: z.literal('next_step').optional(),
+    artifactIds,
     ...runInputFields,
   }).strict(),
   z.object({

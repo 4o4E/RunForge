@@ -20,9 +20,9 @@ import { isExternalUuidToken } from './token.js';
 import { newArtifactId } from '../id.js';
 import {
   externalArtifactStorage,
-  MAX_EXTERNAL_ARTIFACT_BYTES,
   type ExternalArtifactStorage,
 } from './artifactStorage.js';
+import { MAX_EXTERNAL_ARTIFACT_BYTES } from './artifactProtocol.js';
 
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
@@ -68,6 +68,14 @@ function artifactFileName(value: string): string {
     throw new ExternalApiError(400, 'INVALID_ARTIFACT_NAME', 'name 只能是文件名，不能包含路径');
   }
   return name;
+}
+
+function artifactMimeType(value: string): string {
+  const mimeType = value.split(';', 1)[0].trim().toLowerCase();
+  if (!/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(mimeType)) {
+    throw new ExternalApiError(400, 'INVALID_ARTIFACT_MIME_TYPE', 'mimeType 不是有效的 MIME 类型');
+  }
+  return mimeType;
 }
 
 function snapshotWithTrustedPrompt(
@@ -120,9 +128,15 @@ export class ExternalCommandService {
       if (replay) return replay;
       const content = decodeArtifactContent(command.contentBase64);
       const name = artifactFileName(command.name);
+      const mimeType = artifactMimeType(command.mimeType);
       const artifactId = newArtifactId();
       const storageKey = `${access.caller.id}/${artifactId}`;
-      await this.artifactStorage.write(storageKey, content);
+      try {
+        await this.artifactStorage.write(storageKey, content);
+      } catch (error) {
+        console.warn(`[artifact] 写入受控存储失败 ${artifactId}: ${(error as Error).message}`);
+        throw new ExternalApiError(500, 'ARTIFACT_STORAGE_ERROR', 'artifact 内容当前无法保存');
+      }
       try {
         const created = await this.repository.createArtifact(access, {
           requestHash,
@@ -130,7 +144,7 @@ export class ExternalCommandService {
           artifactId,
           storageKey,
           name,
-          mimeType: command.mimeType,
+          mimeType,
           size: content.length,
           metadata: command.metadata,
           source: command.source,
@@ -188,6 +202,7 @@ export class ExternalCommandService {
         idempotencyKey: command.idempotencyKey,
         requestHash: commandHash(command),
         input: command.input,
+        artifactIds: command.artifactIds ?? [],
         threadId: command.threadId,
         source: command.source,
       });
@@ -202,6 +217,7 @@ export class ExternalCommandService {
               idempotencyKey: command.idempotencyKey,
               requestHash: commandHash(command),
               input: command.input,
+              artifactIds: command.artifactIds ?? [],
               title: command.title,
               source: command.source,
               snapshot,
@@ -210,6 +226,7 @@ export class ExternalCommandService {
               idempotencyKey: command.idempotencyKey,
               requestHash: commandHash(command),
               input: command.input,
+              artifactIds: command.artifactIds ?? [],
               threadId: command.threadId,
               source: command.source,
               snapshot,
