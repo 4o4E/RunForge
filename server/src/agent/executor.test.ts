@@ -148,6 +148,113 @@ test('executeRun: runs the loop across steps and finalizes', async () => {
   assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'tool', 'assistant']);
 });
 
+test('executeRun: 使用 run 的空间配置副本装配提示词、工具和上下文预算', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread(scope);
+  const observed: { systemPrompt: string; tools: string[] } = { systemPrompt: '', tools: [] };
+  const provider: Provider = {
+    name: 'space-snapshot',
+    async complete(messages, tools) {
+      observed.systemPrompt = messages.find((message) => message.role === 'system')?.content ?? '';
+      observed.tools = tools.map((tool) => tool.name);
+      return { content: 'snapshot applied', toolCalls: [], finishReason: 'stop' };
+    },
+  };
+  const run = await store.createRun(scope, thread.id, 'use snapshot', {
+    modelRef: 'main:model-a',
+    spaceConfigSnapshot: {
+      schemaVersion: 1,
+      spaceId: thread.space_id,
+      mode: 'web',
+      systemPrompt: 'SPACE-SNAPSHOT-MARKER',
+      model: {
+        modelRef: 'main:model-a',
+        allowedModelRefs: ['main:model-a'],
+        contextWindow: 40_000,
+        contextBudget: 12_345,
+        contextBudgetSource: 'space-config',
+      },
+      capabilities: { tools: ['file_read'], mcpServers: [], runtime: [] },
+      external: { allowTrustedPrompt: false, allowNextStep: false },
+    },
+    runtimeCapabilitiesSnapshot: {
+      allowedCapabilities: [],
+      llm: { enabled: false, defaultModelId: '', models: [] },
+      image: { enabled: false, defaultModelId: '', models: [] },
+      video: { enabled: false, defaultModelId: '', models: [] },
+    },
+  });
+  const published: AgentEvent[] = [];
+  await executeRun(run.id, {
+    store,
+    provider,
+    publish: (_id, event) => published.push(event),
+    hardStepCap: 3,
+    toolSettings: testToolSettings(),
+  });
+
+  assert.match(observed.systemPrompt, /SPACE-SNAPSHOT-MARKER/);
+  assert.deepEqual(observed.tools, ['file_read']);
+  const usage = published.find((event): event is Extract<AgentEvent, { type: 'usage_update' }> => event.type === 'usage_update');
+  assert.equal(usage?.contextBudget, 12_345);
+});
+
+test('executeRun: external 空间即使模型伪造 ask_user 调用也不会进入等待状态', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread(scope);
+  let turn = 0;
+  const provider: Provider = {
+    name: 'external-ask-user-guard',
+    async complete() {
+      turn += 1;
+      if (turn === 1) {
+        return {
+          content: null,
+          toolCalls: [{ id: 'call_external_ask', name: 'ask_user', arguments: '{"question":"继续吗？"}' }],
+          finishReason: 'tool-calls',
+        };
+      }
+      return { content: '按合理假设完成', toolCalls: [], finishReason: 'stop' };
+    },
+  };
+  const run = await store.createRun(scope, thread.id, 'external input', {
+    modelRef: 'main:model-a',
+    spaceConfigSnapshot: {
+      schemaVersion: 1,
+      spaceId: thread.space_id,
+      mode: 'external',
+      systemPrompt: '',
+      model: {
+        modelRef: 'main:model-a',
+        allowedModelRefs: ['main:model-a'],
+        contextWindow: 40_000,
+        contextBudget: 20_000,
+        contextBudgetSource: 'space-config',
+      },
+      capabilities: { tools: ['file_read'], mcpServers: [], runtime: [] },
+      external: { allowTrustedPrompt: false, allowNextStep: false },
+    },
+    runtimeCapabilitiesSnapshot: {
+      allowedCapabilities: [],
+      llm: { enabled: false, defaultModelId: '', models: [] },
+      image: { enabled: false, defaultModelId: '', models: [] },
+      video: { enabled: false, defaultModelId: '', models: [] },
+    },
+  });
+  const published: AgentEvent[] = [];
+  await executeRun(run.id, {
+    store,
+    provider,
+    publish: (_id, event) => published.push(event),
+    hardStepCap: 3,
+    toolSettings: testToolSettings(),
+  });
+
+  assert.equal((await store.getRun(scope, run.id))?.status, 'done');
+  assert.equal(published.some((event) => event.type === 'user_question'), false);
+  assert.ok(published.some((event) => event.type === 'tool_result' && /未被当前 run 的空间配置授权/.test(event.result)));
+});
+
 test('thread title: uses first input as fallback and generates for an empty-title branch', async () => {
   const store = new MemoryStore();
   const thread = await store.createThread(scope);
@@ -388,7 +495,14 @@ test('executeRun: injects the current workspace root into the LLM context', asyn
 test('executeRun: injects database workload token at run startup', async () => {
   const store = new MemoryStore();
   const thread = await store.createThread(scope);
-  const run = await store.createRun(scope, thread.id, 'check datasource env');
+  const run = await store.createRun(scope, thread.id, 'check datasource env', {
+    runtimeCapabilitiesSnapshot: {
+      allowedCapabilities: ['datasource.credentials'],
+      llm: { enabled: false, defaultModelId: '', models: [] },
+      image: { enabled: false, defaultModelId: '', models: [] },
+      video: { enabled: false, defaultModelId: '', models: [] },
+    },
+  });
   let sawRuntimeContext = false;
   let sawSkillReusedRunEnv = false;
   let turn = 0;

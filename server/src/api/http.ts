@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { createRuntimeCapabilitiesSnapshot, executeRun } from '../agent/executor.js';
+import { executeRun } from '../agent/executor.js';
 import { store } from '../store/index.js';
 import { filesApi } from './files.js';
 import { settingsApi } from './settings.js';
@@ -18,17 +18,19 @@ import { sendSpaceError, tenantSpacesApi } from './spaces.js';
 import { requireSystemScope, requireTenantScope } from '../auth/guards.js';
 import { getIdentity, requireScope, type IdentityContext } from '../auth/context.js';
 import type { Scope } from '../store/types.js';
-import { listDatasources, releaseRunLeases } from '../datasources/accountPool.js';
+import { releaseRunLeases } from '../datasources/accountPool.js';
 import type { AskUserAnswer, AskUserOption, AskUserSpec } from '../agent/types.js';
 import { shellManager } from '../shell/manager.js';
 import { shellBus } from '../shell/bus.js';
-import { getLlmSettings, getToolSettings, llmModelOptions } from '../settings.js';
+import { getToolSettings } from '../settings.js';
 import { createPolicy } from '../tools/policy.js';
 import { isWithin } from '../tools/policy.js';
 import type { Response } from 'express';
 import type { LlmProviderState } from '../llm/types.js';
 import { RunActiveError } from '../store/types.js';
 import { spaceAccess } from '../spaces/access.js';
+import { SpaceConfigError } from '../spaces/config.js';
+import { runAdmission } from '../spaces/runAdmission.js';
 
 export const api = Router();
 
@@ -166,21 +168,6 @@ function optionalText(value: unknown): string | null {
 
 function optionalBoolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
-}
-
-async function validateRunModelRef(scope: Scope, modelRef: string | null): Promise<string | null> {
-  if (!modelRef) return null;
-  const settings = await getLlmSettings(scope);
-  const options = llmModelOptions(settings);
-  if (!options.some((option) => option.ref === modelRef)) {
-    throw new Error(`模型未启用：${modelRef}`);
-  }
-  return modelRef;
-}
-
-async function runtimeCapabilitiesSnapshotForNewRun(scope: Scope): Promise<Record<string, unknown>> {
-  const hasDatasources = (await listDatasources(scope)).some((datasource) => datasource.enabled && datasource.status === 'active');
-  return { ...(await createRuntimeCapabilitiesSnapshot(scope, hasDatasources)) };
 }
 
 // --- Threads ---
@@ -364,22 +351,18 @@ api.post('/threads/:id/runs', async (req, res) => {
   if (!await checkThreadSpaceAccess(res, identity, thread.space_id, true)) return;
   const input = String(req.body?.input ?? '').trim();
   if (!input) return res.status(400).json({ error: 'input 为必填' });
-  let modelRef: string | null = null;
-  try {
-    modelRef = await validateRunModelRef(scope, optionalText(req.body?.modelRef));
-  } catch (err) {
-    return res.status(400).json({ error: (err as Error).message });
-  }
-
   let run;
   try {
-    run = await store.createRun(scope, thread.id, input, {
-      modelRef,
+    run = await runAdmission.createWebRun(scope, thread, {
+      input,
+      requestedModelRef: optionalText(req.body?.modelRef),
       parentRunId: optionalText(req.body?.parentRunId) ?? undefined,
-      runtimeCapabilitiesSnapshot: await runtimeCapabilitiesSnapshotForNewRun(scope),
     });
   } catch (err) {
     if (sendRunActiveConflict(res, err)) return;
+    if (err instanceof SpaceConfigError) {
+      return res.status(400).json({ error: err.message, code: err.code });
+    }
     return res.status(400).json({ error: (err as Error).message });
   }
   // 后台执行：agent 循环在当前进程内运行，并通过 WebSocket 推送事件。
@@ -424,23 +407,18 @@ api.post('/runs/:id/branch', async (req, res) => {
     ? String(req.body?.input ?? '').trim()
     : source.input;
   if (!input) return res.status(400).json({ error: 'input 为必填' });
-  let modelRef: string | null = source.model_ref;
-  try {
-    if (Object.prototype.hasOwnProperty.call(req.body ?? {}, 'modelRef')) {
-      modelRef = await validateRunModelRef(scope, optionalText(req.body?.modelRef));
-    }
-  } catch (err) {
-    return res.status(400).json({ error: (err as Error).message });
-  }
   let run;
   try {
-    run = await store.createRun(scope, source.thread_id, input, {
-      modelRef,
+    run = await runAdmission.createWebRun(scope, thread, {
+      input,
+      requestedModelRef: optionalText(req.body?.modelRef),
       parentRunId: source.parent_run_id,
-      runtimeCapabilitiesSnapshot: await runtimeCapabilitiesSnapshotForNewRun(scope),
     });
   } catch (err) {
     if (sendRunActiveConflict(res, err)) return;
+    if (err instanceof SpaceConfigError) {
+      return res.status(400).json({ error: err.message, code: err.code });
+    }
     return res.status(400).json({ error: (err as Error).message });
   }
   void executeRun(run.id, { scope });

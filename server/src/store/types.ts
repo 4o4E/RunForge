@@ -289,6 +289,23 @@ export class DefaultSpaceImmutableError extends Error {
   }
 }
 
+export class SpaceConfigChangedError extends Error {
+  readonly code = 'SPACE_CONFIG_CHANGED';
+
+  constructor() {
+    super('空间配置已更新，请按最新配置重试');
+    this.name = 'SpaceConfigChangedError';
+  }
+}
+
+export interface CreateRunOptions {
+  modelRef?: string | null;
+  parentRunId?: string | null;
+  runtimeCapabilitiesSnapshot?: Record<string, unknown> | null;
+  spaceConfigSnapshot?: Record<string, unknown>;
+  expectedSpaceConfigVersion?: number;
+}
+
 export interface TenantConfigTemplateEntry {
   key: string;
   value: unknown;
@@ -391,7 +408,7 @@ export interface Store {
   }): Promise<ThreadNoticeRow>;
   forkThreadAtRun(scope: Scope, sourceRunId: string): Promise<{ thread: ThreadRow; activeRun: RunRow } | null>;
 
-  createRun(scope: Scope, threadId: string, input: string, options?: { modelRef?: string | null; parentRunId?: string | null; runtimeCapabilitiesSnapshot?: Record<string, unknown> | null }): Promise<RunRow>;
+  createRun(scope: Scope, threadId: string, input: string, options?: CreateRunOptions): Promise<RunRow>;
   getRun(scope: Scope, id: string): Promise<RunRow | null>;
   listRuns(scope: Scope, threadId: string): Promise<RunRow[]>;
   /** 跨租户扫描,只给启动期后台任务(recovery.ts)用,禁止在 api/*.ts 路由里调用。 */

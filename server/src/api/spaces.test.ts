@@ -30,12 +30,14 @@ test('space API: 管理权限、可见名单、execution user 和软删除语义
     const createdWebResponse = await fetch(`${base}/spaces`, {
       method: 'POST',
       headers: bearer(ownerToken),
-      body: JSON.stringify({ mode: 'web', name: 'Team Web', visibleUserIds: [member.id], config: { prompt: 'v1' } }),
+      body: JSON.stringify({ mode: 'web', name: 'Team Web', visibleUserIds: [member.id], config: { systemPrompt: 'v1' } }),
     });
     assert.equal(createdWebResponse.status, 201);
     const webSpace = (await createdWebResponse.json()) as SpaceSummary;
     assert.match(webSpace.id, /^sp_[0-9A-Za-z]+$/);
     assert.deepEqual(webSpace.visibleUserIds, [member.id]);
+    assert.equal(webSpace.config.schemaVersion, 1);
+    assert.equal(webSpace.config.systemPrompt, 'v1');
 
     const externalResponse = await fetch(`${base}/spaces`, {
       method: 'POST',

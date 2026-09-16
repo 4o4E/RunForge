@@ -14,8 +14,8 @@ import { runBus } from './bus.js';
 import type { AgentEvent, FinishReason } from './types.js';
 import { store as defaultStore } from '../store/index.js';
 import { scopeForThread, type Scope, type Store } from '../store/types.js';
-import { getMcpSettings, getRuntimeCapabilitiesSettings, getToolSettings } from '../settings.js';
-import type { McpSettings, RuntimeCapabilitiesSettings, ToolSettings } from '../settings.js';
+import { getMcpSettings, getToolSettings } from '../settings.js';
+import type { McpSettings, ToolSettings } from '../settings.js';
 import {
   activateMcpServer,
   renderMcpCatalog,
@@ -32,6 +32,11 @@ import type { SubagentRunRow } from '../store/types.js';
 import { loadWorkflowIndex, renderWorkflowCatalog, renderWorkflowSystemRules } from '../workflows/registry.js';
 import { scheduleThreadTitleGeneration } from './threadTitle.js';
 import { notifyRunCompleted } from '../notifications/push.js';
+import {
+  createTenantRuntimeCapabilitiesSnapshot,
+  type RunSpaceConfigSnapshot,
+  type RuntimeCapabilitiesSnapshot,
+} from '../spaces/config.js';
 
 const ASK_USER_TOOL_NAME = 'ask_user';
 const DATABASE_ACCESS_SKILL_NAME = 'database-access';
@@ -95,10 +100,6 @@ export interface ExecutorDeps {
 interface DatabaseRuntimeEnv {
   env: Record<string, string>;
   summary: string;
-}
-
-export interface RuntimeCapabilitiesSnapshot extends RuntimeCapabilitiesSettings {
-  allowedCapabilities: RuntimeCapabilityName[];
 }
 
 interface ToolTrace {
@@ -213,7 +214,12 @@ class StreamStatsTracker {
   }
 }
 
-async function defaultDeps(scope: Scope, overrides: Partial<ExecutorDeps>, modelRef?: string | null): Promise<ExecutorDeps> {
+async function defaultDeps(
+  scope: Scope,
+  overrides: Partial<ExecutorDeps>,
+  modelRef?: string | null,
+  spaceConfig?: RunSpaceConfigSnapshot | null,
+): Promise<ExecutorDeps> {
   const configured = overrides.provider ? null : await getConfiguredProvider(scope, modelRef ?? undefined);
   return {
     provider: overrides.provider ?? configured!.provider,
@@ -227,7 +233,11 @@ async function defaultDeps(scope: Scope, overrides: Partial<ExecutorDeps>, model
     mcpToolLoader: overrides.mcpToolLoader,
     databaseRuntimeEnv: overrides.databaseRuntimeEnv,
     generateThreadTitle: overrides.generateThreadTitle ?? overrides.store === undefined,
-    contextSettings: overrides.contextSettings ?? (configured ? agentContextSettings(configured.contextWindow) : {
+    contextSettings: overrides.contextSettings ?? (spaceConfig ? {
+      modelContextWindow: spaceConfig.model.contextWindow,
+      contextBudget: spaceConfig.model.contextBudget,
+      contextBudgetSource: spaceConfig.model.contextBudgetSource,
+    } : configured ? agentContextSettings(configured.contextWindow) : {
       modelContextWindow: config.agent.modelContextWindow,
       contextBudget: config.agent.contextBudget,
       contextBudgetSource: config.agent.contextBudgetSource,
@@ -340,29 +350,12 @@ function addUsage(total: LlmUsage | undefined, next: LlmUsage | undefined): LlmU
   };
 }
 
-export function enabledRuntimeCapabilities(settings: RuntimeCapabilitiesSettings, hasDatasources: boolean): RuntimeCapabilityName[] {
-  const capabilities: RuntimeCapabilityName[] = [];
-  if (hasDatasources) capabilities.push(DATASOURCE_CREDENTIAL_CAPABILITY);
-  if (settings.llm.enabled) capabilities.push('llm');
-  if (settings.image.enabled) capabilities.push('image');
-  if (settings.video.enabled) capabilities.push('video');
-  return capabilities;
-}
-
-export async function createRuntimeCapabilitiesSnapshot(scope: Scope, hasDatasources: boolean): Promise<RuntimeCapabilitiesSnapshot> {
-  const settings = await getRuntimeCapabilitiesSettings(scope);
-  return {
-    ...settings,
-    allowedCapabilities: enabledRuntimeCapabilities(settings, hasDatasources),
-  };
-}
-
-async function loadRuntimeCapabilitiesSnapshot(store: Store, scope: Scope, runId: string, hasDatasources: boolean): Promise<RuntimeCapabilitiesSnapshot> {
+async function loadRuntimeCapabilitiesSnapshot(store: Store, scope: Scope, runId: string): Promise<RuntimeCapabilitiesSnapshot> {
   const run = await store.getRunUnscoped(runId);
   const raw = run?.runtime_capabilities_snapshot;
   if (raw && typeof raw === 'object') return raw as unknown as RuntimeCapabilitiesSnapshot;
   const settings = store === defaultStore
-    ? await createRuntimeCapabilitiesSnapshot(scope, hasDatasources)
+    ? await createTenantRuntimeCapabilitiesSnapshot(scope.tenantId)
     : {
         llm: { enabled: false, defaultModelId: '', models: [] },
         image: { enabled: false, defaultModelId: '', models: [] },
@@ -376,8 +369,38 @@ async function loadRuntimeCapabilitiesSnapshot(store: Store, scope: Scope, runId
   return snapshot;
 }
 
+function runSpaceConfigSnapshot(value: unknown): RunSpaceConfigSnapshot | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = value as Partial<RunSpaceConfigSnapshot>;
+  if (typeof raw.spaceId !== 'string') return null;
+  if (
+    raw.schemaVersion !== 1
+    || (raw.mode !== 'web' && raw.mode !== 'external')
+    || typeof raw.systemPrompt !== 'string'
+    || !raw.model
+    || typeof raw.model.modelRef !== 'string'
+    || !Array.isArray(raw.model.allowedModelRefs)
+    || typeof raw.model.contextWindow !== 'number'
+    || typeof raw.model.contextBudget !== 'number'
+    || typeof raw.model.contextBudgetSource !== 'string'
+    || !raw.capabilities
+    || !Array.isArray(raw.capabilities.tools)
+    || !Array.isArray(raw.capabilities.mcpServers)
+    || !Array.isArray(raw.capabilities.runtime)
+    || !raw.external
+    || typeof raw.external.allowTrustedPrompt !== 'boolean'
+    || typeof raw.external.allowNextStep !== 'boolean'
+  ) {
+    throw new Error('run 的空间配置副本无效，拒绝回退到当前空间配置');
+  }
+  return raw as RunSpaceConfigSnapshot;
+}
+
 async function createDefaultDatabaseRuntimeEnv(scope: Scope, runId: string, allowedCapabilities: RuntimeCapabilityName[]): Promise<DatabaseRuntimeEnv> {
-  const activeDatasources = (await listDatasources(scope)).filter((datasource) => datasource.enabled && datasource.status === 'active');
+  const datasourceAllowed = allowedCapabilities.includes(DATASOURCE_CREDENTIAL_CAPABILITY);
+  const activeDatasources = datasourceAllowed
+    ? (await listDatasources(scope)).filter((datasource) => datasource.enabled && datasource.status === 'active')
+    : [];
   const allowedDatasourceIds = activeDatasources.map((datasource) => datasource.id);
   const created = await createWorkloadToken(scope, {
     runId,
@@ -508,13 +531,18 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
   const owningThread = await store.getThreadUnscoped(run.thread_id);
   if (!owningThread) throw new Error(`thread 不存在：${run.thread_id}`);
   const scope: Scope = scopeOverride ?? scopeForThread(owningThread);
+  let spaceConfig: RunSpaceConfigSnapshot | null = null;
   let deps: ExecutorDeps;
   try {
+    spaceConfig = runSpaceConfigSnapshot(run.space_config_snapshot);
+    if (spaceConfig && run.model_ref && run.model_ref !== spaceConfig.model.modelRef) {
+      throw new Error('run 的模型与空间配置副本不一致');
+    }
     deps = await defaultDeps(scope, {
       ...depOverrides,
       store,
       generateThreadTitle: depOverrides.generateThreadTitle ?? usesDefaultStore,
-    }, run.model_ref);
+    }, run.model_ref ?? spaceConfig?.model.modelRef, spaceConfig);
   } catch (err) {
     const message = (err as Error).message;
     console.warn(`[agent] run ${runId} failed before start: ${errorStack(err)}`);
@@ -621,9 +649,15 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     if (!initialRun.goal_state) await store.setGoalState(scope, runId, goal);
     const toolSettings = deps.toolSettings ?? (await getToolSettings(scope));
     const toolPolicy = createPolicy(toolSettings);
-    const mcpSettings = deps.mcpSettings ?? (deps.store === defaultStore ? await getMcpSettings(scope) : { servers: [] });
-    const activeDatasources = deps.store === defaultStore ? (await listDatasources(scope)).filter((datasource) => datasource.enabled && datasource.status === 'active') : [];
-    const capabilitySnapshot = await loadRuntimeCapabilitiesSnapshot(store, scope, runId, activeDatasources.length > 0);
+    const tenantMcpSettings = deps.mcpSettings ?? (deps.store === defaultStore ? await getMcpSettings(scope) : { servers: [] });
+    const allowedMcpServerIds = spaceConfig ? new Set(spaceConfig.capabilities.mcpServers) : null;
+    const mcpSettings = allowedMcpServerIds
+      ? { servers: tenantMcpSettings.servers.filter((server) => allowedMcpServerIds.has(server.id)) }
+      : tenantMcpSettings;
+    const allowedBuiltinToolNames = spaceConfig
+      ? new Set(spaceConfig.capabilities.tools.filter((tool) => spaceConfig!.mode !== 'external' || tool !== ASK_USER_TOOL_NAME))
+      : null;
+    const capabilitySnapshot = await loadRuntimeCapabilitiesSnapshot(store, scope, runId);
     const toolEnv: Record<string, string> = {};
     const databaseRuntimeEnvProvider = deps.databaseRuntimeEnv ?? (deps.store === defaultStore ? createDefaultDatabaseRuntimeEnv : null);
     let databaseRuntimeSummary = '';
@@ -661,12 +695,16 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     const skillRuntimeContext = renderSkillSystemRules();
     const capabilityCatalog = [renderSkillCatalog(skillIndex), renderMcpCatalog(mcpSettings)].join('\n\n');
     const workflowRuntimeContext = [renderWorkflowSystemRules(), renderWorkflowCatalog(workflowIndex)].join('\n\n');
-    const runtimeContext = `${renderRuntimeContext(toolSettings)}\n\n${databaseRuntimeSummary}\n\n${workflowRuntimeContext}\n\n${skillRuntimeContext}\n\n${renderMcpSystemRules()}`;
+    const spaceRuntimeRules = spaceConfig?.mode === 'external'
+      ? '当前 run 来自 external 空间：不能向 Web 用户提问或进入 waiting_for_user；信息不足时采用合理假设，或在最终结果中明确说明缺失信息。'
+      : '';
+    const runtimeContext = `${renderRuntimeContext(toolSettings)}\n\n${spaceRuntimeRules}\n\n${databaseRuntimeSummary}\n\n${workflowRuntimeContext}\n\n${skillRuntimeContext}\n\n${renderMcpSystemRules()}`;
     const ctx = new ContextManager(prior, userInput, renderGoal(goal), {
       appendUserInput: !hasPersistedMessages,
       userInputPrefix: capabilityCatalog,
       activationContext: renderRunActivationContext(activeSkills, activeMcp),
       systemPrompt: renderSystemPrompt({
+        spacePrompt: spaceConfig?.systemPrompt,
         runtimeContext,
         runtimeCapabilitiesContext: renderRuntimeCapabilitiesContext(capabilitySnapshot),
       }),
@@ -702,6 +740,9 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     });
 
     const ensureDatabaseToolEnv = async (activation: SkillActivation): Promise<string> => {
+      if (!capabilitySnapshot.allowedCapabilities.includes(DATASOURCE_CREDENTIAL_CAPABILITY)) {
+        return '当前空间没有授权 datasource.credentials，不能注入数据库短期凭证。';
+      }
       if (toolEnv.WORKLOAD_TOKEN) return '数据库访问运行环境已在 run 初始化时注入；database-access skill 只提供脚本和操作规范。';
 
       const activeDatasources = (await listDatasources(scope)).filter((datasource) => datasource.enabled && datasource.status === 'active');
@@ -710,9 +751,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         runId,
         skillId: activation.skill.id,
         allowedDatasourceIds,
-        allowedCapabilities: capabilitySnapshot.allowedCapabilities.includes(DATASOURCE_CREDENTIAL_CAPABILITY)
-          ? capabilitySnapshot.allowedCapabilities
-          : [DATASOURCE_CREDENTIAL_CAPABILITY, ...capabilitySnapshot.allowedCapabilities],
+        allowedCapabilities: capabilitySnapshot.allowedCapabilities,
       });
 
       toolEnv.WORKLOAD_TOKEN = created.token;
@@ -778,6 +817,9 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       const profile = subagentProfile(runtimeProfileId);
 
       try {
+        if (modelRef && spaceConfig && !spaceConfig.model.allowedModelRefs.includes(modelRef)) {
+          throw new Error(`subagent 模型未被当前空间允许：${modelRef}`);
+        }
         const skillMessages: string[] = [];
         for (const name of skillNames) {
           try {
@@ -787,7 +829,10 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
             skillMessages.push(`Skill "${name}" 加载失败：${(err as Error).message}`);
           }
         }
-        const toolSchemasForProfile = await toolSchemas(profile.tools);
+        const profileTools = allowedBuiltinToolNames
+          ? profile.tools.filter((tool) => allowedBuiltinToolNames.has(tool))
+          : profile.tools;
+        const toolSchemasForProfile = await toolSchemas(profileTools, [], !spaceConfig);
         const tools = toolSchemasForProfile.filter((tool) => !SUBAGENT_FORBIDDEN_TOOLS.has(tool.name));
         const allowedToolNames = new Set(tools.map((tool) => tool.name));
 
@@ -1052,6 +1097,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       // 一次模型请求内的能力集合必须保持不变；本轮激活的 Skill/MCP 从下一次请求才生效。
       const requestMcpServerIds = new Set(activeMcp.keys());
       const requestActiveSkillNames = new Set(activeSkills.map((skill) => skill.name));
+      let requestAllowedToolNames = new Set<string>();
 
       // 支持流式时实时发布增量；完整文本只在末尾落库，历史回放更紧凑。
       let result;
@@ -1067,8 +1113,12 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       const streamedToolNames = new Map<string, string>();
       const stopLlmHeartbeat = streamStats.startHeartbeat(stepIdx, () => llmStage, () => llmActiveTool);
       try {
-        // 原生工具始终注册；MCP schema 只取当前 run 已激活的 server。
-        const tools = await toolSchemas(undefined, [...activeMcp.values()].flatMap((activation) => activation.tools));
+        const activeMcpTools = [...activeMcp.values()].flatMap((activation) => activation.tools);
+        const selectedToolNames = allowedBuiltinToolNames
+          ? [...allowedBuiltinToolNames, ...activeMcpTools.map((tool) => tool.mappedName)]
+          : undefined;
+        const tools = await toolSchemas(selectedToolNames, activeMcpTools, !spaceConfig);
+        requestAllowedToolNames = new Set(tools.map((tool) => tool.name));
         const modelMessages = await hydrateImageAttachments(ctx.all(), toolSettings.workspaceRoot);
         const onStreamDelta = (d: LlmDelta) => {
           publishedDelta = true;
@@ -1242,6 +1292,11 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         noActionTurns += 1;
         if (noActionTurns >= 3) {
           const reason = `连续 ${noActionTurns} 个 step 没有工具调用，也没有有效最终汇报。`;
+          if (spaceConfig?.mode === 'external') {
+            await emit(step.id, { type: 'error', step: stepIdx, message: reason });
+            await store.setRunStatus(scope, runId, 'error', { error: reason });
+            return;
+          }
           const question = blockedQuestion(reason);
           await emit(step.id, { type: 'progress_stalled', step: stepIdx, reason, question });
           await emit(step.id, { type: 'user_question', step: stepIdx, question });
@@ -1258,6 +1313,12 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
 
       const toolTraces: ToolTrace[] = [];
       const applySkillActivation = async (activation: SkillActivation): Promise<string> => {
+        if (
+          activation.skill.name === DATABASE_ACCESS_SKILL_NAME
+          && !capabilitySnapshot.allowedCapabilities.includes(DATASOURCE_CREDENTIAL_CAPABILITY)
+        ) {
+          return '当前空间没有授权 datasource.credentials，拒绝激活 database-access skill。';
+        }
         const alreadyActive = activeSkills.some((skill) => skill.id === activation.skill.id);
         if (!alreadyActive) {
           activeSkills.push(activation.skill);
@@ -1318,9 +1379,12 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         streamStats.add(stepIdx, 'tool_call', 'toolInputChars', Math.max(0, toolInputChars - streamedInputChars), activeTool);
         await emit(step.id, { type: 'tool_call', step: stepIdx, id: call.id, name: call.name, args: redactToolArgs(args), startedAt });
 
-        if (!parsedArgs.ok) {
+        const blockedBySpace = !requestAllowedToolNames.has(call.name);
+        if (!parsedArgs.ok || blockedBySpace) {
           const endedAt = new Date().toISOString();
-          const text = `工具参数无效，未执行 ${call.name}：${parsedArgs.error}`;
+          const text = !parsedArgs.ok
+            ? `工具参数无效，未执行 ${call.name}：${parsedArgs.error}`
+            : `工具 ${call.name} 未被当前 run 的空间配置授权，未执行。`;
           trace.result = text;
           trace.endedAt = endedAt;
           trace.durationMs = durationMs(startedAt, endedAt);
@@ -1338,7 +1402,9 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           const toolMsg = { role: 'tool' as const, content: text, toolCallId: call.id };
           ctx.add(toolMsg);
           ctx.setLastDbId(await store.addMessage(scope, threadId, runId, step.id, toolMsg));
-          const signature = toolSignature(call.name, { _invalidArgs: call.arguments.slice(0, 240) });
+          const signature = toolSignature(call.name, !parsedArgs.ok
+            ? { _invalidArgs: call.arguments.slice(0, 240) }
+            : { _blockedBySpace: true });
           recentToolSignatures.push(signature);
           if (recentToolSignatures.length > 6) recentToolSignatures.shift();
           recentFailures.push(`${signature}:${text.slice(0, 240)}`);
@@ -1491,6 +1557,11 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       const guardHit = detectLoopGuard(recentToolSignatures, recentFailures);
       if (guardHit) {
         await emit(step.id, { type: 'progress_stalled', step: stepIdx, reason: guardHit.reason, question: guardHit.question });
+        if (spaceConfig?.mode === 'external') {
+          await emit(step.id, { type: 'error', step: stepIdx, message: guardHit.reason });
+          await store.setRunStatus(scope, runId, 'error', { error: guardHit.reason });
+          return;
+        }
         await emit(step.id, { type: 'user_question', step: stepIdx, question: guardHit.question });
         await store.setRunStatus(scope, runId, 'waiting_for_user');
         return;

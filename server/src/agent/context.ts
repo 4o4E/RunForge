@@ -1,6 +1,5 @@
 import type { LlmMessage, LlmUsage } from '../llm/types.js';
 import type { CompactionAffectedMessage } from '@runforge/contracts';
-import type { RuntimeCapabilitiesSettings } from '@runforge/contracts';
 import type { ThreadMessage } from '../store/types.js';
 import type { Provider } from '../llm/types.js';
 import { config, type AgentContextSettings } from '../config.js';
@@ -12,6 +11,12 @@ import {
   type WorkingMessage,
 } from './contextCompactor.js';
 import { estimateTokens, maskPlaceholder, totalChars } from './compaction.js';
+
+interface RuntimeCapabilitiesContextSettings {
+  llm: { enabled: boolean; models: Array<{ id: string }> };
+  image: { enabled: boolean; models: Array<{ id: string }> };
+  video: { enabled: boolean; models: Array<{ id: string }> };
+}
 
 const SYSTEM_PROMPT = `你是 RunForge，一个通用自主助手。
 
@@ -68,7 +73,7 @@ export function renderRuntimeContext(info: RuntimeContextInfo): string {
 - shell session 会长期记住当前目录 / The shell session remembers cwd across commands: 需要切目录时直接执行 cd，不要给每次命令单独传 cwd。旧 shell 工具只是兼容入口。`;
 }
 
-export function renderRuntimeCapabilitiesContext(settings: RuntimeCapabilitiesSettings): string {
+export function renderRuntimeCapabilitiesContext(settings: RuntimeCapabilitiesContextSettings): string {
   const lines = ['运行时内部能力 / Runtime internal capabilities:'];
   const enabled: string[] = [];
   if (settings.llm.enabled) enabled.push('llm');
@@ -91,8 +96,11 @@ export function renderRuntimeCapabilitiesContext(settings: RuntimeCapabilitiesSe
   return lines.join('\n');
 }
 
-export function renderSystemPrompt(parts: { runtimeContext?: string; runtimeCapabilitiesContext?: string }): string {
-  return [SYSTEM_PROMPT, parts.runtimeContext, parts.runtimeCapabilitiesContext].map((part) => part?.trim()).filter(Boolean).join('\n\n');
+export function renderSystemPrompt(parts: { spacePrompt?: string; runtimeContext?: string; runtimeCapabilitiesContext?: string }): string {
+  return [SYSTEM_PROMPT, parts.spacePrompt, parts.runtimeContext, parts.runtimeCapabilitiesContext]
+    .map((part) => part?.trim())
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 export type { CompactionInfo, CompactionResult };

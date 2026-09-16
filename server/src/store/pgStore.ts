@@ -6,9 +6,10 @@ import type { LlmMessage } from '../llm/types.js';
 import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
 import { sanitizeThreadMessagesForModel } from './messageView.js';
-import { DefaultSpaceImmutableError, isTerminalRunStatus, RunActiveError } from './types.js';
+import { DefaultSpaceImmutableError, isTerminalRunStatus, RunActiveError, SpaceConfigChangedError } from './types.js';
 import type {
   AuthTokenRow,
+  CreateRunOptions,
   CreateSpaceRecordInput,
   CreateTenantWithOwnerInput,
   PushSubscriptionRow,
@@ -568,7 +569,7 @@ export class PgStore implements Store {
     }
   }
 
-  async createRun(scope: Scope, threadId: string, input: string, options: { modelRef?: string | null; parentRunId?: string | null; runtimeCapabilitiesSnapshot?: Record<string, unknown> | null } = {}): Promise<RunRow> {
+  async createRun(scope: Scope, threadId: string, input: string, options: CreateRunOptions = {}): Promise<RunRow> {
     const id = newRunId();
     const row = await prisma.$transaction(async (tx) => {
       const thread = await tx.threads.findFirst({
@@ -589,6 +590,12 @@ export class PgStore implements Store {
       if (!thread) throw new Error('threadId 不存在或不属于当前用户');
       if (thread.spaces.deleted_at) throw new Error('space 已删除，不能创建新 run');
       if (thread.spaces.mode !== 'web') throw new Error('外部空间在 Web 中只读');
+      if (
+        options.expectedSpaceConfigVersion !== undefined
+        && options.expectedSpaceConfigVersion !== thread.spaces.config_version
+      ) {
+        throw new SpaceConfigChangedError();
+      }
       const user = await tx.users.findFirst({
         where: { id: scope.userId, tenant_id: scope.tenantId, status: 'active' },
         select: { role: true },
@@ -622,7 +629,7 @@ export class PgStore implements Store {
           input,
           model_ref: options.modelRef ?? null,
           runtime_capabilities_snapshot: nullableJson(options.runtimeCapabilitiesSnapshot),
-          space_config_snapshot: requiredJson(thread.spaces.config),
+          space_config_snapshot: requiredJson(options.spaceConfigSnapshot ?? thread.spaces.config),
           space_config_version: thread.spaces.config_version,
         },
       });

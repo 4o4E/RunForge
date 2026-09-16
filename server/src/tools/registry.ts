@@ -57,14 +57,22 @@ const CORE_TOOL_NAMES = new Set([
   'subagent_list',
 ]);
 
-export async function toolSchemas(profileTools?: string[], activeMcpTools: McpMappedTool[] = []): Promise<LlmTool[]> {
+export function builtinToolNames(): string[] {
+  return TOOLS.map((tool) => tool.name);
+}
+
+export async function toolSchemas(
+  profileTools?: string[],
+  activeMcpTools: McpMappedTool[] = [],
+  includeCoreTools = true,
+): Promise<LlmTool[]> {
   const builtinTools = !profileTools ? TOOLS.map(toLlmTool) : (() => {
-    const selected = new Set([...profileTools, ...CORE_TOOL_NAMES]);
+    const selected = new Set(includeCoreTools ? [...profileTools, ...CORE_TOOL_NAMES] : profileTools);
     return TOOLS.filter((tool) => selected.has(tool.name)).map(toLlmTool);
   })();
   const mcpTools = mcpToolSchemas(activeMcpTools);
   if (!profileTools) return [...builtinTools, ...mcpTools];
-  const selected = new Set([...profileTools, ...CORE_TOOL_NAMES]);
+  const selected = new Set(includeCoreTools ? [...profileTools, ...CORE_TOOL_NAMES] : profileTools);
   return [...builtinTools, ...mcpTools.filter((tool) => selected.has(tool.name))];
 }
 

@@ -9,6 +9,12 @@ import type { IdentityContext } from '../auth/context.js';
 import type { SpaceWithVisibilityRow, Store, UserRow } from '../store/types.js';
 import { DefaultSpaceImmutableError } from '../store/types.js';
 import { store as defaultStore } from '../store/index.js';
+import {
+  normalizeSpaceConfig,
+  spaceConfigService as defaultSpaceConfigService,
+  SpaceConfigError,
+  type SpaceConfigService,
+} from './config.js';
 
 export class SpaceAccessError extends Error {
   constructor(
@@ -108,7 +114,10 @@ function isManager(role: TenantUserRole): boolean {
 }
 
 export class SpaceAccessService {
-  constructor(private readonly store: Store = defaultStore) {}
+  constructor(
+    private readonly store: Store = defaultStore,
+    private readonly configService: SpaceConfigService = defaultSpaceConfigService,
+  ) {}
 
   async list(actorContext: SpaceActorContext, includeDeleted = false): Promise<SpaceSummary[]> {
     if (actorContext.scope === 'system') {
@@ -178,12 +187,13 @@ export class SpaceAccessService {
   private async createManaged(tenantId: string, createdByUserId: string | null, input: CreateSpaceInput): Promise<SpaceSummary> {
     const executionUserId = await this.validateExecutionUser(tenantId, input.mode, input.executionUserId ?? null);
     const visibleUserIds = await this.validateVisibleUsers(tenantId, input.visibleUserIds ?? []);
+    const config = await this.normalizeConfigForSave(tenantId, input.mode, input.config ?? {});
     const row = await this.store.createSpace({
       tenantId,
       mode: input.mode,
       name: input.name,
       executionUserId,
-      config: input.config ?? {},
+      config,
       createdByUserId,
       visibleUserIds,
     });
@@ -211,11 +221,14 @@ export class SpaceAccessService {
     const visibleUserIds = input.visibleUserIds === undefined
       ? undefined
       : await this.validateVisibleUsers(tenantId, input.visibleUserIds);
+    const config = input.config === undefined
+      ? undefined
+      : await this.normalizeConfigForSave(tenantId, current.mode, input.config);
     try {
       const updated = await this.store.updateSpace(tenantId, spaceId, {
         name: input.name,
         executionUserId,
-        config: input.config,
+        config,
         visibleUserIds,
       });
       if (!updated) throw new SpaceAccessError(404, 'SPACE_NOT_FOUND', '空间不存在');
@@ -313,6 +326,15 @@ export class SpaceAccessService {
     return [...new Set(userIds)];
   }
 
+  private async normalizeConfigForSave(tenantId: string, mode: SpaceMode, value: unknown) {
+    try {
+      return await this.configService.normalizeForSave(tenantId, mode, value);
+    } catch (error) {
+      if (error instanceof SpaceConfigError) throw new SpaceAccessError(400, error.code, error.message);
+      throw error;
+    }
+  }
+
   private async toSummaries(tenantId: string, spaces: SpaceWithVisibilityRow[]): Promise<SpaceSummary[]> {
     const tenant = await this.requireTenant(tenantId);
     const summaries = spaces.map((space) => this.toSummary(space, tenant.default_space_id));
@@ -329,7 +351,7 @@ export class SpaceAccessService {
       mode: space.mode,
       name: space.name,
       executionUserId: space.execution_user_id,
-      config: space.config,
+      config: normalizeSpaceConfig(space.config),
       configVersion: space.config_version,
       createdByUserId: space.created_by_user_id,
       visibleUserIds: space.visible_user_ids,

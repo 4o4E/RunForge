@@ -128,14 +128,14 @@ test('SpaceAccessService: external space 只接受本 tenant 的 active executio
     name: 'External',
     executionUserId: ctx.member.id,
     visibleUserIds: [ctx.hiddenMember.id],
-    config: { prompt: 'v1' },
+    config: { systemPrompt: 'v1' },
   });
   assert.equal(external.executionUserId, ctx.member.id);
   assert.equal(external.configVersion, 1);
 
   const updated = await ctx.service.update(ctx.ownerIdentity, external.id, {
     executionUserId: ctx.hiddenMember.id,
-    config: { prompt: 'v2' },
+    config: { systemPrompt: 'v2' },
   });
   assert.equal(updated.executionUserId, ctx.hiddenMember.id);
   assert.equal(updated.configVersion, 2);
@@ -154,7 +154,7 @@ test('SpaceAccessService: default 不可重命名删除，普通空间软删除�
   );
 
   const configuredDefault = await ctx.service.update(ctx.ownerIdentity, ctx.provisioned.defaultSpace.id, {
-    config: { prompt: 'updated' },
+    config: { systemPrompt: 'updated' },
   });
   assert.equal(configuredDefault.configVersion, 2);
 

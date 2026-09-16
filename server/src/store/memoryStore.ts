@@ -3,9 +3,10 @@ import type { LlmMessage } from '../llm/types.js';
 import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
 import { sanitizeThreadMessagesForModel } from './messageView.js';
-import { DefaultSpaceImmutableError, isTerminalRunStatus, RunActiveError } from './types.js';
+import { DefaultSpaceImmutableError, isTerminalRunStatus, RunActiveError, SpaceConfigChangedError } from './types.js';
 import type {
   AuthTokenRow,
+  CreateRunOptions,
   CreateSpaceRecordInput,
   CreateTenantWithOwnerInput,
   PushSubscriptionRow,
@@ -441,12 +442,15 @@ export class MemoryStore implements Store {
     return { thread: newThread, activeRun };
   }
 
-  async createRun(scope: Scope, threadId: string, input: string, options: { modelRef?: string | null; parentRunId?: string | null; runtimeCapabilitiesSnapshot?: Record<string, unknown> | null } = {}): Promise<RunRow> {
+  async createRun(scope: Scope, threadId: string, input: string, options: CreateRunOptions = {}): Promise<RunRow> {
     const thread = this.threads.get(threadId);
     if (!this.threadOwnedBy(thread, scope)) throw new Error('threadId 不存在或不属于当前用户');
     const space = this.spaces.get(thread.space_id);
     if (!space || space.deleted_at) throw new Error('space 已删除，不能创建新 run');
     if (space.mode !== 'web') throw new Error('外部空间在 Web 中只读');
+    if (options.expectedSpaceConfigVersion !== undefined && options.expectedSpaceConfigVersion !== space.config_version) {
+      throw new SpaceConfigChangedError();
+    }
     const user = this.users.get(scope.userId);
     if (user) {
       const canManage = user.status === 'active' && (user.role === 'owner' || user.role === 'admin');
@@ -473,7 +477,7 @@ export class MemoryStore implements Store {
       error: null,
       goal_state: null,
       runtime_capabilities_snapshot: options.runtimeCapabilitiesSnapshot ?? null,
-      space_config_snapshot: structuredClone(space.config),
+      space_config_snapshot: structuredClone(options.spaceConfigSnapshot ?? space.config),
       space_config_version: space.config_version,
       plugin_lock: null,
       external_input_open: false,

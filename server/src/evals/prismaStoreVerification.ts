@@ -8,6 +8,8 @@ import { tenantSettingsTemplateEntries } from '../settings.js';
 import { DefaultSpaceImmutableError, RunActiveError } from '../store/types.js';
 import { newExternalCallerId, newExternalTokenId, newSpaceId } from '../id.js';
 import { SpaceAccessService } from '../spaces/access.js';
+import { SpaceConfigService } from '../spaces/config.js';
+import { RunAdmissionService } from '../spaces/runAdmission.js';
 
 const suffix = randomUUID().replaceAll('-', '').slice(0, 12);
 const tenantId = `prisma-verify-${suffix}`;
@@ -15,7 +17,9 @@ const otherTenantId = `prisma-verify-other-${suffix}`;
 const systemAdminEmail = `prisma-verify-${suffix}@system.test`;
 const toolResult = `验证工具结果：${'原始内容'.repeat(60)}`;
 const store = new PgStore();
-const spaceAccess = new SpaceAccessService(store);
+const spaceConfig = new SpaceConfigService();
+const spaceAccess = new SpaceAccessService(store, spaceConfig);
+const runAdmission = new RunAdmissionService(store, spaceConfig);
 
 try {
   const provisioned = await store.createTenantWithOwner({
@@ -77,12 +81,12 @@ try {
     name: 'Prisma 外部空间',
     executionUserId: visibleMember.id,
     visibleUserIds: [visibleMember.id],
-    config: { prompt: 'v1' },
+    config: { systemPrompt: 'v1' },
   });
   assert.equal((await store.findSpace(tenantId, externalSpace.id))?.execution_user_id, visibleMember.id);
   assert.deepEqual((await store.findSpace(tenantId, externalSpace.id))?.visible_user_ids, [visibleMember.id]);
   const updatedExternalSpace = await spaceAccess.update(ownerIdentity, externalSpace.id, {
-    config: { prompt: 'v2' },
+    config: { systemPrompt: 'v2' },
   });
   assert.equal(updatedExternalSpace.configVersion, 2);
 
@@ -126,10 +130,10 @@ try {
   assert.equal(await store.getThread({ tenantId, userId: 'user_other' }, thread.id), null);
   assert.equal((await store.listThreads(scope)).some((item) => item.id === thread.id), true);
 
-  const run = await store.createRun(scope, thread.id, '验证输入', {
-    modelRef: 'verify:model',
-    runtimeCapabilitiesSnapshot: { allowedCapabilities: ['llm'] },
-  });
+  const run = await runAdmission.createWebRun(scope, thread, { input: '验证输入' });
+  assert.ok(run.model_ref);
+  assert.equal((run.space_config_snapshot as { spaceId?: string } | null)?.spaceId, defaultSpace.id);
+  assert.equal(JSON.stringify(run.runtime_capabilities_snapshot).includes('apiKey'), false);
   assert.equal((await store.getThread(scope, thread.id))?.active_run_id, run.id);
   assert.equal((await store.getThreadUnscoped(thread.id))?.id, thread.id);
   assert.equal((await store.getRunUnscoped(run.id))?.id, run.id);

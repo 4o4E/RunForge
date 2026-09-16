@@ -8,5 +8,5 @@ export type * from './shell.js';
 export type * from './runtime.js';
 export type * from './notifications.js';
 export type * from './auth.js';
-export type * from './spaces.js';
+export * from './spaces.js';
 export * from './schemas.js';
