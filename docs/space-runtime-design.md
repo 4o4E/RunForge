@@ -212,6 +212,18 @@ run 仍为活动状态且属于当前 caller 时接受。
 cursor 使用数据库 `events.id`。重连时先回放 cursor 之后的已持久化事件，再接收后端实时
 推送。Web JWT WebSocket 与外部 UUID Token WebSocket 是两套鉴权入口，不能混用。
 
+服务端确认订阅后先返回当前位置，再把每条持久化事件连同 cursor 放入统一事件帧：
+
+```json
+{ "type": "subscribed", "runId": "ru_xxx", "cursor": 123 }
+{ "type": "event", "runId": "ru_xxx", "cursor": 124, "event": { "type": "step_start", "step": 2 } }
+```
+
+首次订阅可省略 cursor，按 `0` 从头回放。调用方只在完整收到事件帧后保存该帧 cursor；
+连接断开后用最后保存值重连。服务端只发送已经写入 `events` 的事件，run 进入 final/error
+终点后以正常关闭帧结束连接。订阅消息无效时返回 `type=error` 并关闭，Token 无效或 run
+不属于当前 caller 时只按无权访问关闭，不泄露资源是否存在。
+
 ## 6. 附件与 Artifact
 
 外部调用方不提交宿主机路径。附件先通过 `artifact.upload` 上传，获得无路径语义的

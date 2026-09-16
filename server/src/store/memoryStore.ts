@@ -22,6 +22,7 @@ import type {
   SpaceRow,
   SpaceWithVisibilityRow,
   Store,
+  StoredEvent,
   SubagentRunRow,
   StepRow,
   SystemAdminRow,
@@ -75,7 +76,7 @@ export class MemoryStore implements Store {
   private runs = new Map<string, RunRow>();
   private steps: StepRow[] = [];
   private messages: StoredMsg[] = [];
-  private events = new Map<string, AgentEvent[]>();
+  private events = new Map<string, StoredEvent[]>();
   private shellSessions = new Map<string, ShellSessionRow>();
   private shellCommands = new Map<string, ShellCommandRow>();
   private shellLogs = new Map<string, ShellCommandLogRow[]>();
@@ -91,6 +92,7 @@ export class MemoryStore implements Store {
   private systemAdminTokens = new Map<string, SystemAdminTokenRow>();
   private seq = 0;
   private shellLogSeq = 0;
+  private eventCursor = 0;
   private now = () => new Date().toISOString();
 
   // 多租户改造 Phase 2(docs/multi-tenancy-design.md §5)。这几个私有归属判断函数
@@ -785,12 +787,20 @@ export class MemoryStore implements Store {
   async addEvent(scope: Scope, runId: string, _stepId: string | null, event: AgentEvent) {
     if (!this.runOwnedBy(this.runs.get(runId), scope)) return;
     const list = this.events.get(runId) ?? [];
-    list.push(event);
+    this.eventCursor += 1;
+    list.push({
+      cursor: this.eventCursor,
+      event,
+    });
     this.events.set(runId, list);
   }
   async getEvents(scope: Scope, runId: string) {
     if (!this.runOwnedBy(this.runs.get(runId), scope)) return [];
-    return this.events.get(runId) ?? [];
+    return (this.events.get(runId) ?? []).map((row) => row.event);
+  }
+  async getEventsAfterCursor(scope: Scope, runId: string, cursor: number): Promise<StoredEvent[]> {
+    if (!this.runOwnedBy(this.runs.get(runId), scope)) return [];
+    return (this.events.get(runId) ?? []).filter((row) => row.cursor > cursor);
   }
 
   async createSubagentRun(scope: Scope, input: {

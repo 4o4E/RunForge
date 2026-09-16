@@ -11,6 +11,11 @@ import { getIdentity } from '../auth/context.js';
 import { signSystemAccessToken, signTenantAccessToken } from '../auth/jwt.js';
 import { store } from '../store/index.js';
 import { spaceAccess } from '../spaces/access.js';
+import { MemoryStore } from '../store/memoryStore.js';
+import type { ExternalCallerAccess } from '../external/types.js';
+import { hashOpaqueToken } from '../auth/tokens.js';
+import { runBus } from '../agent/bus.js';
+import type { ExternalWebSocketFrame } from '@runforge/contracts';
 
 function listen(server: ReturnType<typeof createServer>): Promise<number> {
   return new Promise((resolve) => {
@@ -152,6 +157,134 @@ test('websocket auth accepts a valid JWT and rejects missing or opaque tokens', 
   } finally {
     server.close();
     config.auth.jwtSecret = previousJwtSecret;
+  }
+});
+
+test('external websocket: UUID Token 鉴权后按 events.id 回放并从 cursor 续传', async () => {
+  const eventStore = new MemoryStore();
+  const externalScope = { tenantId: 'tn_external_ws', userId: 'us_external_ws' };
+  const thread = await eventStore.createThread(externalScope, 'external websocket');
+  const run = await eventStore.createRun(externalScope, thread.id, 'stream events');
+  await eventStore.addEvent(externalScope, run.id, null, { type: 'step_start', step: 1 });
+  const uuidToken = '123e4567-e89b-42d3-a456-426614174000';
+  const access: ExternalCallerAccess = {
+    caller: {
+      id: 'ec_external_ws',
+      tenantId: externalScope.tenantId,
+      spaceId: 'sp_external_ws',
+      name: 'External WS',
+      status: 'active',
+      metadata: {},
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+    },
+    token: {
+      id: 'et_external_ws',
+      callerId: 'ec_external_ws',
+      label: null,
+      expiresAt: null,
+      revokedAt: null,
+      lastUsedAt: null,
+      createdAt: new Date(0).toISOString(),
+    },
+    space: {
+      id: 'sp_external_ws',
+      tenant_id: externalScope.tenantId,
+      mode: 'external',
+      name: 'External WS',
+      execution_user_id: externalScope.userId,
+      config: {},
+      config_version: 1,
+      created_by_user_id: null,
+      visible_user_ids: [],
+      deleted_at: null,
+      created_at: new Date(0).toISOString(),
+      updated_at: new Date(0).toISOString(),
+    },
+  };
+  let observedHash = '';
+  const repository = {
+    authenticateToken: async (tokenHash: string) => {
+      observedHash = tokenHash;
+      return access;
+    },
+    getRun: async (_access: ExternalCallerAccess, runId: string) => runId === run.id
+      ? {
+          executionUserId: externalScope.userId,
+          response: {
+            operation: 'run.get' as const,
+            threadId: thread.id,
+            runId: run.id,
+            status: 'running' as const,
+            input: run.input,
+            output: null,
+            error: null,
+            createdAt: run.created_at,
+            updatedAt: run.updated_at,
+          },
+        }
+      : null,
+  };
+  const server = createServer();
+  attachWebSocket(server, {
+    externalEventStore: eventStore,
+    externalRepository: repository,
+    externalPollIntervalMs: 20,
+  });
+  const port = await listen(server);
+
+  const subscribe = (cursor: number, onFrame?: (frame: ExternalWebSocketFrame) => Promise<void> | void) => new Promise<ExternalWebSocketFrame[]>((resolve, reject) => {
+    const frames: ExternalWebSocketFrame[] = [];
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/external/${uuidToken}`);
+    ws.on('open', () => ws.send(JSON.stringify({ type: 'subscribe', runId: run.id, cursor })));
+    ws.on('message', async (data) => {
+      const frame = JSON.parse(data.toString()) as ExternalWebSocketFrame;
+      frames.push(frame);
+      try {
+        await onFrame?.(frame);
+      } catch (error) {
+        reject(error);
+        ws.close();
+      }
+    });
+    ws.on('close', (code) => {
+      try {
+        assert.equal(code, 1000);
+        resolve(frames);
+      } catch (error) {
+        reject(error);
+      }
+    });
+    ws.on('error', reject);
+  });
+
+  try {
+    let finalAdded = false;
+    const firstFrames = await subscribe(0, async (frame) => {
+      if (frame.type !== 'event' || frame.event.type !== 'step_start' || finalAdded) return;
+      finalAdded = true;
+      const final = { type: 'final' as const, step: 1, output: 'done' };
+      await eventStore.addEvent(externalScope, run.id, null, final);
+      runBus.publish(run.id, final);
+    });
+    assert.equal(observedHash, hashOpaqueToken(uuidToken));
+    assert.deepEqual(firstFrames.map((frame) => frame.type === 'event'
+      ? [frame.type, frame.cursor, frame.event.type]
+      : [frame.type, 'cursor' in frame ? frame.cursor : null]), [
+      ['subscribed', 0],
+      ['event', 1, 'step_start'],
+      ['event', 2, 'final'],
+    ]);
+
+    const resumedFrames = await subscribe(1);
+    assert.deepEqual(resumedFrames.map((frame) => frame.type === 'event'
+      ? [frame.type, frame.cursor, frame.event.type]
+      : [frame.type, 'cursor' in frame ? frame.cursor : null]), [
+      ['subscribed', 1],
+      ['event', 2, 'final'],
+    ]);
+  } finally {
+    server.close();
   }
 });
 

@@ -104,8 +104,7 @@ export interface StepRow {
 }
 
 export interface StoredEvent {
-  step_id: string | null;
-  idx: number;
+  cursor: number;
   event: AgentEvent;
 }
 
@@ -490,6 +489,8 @@ export interface Store {
 
   addEvent(scope: Scope, runId: string, stepId: string | null, event: AgentEvent): Promise<void>;
   getEvents(scope: Scope, runId: string): Promise<AgentEvent[]>;
+  /** 按数据库 events.id 增量读取，用于可重连的外部事件流。 */
+  getEventsAfterCursor(scope: Scope, runId: string, cursor: number): Promise<StoredEvent[]>;
 
   createSubagentRun(scope: Scope, input: {
     parentRunId: string;

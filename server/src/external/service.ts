@@ -15,6 +15,7 @@ import {
 import { hashOpaqueToken } from '../auth/tokens.js';
 import { externalRepository } from './repository.js';
 import { ExternalApiError, type ExternalCallerAccess, type ExternalRepository, type ExternalRunSnapshot } from './types.js';
+import { isExternalUuidToken } from './token.js';
 
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
@@ -71,7 +72,7 @@ export class ExternalCommandService {
   ) {}
 
   async execute(uuidToken: string, value: unknown): Promise<unknown> {
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(uuidToken)) {
+    if (!isExternalUuidToken(uuidToken)) {
       throw new ExternalApiError(401, 'EXTERNAL_TOKEN_INVALID', '外部访问凭证无效');
     }
     let access = await this.repository.authenticateToken(hashOpaqueToken(uuidToken));

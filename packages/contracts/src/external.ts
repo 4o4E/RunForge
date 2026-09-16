@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { RunStatus } from './agent.js';
+import type { AgentEvent, RunStatus } from './agent.js';
 
 const optionalId = z.string().trim().min(1).max(256).optional();
 const idempotencyKey = z.string().trim().min(1).max(256);
@@ -48,6 +48,14 @@ export const externalCommandSchema = z.discriminatedUnion('operation', [
 
 export type ExternalSource = z.output<typeof externalSourceSchema>;
 export type ExternalCommand = z.output<typeof externalCommandSchema>;
+
+export const externalSubscriptionSchema = z.object({
+  type: z.literal('subscribe'),
+  runId: z.string().trim().regex(/^ru_[0-9A-Za-z]+$/),
+  cursor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).default(0),
+}).strict();
+
+export type ExternalSubscription = z.output<typeof externalSubscriptionSchema>;
 
 export interface ExternalCallerSummary {
   id: string;
@@ -117,3 +125,8 @@ export interface ExternalNextStepReceipt {
   version: number;
   status: 'accepted';
 }
+
+export type ExternalWebSocketFrame =
+  | { type: 'subscribed'; runId: string; cursor: number }
+  | { type: 'event'; runId: string; cursor: number; event: AgentEvent }
+  | { type: 'error'; code: string; message: string };

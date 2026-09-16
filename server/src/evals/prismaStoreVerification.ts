@@ -359,6 +359,9 @@ try {
   assert.equal(await store.getLastCompletedStepIndex(scope, run.id), 1);
   assert.equal(await store.countRunMessages(scope, run.id), 3);
   assert.equal((await store.getEvents(scope, run.id))[0]?.type, 'step_start');
+  const persistedEvents = await store.getEventsAfterCursor(scope, run.id, 0);
+  assert.equal(persistedEvents[0]?.event.type, 'step_start');
+  assert.deepEqual(await store.getEventsAfterCursor(scope, run.id, persistedEvents[0].cursor), []);
   assert.equal((await store.searchThreadMessages(scope, '验证输入')).length, 1);
 
   await store.addThreadNotice(scope, {

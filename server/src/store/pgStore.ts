@@ -23,6 +23,7 @@ import type {
   ShellLogStream,
   ShellSessionRow,
   Store,
+  StoredEvent,
   SpaceRow,
   SpaceWithVisibilityRow,
   SubagentRunRow,
@@ -1189,14 +1190,23 @@ export class PgStore implements Store {
   }
 
   async getEvents(scope: Scope, runId: string): Promise<AgentEvent[]> {
+    return (await this.getEventsAfterCursor(scope, runId, 0)).map((row) => row.event);
+  }
+
+  async getEventsAfterCursor(scope: Scope, runId: string, cursor: number): Promise<StoredEvent[]> {
+    if (!Number.isSafeInteger(cursor) || cursor < 0) return [];
     return (await prisma.events.findMany({
       where: {
         run_id: runId,
+        id: { gt: BigInt(cursor) },
         runs: { threads_runs_thread_idTothreads: { tenant_id: scope.tenantId, user_id: scope.userId } },
       },
-      select: { data: true },
+      select: { id: true, data: true },
       orderBy: { id: 'asc' },
-    })).map((row) => row.data as unknown as AgentEvent);
+    })).map((row) => ({
+      cursor: serialId(row.id),
+      event: row.data as unknown as AgentEvent,
+    }));
   }
 
   async createSubagentRun(scope: Scope, input: {
