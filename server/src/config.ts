@@ -197,6 +197,11 @@ export const config = {
     otlpEndpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? '',
     console: (process.env.OTEL_CONSOLE ?? 'false') === 'true',
   },
+  providerTrace: {
+    // 数据库记录长期保留；本地 JSONL 只作为故障排查缓存，固定保留最近 7 个自然日。
+    directory: resolve(process.env.RUNFORGE_PROVIDER_TRACE_DIR ?? resolve(process.cwd(), '../logs/provider-traces')),
+    retentionDays: 7,
+  },
   preview: {
     officeConverterUrl: process.env.OFFICE_PREVIEW_CONVERTER_URL ?? '',
     officeTimeoutMs: Number(process.env.OFFICE_PREVIEW_TIMEOUT_MS ?? 180000),

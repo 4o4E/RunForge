@@ -41,6 +41,13 @@ import {
 import { resolveWorkspaceRootForThread } from '../files/workspaceRoot.js';
 import { externalArtifactMaterializer } from '../external/artifactMaterializer.js';
 import { attachExternalArtifactTokens, type ExternalArtifactTokenSource } from '../external/artifactProtocol.js';
+import {
+  providerRunner as defaultProviderRunner,
+  type ProviderDescriptor,
+  type ProviderInvocationContext,
+  type ProviderPurpose,
+  type ProviderRunner,
+} from '../llm/providerRunner.js';
 
 const ASK_USER_TOOL_NAME = 'ask_user';
 const DATABASE_ACCESS_SKILL_NAME = 'database-access';
@@ -87,6 +94,8 @@ const SUBAGENT_WRITER_TOOLS = [
 
 export interface ExecutorDeps {
   provider: Provider;
+  providerDescriptor: ProviderDescriptor;
+  providerRunner: ProviderRunner;
   store: Store;
   publish: (runId: string, event: AgentEvent) => void;
   /** 防失控兜底，不是主要流程控制；配置见 config.agent.hardStepCap。 */
@@ -230,12 +239,21 @@ async function defaultDeps(
   spaceConfig?: RunSpaceConfigSnapshot | null,
 ): Promise<ExecutorDeps> {
   const configured = overrides.provider ? null : await getConfiguredProvider(scope, modelRef ?? undefined);
+  const provider = overrides.provider ?? configured!.provider;
+  const stream = overrides.stream ?? configured?.stream ?? config.llm.stream;
   return {
-    provider: overrides.provider ?? configured!.provider,
+    provider,
+    providerDescriptor: overrides.providerDescriptor ?? configured?.descriptor ?? {
+      provider: provider.name,
+      model: modelRef?.trim() || config.llm.model,
+      // 注入 Provider 的测试/评估路径沿用旧行为：流式首个增量前最多补一次请求。
+      retries: stream && provider.completeStream ? 1 : 0,
+    },
+    providerRunner: overrides.providerRunner ?? defaultProviderRunner,
     store: overrides.store ?? defaultStore,
     publish: overrides.publish ?? ((runId, event) => runBus.publish(runId, event)),
     hardStepCap: overrides.hardStepCap ?? config.agent.hardStepCap,
-    stream: overrides.stream ?? configured?.stream ?? config.llm.stream,
+    stream,
     resume: overrides.resume ?? false,
     toolSettings: overrides.toolSettings,
     mcpSettings: overrides.mcpSettings,
@@ -568,6 +586,44 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
   const initialRun = run;
   const threadId = initialRun.thread_id;
   const userInput = initialRun.input;
+
+  const observedProvider = (
+    purpose: ProviderPurpose,
+    stepId: string | null,
+    targetProvider = provider,
+    descriptor = deps.providerDescriptor,
+    onRetry?: (input: { attempt: number; message: string }) => void | Promise<void>,
+  ): Provider => {
+    const context: ProviderInvocationContext = {
+      tenantId: scope.tenantId,
+      spaceId: initialThread.space_id,
+      threadId,
+      runId,
+      stepId,
+      purpose,
+      ...descriptor,
+    };
+    return {
+      name: targetProvider.name,
+      complete: (messages, tools) => deps.providerRunner.run({
+        provider: targetProvider,
+        context,
+        messages,
+        tools,
+        onRetry,
+      }),
+      ...(targetProvider.completeStream ? {
+        completeStream: (messages, tools, onDelta) => deps.providerRunner.run({
+          provider: targetProvider,
+          context,
+          messages,
+          tools,
+          onDelta,
+          onRetry,
+        }),
+      } : {}),
+    };
+  };
 
   const emit = async (stepId: string | null, event: AgentEvent) => {
     publish(runId, event);
@@ -966,7 +1022,15 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           },
         ];
 
-        const subagentProvider = modelRef ? (await getConfiguredProvider(scope, modelRef)).provider : provider;
+        const selectedProvider = modelRef
+          ? await getConfiguredProvider(scope, modelRef)
+          : { provider, descriptor: deps.providerDescriptor };
+        const subagentProvider = observedProvider(
+          'subagent',
+          stepId,
+          selectedProvider.provider,
+          selectedProvider.descriptor,
+        );
         const toolTrace: string[] = [];
         let output = '';
         let usage: LlmUsage | undefined;
@@ -1182,7 +1246,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
 
       ctx.setActivationContext(renderRunActivationContext(activeSkills, activeMcp));
       // 模型调用前先控制工作上下文大小；mask 决策会落库，窗口丢弃只留在内存。
-      const compaction = await ctx.maybeCompact(provider);
+      const compaction = await ctx.maybeCompact(observedProvider('compaction', step.id));
       await persistCompaction(step.id, compaction);
       // 每个 step 调模型前先推估算上下文，避免等待模型返回期间占用为空。
       await emitUsageUpdate(step.id, stepIdx);
@@ -1194,7 +1258,6 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       // 支持流式时实时发布增量；完整文本只在末尾落库，历史回放更紧凑。
       let result;
       let liveStreamed = false;
-      let publishedDelta = false;
       let persistedLiveContent = false;
       let persistedLiveReasoning = false;
       const llmStartedAt = new Date().toISOString();
@@ -1213,7 +1276,6 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         requestAllowedToolNames = new Set(tools.map((tool) => tool.name));
         const modelMessages = await hydrateImageAttachments(ctx.all(), toolSettings.workspaceRoot);
         const onStreamDelta = (d: LlmDelta) => {
-          publishedDelta = true;
           if (d.toolInputStart) {
             llmStage = 'tool_call';
             llmActiveTool = d.toolInputStart;
@@ -1259,23 +1321,25 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
             publishLiveEvent({ type: 'llm_delta', step: stepIdx, text: d.content });
           }
         };
-        if (stream && provider.completeStream) {
-          try {
-            result = await provider.completeStream(modelMessages, tools, onStreamDelta);
-            liveStreamed = true;
-          } catch (err) {
-            if (publishedDelta) throw err; // 已经输出部分内容时无法干净回退。
-            const message = err instanceof Error ? err.message : String(err);
+        const stepProvider = observedProvider('agent', step.id, provider, deps.providerDescriptor, async ({ message }) => {
+          if (stream && provider.completeStream) {
             console.warn(
-              `[agent] run ${runId} step ${stepIdx} provider ${provider.name} 流式请求在首个增量前失败，将保持流式协议重试：${errorStack(err)}`,
+              `[agent] run ${runId} step ${stepIdx} provider ${provider.name} 流式请求在首个增量前失败，将保持流式协议重试：${message}`,
             );
             // 诊断事件只落库，不推给前端，避免一次可恢复重试被显示成失败。
-            await store.addEvent(scope, runId, step.id, { type: 'stream_retry', step: stepIdx, provider: provider.name, message });
-            result = await provider.completeStream(modelMessages, tools, onStreamDelta);
-            liveStreamed = true;
+            await store.addEvent(scope, runId, step.id, {
+              type: 'stream_retry',
+              step: stepIdx,
+              provider: provider.name,
+              message,
+            });
           }
+        });
+        if (stream && stepProvider.completeStream) {
+          result = await stepProvider.completeStream(modelMessages, tools, onStreamDelta);
+          liveStreamed = true;
         }
-        if (!result) result = await provider.complete(modelMessages, tools);
+        if (!result) result = await stepProvider.complete(modelMessages, tools);
       } finally {
         stopLlmHeartbeat();
       }
@@ -1378,7 +1442,12 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
             void notifyRunCompleted(scope, runId, { store, output: finalText })
               .catch((err) => console.warn(`对话完成通知推送失败：${(err as Error).message}`));
           }
-          if (deps.generateThreadTitle) scheduleThreadTitleGeneration(scope, runId, { store, provider });
+          if (deps.generateThreadTitle) {
+            scheduleThreadTitleGeneration(scope, runId, {
+              store,
+              provider: observedProvider('title', null),
+            });
+          }
           return;
         }
 

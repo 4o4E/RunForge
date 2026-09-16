@@ -1,6 +1,8 @@
 // AI SDK-backed provider (Phase 2). Implements the same neutral `Provider`
 // contract the executor already depends on, but delegates protocol mapping,
-// streaming, retries and tool-call assembly to the Vercel AI SDK. This replaces
+// streaming parsing and tool-call assembly to the Vercel AI SDK. Retry and
+// attempt observability stay in RunForge ProviderRunner so no request escapes
+// the persistence boundary. This replaces
 // the hand-written openai-chat / openai-responses / anthropic wire translation.
 //
 // It is a *single-turn* provider: like the legacy providers, it returns the
@@ -24,7 +26,7 @@ import {
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAnthropic } from '@ai-sdk/anthropic';
-import type { LlmConfig, LlmDelta, LlmMessage, LlmProviderState, LlmResult, LlmTool, Provider } from '../types.js';
+import type { LlmConfig, LlmDelta, LlmMessage, LlmProviderState, LlmResult, LlmTool, Provider, ProviderCallOptions } from '../types.js';
 import { config } from '../../config.js';
 import { toolArgumentsForModel } from '../toolArgs.js';
 
@@ -47,14 +49,14 @@ type ReasoningModelPart = {
   providerOptions?: TextPart['providerOptions'];
 };
 
-function buildModel(cfg: LlmConfig, opts: AiSdkOptions): LanguageModel {
+function buildModel(cfg: LlmConfig, opts: AiSdkOptions, fetcher?: typeof globalThis.fetch): LanguageModel {
   let model: LanguageModel;
   switch (opts.flavor) {
     case 'openai':
-      model = createOpenAI({ baseURL: cfg.baseUrl, apiKey: cfg.apiKey })(cfg.model);
+      model = createOpenAI({ baseURL: cfg.baseUrl, apiKey: cfg.apiKey, fetch: fetcher })(cfg.model);
       break;
     case 'anthropic':
-      model = createAnthropic({ baseURL: cfg.baseUrl, apiKey: cfg.apiKey })(cfg.model);
+      model = createAnthropic({ baseURL: cfg.baseUrl, apiKey: cfg.apiKey, fetch: fetcher })(cfg.model);
       break;
     case 'openai-compatible':
     default:
@@ -63,6 +65,7 @@ function buildModel(cfg: LlmConfig, opts: AiSdkOptions): LanguageModel {
         baseURL: cfg.baseUrl,
         apiKey: cfg.apiKey,
         includeUsage: true,
+        fetch: fetcher,
       })(cfg.model);
       break;
   }
@@ -177,14 +180,13 @@ function toToolSet(tools: LlmTool[]) {
 }
 
 export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provider {
-  const model = buildModel(cfg, opts);
-
-  const common = (messages: LlmMessage[], tools: LlmTool[], functionId: string) => ({
-    model,
+  const common = (messages: LlmMessage[], tools: LlmTool[], functionId: string, callOptions?: ProviderCallOptions) => ({
+    model: buildModel(cfg, opts, callOptions?.fetch),
     messages: toModelMessages(messages),
     tools: toToolSet(tools),
     maxOutputTokens: cfg.maxTokens ?? undefined,
-    maxRetries: cfg.retries,
+    // 重试由 RunForge ProviderRunner 统一管理，确保每次 HTTP attempt 都可观测。
+    maxRetries: 0,
     abortSignal: AbortSignal.timeout(cfg.timeoutMs),
     // OpenAI Responses 走无状态模式，确保 reasoning item 返回不可解密的
     // encrypted_content，并由 RunForge 自己持久化；其他 flavor 不发送此选项。
@@ -197,9 +199,14 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
     },
   });
 
-  async function completeByStream(messages: LlmMessage[], tools: LlmTool[], onDelta: (d: LlmDelta) => void): Promise<LlmResult> {
+  async function completeByStream(
+    messages: LlmMessage[],
+    tools: LlmTool[],
+    onDelta: (d: LlmDelta) => void,
+    callOptions?: ProviderCallOptions,
+  ): Promise<LlmResult> {
     const r = streamText({
-      ...common(messages, tools, 'chat'),
+      ...common(messages, tools, 'chat', callOptions),
       // 错误由 fullStream 抛给调用方，统一由 agent 写入带 run/step 的诊断日志。
       onError: () => {},
     });
@@ -242,10 +249,10 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
   return {
     name: `aisdk:${opts.flavor}`,
 
-    async complete(messages, tools): Promise<LlmResult> {
+    async complete(messages, tools, callOptions): Promise<LlmResult> {
       // 标题和压缩摘要同样必须遵守供应商的流式传输约束。
-      if (cfg.stream) return completeByStream(messages, tools, () => {});
-      const r = await generateText(common(messages, tools, 'chat'));
+      if (cfg.stream) return completeByStream(messages, tools, () => {}, callOptions);
+      const r = await generateText(common(messages, tools, 'chat', callOptions));
       return {
         content: r.text || null,
         reasoning: r.reasoningText ?? null,
@@ -265,8 +272,8 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
       };
     },
 
-    async completeStream(messages, tools, onDelta: (d: LlmDelta) => void): Promise<LlmResult> {
-      return completeByStream(messages, tools, onDelta);
+    async completeStream(messages, tools, onDelta: (d: LlmDelta) => void, callOptions): Promise<LlmResult> {
+      return completeByStream(messages, tools, onDelta, callOptions);
     },
   };
 }

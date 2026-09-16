@@ -161,12 +161,12 @@ export function parseResponsesOutput(data: ResponsesData): LlmResult {
 export function createOpenAIResponsesProvider(cfg: LlmConfig): Provider {
   return {
     name: 'openai-responses',
-    async complete(messages, tools) {
+    async complete(messages, tools, callOptions) {
       const data = await postJson(
         `${cfg.baseUrl}/responses`,
         { Authorization: `Bearer ${cfg.apiKey}` },
         buildResponsesRequest(messages, tools, cfg),
-        { timeoutMs: cfg.timeoutMs, retries: cfg.retries },
+        { timeoutMs: cfg.timeoutMs, retries: 0, fetch: callOptions?.fetch },
       );
       return parseResponsesOutput(data as ResponsesData);
     },

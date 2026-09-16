@@ -8,6 +8,7 @@ import { createMockProvider } from './providers/mock.js';
 import { getLlmSettings, type LlmProviderSettings } from '../settings.js';
 import type { TenantScope } from '../store/types.js';
 import { mergeModelCapability } from './modelCatalog.js';
+import type { ProviderDescriptor } from './providerRunner.js';
 
 // `aisdk` is the default (Phase 2). The legacy hand-written providers are kept
 // selectable as a rollback path until the AI SDK path is validated in real use.
@@ -63,7 +64,13 @@ export function createProviderFromSettings(provider: LlmProviderSettings, model:
   });
 }
 
-export async function getConfiguredProvider(scope: TenantScope, modelRef?: string): Promise<{ provider: Provider; modelRef: string; stream: boolean; contextWindow: number }> {
+export async function getConfiguredProvider(scope: TenantScope, modelRef?: string): Promise<{
+  provider: Provider;
+  descriptor: ProviderDescriptor;
+  modelRef: string;
+  stream: boolean;
+  contextWindow: number;
+}> {
   const settings = await getLlmSettings(scope);
   const ref = modelRef?.trim() || settings.defaultModelRef;
   const parsed = parseModelRef(ref);
@@ -73,8 +80,14 @@ export async function getConfiguredProvider(scope: TenantScope, modelRef?: strin
   if (!providerSettings.models.includes(parsed.model)) {
     throw new Error(`供应商 ${providerSettings.id} 未配置模型：${parsed.model}`);
   }
+  const provider = createProviderFromSettings(providerSettings, parsed.model);
   return {
-    provider: createProviderFromSettings(providerSettings, parsed.model),
+    provider,
+    descriptor: {
+      provider: provider.name,
+      model: parsed.model,
+      retries: Math.max(0, providerSettings.retries),
+    },
     modelRef: ref,
     stream: providerSettings.stream,
     contextWindow: providerSettings.modelCapabilities.find((item) => item.model === parsed.model)?.contextWindow

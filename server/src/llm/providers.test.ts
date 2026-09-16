@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildResponsesRequest, parseResponsesOutput } from './providers/openaiResponses.js';
-import { applyStreamChunk, buildChatRequest, parseChatResponse } from './providers/openaiChat.js';
-import { buildAnthropicRequest, parseAnthropicResponse } from './providers/anthropic.js';
+import { buildResponsesRequest, createOpenAIResponsesProvider, parseResponsesOutput } from './providers/openaiResponses.js';
+import { applyStreamChunk, buildChatRequest, createOpenAIChatProvider, parseChatResponse } from './providers/openaiChat.js';
+import { buildAnthropicRequest, createAnthropicProvider, parseAnthropicResponse } from './providers/anthropic.js';
 import { createMockProvider } from './providers/mock.js';
 import type { LlmMessage, LlmTool } from './types.js';
 
@@ -48,6 +48,33 @@ test('provider requests: 空输出上限不会发送本地 token 限制', () => 
   assert.equal('max_tokens' in anthropic, false);
 
   assert.equal(buildChatRequest(CONVO, TOOLS, 'gpt-x', 321).max_tokens, 321);
+});
+
+test('手写 provider adapter: 注入 fetch 且内部不再自行重试', async () => {
+  const config = {
+    baseUrl: 'https://provider.test/v1',
+    apiKey: 'secret',
+    model: 'test-model',
+    maxTokens: null,
+    timeoutMs: 1_000,
+    retries: 3,
+  };
+  for (const provider of [
+    createOpenAIResponsesProvider(config),
+    createOpenAIChatProvider(config),
+    createAnthropicProvider(config),
+  ]) {
+    let calls = 0;
+    const fetcher: typeof fetch = async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ error: 'retryable' }), {
+        status: 503,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    await assert.rejects(provider.complete(CONVO, TOOLS, { fetch: fetcher }), /HTTP 503/);
+    assert.equal(calls, 1, `${provider.name} 只能发送一次，重试由 ProviderRunner 控制`);
+  }
 });
 
 test('openai-responses: persists and replays encrypted reasoning items', () => {

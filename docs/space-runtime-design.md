@@ -324,7 +324,7 @@ Cordis 只负责业务插件的服务依赖和生命周期，不替换 Agent loo
 新的空间代码不能在 API handler 中直接使用数据库 pool。业务查询通过 Store/repository，
 事务和原生约束集中在持久化层，为 Prisma 迁移保留边界。
 
-## 11. Provider 观测：现有内容与缺口
+## 11. Provider 观测
 
 当前数据库已经保存：
 
@@ -333,8 +333,8 @@ Cordis 只负责业务插件的服务依赖和生命周期，不替换 Agent loo
 - 实际进入 RunForge 上下文的 message、tool call 和 tool result。
 - 后端给 Web 前端推送并落库的 `llm_delta`、reasoning、工具和 final/error 事件。
 
-这些记录可以回答“某个 run/step 在 RunForge 内发生了什么”，但不能完整回答“上游 LLM API
-每一次 HTTP attempt 实际收到了什么”：
+这些记录可以回答“某个 run/step 在 RunForge 内发生了什么”，但单独使用它们不能完整回答
+“上游 LLM API 每一次 HTTP attempt 实际收到了什么”：
 
 - AI SDK 会把中立 message、tool schema 和 provider options 翻译成供应商 wire body；
   messages 表保存的是翻译前的逻辑内容。
@@ -346,7 +346,7 @@ Cordis 只负责业务插件的服务依赖和生命周期，不替换 Agent loo
   流，也不能区分重试前后的流。
 - OpenTelemetry 是外部 trace，不是本项目数据库中的可追溯记录。
 
-因此在现有 run/step/message/event 之上新增两层 Provider 记录：
+因此已在现有 run/step/message/event 之上实现两层 Provider 记录：
 
 - `provider_invocations`：一次逻辑模型调用，关联 tenant、space、thread、run、step、调用
   用途、provider、model、逻辑请求和最终标准化聚合结果。调用用途至少区分主 Agent、
@@ -378,6 +378,15 @@ AI SDK 在这里仅负责协议转换、流解析和工具调用组装，不拥�
 
 本地文件继续记录 LLM API 流式 trace 和运行控制日志，保留 7 天；数据库 invocation/
 attempt 记录不由该清理任务删除。
+
+当前实现覆盖主 Agent、标题生成、上下文压缩摘要、subagent 和 run-scoped LLM capability。
+管理端模型列表探测和测试对话不属于 run，不写入这两张 run 关联表。无网络的 mock provider
+会产生 invocation，但不会伪造 HTTP attempt。attempt 错误分为 `http`、`transport`、
+`parse` 和 `runtime`，便于区分上游状态码、传输中断、响应解析失败和本地运行错误。
+
+完整原始流会在单次调用期间于内存中聚合，并同时写入数据库和 7 日 JSONL。这是为了满足
+逐 attempt 完整复盘的已确认要求；首版单实例且暂不做资源配额，因此本阶段不增加截断、
+采样或异步对象存储。该成本必须在后续容量验收中按真实长响应继续观察。
 
 ## 12. Prisma 实施顺序
 
@@ -490,10 +499,10 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
 
 ### 阶段 8：Provider 观测和本地 trace
 
-- 实现 RunForge 自己的 ProviderRunner 重试状态机，并关闭 SDK 内部重试。
-- 接入 observing fetch、流式 tap 和手写 provider observer。
-- 保存逻辑请求、invocation/attempt、wire body、原始流聚合和标准化响应，不保存请求头。
-- 实现本地 trace、运行日志和 7 天清理。
+- ✅ 实现 RunForge 自己的 ProviderRunner 重试状态机，并关闭 SDK 内部重试。
+- ✅ 接入 observing fetch、流式 tap 和手写 provider observer。
+- ✅ 保存逻辑请求、invocation/attempt、wire body、原始流聚合和标准化响应，不保存请求头。
+- ✅ 实现本地 JSONL attempt trace 和 7 天清理；数据库记录独立保留。
 
 ### 阶段 9：端到端验收与文档更新
 

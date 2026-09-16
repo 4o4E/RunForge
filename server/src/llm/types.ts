@@ -95,10 +95,16 @@ export interface LlmDelta {
   toolInputAvailable?: { id: string; name: string; input: unknown };
 }
 
+/** 单次 Provider 请求的传输依赖。Runner 通过这里注入 observing fetch；
+ * Provider adapter 本身只负责一次协议转换和发送，不拥有重试状态。 */
+export interface ProviderCallOptions {
+  fetch?: typeof globalThis.fetch;
+}
+
 /** A pluggable LLM backend. */
 export interface Provider {
   readonly name: string;
-  complete(messages: LlmMessage[], tools: LlmTool[]): Promise<LlmResult>;
+  complete(messages: LlmMessage[], tools: LlmTool[], options?: ProviderCallOptions): Promise<LlmResult>;
   /**
    * Optional streaming variant. Calls onDelta as tokens arrive and resolves with
    * the fully-aggregated result. Providers without this fall back to complete().
@@ -107,5 +113,6 @@ export interface Provider {
     messages: LlmMessage[],
     tools: LlmTool[],
     onDelta: (delta: LlmDelta) => void,
+    options?: ProviderCallOptions,
   ): Promise<LlmResult>;
 }

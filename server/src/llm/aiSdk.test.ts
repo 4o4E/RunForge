@@ -109,7 +109,9 @@ test('toModelMessages: malformed tool-call args stay visible to the model', () =
 test('AI SDK provider: configured streaming also applies to complete()', async () => {
   const originalFetch = globalThis.fetch;
   let requestBody = '';
-  globalThis.fetch = async (input, init) => {
+  let calls = 0;
+  const observingFetch: typeof fetch = async (input, init) => {
+    calls += 1;
     const request = input instanceof Request ? input : new Request(input, init);
     requestBody = await request.text();
     return new Response(JSON.stringify({ error: { message: 'expected test failure' } }), {
@@ -117,6 +119,7 @@ test('AI SDK provider: configured streaming also applies to complete()', async (
       headers: { 'content-type': 'application/json' },
     });
   };
+  globalThis.fetch = async () => assert.fail('显式注入 fetch 时不应使用全局 fetch');
 
   try {
     const provider = createAiSdkProvider({
@@ -129,7 +132,12 @@ test('AI SDK provider: configured streaming also applies to complete()', async (
       stream: true,
     }, { flavor: 'openai', reasoningTag: '' });
 
-    await assert.rejects(provider.complete([{ role: 'user', content: '你好' }], []));
+    await assert.rejects(provider.complete(
+      [{ role: 'user', content: '你好' }],
+      [],
+      { fetch: observingFetch },
+    ));
+    assert.equal(calls, 1);
     const body = JSON.parse(requestBody);
     assert.equal(body.stream, true);
     assert.equal(body.store, false);

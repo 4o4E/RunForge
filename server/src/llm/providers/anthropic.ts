@@ -110,12 +110,12 @@ export function createAnthropicProvider(cfg: LlmConfig): Provider {
   const baseUrl = cfg.baseUrl.includes('anthropic') ? cfg.baseUrl : 'https://api.anthropic.com/v1';
   return {
     name: 'anthropic',
-    async complete(messages, tools) {
+    async complete(messages, tools, callOptions) {
       const data = await postJson(
         `${baseUrl}/messages`,
         { 'x-api-key': cfg.apiKey, 'anthropic-version': '2023-06-01' },
         buildAnthropicRequest(messages, tools, cfg),
-        { timeoutMs: cfg.timeoutMs, retries: cfg.retries },
+        { timeoutMs: cfg.timeoutMs, retries: 0, fetch: callOptions?.fetch },
       );
       return parseAnthropicResponse(data as AnthropicData);
     },

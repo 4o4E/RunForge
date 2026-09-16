@@ -4,12 +4,14 @@ export interface PostJsonOptions {
   retries?: number;
   /** base backoff in ms; grows exponentially with jitter */
   backoffMs?: number;
+  /** ProviderRunner 注入 observing fetch；不传时使用全局 fetch。 */
+  fetch?: typeof globalThis.fetch;
 }
 
 // Transient HTTP statuses worth retrying (rate limit + gateway/server errors).
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 
-class HttpError extends Error {
+export class HttpError extends Error {
   constructor(
     message: string,
     readonly status: number | null,
@@ -21,11 +23,17 @@ class HttpError extends Error {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function attempt(url: string, headers: Record<string, string>, body: unknown, timeoutMs: number): Promise<unknown> {
+async function attempt(
+  url: string,
+  headers: Record<string, string>,
+  body: unknown,
+  timeoutMs: number,
+  fetcher: typeof globalThis.fetch,
+): Promise<unknown> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, {
+    const res = await fetcher(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify(body),
@@ -57,11 +65,12 @@ export async function streamPost(
   body: unknown,
   timeoutMs: number,
   onData: (data: string) => void,
+  fetcher: typeof globalThis.fetch = globalThis.fetch,
 ): Promise<void> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, {
+    const res = await fetcher(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...headers },
       body: JSON.stringify(body),
@@ -104,7 +113,7 @@ export async function postJson(
   let lastErr: HttpError | undefined;
   for (let i = 0; i <= retries; i++) {
     try {
-      return await attempt(url, headers, body, opts.timeoutMs);
+      return await attempt(url, headers, body, opts.timeoutMs, opts.fetch ?? globalThis.fetch);
     } catch (err) {
       lastErr = err as HttpError;
       if (!lastErr.retryable || i === retries) break;

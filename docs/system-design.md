@@ -19,7 +19,7 @@
 - 通过 Agent 执行循环完成多步任务：计划、调用工具、观察结果、继续推进。
 - 支持多 LLM provider：`aisdk`、`openai-responses`、`openai-chat`、`anthropic`、`mock`。
 - 内置通用工具：shell、托管 shell、文件读写/编辑、glob、grep、web fetch、web search、ask user、update plan、skill、workflow、subagent 和数据源访问。
-- LLM 请求支持超时、瞬态错误重试和流式输出。
+- LLM 请求支持超时、流式输出和由 RunForge `ProviderRunner` 统一控制的瞬态错误重试。
 - 暴露 REST API 和 WebSocket 事件流。
 - 对话按 `thread -> run -> step` 组织并持久化到 PostgreSQL。
 - 前端提供 React 聊天控制台，可查看 reasoning、工具调用、工具结果和最终输出。
@@ -54,7 +54,8 @@ Server (Node.js / TypeScript 单体)
   |
   |-- Agent 执行循环
   |     |-- ContextManager: system prompt、Goal 锚点、历史消息、压缩视图
-  |     |-- Provider 抽象: aisdk / openai-responses / openai-chat / anthropic / mock
+  |     |-- ProviderRunner: invocation/attempt 持久化、统一重试、原始流观测
+  |     |     `-- Provider 抽象: aisdk / openai-responses / openai-chat / anthropic / mock
   |     |-- Skill / MCP / Workflow registry: 按 run 渐进加载外部能力和任务流程
   |     |-- Tool registry: 工具注册、策略检查、输出截断
   |     |-- Subagent runner: 异步只读子任务
@@ -88,6 +89,8 @@ Web 创建 thread
 
 - run 在收到请求后由当前服务进程异步执行，没有独立队列和 worker。
 - Provider 抽象隔离不同 LLM 协议，执行循环只依赖中立消息和工具类型。
+- ProviderRunner 位于执行循环与 Provider adapter 之间，所有运行期真实 HTTP attempt 都先
+  建立观测记录；adapter 只负责单次协议转换、发送和解析，不拥有重试状态。
 - Store 抽象隔离 PostgreSQL，测试可以使用 MemoryStore。
 - Tool registry 是工具调用统一入口，策略检查和输出截断都在这里执行。
 - ContextManager 在每次 LLM 调用前检查 token 预算，并通过可插拔 ContextCompactor 策略执行压缩；默认策略保留 RunForge 自研级联，可选策略可接入社区裁剪能力。社区方案和自研 runtime 的边界见 [Agent 核心边界](agent-core-boundaries.md)。
@@ -123,7 +126,11 @@ Web 创建 thread
 `server/src/llm/`
 
 - `types.ts`：中立消息、工具、usage、Provider 接口。
-- `index.ts`：按 `LLM_PROVIDER` 创建 provider。
+- `index.ts`：按租户 LLM 配置解析 provider、model 和统一重试参数。
+- `providerRunner.ts`：创建逻辑 invocation，按统一策略执行 attempt，并聚合 wire body、
+  原始响应、标准化结果和错误分类。
+- `observability/repository.ts`：Provider 观测的 Prisma/内存持久化边界。
+- `observability/trace.ts`：按日追加本地 JSONL attempt trace，并保留最近 7 个自然日。
 - `providers/aiSdk.ts`：默认 provider 路径，基于 AI SDK。
 - `providers/openaiResponses.ts`、`openaiChat.ts`、`anthropic.ts`：手写旧 provider，仅作为兼容和回滚路径。
 - `providers/mock.ts`：离线确定性 provider，用于测试和本地演示。
@@ -199,7 +206,9 @@ Provider.complete(messages, tools) -> { content, reasoning, toolCalls, usage }
 Provider.completeStream(messages, tools, onDelta)
 ```
 
-各 provider 负责把中立消息、工具定义和工具结果翻译成目标协议。
+各 provider adapter 负责把中立消息、工具定义和工具结果翻译成目标协议，并通过调用参数
+接收当前 attempt 的 observing fetch。AI SDK 的 `maxRetries` 和手写 provider 的内部重试均
+固定关闭，重试只由 `ProviderRunner` 决定，避免 SDK 内部请求绕过 attempt 记录。
 
 当前支持：
 
@@ -209,7 +218,18 @@ Provider.completeStream(messages, tools, onDelta)
 - `anthropic`：手写 Anthropic Messages provider，保留为回滚路径。
 - `mock`：离线 deterministic provider，不需要密钥和网络。
 
-通过 `LLM_PROVIDER` 切换 provider。AI SDK flavor 通过 `LLM_AISDK_FLAVOR` 选择。
+运行时优先读取租户 LLM 配置；环境变量只提供初始默认值或配置读取失败时的兜底。
+
+一次运行期模型调用先建立 `provider_invocations`，再为每次真实 HTTP 请求建立
+`provider_attempts`。主 Agent、标题生成、上下文摘要、subagent 和 run-scoped LLM capability
+均接入同一入口。attempt 保存最终 URL、序列化请求 body、HTTP 状态、Provider request/
+response ID、上游原始响应、标准化结果、finish reason、usage 和错误分类；请求头不进入
+数据库或文件。URL 中常见的 key/token/signature 查询参数会在写入前脱敏。
+
+流式响应通过透传 `TransformStream` 聚合，不提前消费或改写 Provider 响应。只有尚未向
+Agent runtime 发布任何增量的失败才允许重试；一旦发布部分流，本次 invocation 直接失败，
+避免重试造成重复输出。本地 `logs/provider-traces/provider-YYYY-MM-DD.jsonl` 保存同样的
+attempt 诊断记录并固定保留 7 天，数据库记录不由该清理任务删除。
 
 ## 数据模型
 
@@ -220,6 +240,10 @@ PostgreSQL 以执行过程为核心建模：
 - `steps`：run 内的每次 Agent 循环。
 - `messages`：LLM 对话消息，保存原始内容、tool calls、tool call id 和压缩标记。
 - `events`：前端可回放的执行事件流。
+- `provider_invocations`：一次逻辑模型调用，关联空间、thread、run、step、用途、模型、
+  逻辑请求和最终标准化结果。
+- `provider_attempts`：一次真实上游 HTTP 请求，保存 wire body、原始响应、状态、用量、
+  Provider ID 和错误分类；同一 invocation 内 attempt 序号唯一。
 - `app_settings`：运行时工具配置，env 只作为初始默认值或兜底。
 - `subagent_runs`：主 agent 派发的异步只读子任务，保存 task assignment、stage、skill、输出和 usage。
 - `shell_sessions`、`shell_commands`、`shell_command_logs`、`shell_session_events`：托管 shell 会话、命令、增量日志和审计事件。

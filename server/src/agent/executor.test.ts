@@ -12,6 +12,8 @@ import { maskPlaceholder } from './compaction.js';
 import type { ToolSettings } from '../settings.js';
 import { maybeGenerateThreadTitleAfterFirstRun } from './threadTitle.js';
 import type { AppliedRunInput, Scope } from '../store/types.js';
+import { ProviderRunner } from '../llm/providerRunner.js';
+import { MemoryProviderObservationRepository } from '../llm/observability/repository.js';
 
 const scope: Scope = { tenantId: 'default', userId: 'us_test' };
 
@@ -488,6 +490,7 @@ test('thread title: extracts concise title from json-like provider output', asyn
 
 test('executeRun: generates a thread title after completion when enabled', async () => {
   const store = new MemoryStore();
+  const observations = new MemoryProviderObservationRepository();
   const thread = await store.createThread(scope);
   const run = await store.createRun(scope, thread.id, '规划一次杭州周边漂流');
   let calls = 0;
@@ -508,11 +511,16 @@ test('executeRun: generates a thread title after completion when enabled', async
     hardStepCap: 3,
     toolSettings: testToolSettings(),
     generateThreadTitle: true,
+    providerRunner: new ProviderRunner(observations, null),
   });
 
   await waitUntil(async () => (await store.getThread(scope, thread.id))?.title === '杭州周边漂流规划');
   assert.equal((await store.getThread(scope, thread.id))?.title, '杭州周边漂流规划');
   assert.equal(calls, 2);
+  assert.deepEqual(
+    [...observations.invocations.values()].map((item) => item.purpose),
+    ['agent', 'title'],
+  );
 });
 
 test('executeRun: persists streamed text and terminal stream status for replay', async () => {
@@ -1007,6 +1015,7 @@ test('executeRun: starts async subagents and allows cross-run polling', async ()
   );
 
   const store = new MemoryStore();
+  const observations = new MemoryProviderObservationRepository();
   const thread = await store.createThread(scope);
   const run = await store.createRun(scope, thread.id, 'delegate review');
   const published: AgentEvent[] = [];
@@ -1061,6 +1070,7 @@ test('executeRun: starts async subagents and allows cross-run polling', async ()
     publish: (_id, e) => published.push(e),
     hardStepCap: 4,
     toolSettings: testToolSettings(),
+    providerRunner: new ProviderRunner(observations, null),
   });
 
   const started = published.find((e) => e.type === 'subagent_started');
@@ -1081,6 +1091,9 @@ test('executeRun: starts async subagents and allows cross-run polling', async ()
   assert.equal(rows.length, 2);
   assert.equal(rows.every((row) => row.status === 'done'), true);
   assert.match(rows[0].output ?? '', /没有发现阻塞风险/);
+  const purposes = [...observations.invocations.values()].map((item) => item.purpose);
+  assert.equal(purposes.filter((purpose) => purpose === 'agent').length, 2);
+  assert.equal(purposes.filter((purpose) => purpose === 'subagent').length, 2);
 
   const run2 = await store.createRun(scope, thread.id, 'poll previous subagent');
   let pollTurn = 0;
@@ -1496,6 +1509,54 @@ test('executeRun: compacts bulky old history when finishing a run', async () => 
     assert.equal(placeholder.tool_name, 'file_write');
     assert.equal(oldTool?.content, maskPlaceholder('x'.repeat(4000)));
     assert.ok(published.some((e) => e.type === 'compaction' && e.reason === 'post-run-history'));
+  } finally {
+    config.agent.keepRecentMessages = keepRecentMessages;
+  }
+});
+
+test('executeRun: records L3 summary and main model calls as separate provider purposes', async () => {
+  const { keepRecentMessages } = config.agent;
+  config.agent.keepRecentMessages = 2;
+  try {
+    const store = new MemoryStore();
+    const observations = new MemoryProviderObservationRepository();
+    const thread = await store.createThread(scope);
+    const oldRun = await store.createRun(scope, thread.id, 'old anchor');
+    for (let index = 0; index < 8; index += 1) {
+      await store.addMessage(scope, thread.id, oldRun.id, null, {
+        role: index % 2 === 0 ? 'assistant' : 'user',
+        content: `history-${index}-${'x'.repeat(1200)}`,
+      });
+    }
+    await store.setRunStatus(scope, oldRun.id, 'done');
+
+    const run = await store.createRun(scope, thread.id, 'new request');
+    await executeRun(run.id, {
+      store,
+      provider: {
+        name: 'summary-aware',
+        async complete(messages) {
+          const summaryPrompt = messages.some((message) => message.content?.includes('需要摘要的旧上下文'));
+          return summaryPrompt
+            ? { content: '压缩后的历史摘要', toolCalls: [] }
+            : { content: 'done', toolCalls: [] };
+        },
+      },
+      providerRunner: new ProviderRunner(observations, null),
+      publish: () => {},
+      hardStepCap: 3,
+      contextSettings: {
+        modelContextWindow: 10_000,
+        contextBudget: 1_000,
+        contextBudgetSource: 'test',
+      },
+      toolSettings: testToolSettings(),
+    });
+
+    assert.deepEqual(
+      [...observations.invocations.values()].map((item) => item.purpose),
+      ['compaction', 'agent'],
+    );
   } finally {
     config.agent.keepRecentMessages = keepRecentMessages;
   }

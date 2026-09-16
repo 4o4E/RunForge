@@ -153,14 +153,15 @@ export function createOpenAIChatProvider(cfg: LlmConfig): Provider {
   const auth = { Authorization: `Bearer ${cfg.apiKey}` };
   return {
     name: 'openai-chat',
-    async complete(messages, tools) {
+    async complete(messages, tools, callOptions) {
       const data = await postJson(url, auth, buildChatRequest(messages, tools, cfg.model, cfg.maxTokens), {
         timeoutMs: cfg.timeoutMs,
-        retries: cfg.retries,
+        retries: 0,
+        fetch: callOptions?.fetch,
       });
       return parseChatResponse(data as ChatData);
     },
-    async completeStream(messages, tools, onDelta) {
+    async completeStream(messages, tools, onDelta, callOptions) {
       const acc = {
         content: '',
         reasoning: '',
@@ -184,6 +185,7 @@ export function createOpenAIChatProvider(cfg: LlmConfig): Provider {
           const d = applyStreamChunk(chunk, acc);
           if (d.content || d.reasoning) onDelta(d);
         },
+        callOptions?.fetch,
       );
       return {
         content: acc.content || null,

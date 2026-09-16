@@ -19,6 +19,9 @@ import { ExternalApiError } from '../external/types.js';
 import { FileExternalArtifactStorage } from '../external/artifactStorage.js';
 import { ExternalArtifactMaterializer } from '../external/artifactMaterializer.js';
 import { externalArtifactRemotePath } from '../external/artifactProtocol.js';
+import { ProviderRunner } from '../llm/providerRunner.js';
+import { PrismaProviderObservationRepository } from '../llm/observability/repository.js';
+import type { Provider } from '../llm/types.js';
 
 const suffix = randomUUID().replaceAll('-', '').slice(0, 12);
 const tenantId = `prisma-verify-${suffix}`;
@@ -424,6 +427,60 @@ try {
   });
   assert.equal((await store.getRun(scope, run.id))?.goal_state?.intent, '验证 Prisma Store');
   const step = await store.createStep(scope, run.id, 1);
+  const verificationProvider: Provider = {
+    name: 'prisma-verification',
+    async complete(_messages, _tools, options) {
+      const response = await options!.fetch!('https://provider.verify/v1/chat?api_key=verification-query-secret', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer verification-secret', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'verification-model', input: 'provider persistence' }),
+      });
+      const data = await response.json() as { id: string; output: string };
+      return {
+        content: data.output,
+        toolCalls: [],
+        usage: { inputTokens: 4, outputTokens: 2 },
+        finishReason: 'stop',
+        rawFinishReason: 'stop',
+      };
+    },
+  };
+  const providerResult = await new ProviderRunner(
+    new PrismaProviderObservationRepository(),
+    null,
+    async () => {},
+    () => 0,
+    async () => new Response(JSON.stringify({ id: 'resp_prisma_verify', output: 'observed' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  ).run({
+    provider: verificationProvider,
+    context: {
+      tenantId,
+      spaceId: thread.space_id,
+      threadId: thread.id,
+      runId: run.id,
+      stepId: step.id,
+      purpose: 'agent',
+      provider: verificationProvider.name,
+      model: 'verification-model',
+      retries: 0,
+    },
+    messages: [{ role: 'user', content: 'provider persistence' }],
+    tools: [],
+  });
+  assert.equal(providerResult.content, 'observed');
+  const providerInvocation = await prisma.provider_invocations.findFirst({
+    where: { run_id: run.id },
+    include: { provider_attempts: true },
+  });
+  assert.equal(providerInvocation?.status, 'success');
+  assert.equal(providerInvocation?.provider_attempts.length, 1);
+  assert.equal(providerInvocation?.provider_attempts[0].provider_response_id, 'resp_prisma_verify');
+  assert.equal(providerInvocation?.provider_attempts[0].url.includes('verification-query-secret'), false);
+  assert.equal(new URL(providerInvocation!.provider_attempts[0].url).searchParams.get('api_key'), '[REDACTED]');
+  assert.equal(JSON.stringify(providerInvocation).includes('verification-secret'), false);
   await store.addMessage(scope, thread.id, run.id, null, { role: 'user', content: '验证输入' });
   await store.addMessage(scope, thread.id, run.id, step.id, {
     role: 'assistant',
@@ -511,6 +568,7 @@ try {
     threadId: thread.id,
     runId: run.id,
     messageCount: await store.countRunMessages(scope, run.id),
+    providerAttemptCount: await prisma.provider_attempts.count({ where: { invocation_id: providerInvocation!.id } }),
   }));
 } finally {
   await rm(artifactVerificationRoot, { recursive: true, force: true });

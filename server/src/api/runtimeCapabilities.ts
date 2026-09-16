@@ -14,6 +14,7 @@ import { newRuntimeCapabilityCallId } from '../id.js';
 import { getRuntimeCapabilitiesSettings } from '../settings.js';
 import { store } from '../store/index.js';
 import { scopeForThread, type Scope } from '../store/types.js';
+import { providerRunner } from '../llm/providerRunner.js';
 
 export const runtimeCapabilitiesApi = Router();
 
@@ -278,16 +279,32 @@ async function handleLlmChat(req: Request, res: import('express').Response, body
     const selected = selectLlmModel(settings, body);
     modelRef = selected.modelRef;
     const messages = normalizeMessages(body.messages);
-    const { provider, modelRef: resolvedModelRef } = await getConfiguredProvider(audit.scope, modelRef);
-    const result = await provider.complete(messages, []);
+    const configured = await getConfiguredProvider(audit.scope, modelRef);
+    const run = await store.getRun(audit.scope, audit.runId);
+    const thread = run ? await store.getThread(audit.scope, run.thread_id) : null;
+    if (!run || !thread) throw new DatasourceError(404, 'run 不存在');
+    const result = await providerRunner.run({
+      provider: configured.provider,
+      context: {
+        tenantId: audit.scope.tenantId,
+        spaceId: thread.space_id,
+        threadId: thread.id,
+        runId: run.id,
+        stepId,
+        purpose: 'runtime-capability',
+        ...configured.descriptor,
+      },
+      messages,
+      tools: [],
+    });
     await addCapabilityAudit({
       scope: audit.scope,
       runId: audit.runId,
       stepId,
       tokenId: audit.tokenId,
       capability: 'llm',
-      provider: provider.name,
-      model: resolvedModelRef,
+      provider: configured.provider.name,
+      model: configured.modelRef,
       requestSummary: { modelId: selected.id, modelRef, messages: summarizeMessages(messages) },
       responseSummary: { contentChars: result.content?.length ?? 0, toolCalls: result.toolCalls.length, finishReason: result.finishReason },
       usage: result.usage ?? null,

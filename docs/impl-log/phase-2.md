@@ -2,6 +2,8 @@
 
 > 对应 [refactor-plan.md](../refactor-plan.md) §6 Phase 2。
 > 日期:2026-06-11 · 状态:✅ 完成(灰度:旧 provider 暂留作回退)
+> 后续变更：Provider 重试现已由 RunForge `ProviderRunner` 统一接管，见
+> [Provider 观测与统一重试实施日志](provider-observability.md)；下文保留本阶段当时的实现记录。
 
 ## 目标
 
