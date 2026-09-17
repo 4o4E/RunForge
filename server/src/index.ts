@@ -20,6 +20,7 @@ import { startDatasourceLeaseReconciler } from './datasources/reconciler.js';
 import { shellManager } from './shell/manager.js';
 import { externalArtifactStorage } from './external/artifactStorage.js';
 import { listArtifactStorageKeys } from './external/repository.js';
+import { mountWebApp } from './web/static.js';
 
 const app = express();
 assertJwtSecretConfigured();
@@ -28,6 +29,7 @@ app.use(express.json({ limit: '50mb' }));
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 app.use('/api', api);
+const webDist = mountWebApp(app, process.env.RUNFORGE_WEB_DIST);
 
 const server = createServer(app);
 attachWebSocket(server);
@@ -48,6 +50,7 @@ const displayHost = config.host.includes(':') ? `[${config.host}]` : config.host
 
 server.listen(config.port, config.host, () => {
   console.log(`🚀 RunForge server listening on http://${displayHost}:${config.port}`);
+  if (webDist) console.log(`   Web: ${webDist}`);
   console.log(`   WebSocket: ws://${displayHost}:${config.port}/ws?runId=<id>`);
   void getToolSettings({ tenantId: 'default' }).then((settings) => {
     console.log(

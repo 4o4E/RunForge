@@ -106,6 +106,9 @@ importers:
       pg:
         specifier: ^8.13.1
         version: 8.21.0
+      prisma:
+        specifier: 7.10.0
+        version: 7.10.0(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(typescript@5.9.3)
       web-push:
         specifier: ^3.6.7
         version: 3.6.7
@@ -140,9 +143,6 @@ importers:
       '@types/ws':
         specifier: ^8.5.13
         version: 8.18.1
-      prisma:
-        specifier: 7.10.0
-        version: 7.10.0(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(typescript@5.9.3)
       tsx:
         specifier: ^4.19.2
         version: 4.22.4

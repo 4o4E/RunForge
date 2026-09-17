@@ -104,6 +104,12 @@ Web 创建 thread
 - Express 和 WebSocket 服务入口。
 - 初始化 OpenTelemetry。
 - 注册 `/api` 和 `/ws`。
+- 生产容器设置 `RUNFORGE_WEB_DIST` 后，由同一个 Node.js 进程提供前端静态文件和前端路由。
+
+`server/src/web/static.ts`
+
+- 校验前端构建目录和 `index.html`，配置错误时终止启动。
+- 提供静态资源和前端路由入口，同时保留 `/api`、`/ws`、`/health` 的服务端路径边界。
 
 `server/src/api/`
 

@@ -1,0 +1,111 @@
+name: 容器构建与发布
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  IMAGE_NAME: ghcr.io/4o4e/runforge
+
+jobs:
+  verify:
+    name: 构建并验证两套 Compose
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 构建本机架构镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: runforge:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 验证自带和外部 PostgreSQL 部署
+        env:
+          RUNFORGE_IMAGE: runforge:ci
+        run: bash scripts/verify-container.sh
+
+  publish:
+    name: 发布 GHCR 镜像和 GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 校验 tag 和软件包版本
+        run: test "${GITHUB_REF_NAME}" = "v$(node -p "require('./package.json').version")"
+
+      - name: 设置 QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 生成镜像标签
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ github.ref_name }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+          labels: |
+            org.opencontainers.image.title=RunForge
+            org.opencontainers.image.description=通用 Agent 运行平台
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: 构建并推送多架构镜像
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 验证镜像允许匿名拉取
+        run: |
+          docker logout ghcr.io
+          docker pull "${IMAGE_NAME}:${GITHUB_REF_NAME}"
+
+      - name: 创建 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            deploy/compose.postgres.yml \
+            deploy/compose.external-postgres.yml \
+            .env.docker.example \
+            --verify-tag \
+            --generate-notes \
+            --title "RunForge ${GITHUB_REF_NAME}"

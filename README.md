@@ -11,15 +11,55 @@
 - 持久化：使用 PostgreSQL 保存 thread、run、step、message、event、shell session、subagent run 和运行配置。
 - 隔离基础：提供工具策略层和可选 bwrap shell 沙箱，为后续云端隔离执行打基础。
 
-当前实现是 Node.js/TypeScript 后端 + React/Vite 前端的单体原型。它已经能完成端到端 agent 执行闭环，并支持服务启动后恢复中断 run、托管 shell 长耗时命令、skill 渐进加载和异步只读 subagent；但还不是完整多 worker 云平台，队列调度、跨 worker 接管、多租户鉴权、per-run 工作区、资源配额和跨 thread memory 等平台能力仍在路线图中。
+当前实现是 Node.js/TypeScript 后端 + React/Vite 前端的单实例通用 Agent 运行平台。它已经能完成端到端 Agent 执行闭环，并支持多租户身份与数据隔离、租户空间配置、外部调用入口、服务启动后恢复中断 run、托管 shell 长耗时命令、Skill 渐进加载和异步只读 subagent。队列调度、跨 worker 接管、per-run 工作区、资源配额和跨 thread memory 等多 worker 平台能力仍在路线图中。
 
-## 从 0 部署指南
+## Docker 部署
+
+发布镜像为 `ghcr.io/4o4e/runforge`。镜像同时包含 React 前端和 Node.js 后端，容器启动时会
+先执行所有尚未应用的 Prisma migration，再启动 HTTP 和 WebSocket 服务。
+
+复制 Docker 环境变量模板并替换所有 `replace-with-...` 值：
+
+```bash
+cp .env.docker.example .env.docker
+```
+
+使用自带 PostgreSQL 的 Compose：
+
+```bash
+docker compose --env-file .env.docker -f deploy/compose.postgres.yml up -d
+```
+
+使用外部 PostgreSQL 时，在 `.env.docker` 中填写 `DATABASE_URL`，然后启动应用容器：
+
+```bash
+docker compose --env-file .env.docker -f deploy/compose.external-postgres.yml up -d
+```
+
+两套 Compose 都在 `http://localhost:8080` 提供 Web 控制台、REST API 和 WebSocket。可以通过
+`RUNFORGE_PORT` 修改宿主机端口。`runforge-data` 卷保存用户 workspace、Provider 记录和业务
+插件目录；自带 PostgreSQL 的版本额外使用 `runforge-postgres` 卷保存数据库。
+
+业务插件可以直接写入 `runforge-data` 卷内的 `/var/lib/runforge/business-plugins`，也可以在
+Compose 中为该目录增加只读 bind mount。Office 转换服务、OpenTelemetry 接收端等外部服务
+使用 `.env.docker` 中的 URL 接入。
+
+固定版本部署建议设置：
+
+```bash
+RUNFORGE_IMAGE=ghcr.io/4o4e/runforge:v0.1.0
+```
+
+发布流程接受 `v*.*.*` tag。它会构建 `linux/amd64` 和 `linux/arm64` 镜像，推送版本标签与
+`latest`，验证匿名拉取，并创建带两套 Compose 和环境变量模板的 GitHub Release。
+
+## 源代码部署
 
 前置条件：
 
 - Node.js >= 24
 - pnpm 11.x
-- PostgreSQL，或直接使用 `docker compose up -d`
+- PostgreSQL，或使用仓库内 Compose 单独启动开发数据库
 - Linux 环境如需强制 bwrap 沙箱，需要提前安装 bubblewrap（常见包名为 `bubblewrap`）
 
 ### 1. 安装依赖
@@ -33,7 +73,7 @@ pnpm install
 推荐本地从 0 部署时直接使用仓库内 PostgreSQL：
 
 ```bash
-docker compose up -d
+docker compose up -d postgres
 ```
 
 这种方式对应的连接串是：
@@ -204,9 +244,12 @@ RunForge/
 ├── server/              # Node.js / TypeScript 后端
 ├── web/                 # React / Vite 前端控制台
 ├── docs/                # 设计文档与实施日志
+├── deploy/              # 自带 PostgreSQL 与外部 PostgreSQL 的生产 Compose
+├── docker/              # 容器启动脚本
 ├── scripts/             # Linux 启停脚本
 ├── workspace/           # 默认工作区
-├── docker-compose.yml   # 本地 PostgreSQL
+├── Dockerfile           # 前后端单镜像构建
+├── docker-compose.yml   # 源代码开发使用的 PostgreSQL 与 Jaeger
 └── package.json         # pnpm workspace 根配置
 ```
 

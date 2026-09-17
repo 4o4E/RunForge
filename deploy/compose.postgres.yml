@@ -1,0 +1,71 @@
+services:
+  runforge:
+    image: ${RUNFORGE_IMAGE:-ghcr.io/4o4e/runforge:v0.1.0}
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${RUNFORGE_PORT:-8080}:8080"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+      DATABASE_URL: postgresql://${POSTGRES_USER:-runforge}:${POSTGRES_PASSWORD:?请设置 POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-runforge}
+      RUNFORGE_JWT_SECRET: ${RUNFORGE_JWT_SECRET:?请设置 RUNFORGE_JWT_SECRET}
+      RUNFORGE_SHARE_SECRET: ${RUNFORGE_SHARE_SECRET:?请设置 RUNFORGE_SHARE_SECRET}
+      RUNFORGE_BOOTSTRAP_ADMIN_PASSWORD: ${RUNFORGE_BOOTSTRAP_ADMIN_PASSWORD:?请设置 RUNFORGE_BOOTSTRAP_ADMIN_PASSWORD}
+      RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD: ${RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD:?请设置 RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD}
+      RUNFORGE_ACCESS_TOKEN: ${RUNFORGE_ACCESS_TOKEN:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-aisdk}
+      LLM_AISDK_FLAVOR: ${LLM_AISDK_FLAVOR:-openai-compatible}
+      LLM_REASONING_TAG: ${LLM_REASONING_TAG-think}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-4096}
+      LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-120000}
+      LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-2}
+      LLM_STREAM: ${LLM_STREAM:-true}
+      AGENT_HARD_STEP_CAP: ${AGENT_HARD_STEP_CAP:-1000}
+      TOOL_SANDBOX: ${TOOL_SANDBOX:-off}
+      TOOL_SANDBOX_BACKEND: ${TOOL_SANDBOX_BACKEND:-auto}
+      TOOL_NETWORK: ${TOOL_NETWORK:-disabled}
+      TOOL_MAX_OUTPUT: ${TOOL_MAX_OUTPUT:-40000}
+      OFFICE_PREVIEW_CONVERTER_URL: ${OFFICE_PREVIEW_CONVERTER_URL:-}
+      OFFICE_PREVIEW_TIMEOUT_MS: ${OFFICE_PREVIEW_TIMEOUT_MS:-180000}
+      OFFICE_PREVIEW_CACHE_VERSION: ${OFFICE_PREVIEW_CACHE_VERSION:-}
+      OTEL_ENABLED: ${OTEL_ENABLED:-false}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_CONSOLE: ${OTEL_CONSOLE:-false}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-runforge}
+      WEB_PUSH_VAPID_PUBLIC_KEY: ${WEB_PUSH_VAPID_PUBLIC_KEY:-}
+      WEB_PUSH_VAPID_PRIVATE_KEY: ${WEB_PUSH_VAPID_PRIVATE_KEY:-}
+      WEB_PUSH_SUBJECT: ${WEB_PUSH_SUBJECT:-mailto:admin@runforge.local}
+    volumes:
+      - runforge-data:/var/lib/runforge
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 6
+
+  postgres:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-runforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-runforge}
+    volumes:
+      - runforge-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-runforge} -d ${POSTGRES_DB:-runforge}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  runforge-data:
+  runforge-postgres:

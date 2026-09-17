@@ -1,0 +1,14 @@
+.git
+.github
+.run
+logs
+node_modules
+**/node_modules
+**/dist
+workspace
+.env
+.env.*
+!.env.example
+!.env.docker.example
+*.log
+*.tsbuildinfo
