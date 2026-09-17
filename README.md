@@ -18,7 +18,7 @@
 发布镜像为 `ghcr.io/4o4e/runforge`。镜像同时包含 React 前端和 Node.js 后端，容器启动时会
 先执行所有尚未应用的 Prisma migration，再启动 HTTP 和 WebSocket 服务。
 
-复制 Docker 环境变量模板并替换所有 `replace-with-...` 值：
+复制 Docker 密钥模板并替换所有 `replace-with-...` 值：
 
 ```bash
 cp .env.docker.example .env.docker
@@ -36,19 +36,15 @@ docker compose --env-file .env.docker -f deploy/compose.postgres.yml up -d
 docker compose --env-file .env.docker -f deploy/compose.external-postgres.yml up -d
 ```
 
-两套 Compose 都在 `http://localhost:8080` 提供 Web 控制台、REST API 和 WebSocket。可以通过
-`RUNFORGE_PORT` 修改宿主机端口。`runforge-data` 卷保存用户 workspace、Provider 记录和业务
-插件目录；自带 PostgreSQL 的版本额外使用 `runforge-postgres` 卷保存数据库。
+两套 Compose 都在 `http://localhost:8080` 提供 Web 控制台、REST API 和 WebSocket。
+`.env.docker` 只保存数据库密码、签名密钥、初始账号密码和上游 API 密钥；镜像版本、端口、
+模型参数、工具参数及外部服务地址直接在对应 Compose 文件中修改。`runforge-data` 卷保存用户
+workspace、Provider 记录和业务插件目录；自带 PostgreSQL 的版本额外使用
+`runforge-postgres` 卷保存数据库。
 
 业务插件可以直接写入 `runforge-data` 卷内的 `/var/lib/runforge/business-plugins`，也可以在
 Compose 中为该目录增加只读 bind mount。Office 转换服务、OpenTelemetry 接收端等外部服务
-使用 `.env.docker` 中的 URL 接入。
-
-固定版本部署建议设置：
-
-```bash
-RUNFORGE_IMAGE=ghcr.io/4o4e/runforge:v0.1.0
-```
+地址也直接写入 Compose。
 
 发布流程接受 `v*.*.*` tag。它会构建 `linux/amd64` 和 `linux/arm64` 镜像，推送版本标签与
 `latest`，验证匿名拉取，并创建带两套 Compose 和环境变量模板的 GitHub Release。
