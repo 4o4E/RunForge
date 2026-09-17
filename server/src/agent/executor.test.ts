@@ -14,6 +14,10 @@ import { maybeGenerateThreadTitleAfterFirstRun } from './threadTitle.js';
 import type { AppliedRunInput, Scope } from '../store/types.js';
 import { ProviderRunner } from '../llm/providerRunner.js';
 import { MemoryProviderObservationRepository } from '../llm/observability/repository.js';
+import { BusinessPluginRegistry } from '../businessPlugins/registry.js';
+import { BusinessPluginRuntimeService } from '../businessPlugins/runtime.js';
+import { createBusinessPluginSelection } from '../businessPlugins/cordis.js';
+import { createSpaceRuntimeLock } from '../plugins/lock.js';
 
 const scope: Scope = { tenantId: 'default', userId: 'us_test' };
 
@@ -240,6 +244,100 @@ test('executeRun: 使用 run 的空间配置副本装配提示词、工具和上
   assert.deepEqual(observed.tools, ['file_read']);
   const usage = published.find((event): event is Extract<AgentEvent, { type: 'usage_update' }> => event.type === 'usage_update');
   assert.equal(usage?.contextBudget, 12_345);
+});
+
+test('executeRun: 按 plugin_lock 装配并激活 tenant 业务 Skill', async () => {
+  const sourceRoot = await mkdtemp(join(tmpdir(), 'runforge-executor-business-source-'));
+  const workspaceRoot = await mkdtemp(join(tmpdir(), 'runforge-executor-business-workspace-'));
+  const pluginRoot = join(sourceRoot, scope.tenantId, 'crm');
+  const skillRoot = join(pluginRoot, 'skills', 'customer-query');
+  await mkdir(skillRoot, { recursive: true });
+  await writeFile(join(skillRoot, 'SKILL.md'), [
+    '---',
+    'name: customer-query',
+    'description: Query the reviewed tenant CRM.',
+    '---',
+    '# Customer query instructions',
+  ].join('\n'));
+  await writeFile(join(pluginRoot, 'runforge.plugin.yaml'), [
+    'schemaVersion: 1',
+    'id: crm',
+    'description: CRM business plugin.',
+    'skills:',
+    '  - id: customer-query',
+    '    path: skills/customer-query',
+  ].join('\n'));
+
+  const registry = new BusinessPluginRegistry([sourceRoot]);
+  const [definition] = await registry.list(scope.tenantId);
+  assert.ok(definition);
+  const runtime = new BusinessPluginRuntimeService();
+  const store = new MemoryStore();
+  const thread = await store.createThread(scope);
+  const lock = createSpaceRuntimeLock({
+    tenantId: scope.tenantId,
+    spaceId: thread.space_id,
+    configVersion: 1,
+    plugins: [createBusinessPluginSelection(definition)],
+  });
+  const run = await store.createRun(scope, thread.id, 'query customer', {
+    modelRef: 'main:model-a',
+    pluginLock: lock,
+    spaceConfigSnapshot: {
+      schemaVersion: 1,
+      spaceId: thread.space_id,
+      mode: 'web',
+      systemPrompt: '',
+      model: {
+        modelRef: 'main:model-a',
+        allowedModelRefs: ['main:model-a'],
+        contextWindow: 40_000,
+        contextBudget: 20_000,
+        contextBudgetSource: 'space-config',
+      },
+      capabilities: { tools: ['skill_activate'], mcpServers: [], businessPlugins: ['crm'], runtime: [] },
+      external: { allowTrustedPrompt: false, allowNextStep: false },
+    },
+  });
+  let turn = 0;
+  let sawCatalog = false;
+  let sawInstructions = false;
+  try {
+    await executeRun(run.id, {
+      store,
+      provider: {
+        name: 'business-skill',
+        async complete(messages) {
+          turn += 1;
+          if (turn === 1) {
+            sawCatalog = messages.some((message) => message.content?.includes('business:crm/customer-query'));
+            return {
+              content: null,
+              toolCalls: [{ id: 'business_skill', name: 'skill_activate', arguments: '{"id":"business:crm/customer-query"}' }],
+            };
+          }
+          sawInstructions = messages.some((message) => message.role === 'tool' && message.content?.includes('# Customer query instructions'));
+          return { content: 'business skill done', toolCalls: [] };
+        },
+      },
+      publish: () => {},
+      hardStepCap: 3,
+      toolSettings: testToolSettings({ workspaceRoot }),
+      businessPluginRegistry: registry,
+      businessPluginRuntime: runtime,
+      businessPluginSecretResolver: async () => ({}),
+    });
+    assert.equal((await store.getRun(scope, run.id))?.status, 'done');
+    assert.equal(sawCatalog, true);
+    assert.equal(sawInstructions, true);
+    assert.equal((await store.getEvents(scope, run.id)).some((event) => (
+      event.type === 'skill_activated' && event.skillId === 'business:crm/customer-query'
+    )), true);
+  } finally {
+    await runtime.dispose();
+    await rm(sourceRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
 });
 
 test('executeRun: external 空间即使模型伪造 ask_user 调用也不会进入等待状态', async () => {

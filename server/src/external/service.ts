@@ -264,6 +264,7 @@ export class ExternalCommandService {
         modelRef: resolved.modelRef,
         spaceConfig: snapshotWithTrustedPrompt(resolved.snapshot, trustedPrompt),
         runtimeCapabilities: resolved.runtimeCapabilitiesSnapshot,
+        pluginLock: resolved.pluginLock,
       };
     } catch (error) {
       if (error instanceof SpaceConfigError) {

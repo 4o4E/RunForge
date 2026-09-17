@@ -513,7 +513,7 @@ export class MemoryStore implements Store {
       runtime_capabilities_snapshot: options.runtimeCapabilitiesSnapshot ?? null,
       space_config_snapshot: structuredClone(options.spaceConfigSnapshot ?? space.config),
       space_config_version: space.config_version,
-      plugin_lock: null,
+      plugin_lock: structuredClone(options.pluginLock ?? null) as Record<string, unknown> | null,
       external_input_open: false,
       input_version: 0,
       created_at: this.now(),

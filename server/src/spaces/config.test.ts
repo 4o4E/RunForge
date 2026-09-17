@@ -8,6 +8,25 @@ import {
   type TenantSpaceCapabilityCatalog,
 } from './config.js';
 import { RunAdmissionService } from './runAdmission.js';
+import type { BusinessPluginDefinition } from '../businessPlugins/types.js';
+
+const businessPlugin: BusinessPluginDefinition = {
+  root: '/plugins/tn_config/crm',
+  manifestPath: '/plugins/tn_config/crm/runforge.plugin.yaml',
+  contentHash: 'a'.repeat(64),
+  manifest: {
+    schemaVersion: 1,
+    id: 'crm',
+    version: '1.0.0',
+    displayName: 'CRM',
+    description: 'CRM business capability',
+    skills: [],
+    mcpServers: [],
+    secrets: [],
+    resources: [],
+    configSchema: {},
+  },
+};
 
 const catalog: TenantSpaceCapabilityCatalog = {
   defaultModelRef: 'main:model-a',
@@ -23,6 +42,10 @@ const catalog: TenantSpaceCapabilityCatalog = {
   toolNames: ['file_read', 'file_write', 'ask_user'],
   mcpServerIds: ['browser', 'docs'],
   mcpServers: [{ id: 'browser', label: 'Browser' }, { id: 'docs', label: 'Docs' }],
+  businessPluginIds: ['crm'],
+  businessPlugins: [{ id: 'crm', label: 'CRM', description: 'CRM business capability', contentHash: businessPlugin.contentHash }],
+  businessPluginDefinitions: [businessPlugin],
+  businessPluginConfigs: { crm: { region: 'cn' } },
   runtimeCapabilities: ['datasource.credentials', 'image'],
   runtimeSettings: {
     llm: { enabled: false, defaultModelId: '', models: [] },
@@ -53,7 +76,7 @@ test('space config: 空配置保持兼容，未知字段和越权能力被拒绝
     schemaVersion: 1,
     systemPrompt: '',
     model: { defaultModelRef: null, allowedModelRefs: null, contextBudget: null },
-    capabilities: { tools: null, mcpServers: null, runtime: null },
+    capabilities: { tools: null, mcpServers: null, businessPlugins: [], runtime: null },
     external: { allowTrustedPrompt: false, allowNextStep: false },
   });
   assert.throws(() => normalizeSpaceConfig({ unknown: true }), SpaceConfigError);
@@ -79,6 +102,7 @@ test('space config: run 接纳解析显式能力并从 external 空间双重移�
     capabilities: {
       tools: ['file_read', 'ask_user'],
       mcpServers: ['docs'],
+      businessPlugins: ['crm'],
       runtime: ['image'],
     },
     external: { allowTrustedPrompt: true, allowNextStep: true },
@@ -103,7 +127,10 @@ test('space config: run 接纳解析显式能力并从 external 空间双重移�
   assert.equal(resolved.snapshot.model.contextBudgetSource, 'space-config');
   assert.deepEqual(resolved.snapshot.capabilities.tools, ['file_read']);
   assert.deepEqual(resolved.snapshot.capabilities.mcpServers, ['docs']);
+  assert.deepEqual(resolved.snapshot.capabilities.businessPlugins, ['crm']);
   assert.deepEqual(resolved.snapshot.capabilities.runtime, ['image']);
+  assert.equal(resolved.pluginLock.plugins[0]?.id, 'business.crm');
+  assert.deepEqual(resolved.pluginLock.plugins[0]?.config, { region: 'cn' });
   assert.equal(resolved.snapshot.systemPrompt, '只输出审计结果');
   assert.equal(JSON.stringify(resolved.runtimeCapabilitiesSnapshot).includes('must-not-enter-run-snapshot'), false);
   assert.deepEqual(resolved.runtimeCapabilitiesSnapshot.image.models, [{ id: 'image-main', label: 'Image Main' }]);
@@ -168,6 +195,7 @@ test('run admission: 固化配置副本，后续空间更新只影响新 run', a
   const first = await admission.createWebRun(scope, thread, { input: 'first' });
   assert.equal(first.model_ref, 'main:model-a');
   assert.equal(first.space_config_version, 1);
+  assert.equal(typeof first.plugin_lock?.hash, 'string');
   assert.equal((first.space_config_snapshot as unknown as { systemPrompt: string }).systemPrompt, 'version one');
   await store.setRunStatus(scope, first.id, 'done');
 

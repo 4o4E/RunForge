@@ -310,6 +310,7 @@ export interface CreateRunOptions {
   parentRunId?: string | null;
   runtimeCapabilitiesSnapshot?: Record<string, unknown> | null;
   spaceConfigSnapshot?: Record<string, unknown>;
+  pluginLock?: object;
   expectedSpaceConfigVersion?: number;
 }
 

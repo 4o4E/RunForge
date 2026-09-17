@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { z } from 'zod';
 import { PluginRuntimeError } from './errors.js';
+import { createSpaceRuntimeLock } from './lock.js';
 import { CordisRuntimeManager } from './runtime.js';
 import type {
   JsonValue,
@@ -248,6 +249,27 @@ test('Cordis runtime: 配置锁稳定、不可变且能发现持久化内容被�
   } finally {
     await manager.dispose();
   }
+});
+
+test('Cordis runtime: 运行锁把 __proto__ 当作普通 JSON 键参与 hash', () => {
+  const leftConfig = JSON.parse('{"__proto__":{"role":"left"}}') as JsonValue;
+  const rightConfig = JSON.parse('{"__proto__":{"role":"right"}}') as JsonValue;
+  const left = createSpaceRuntimeLock(spaceConfig('sp_proto', 1, [{
+    id: 'lock',
+    version: '1.0.0',
+    contentHash: contentHash('lock@1'),
+    config: leftConfig,
+  }]));
+  const right = createSpaceRuntimeLock(spaceConfig('sp_proto', 1, [{
+    id: 'lock',
+    version: '1.0.0',
+    contentHash: contentHash('lock@1'),
+    config: rightConfig,
+  }]));
+
+  assert.equal(Object.getPrototypeOf(left.plugins[0]!.config), Object.prototype);
+  assert.equal(Object.hasOwn(left.plugins[0]!.config as object, '__proto__'), true);
+  assert.notEqual(left.hash, right.hash);
 });
 
 test('Cordis runtime: 当前版本切换后保留活动 run 的旧插件，并可按旧锁恢复', async () => {

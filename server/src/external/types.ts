@@ -11,6 +11,7 @@ import type {
 } from '@runforge/contracts';
 import type { RunSpaceConfigSnapshot, RuntimeCapabilitiesSnapshot } from '../spaces/config.js';
 import type { SpaceWithVisibilityRow } from '../store/types.js';
+import type { SpaceRuntimeLock } from '../plugins/types.js';
 
 export class ExternalApiError extends Error {
   constructor(
@@ -35,6 +36,7 @@ export interface ExternalRunSnapshot {
   modelRef: string;
   spaceConfig: RunSpaceConfigSnapshot;
   runtimeCapabilities: RuntimeCapabilitiesSnapshot;
+  pluginLock: SpaceRuntimeLock;
 }
 
 export interface ExternalRunWriteInput {

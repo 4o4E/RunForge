@@ -202,6 +202,10 @@ export const config = {
     directory: resolve(process.env.RUNFORGE_PROVIDER_TRACE_DIR ?? resolve(process.cwd(), '../logs/provider-traces')),
     retentionDays: 7,
   },
+  businessPlugins: {
+    // 业务插件由调用方/运维以只读目录交付；RunForge 只发现和运行，不维护源码或发布产物。
+    roots: patterns(process.env.RUNFORGE_BUSINESS_PLUGIN_ROOTS),
+  },
   preview: {
     officeConverterUrl: process.env.OFFICE_PREVIEW_CONVERTER_URL ?? '',
     officeTimeoutMs: Number(process.env.OFFICE_PREVIEW_TIMEOUT_MS ?? 180000),

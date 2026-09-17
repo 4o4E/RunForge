@@ -97,6 +97,7 @@ export async function runTool(
     step?: number;
     mcpSettings?: McpSettings;
     activeMcpServerIds?: ReadonlySet<string>;
+    mcpCallTool?: typeof callMcpTool;
   },
 ): Promise<ToolResult> {
   const mcpTool = parseMcpToolName(name);
@@ -115,7 +116,7 @@ export async function runTool(
       if (!ctx.mcpSettings) {
         return { text: '当前 run 缺少 MCP 配置，拒绝回退到其它 tenant 的配置。' };
       }
-      const result = await callMcpTool(name, args, ctx.mcpSettings, {
+      const result = await (ctx.mcpCallTool ?? callMcpTool)(name, args, ctx.mcpSettings, {
         workspaceRoot: settings.workspaceRoot,
         runId: ctx.runId,
       });

@@ -10,6 +10,7 @@ import { ExternalApiError, type ExternalCallerAccess, type ExternalRepository } 
 import { FileExternalArtifactStorage } from './artifactStorage.js';
 import { ExternalArtifactMaterializer } from './artifactMaterializer.js';
 import { attachExternalArtifactTokens, externalArtifactRemotePath } from './artifactProtocol.js';
+import { createSpaceRuntimeLock } from '../plugins/lock.js';
 
 const uuidToken = '123e4567-e89b-42d3-a456-426614174000';
 const space: SpaceWithVisibilityRow = {
@@ -88,7 +89,7 @@ const resolvedConfig = {
       contextBudget: 50_000,
       contextBudgetSource: 'model-settings',
     },
-    capabilities: { tools: [], mcpServers: [], runtime: [] },
+    capabilities: { tools: [], mcpServers: [], businessPlugins: [], runtime: [] },
     external: { allowTrustedPrompt: true, allowNextStep: false },
   },
   runtimeCapabilitiesSnapshot: {
@@ -97,6 +98,12 @@ const resolvedConfig = {
     image: { enabled: false, defaultModelId: '', models: [] },
     video: { enabled: false, defaultModelId: '', models: [] },
   },
+  pluginLock: createSpaceRuntimeLock({
+    tenantId: space.tenant_id,
+    spaceId: space.id,
+    configVersion: 3,
+    plugins: [],
+  }),
 };
 
 test('external command: run.create 固化可信提示词，只启动一次 executor', async () => {

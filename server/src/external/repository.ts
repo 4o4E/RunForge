@@ -482,6 +482,7 @@ export class PrismaExternalRepository implements ExternalRepository {
             runtime_capabilities_snapshot: requiredJson(input.snapshot.runtimeCapabilities),
             space_config_snapshot: requiredJson(input.snapshot.spaceConfig),
             space_config_version: input.snapshot.configVersion,
+            plugin_lock: requiredJson(input.snapshot.pluginLock),
             external_input_open: input.snapshot.spaceConfig.external.allowNextStep,
           },
         });
@@ -574,6 +575,7 @@ export class PrismaExternalRepository implements ExternalRepository {
             runtime_capabilities_snapshot: requiredJson(input.snapshot.runtimeCapabilities),
             space_config_snapshot: requiredJson(input.snapshot.spaceConfig),
             space_config_version: input.snapshot.configVersion,
+            plugin_lock: requiredJson(input.snapshot.pluginLock),
             external_input_open: input.snapshot.spaceConfig.external.allowNextStep,
           },
         });

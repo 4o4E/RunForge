@@ -17,6 +17,15 @@ import {
 } from '../settings.js';
 import type { SpaceWithVisibilityRow } from '../store/types.js';
 import { builtinToolNames } from '../tools/registry.js';
+import { createBusinessPluginSelection } from '../businessPlugins/cordis.js';
+import { businessPluginRegistry } from '../businessPlugins/registry.js';
+import {
+  businessPluginReadiness,
+  getBusinessPluginTenantSettings,
+} from '../businessPlugins/settings.js';
+import type { BusinessPluginDefinition } from '../businessPlugins/types.js';
+import { createSpaceRuntimeLock } from '../plugins/lock.js';
+import type { JsonValue, SpaceRuntimeLock } from '../plugins/types.js';
 
 export class SpaceConfigError extends Error {
   readonly code = 'SPACE_CONFIG_INVALID';
@@ -35,6 +44,10 @@ export interface TenantSpaceCapabilityCatalog {
   toolNames: string[];
   mcpServerIds: string[];
   mcpServers: Array<{ id: string; label: string }>;
+  businessPluginIds: string[];
+  businessPlugins: Array<{ id: string; label: string; description: string; contentHash: string }>;
+  businessPluginDefinitions: BusinessPluginDefinition[];
+  businessPluginConfigs: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   runtimeCapabilities: RuntimeCapabilityName[];
   runtimeSettings: RuntimeCapabilitiesSettings;
 }
@@ -54,6 +67,7 @@ export interface RunSpaceConfigSnapshot {
   capabilities: {
     tools: string[];
     mcpServers: string[];
+    businessPlugins: string[];
     runtime: RuntimeCapabilityName[];
   };
   external: {
@@ -82,6 +96,7 @@ export interface ResolvedRunSpaceConfig {
   modelRef: string;
   snapshot: RunSpaceConfigSnapshot;
   runtimeCapabilitiesSnapshot: RuntimeCapabilitiesSnapshot;
+  pluginLock: SpaceRuntimeLock;
 }
 
 type CatalogLoader = (tenantId: string) => Promise<TenantSpaceCapabilityCatalog>;
@@ -101,6 +116,7 @@ function normalizeParsedConfig(config: SpaceConfig): SpaceConfig {
     capabilities: {
       tools: config.capabilities.tools === null ? null : unique(config.capabilities.tools),
       mcpServers: config.capabilities.mcpServers === null ? null : unique(config.capabilities.mcpServers),
+      businessPlugins: unique(config.capabilities.businessPlugins),
       runtime: config.capabilities.runtime === null
         ? null
         : [...new Set(config.capabilities.runtime)],
@@ -161,6 +177,10 @@ async function loadCatalogFromTenant(tenantId: string): Promise<TenantSpaceCapab
       toolNames: builtinToolNames(),
       mcpServerIds: [],
       mcpServers: [],
+      businessPluginIds: [],
+      businessPlugins: [],
+      businessPluginDefinitions: [],
+      businessPluginConfigs: {},
       runtimeCapabilities: [],
       runtimeSettings: {
         llm: { enabled: false, defaultModelId: '', models: [] },
@@ -170,14 +190,19 @@ async function loadCatalogFromTenant(tenantId: string): Promise<TenantSpaceCapab
     };
   }
 
-  const [llm, mcp, runtime, datasources] = await Promise.all([
+  const [llm, mcp, runtime, datasources, pluginDefinitions, pluginSettings] = await Promise.all([
     getLlmSettings({ tenantId }),
     getMcpSettings({ tenantId }),
     getRuntimeCapabilitiesSettings({ tenantId }),
     listDatasources({ tenantId }),
+    businessPluginRegistry.list(tenantId),
+    getBusinessPluginTenantSettings(tenantId),
   ]);
   const models = llmModelOptions(llm);
   const enabledMcpServers = mcp.servers.filter((server) => server.enabled);
+  const readyPlugins = businessPluginReadiness(pluginDefinitions, pluginSettings)
+    .filter((item) => item.ready)
+    .map((item) => item.definition);
   return {
     defaultModelRef: llm.defaultModelRef,
     modelContextWindows: contextWindows(llm),
@@ -186,6 +211,20 @@ async function loadCatalogFromTenant(tenantId: string): Promise<TenantSpaceCapab
     toolNames: builtinToolNames(),
     mcpServerIds: enabledMcpServers.map((server) => server.id),
     mcpServers: enabledMcpServers.map((server) => ({ id: server.id, label: server.label || server.id })),
+    businessPluginIds: readyPlugins.map((definition) => definition.manifest.id),
+    businessPlugins: readyPlugins.map((definition) => ({
+      id: definition.manifest.id,
+      label: definition.manifest.displayName,
+      description: definition.manifest.description,
+      contentHash: definition.contentHash,
+    })),
+    businessPluginDefinitions: readyPlugins,
+    businessPluginConfigs: Object.fromEntries(readyPlugins.map((definition) => [
+      definition.manifest.id,
+      Object.prototype.hasOwnProperty.call(pluginSettings.plugins, definition.manifest.id)
+        ? pluginSettings.plugins[definition.manifest.id]!.config
+        : {},
+    ])),
     runtimeCapabilities: enabledRuntimeCapabilities(
       runtime,
       datasources.some((datasource) => datasource.enabled && datasource.status === 'active'),
@@ -252,6 +291,7 @@ export class SpaceConfigService {
       models: catalog.modelOptions,
       tools: catalog.toolNames,
       mcpServers: catalog.mcpServers,
+      businessPlugins: catalog.businessPlugins,
       runtimeCapabilities: catalog.runtimeCapabilities,
     };
   }
@@ -265,6 +305,22 @@ export class SpaceConfigService {
     const config = normalizeSpaceConfig(space.config);
     const catalog = await this.loadCatalog(tenantId);
     const resolved = this.resolve(space.mode, config, catalog, requestedModelRef);
+    const selectedDefinitions = new Map(
+      catalog.businessPluginDefinitions.map((definition) => [definition.manifest.id, definition]),
+    );
+    const pluginLock = createSpaceRuntimeLock({
+      tenantId,
+      spaceId: space.id,
+      configVersion: space.config_version,
+      plugins: resolved.capabilities.businessPlugins.map((id) => {
+        const definition = selectedDefinitions.get(id);
+        if (!definition) throw new SpaceConfigError(`业务插件不属于当前 tenant 可用目录：${id}`);
+        return createBusinessPluginSelection(
+          definition,
+          { ...(catalog.businessPluginConfigs[id] ?? {}) } as JsonValue,
+        );
+      }),
+    });
     return {
       configVersion: space.config_version,
       modelRef: resolved.model.modelRef,
@@ -273,6 +329,7 @@ export class SpaceConfigService {
         spaceId: space.id,
       },
       runtimeCapabilitiesSnapshot: runtimeSnapshot(catalog, resolved.capabilities.runtime),
+      pluginLock,
     };
   }
 
@@ -308,6 +365,11 @@ export class SpaceConfigService {
     const tools = selectValues(config.capabilities.tools, catalog.toolNames, '工具')
       .filter((tool) => mode !== 'external' || tool !== 'ask_user');
     const mcpServers = selectValues(config.capabilities.mcpServers, catalog.mcpServerIds, 'MCP Server');
+    const businessPlugins = selectValues(
+      config.capabilities.businessPlugins,
+      catalog.businessPluginIds,
+      '业务插件',
+    );
     const runtime = selectValues(
       config.capabilities.runtime,
       catalog.runtimeCapabilities,
@@ -327,7 +389,7 @@ export class SpaceConfigService {
           ? defaultContext.contextBudgetSource
           : 'space-config',
       },
-      capabilities: { tools, mcpServers, runtime },
+      capabilities: { tools, mcpServers, businessPlugins, runtime },
       external: { ...config.external },
     };
   }

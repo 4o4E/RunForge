@@ -41,6 +41,8 @@ test('materialized agent resource directories are readonly for file writes', () 
   assert.match((blockedSkill as { reason: string }).reason, /只读/);
   const blockedWorkflow = p.check('file_write', { path: resolve(ROOT, '.agents/workflows/software-development/WORKFLOW.md') });
   assert.equal(blockedWorkflow.ok, false);
+  const blockedBusinessPlugin = p.check('file_write', { path: resolve(ROOT, '.agents/business-plugins/crm/hash/skills/query/SKILL.md') });
+  assert.equal(blockedBusinessPlugin.ok, false);
   assert.match((blockedWorkflow as { reason: string }).reason, /只读/);
 });
 

@@ -21,8 +21,10 @@ export const spaceConfigSchema = z.object({
   capabilities: z.object({
     tools: nullableIdListSchema,
     mcpServers: nullableIdListSchema,
+    // 业务插件承载成组的业务权限，必须由管理员显式选择；部署新增插件不能自动扩权。
+    businessPlugins: z.array(z.string().trim().min(1)).default([]),
     runtime: z.array(z.enum(runtimeCapabilityNames)).nullable().default(null),
-  }).strict().default({ tools: null, mcpServers: null, runtime: null }),
+  }).strict().default({ tools: null, mcpServers: null, businessPlugins: [], runtime: null }),
   external: z.object({
     allowTrustedPrompt: z.boolean().default(false),
     allowNextStep: z.boolean().default(false),
@@ -54,6 +56,7 @@ export interface SpaceOptions {
   models: LlmModelOption[];
   tools: string[];
   mcpServers: Array<{ id: string; label: string }>;
+  businessPlugins: Array<{ id: string; label: string; description: string; contentHash: string }>;
   runtimeCapabilities: RuntimeCapabilityName[];
 }
 

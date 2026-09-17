@@ -1,13 +1,28 @@
-import { Router } from 'express';
+import { Router, type Response } from 'express';
 import { store } from '../store/index.js';
 import { getIdentity } from '../auth/context.js';
 import { requireMatchingTenantParam, requireOwner, requireOwnerOrAdmin } from '../auth/guards.js';
 import { hashPassword } from '../auth/passwords.js';
 import { generateOpaqueToken, hashOpaqueToken } from '../auth/tokens.js';
 import { toApiTokenSummary, toUserSummary } from '../auth/view.js';
-import type { CreateApiTokenInput, CreateApiTokenResponse, CreateUserInput, UpdateUserInput } from '@runforge/contracts';
+import type {
+  CreateApiTokenInput,
+  CreateApiTokenResponse,
+  CreateUserInput,
+  UpdateBusinessPluginSettingsInput,
+  UpdateUserInput,
+} from '@runforge/contracts';
+import { loadBusinessPluginAdminView, updateBusinessPluginAdminView } from '../businessPlugins/settings.js';
+import { BusinessPluginError } from '../businessPlugins/errors.js';
 
 export const tenantsApi = Router();
+
+function handleBusinessPluginError(res: Response, error: unknown) {
+  if (error instanceof BusinessPluginError) {
+    return res.status(400).json({ error: error.message, code: error.code });
+  }
+  return res.status(500).json({ error: (error as Error).message });
+}
 
 // 给前端"我是谁"用(判断要不要显示管理后台入口、角色相关的 UI 分支)。
 // 不在前端解码 JWT payload 猜角色——这里是权威来源。
@@ -23,6 +38,33 @@ tenantsApi.get('/me', async (_req, res) => {
     return;
   }
   res.json(toUserSummary(user));
+});
+
+tenantsApi.get('/:id/business-plugins', requireMatchingTenantParam('id'), requireOwnerOrAdmin, async (req, res) => {
+  try {
+    res.json(await loadBusinessPluginAdminView(req.params.id));
+  } catch (error) {
+    handleBusinessPluginError(res, error);
+  }
+});
+
+tenantsApi.put('/:id/business-plugins', requireMatchingTenantParam('id'), requireOwnerOrAdmin, async (req, res) => {
+  try {
+    res.json(await updateBusinessPluginAdminView(
+      req.params.id,
+      (req.body ?? {}) as UpdateBusinessPluginSettingsInput,
+    ));
+  } catch (error) {
+    handleBusinessPluginError(res, error);
+  }
+});
+
+tenantsApi.post('/:id/business-plugins/reload', requireMatchingTenantParam('id'), requireOwnerOrAdmin, async (req, res) => {
+  try {
+    res.json(await loadBusinessPluginAdminView(req.params.id, true));
+  } catch (error) {
+    handleBusinessPluginError(res, error);
+  }
 });
 
 tenantsApi.post('/:id/tokens', requireMatchingTenantParam('id'), requireOwner, async (req, res) => {

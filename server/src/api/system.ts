@@ -2,7 +2,13 @@ import { Router, type Request, type Response } from 'express';
 import { store } from '../store/index.js';
 import { hashPassword } from '../auth/passwords.js';
 import { toSystemAdminSummary, toTenantSummary, toUserSummary } from '../auth/view.js';
-import type { CreateSystemAdminInput, CreateTenantInput, CreateTenantResponse, UpdateTenantStatusInput } from '@runforge/contracts';
+import type {
+  CreateSystemAdminInput,
+  CreateTenantInput,
+  CreateTenantResponse,
+  UpdateBusinessPluginSettingsInput,
+  UpdateTenantStatusInput,
+} from '@runforge/contracts';
 import {
   getLlmSettings,
   getMcpSettings,
@@ -41,6 +47,8 @@ import {
 import { testDatasourceById, testDatasourceDraft } from '../datasources/introspection.js';
 import type { DatasourceRow } from '../datasources/types.js';
 import { systemSpacesApi } from './spaces.js';
+import { loadBusinessPluginAdminView, updateBusinessPluginAdminView } from '../businessPlugins/settings.js';
+import { BusinessPluginError } from '../businessPlugins/errors.js';
 
 export const systemApi = Router();
 
@@ -73,6 +81,13 @@ function handleDatasourceError(res: Response, err: unknown) {
   return res.status(500).json({ error: (err as Error).message });
 }
 
+function handleBusinessPluginError(res: Response, error: unknown) {
+  if (error instanceof BusinessPluginError) {
+    return res.status(400).json({ error: error.message, code: error.code });
+  }
+  return res.status(500).json({ error: (error as Error).message });
+}
+
 systemApi.get('/tenants', async (_req, res) => {
   const rows = await store.listTenants();
   res.json({ tenants: rows.map(toTenantSummary) });
@@ -83,6 +98,39 @@ systemApi.get('/tenants/:tenantId/users', async (req, res) => {
   if (!scope) return;
   const rows = await store.listUsersByTenant(scope.tenantId);
   res.json({ users: rows.map(toUserSummary) });
+});
+
+systemApi.get('/tenants/:tenantId/business-plugins', async (req, res) => {
+  const scope = await systemTenantScope(req, res);
+  if (!scope) return;
+  try {
+    res.json(await loadBusinessPluginAdminView(scope.tenantId));
+  } catch (error) {
+    handleBusinessPluginError(res, error);
+  }
+});
+
+systemApi.put('/tenants/:tenantId/business-plugins', async (req, res) => {
+  const scope = await systemTenantScope(req, res);
+  if (!scope) return;
+  try {
+    res.json(await updateBusinessPluginAdminView(
+      scope.tenantId,
+      (req.body ?? {}) as UpdateBusinessPluginSettingsInput,
+    ));
+  } catch (error) {
+    handleBusinessPluginError(res, error);
+  }
+});
+
+systemApi.post('/tenants/:tenantId/business-plugins/reload', async (req, res) => {
+  const scope = await systemTenantScope(req, res);
+  if (!scope) return;
+  try {
+    res.json(await loadBusinessPluginAdminView(scope.tenantId, true));
+  } catch (error) {
+    handleBusinessPluginError(res, error);
+  }
 });
 
 // tenant、首个 owner、配置副本和 default space 由 Store 在同一事务中创建；任何一步

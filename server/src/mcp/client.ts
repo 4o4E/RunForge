@@ -22,9 +22,24 @@ export interface McpActivation {
 }
 
 interface ClientEntry {
-  client: Client;
+  client: McpClient;
   signature: string;
 }
+
+interface McpClient {
+  listTools(
+    params?: { cursor?: string },
+    options?: { timeout?: number },
+  ): Promise<{ tools: McpSdkTool[]; nextCursor?: string }>;
+  callTool(
+    params: { name: string; arguments: Record<string, unknown> },
+    schema: typeof CallToolResultSchema,
+    options?: { timeout?: number },
+  ): Promise<unknown>;
+  close(): Promise<void>;
+}
+
+type McpConnector = (server: McpServerSettings) => Promise<McpClient>;
 
 interface RenderContext {
   workspaceRoot?: string;
@@ -36,7 +51,6 @@ interface RenderContext {
 
 const TOOL_PREFIX = 'mcp__';
 const TOOL_SEP = '__';
-const clients = new Map<string, ClientEntry>();
 
 export function mcpToolName(serverId: string, toolName: string): string {
   return `${TOOL_PREFIX}${serverId}${TOOL_SEP}${toolName}`;
@@ -69,26 +83,12 @@ function headersForServer(server: McpServerSettings): Record<string, string> {
   return headers;
 }
 
-async function closeEntry(serverId: string): Promise<void> {
-  const existing = clients.get(serverId);
-  if (!existing) return;
-  clients.delete(serverId);
-  await existing.client.close().catch(() => {});
-}
-
-async function connectServer(server: McpServerSettings): Promise<Client> {
-  const signature = configSignature(server);
-  const existing = clients.get(server.id);
-  if (existing?.signature === signature) return existing.client;
-  await closeEntry(server.id);
-
+async function createConnectedClient(server: McpServerSettings): Promise<McpClient> {
   const client = new Client({ name: 'RunForge', version: '0.1.0' }, { capabilities: {} });
   if (!server.url.trim()) throw new Error(`MCP server ${server.id} 缺少远程 MCP URL`);
   await client.connect(new StreamableHTTPClientTransport(new URL(server.url), {
     requestInit: { headers: headersForServer(server) },
   }), { timeout: server.timeoutMs });
-
-  clients.set(server.id, { client, signature });
   return client;
 }
 
@@ -96,9 +96,7 @@ function schemaObject(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : { type: 'object' };
 }
 
-async function listServerTools(server: McpServerSettings): Promise<McpMappedTool[]> {
-  if (!server.enabled) return [];
-  const client = await connectServer(server);
+async function listServerTools(client: McpClient, server: McpServerSettings): Promise<McpMappedTool[]> {
   const tools: McpSdkTool[] = [];
   let cursor: string | undefined;
   do {
@@ -121,8 +119,15 @@ async function listServerTools(server: McpServerSettings): Promise<McpMappedTool
 }
 
 export async function listMcpTools(settings: McpSettings): Promise<McpMappedTool[]> {
-  const settled = await Promise.allSettled(settings.servers.map((server) => listServerTools(server)));
-  return settled.flatMap((item) => item.status === 'fulfilled' ? item.value : []);
+  const session = new McpClientSession();
+  try {
+    const settled = await Promise.allSettled(
+      settings.servers.filter((server) => server.enabled).map((server) => session.listServerTools(server)),
+    );
+    return settled.flatMap((item) => item.status === 'fulfilled' ? item.value : []);
+  } finally {
+    await session.dispose();
+  }
 }
 
 export function mcpToolSchemas(tools: McpMappedTool[]): LlmTool[] {
@@ -148,13 +153,6 @@ export function renderMcpSystemRules(): string {
 - The initial MCP list is only for capability routing; remote tools are not registered until mcp_activate is called with a server id.
 - 激活后，该 MCP Server 的工具 schema 只加入当前 run 后续的 LLM 请求；下一个 run 会恢复为未激活。
 - After activation, that MCP server's tool schemas are added only to later LLM requests in the current run; the next run starts inactive.`;
-}
-
-export async function activateMcpServer(settings: McpSettings, serverId: string): Promise<McpActivation> {
-  const id = serverId.trim();
-  const server = settings.servers.find((item) => item.id === id);
-  if (!server || !server.enabled) throw new Error(`MCP server 未启用或不存在：${id}`);
-  return { server, tools: await listServerTools(server) };
 }
 
 function extensionFromMimeType(mimeType: string): string {
@@ -261,38 +259,111 @@ export async function renderToolResult(result: CallToolResult, ctx: RenderContex
   return result.isError ? `MCP 工具返回错误：\n${text}` : text;
 }
 
+/**
+ * 一个 session 只属于一次 run（或一次管理端探测），不在模块全局缓存连接。
+ * 这样相同 MCP ID 在不同 tenant/space 中也不会共享认证状态或有状态会话。
+ */
+export class McpClientSession {
+  private readonly clients = new Map<string, ClientEntry>();
+  private disposed = false;
+
+  constructor(private readonly connector: McpConnector = createConnectedClient) {}
+
+  async activate(settings: McpSettings, serverId: string): Promise<McpActivation> {
+    const id = serverId.trim();
+    const server = settings.servers.find((item) => item.id === id);
+    if (!server || !server.enabled) throw new Error(`MCP server 未启用或不存在：${id}`);
+    return { server, tools: await this.listServerTools(server) };
+  }
+
+  async listServerTools(server: McpServerSettings): Promise<McpMappedTool[]> {
+    if (!server.enabled) return [];
+    return listServerTools(await this.connect(server), server);
+  }
+
+  async callTool(
+    mappedName: string,
+    args: Record<string, unknown>,
+    settings: McpSettings,
+    ctx: { workspaceRoot?: string; runId?: string } = {},
+  ): Promise<{ text: string; serverId: string; toolName: string }> {
+    const parsed = parseMcpToolName(mappedName);
+    if (!parsed) throw new Error(`不是 MCP 工具名：${mappedName}`);
+    const server = settings.servers.find((item) => item.id === parsed.serverId);
+    if (!server || !server.enabled) throw new Error(`MCP server 未启用：${parsed.serverId}`);
+
+    const client = await this.connect(server);
+    const rawResult = await client.callTool(
+      { name: parsed.toolName, arguments: args },
+      CallToolResultSchema,
+      { timeout: server.timeoutMs },
+    );
+    const result = CallToolResultSchema.parse(rawResult) as CallToolResult;
+    const text = await renderToolResult(result, {
+      workspaceRoot: ctx.workspaceRoot,
+      runId: ctx.runId,
+      serverId: parsed.serverId,
+      toolName: parsed.toolName,
+      args,
+    });
+    return {
+      serverId: parsed.serverId,
+      toolName: parsed.toolName,
+      text: text.length <= server.maxOutput ? text : `${text.slice(0, server.maxOutput)}\n…[MCP 工具结果已截断]…`,
+    };
+  }
+
+  async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+    const clients = [...this.clients.values()].map((entry) => entry.client);
+    this.clients.clear();
+    await Promise.allSettled(clients.map((client) => client.close()));
+  }
+
+  private async connect(server: McpServerSettings): Promise<McpClient> {
+    if (this.disposed) throw new Error('MCP session 已关闭');
+    const signature = configSignature(server);
+    const existing = this.clients.get(server.id);
+    if (existing?.signature === signature) return existing.client;
+    if (existing) {
+      this.clients.delete(server.id);
+      await existing.client.close().catch(() => {});
+    }
+    const client = await this.connector(server);
+    this.clients.set(server.id, { client, signature });
+    return client;
+  }
+}
+
+export async function activateMcpServer(settings: McpSettings, serverId: string): Promise<McpActivation> {
+  const session = new McpClientSession();
+  try {
+    return await session.activate(settings, serverId);
+  } finally {
+    await session.dispose();
+  }
+}
+
 export async function callMcpTool(
   mappedName: string,
   args: Record<string, unknown>,
   settings: McpSettings,
   ctx: { workspaceRoot?: string; runId?: string } = {},
 ): Promise<{ text: string; serverId: string; toolName: string }> {
-  const parsed = parseMcpToolName(mappedName);
-  if (!parsed) throw new Error(`不是 MCP 工具名：${mappedName}`);
-  const server = settings.servers.find((item) => item.id === parsed.serverId);
-  if (!server || !server.enabled) throw new Error(`MCP server 未启用：${parsed.serverId}`);
-
-  const client = await connectServer(server);
-  const rawResult = await client.callTool(
-    { name: parsed.toolName, arguments: args },
-    CallToolResultSchema,
-    { timeout: server.timeoutMs },
-  );
-  const result = CallToolResultSchema.parse(rawResult) as CallToolResult;
-  const text = await renderToolResult(result, {
-    workspaceRoot: ctx.workspaceRoot,
-    runId: ctx.runId,
-    serverId: parsed.serverId,
-    toolName: parsed.toolName,
-    args,
-  });
-  return {
-    serverId: parsed.serverId,
-    toolName: parsed.toolName,
-    text: text.length <= server.maxOutput ? text : `${text.slice(0, server.maxOutput)}\n…[MCP 工具结果已截断]…`,
-  };
+  const session = new McpClientSession();
+  try {
+    return await session.callTool(mappedName, args, settings, ctx);
+  } finally {
+    await session.dispose();
+  }
 }
 
 export async function probeMcpServer(server: McpServerSettings): Promise<McpMappedTool[]> {
-  return listServerTools({ ...server, enabled: true });
+  const session = new McpClientSession();
+  try {
+    return await session.listServerTools({ ...server, enabled: true });
+  } finally {
+    await session.dispose();
+  }
 }

@@ -7,7 +7,13 @@ import { hydrateImageAttachments } from '../llm/attachments.js';
 import { runTool, toolSchemas } from '../tools/registry.js';
 import { createPolicy } from '../tools/policy.js';
 import { ContextManager, renderRuntimeCapabilitiesContext, renderSystemPrompt } from './context.js';
-import { activateSkill, loadSkillIndex, renderSkillCatalog, renderSkillSystemRules } from '../skills/registry.js';
+import {
+  activateSkillItem,
+  loadSkillIndex,
+  renderSkillCatalog,
+  renderSkillSystemRules,
+  selectSkill,
+} from '../skills/registry.js';
 import type { SkillIndexItem, SkillActivation } from '../skills/registry.js';
 import { DATASOURCE_CREDENTIAL_CAPABILITY, createWorkloadToken, listDatasources, listPermissionProfiles } from '../datasources/accountPool.js';
 import { finishGoal, initGoal, mergeGoal, parseGoalPatch, renderGoal } from './goal.js';
@@ -18,7 +24,8 @@ import { scopeForThread, type AppliedRunInput, type Scope, type Store } from '..
 import { getMcpSettings, getToolSettings } from '../settings.js';
 import type { McpSettings, ToolSettings } from '../settings.js';
 import {
-  activateMcpServer,
+  McpClientSession,
+  parseMcpToolName,
   renderMcpCatalog,
   renderMcpSystemRules,
   type McpActivation,
@@ -48,6 +55,17 @@ import {
   type ProviderPurpose,
   type ProviderRunner,
 } from '../llm/providerRunner.js';
+import { businessPluginRegistry, type BusinessPluginRegistry } from '../businessPlugins/registry.js';
+import { BusinessPluginError } from '../businessPlugins/errors.js';
+import {
+  businessPluginRuntime,
+  type BusinessPluginRunHandle,
+  type BusinessPluginRuntimeService,
+  type TenantSecretResolver,
+} from '../businessPlugins/runtime.js';
+import { resolveCurrentTenantSecrets } from '../businessPlugins/settings.js';
+import { verifySpaceRuntimeLock } from '../plugins/lock.js';
+import type { JsonValue, SpaceRuntimeLock } from '../plugins/types.js';
 
 const ASK_USER_TOOL_NAME = 'ask_user';
 const DATABASE_ACCESS_SKILL_NAME = 'database-access';
@@ -113,6 +131,9 @@ export interface ExecutorDeps {
     runId: string,
     workspaceRoot: string,
   ) => Promise<ExternalArtifactTokenSource[]>;
+  businessPluginRegistry: Pick<BusinessPluginRegistry, 'list' | 'resolveLock'>;
+  businessPluginRuntime: Pick<BusinessPluginRuntimeService, 'startRun'>;
+  businessPluginSecretResolver: TenantSecretResolver;
 }
 
 interface DatabaseRuntimeEnv {
@@ -270,6 +291,9 @@ async function defaultDeps(
       contextBudgetSource: config.agent.contextBudgetSource,
     }),
     materializeRunArtifacts: overrides.materializeRunArtifacts,
+    businessPluginRegistry: overrides.businessPluginRegistry ?? businessPluginRegistry,
+    businessPluginRuntime: overrides.businessPluginRuntime ?? businessPluginRuntime,
+    businessPluginSecretResolver: overrides.businessPluginSecretResolver ?? resolveCurrentTenantSecrets,
   };
 }
 
@@ -414,6 +438,7 @@ function runSpaceConfigSnapshot(value: unknown): RunSpaceConfigSnapshot | null {
     || !raw.capabilities
     || !Array.isArray(raw.capabilities.tools)
     || !Array.isArray(raw.capabilities.mcpServers)
+    || (raw.capabilities.businessPlugins !== undefined && !Array.isArray(raw.capabilities.businessPlugins))
     || !Array.isArray(raw.capabilities.runtime)
     || !raw.external
     || typeof raw.external.allowTrustedPrompt !== 'boolean'
@@ -421,7 +446,33 @@ function runSpaceConfigSnapshot(value: unknown): RunSpaceConfigSnapshot | null {
   ) {
     throw new Error('run 的空间配置副本无效，拒绝回退到当前空间配置');
   }
-  return raw as RunSpaceConfigSnapshot;
+  return {
+    ...raw,
+    capabilities: {
+      ...raw.capabilities,
+      // 兼容业务插件协议接入前已经接纳、但尚未执行完的 run。
+      businessPlugins: raw.capabilities.businessPlugins ?? [],
+    },
+  } as RunSpaceConfigSnapshot;
+}
+
+function runPluginLock(value: unknown): SpaceRuntimeLock | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return verifySpaceRuntimeLock(value as SpaceRuntimeLock);
+}
+
+function businessPluginIdFromRuntimeId(id: string): string {
+  if (!id.startsWith('business.')) throw new Error(`run plugin_lock 包含非业务插件：${id}`);
+  return id.slice('business.'.length);
+}
+
+function businessPluginConfigFromLock(lock: SpaceRuntimeLock): Record<string, Readonly<Record<string, unknown>>> {
+  return Object.fromEntries(lock.plugins.map((plugin) => {
+    const config = plugin.config && typeof plugin.config === 'object' && !Array.isArray(plugin.config)
+      ? plugin.config as Record<string, JsonValue>
+      : {};
+    return [businessPluginIdFromRuntimeId(plugin.id), config];
+  }));
 }
 
 async function createDefaultDatabaseRuntimeEnv(scope: Scope, runId: string, allowedCapabilities: RuntimeCapabilityName[]): Promise<DatabaseRuntimeEnv> {
@@ -561,11 +612,29 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
   const initialThread = owningThread;
   const scope: Scope = scopeOverride ?? scopeForThread(owningThread);
   let spaceConfig: RunSpaceConfigSnapshot | null = null;
+  let pluginLock: SpaceRuntimeLock | null = null;
   let deps: ExecutorDeps;
   try {
     spaceConfig = runSpaceConfigSnapshot(run.space_config_snapshot);
+    pluginLock = runPluginLock(run.plugin_lock);
     if (spaceConfig && run.model_ref && run.model_ref !== spaceConfig.model.modelRef) {
       throw new Error('run 的模型与空间配置副本不一致');
+    }
+    if (pluginLock) {
+      if (
+        pluginLock.tenantId !== scope.tenantId
+        || pluginLock.spaceId !== initialThread.space_id
+        || pluginLock.configVersion !== run.space_config_version
+      ) {
+        throw new Error('run 的 plugin_lock 与 tenant/space/config version 不一致');
+      }
+      const lockedIds = pluginLock.plugins.map((plugin) => businessPluginIdFromRuntimeId(plugin.id)).sort();
+      const configuredIds = [...(spaceConfig?.capabilities.businessPlugins ?? [])].sort();
+      if (JSON.stringify(lockedIds) !== JSON.stringify(configuredIds)) {
+        throw new Error('run 的 plugin_lock 与空间配置副本中的业务插件不一致');
+      }
+    } else if (spaceConfig?.capabilities.businessPlugins.length) {
+      throw new Error('run 已选择业务插件但缺少 plugin_lock');
     }
     deps = await defaultDeps(scope, {
       ...depOverrides,
@@ -673,6 +742,8 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
 
   let currentCtx: ContextManager | null = null;
   let currentStepIdx = 0;
+  const mcpSession = new McpClientSession();
+  const runtimeResources: { businessPluginHandle?: BusinessPluginRunHandle } = {};
 
   if (!await store.beginRunExecution(scope, runId)) {
     const current = await store.getRun(scope, runId);
@@ -680,6 +751,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       await emit(null, { type: 'error', step: 0, message: '用户已取消 run。' });
       await store.setRunStatus(scope, runId, 'canceled');
     }
+    await mcpSession.dispose();
     return;
   }
 
@@ -694,6 +766,11 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     console.warn(`[agent] run ${runId} step ${currentStepIdx || 0} provider ${provider.name} failed: ${errorStack(err)}`);
     await emit(null, { type: 'error', step: 0, message });
     await store.setRunStatus(scope, runId, 'error', { error: message });
+  } finally {
+    await Promise.allSettled([
+      mcpSession.dispose(),
+      runtimeResources.businessPluginHandle?.dispose() ?? Promise.resolve(),
+    ]);
   }
 
   // agent 主循环保持为闭包，让 invoke_agent span 包住内部的模型调用和工具执行 span。
@@ -744,11 +821,48 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     const initialArtifacts = await materializeExternalArtifacts();
     const runtimeUserInput = attachExternalArtifactTokens(userInput, initialArtifacts);
     const toolPolicy = createPolicy(toolSettings);
+    if (pluginLock?.plugins.length) {
+      let definitions;
+      try {
+        definitions = await deps.businessPluginRegistry.resolveLock(scope.tenantId, pluginLock);
+      } catch (error) {
+        if (!(error instanceof BusinessPluginError) || error.code !== 'BUSINESS_PLUGIN_NOT_READY') throw error;
+        // 服务重启后内存索引可能只保留新部署；runtime 会优先读取当前 workspace 中按 hash
+        // 保存的 run 副本，并且仅在副本不存在时尝试当前 tenant 部署。
+        definitions = await deps.businessPluginRegistry.list(scope.tenantId);
+      }
+      runtimeResources.businessPluginHandle = await deps.businessPluginRuntime.startRun({
+        runId,
+        workspaceRoot: toolSettings.workspaceRoot,
+        definitions,
+        lock: pluginLock,
+        tenantConfig: businessPluginConfigFromLock(pluginLock),
+        resolveSecrets: deps.businessPluginSecretResolver,
+      });
+    }
     const tenantMcpSettings = deps.mcpSettings ?? (deps.store === defaultStore ? await getMcpSettings(scope) : { servers: [] });
     const allowedMcpServerIds = spaceConfig ? new Set(spaceConfig.capabilities.mcpServers) : null;
-    const mcpSettings = allowedMcpServerIds
+    const selectedTenantMcpSettings = allowedMcpServerIds
       ? { servers: tenantMcpSettings.servers.filter((server) => allowedMcpServerIds.has(server.id)) }
       : tenantMcpSettings;
+    const mcpSettings: McpSettings = {
+      servers: [...selectedTenantMcpSettings.servers, ...(runtimeResources.businessPluginHandle?.mcpServers ?? [])],
+    };
+    const refreshBusinessMcpServers = async (): Promise<void> => {
+      const handle = runtimeResources.businessPluginHandle;
+      if (!handle) return;
+      const businessIds = new Set(handle.mcpServers.map((server) => server.id));
+      const refreshed = await handle.refreshMcpServers();
+      handle.mcpServers.splice(0, handle.mcpServers.length, ...refreshed);
+      mcpSettings.servers = [
+        ...mcpSettings.servers.filter((server) => !businessIds.has(server.id)),
+        ...refreshed,
+      ];
+    };
+    const duplicateMcpId = mcpSettings.servers.find((server, index) => (
+      mcpSettings.servers.findIndex((candidate) => candidate.id === server.id) !== index
+    ))?.id;
+    if (duplicateMcpId) throw new Error(`空间运行时存在重复 MCP Server ID：${duplicateMcpId}`);
     const allowedBuiltinToolNames = spaceConfig
       ? new Set(spaceConfig.capabilities.tools.filter((tool) => spaceConfig!.mode !== 'external' || tool !== ASK_USER_TOOL_NAME))
       : null;
@@ -765,9 +879,24 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         databaseRuntimeSummary = `数据库访问运行环境（run 级）注入失败：${(err as Error).message}`;
       }
     }
-    const skillIndex = await loadSkillIndex(toolSettings.workspaceRoot);
+    const skillIndex = [
+      ...await loadSkillIndex(toolSettings.workspaceRoot),
+      ...(runtimeResources.businessPluginHandle?.skills ?? []),
+    ].sort((a, b) => a.name.localeCompare(b.name) || a.source.localeCompare(b.source));
+    const activateIndexedSkill = async (nameOrId: string): Promise<SkillActivation> => {
+      const skill = selectSkill(skillIndex, nameOrId);
+      if (!skill) throw new Error(`未找到 skill: ${nameOrId}`);
+      return activateSkillItem(skill);
+    };
     const workflowIndex = await loadWorkflowIndex(toolSettings.workspaceRoot);
-    const mcpToolLoader = deps.mcpToolLoader ?? activateMcpServer;
+    const mcpToolLoader = async (settings: McpSettings, serverId: string): Promise<McpActivation> => {
+      if (runtimeResources.businessPluginHandle?.mcpServers.some((server) => server.id === serverId)) {
+        await refreshBusinessMcpServers();
+      }
+      return deps.mcpToolLoader
+        ? deps.mcpToolLoader(settings, serverId)
+        : mcpSession.activate(settings, serverId);
+    };
     const runEvents = await store.getEvents(scope, runId);
     const activeSkills: SkillIndexItem[] = [];
     const activeMcp = new Map<string, McpActivation>();
@@ -968,7 +1097,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         const skillMessages: string[] = [];
         for (const name of skillNames) {
           try {
-            const activation = await activateSkill(toolSettings.workspaceRoot, name);
+            const activation = await activateIndexedSkill(name);
             skillMessages.push(activation.systemMessage);
           } catch (err) {
             skillMessages.push(`Skill "${name}" 加载失败：${(err as Error).message}`);
@@ -1610,7 +1739,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
             try {
               if (call.name === 'skill_activate') {
                 try {
-                  const activation = await activateSkill(toolSettings.workspaceRoot, String(args.id ?? args.name ?? ''));
+                  const activation = await activateIndexedSkill(String(args.id ?? args.name ?? ''));
                   const out = { text: await applySkillActivation(activation) };
                   span.setAttribute('tool.result.length', out.text.length);
                   return out;
@@ -1666,6 +1795,13 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
                 step: stepIdx,
                 mcpSettings,
                 activeMcpServerIds: requestMcpServerIds,
+                mcpCallTool: async (name, input, settings, context) => {
+                  const parsed = parseMcpToolName(name);
+                  if (parsed && runtimeResources.businessPluginHandle?.mcpServers.some((server) => server.id === parsed.serverId)) {
+                    await refreshBusinessMcpServers();
+                  }
+                  return mcpSession.callTool(name, input, settings, context);
+                },
               });
               span.setAttribute('tool.result.length', out.text.length);
               return out;

@@ -351,6 +351,7 @@ bwrap 模式会只读投射动态库和白名单命令，可写投射工作区�
 相关设计和路线见：
 
 - [空间与外部运行平台设计](space-runtime-design.md)
+- [业务插件协议与当前实现](business-plugin-protocol.md)
 - [长任务设计](long-task-design.md)
 - [工具沙箱设计](tool-sandbox.md)
 - [托管 Shell 资源设计](background-shell-design.md)

@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 
-export type SkillSource = 'builtin' | 'user';
+export type SkillSource = 'builtin' | 'user' | 'business';
 
 export interface SkillIndexItem {
   id: string;
@@ -72,7 +72,7 @@ function parseFrontmatterFields(raw: string): Map<string, string> {
   return fields;
 }
 
-function parseFrontmatter(content: string, file: string): { frontmatter: Frontmatter; body: string } {
+export function parseSkillDocument(content: string, file: string): { frontmatter: Frontmatter; body: string } {
   const match = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(content);
   if (!match) throw new Error(`${file} 缺少 SKILL.md YAML frontmatter`);
   const raw = match[1];
@@ -130,14 +130,20 @@ async function sanitizeSkillDir(sourceRoot: string, targetRoot: string): Promise
   await walk(targetRoot);
 }
 
-async function readSkill(root: string, source: SkillSource, readonly: boolean): Promise<SkillIndexItem> {
+export async function readSkillIndexItem(
+  root: string,
+  source: SkillSource,
+  readonly: boolean,
+  id = `${source}:${basename(root)}`,
+  expectedName = basename(root),
+): Promise<SkillIndexItem> {
   const skillPath = join(root, 'SKILL.md');
-  const { frontmatter } = parseFrontmatter(await readFile(skillPath, 'utf8'), skillPath);
-  if (frontmatter.name !== basename(root)) {
-    throw new Error(`${skillPath} 的 name 必须和目录名一致`);
+  const { frontmatter } = parseSkillDocument(await readFile(skillPath, 'utf8'), skillPath);
+  if (frontmatter.name !== expectedName) {
+    throw new Error(`${skillPath} 的 name 必须是 ${expectedName}`);
   }
   return {
-    id: `${source}:${frontmatter.name}`,
+    id,
     name: frontmatter.name,
     description: frontmatter.description,
     source,
@@ -166,11 +172,11 @@ export async function loadSkillIndex(workspaceRoot: string, builtinSourceRoot = 
   for (const sourceDir of await listSkillDirs(builtinSourceRoot)) {
     const targetDir = join(materializedBuiltinRoot, basename(sourceDir));
     await sanitizeSkillDir(sourceDir, targetDir);
-    builtinItems.push(await readSkill(targetDir, 'builtin', true));
+    builtinItems.push(await readSkillIndexItem(targetDir, 'builtin', true));
   }
 
   const userRoot = resolve(workspaceRoot, '.skills');
-  const userItems = await Promise.all((await listSkillDirs(userRoot)).map((dir) => readSkill(dir, 'user', false)));
+  const userItems = await Promise.all((await listSkillDirs(userRoot)).map((dir) => readSkillIndexItem(dir, 'user', false)));
   return [...userItems, ...builtinItems].sort((a, b) => a.name.localeCompare(b.name) || a.source.localeCompare(b.source));
 }
 
@@ -207,12 +213,9 @@ export function selectSkill(skills: SkillIndexItem[], nameOrId: string): SkillIn
   return matches.find((skill) => skill.source === 'user') ?? matches[0];
 }
 
-export async function activateSkill(workspaceRoot: string, nameOrId: string): Promise<SkillActivation> {
-  const skills = await loadSkillIndex(workspaceRoot);
-  const skill = selectSkill(skills, nameOrId);
-  if (!skill) throw new Error(`未找到 skill: ${nameOrId}`);
+export async function activateSkillItem(skill: SkillIndexItem): Promise<SkillActivation> {
   const skillPath = join(skill.root, 'SKILL.md');
-  const { body } = parseFrontmatter(await readFile(skillPath, 'utf8'), skillPath);
+  const { body } = parseSkillDocument(await readFile(skillPath, 'utf8'), skillPath);
   const systemMessage = [
     '当前 run 的 Skill 激活结果 / Skill activation result for the current run:',
     '- 这段入口说明只在当前 run 生效；如果它出现在后续 run 的历史里，不代表仍处于激活状态。',
@@ -225,4 +228,11 @@ export async function activateSkill(workspaceRoot: string, nameOrId: string): Pr
     body.trim() || '（空正文）',
   ].join('\n');
   return { skill, systemMessage };
+}
+
+export async function activateSkill(workspaceRoot: string, nameOrId: string): Promise<SkillActivation> {
+  const skills = await loadSkillIndex(workspaceRoot);
+  const skill = selectSkill(skills, nameOrId);
+  if (!skill) throw new Error(`未找到 skill: ${nameOrId}`);
+  return activateSkillItem(skill);
 }

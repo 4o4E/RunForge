@@ -78,6 +78,7 @@ export interface PluginSetupResult<TService = unknown> {
   dispose?: PluginDisposable;
 }
 
+/** RunForge 自己维护并装入 Cordis 的运行时定义；不是调用方业务插件协议。 */
 export interface RunForgePluginDefinition<TConfig = unknown, TService = unknown> {
   manifest: RunForgePluginManifest;
   configSchema: ZodType<TConfig>;

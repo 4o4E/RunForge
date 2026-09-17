@@ -34,6 +34,7 @@ export class RunAdmissionService {
           parentRunId: input.parentRunId,
           runtimeCapabilitiesSnapshot: resolved.runtimeCapabilitiesSnapshot as unknown as Record<string, unknown>,
           spaceConfigSnapshot: resolved.snapshot as unknown as Record<string, unknown>,
+          pluginLock: resolved.pluginLock as unknown as Record<string, unknown>,
           expectedSpaceConfigVersion: resolved.configVersion,
         });
       } catch (error) {

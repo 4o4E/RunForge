@@ -32,6 +32,7 @@ interface Draft {
   tools: string[];
   inheritMcp: boolean;
   mcpServers: string[];
+  businessPlugins: string[];
   inheritRuntime: boolean;
   runtime: RuntimeCapabilityName[];
   allowTrustedPrompt: boolean;
@@ -65,6 +66,7 @@ function initialDraft(space: SpaceSummary | null, options: SpaceOptions | null):
     tools: config?.capabilities.tools ?? options?.tools ?? [],
     inheritMcp: config?.capabilities.mcpServers == null,
     mcpServers: config?.capabilities.mcpServers ?? options?.mcpServers.map((server) => server.id) ?? [],
+    businessPlugins: config?.capabilities.businessPlugins ?? [],
     inheritRuntime: config?.capabilities.runtime == null,
     runtime: config?.capabilities.runtime ?? options?.runtimeCapabilities ?? [],
     allowTrustedPrompt: config?.external.allowTrustedPrompt ?? false,
@@ -146,12 +148,30 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
     () => (options?.tools ?? []).filter((tool) => draft.mode !== 'external' || tool !== 'ask_user'),
     [draft.mode, options?.tools],
   );
+  const businessPluginValues = useMemo(() => {
+    const available = (options?.businessPlugins ?? []).map((plugin) => ({ id: plugin.id, label: plugin.label }));
+    const availableIds = new Set(available.map((plugin) => plugin.id));
+    return [
+      ...available,
+      ...draft.businessPlugins
+        .filter((id) => !availableIds.has(id))
+        .map((id) => ({ id, label: `${id}（当前不可用）` })),
+    ];
+  }, [draft.businessPlugins, options?.businessPlugins]);
+  const unavailableBusinessPlugins = draft.businessPlugins.filter(
+    (id) => !(options?.businessPlugins ?? []).some((plugin) => plugin.id === id),
+  );
   const defaultModelInvalid = draft.defaultModelRef !== INHERIT_MODEL
     && !draft.inheritModels
     && !draft.allowedModelRefs.includes(draft.defaultModelRef);
   const explicitModelsEmpty = !draft.inheritModels && draft.allowedModelRefs.length === 0;
   const executionUserMissing = draft.mode === 'external' && !draft.executionUserId;
-  const canSave = Boolean(draft.name.trim()) && !defaultModelInvalid && !explicitModelsEmpty && !executionUserMissing && !saving;
+  const canSave = Boolean(draft.name.trim())
+    && !defaultModelInvalid
+    && !explicitModelsEmpty
+    && !executionUserMissing
+    && unavailableBusinessPlugins.length === 0
+    && !saving;
 
   function submit() {
     if (!canSave) return;
@@ -167,6 +187,7 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
       capabilities: {
         tools: draft.inheritTools ? null : draft.tools.filter((tool) => availableTools.includes(tool)),
         mcpServers: draft.inheritMcp ? null : draft.mcpServers,
+        businessPlugins: draft.businessPlugins,
         runtime: draft.inheritRuntime ? null : draft.runtime,
       },
       external: {
@@ -310,6 +331,22 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
           <CapabilitySection label="MCP Server" description="只显示 tenant 当前已启用的 MCP 服务。" inherit={draft.inheritMcp} onInheritChange={(inheritMcp) => setDraft({ ...draft, inheritMcp })}>
             <OptionGrid values={options?.mcpServers ?? []} selected={draft.mcpServers} disabled={draft.inheritMcp} onChange={(mcpServers) => setDraft({ ...draft, mcpServers })} />
           </CapabilitySection>
+
+          <div className="grid gap-2 rounded-md border p-3">
+            <div>
+              <div className="text-sm font-medium">业务插件</div>
+              <div className="text-xs text-muted-foreground">业务插件包含成组的 Skill、MCP 和运行资源，必须显式启用。</div>
+            </div>
+            <OptionGrid
+              values={businessPluginValues}
+              selected={draft.businessPlugins}
+              disabled={false}
+              onChange={(businessPlugins) => setDraft({ ...draft, businessPlugins })}
+            />
+            {unavailableBusinessPlugins.length > 0 && (
+              <div className="text-xs text-destructive">当前不可用的业务插件必须取消选择后才能保存空间。</div>
+            )}
+          </div>
 
           <CapabilitySection label="运行时能力" description="包括数据源临时凭证、LLM、图片和视频能力。" inherit={draft.inheritRuntime} onInheritChange={(inheritRuntime) => setDraft({ ...draft, inheritRuntime })}>
             <OptionGrid

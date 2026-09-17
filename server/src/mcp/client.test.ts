@@ -4,7 +4,66 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { renderToolResult } from './client.js';
+import type { McpServerSettings } from '../settings.js';
+import { McpClientSession, renderToolResult } from './client.js';
+
+function server(id = 'shared'): McpServerSettings {
+  return {
+    id,
+    label: id,
+    description: id,
+    enabled: true,
+    url: 'https://mcp.example.test',
+    bearerToken: 'secret',
+    headers: [],
+    timeoutMs: 60_000,
+    maxOutput: 40_000,
+  };
+}
+
+test('MCP session: 相同 server ID 在不同 run session 中不共享客户端并各自释放', async () => {
+  let connected = 0;
+  let closed = 0;
+  const connector = async () => {
+    connected += 1;
+    return {
+      listTools: async () => ({ tools: [{ name: 'lookup', inputSchema: { type: 'object' as const } }] }),
+      callTool: async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }),
+      close: async () => { closed += 1; },
+    };
+  };
+  const left = new McpClientSession(connector);
+  const right = new McpClientSession(connector);
+
+  await left.activate({ servers: [server()] }, 'shared');
+  await left.activate({ servers: [server()] }, 'shared');
+  await right.activate({ servers: [server()] }, 'shared');
+
+  assert.equal(connected, 2);
+  await Promise.all([left.dispose(), right.dispose()]);
+  assert.equal(closed, 2);
+});
+
+test('MCP session: 同一 run 中认证配置变化会关闭旧连接并重连', async () => {
+  const connectedTokens: string[] = [];
+  let closed = 0;
+  const session = new McpClientSession(async (settings) => {
+    connectedTokens.push(settings.bearerToken);
+    return {
+      listTools: async () => ({ tools: [] }),
+      callTool: async () => ({ content: [] }),
+      close: async () => { closed += 1; },
+    };
+  });
+
+  await session.activate({ servers: [server()] }, 'shared');
+  await session.activate({ servers: [{ ...server(), bearerToken: 'rotated' }] }, 'shared');
+
+  assert.deepEqual(connectedTokens, ['secret', 'rotated']);
+  assert.equal(closed, 1);
+  await session.dispose();
+  assert.equal(closed, 2);
+});
 
 test('renderToolResult: saves MCP image content and returns a markdown image link', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runforge-mcp-image-'));

@@ -110,7 +110,7 @@ export type AgentEvent =
       step: number;
       skillId: string;
       name: string;
-      source: 'builtin' | 'user';
+      source: 'builtin' | 'user' | 'business';
       root: string;
       readonly: boolean;
       hash: string;

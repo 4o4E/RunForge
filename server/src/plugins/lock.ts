@@ -30,7 +30,14 @@ function normalizeJson(value: unknown, path = '$', seen = new Set<object>()): Js
       if (item === undefined || typeof item === 'function' || typeof item === 'symbol' || typeof item === 'bigint') {
         throw new PluginRuntimeError('CONFIG_INVALID', `${path}.${key} 不是可持久化的 JSON 值`);
       }
-      result[key] = normalizeJson(item, `${path}.${key}`, seen);
+      // 不能直接使用 result[key] 赋值：`__proto__` 会触发普通对象的继承 setter，导致该键
+      // 不进入 JSON/hash。defineProperty 保留它作为普通 JSON 自有属性，运行锁才能覆盖完整配置。
+      Object.defineProperty(result, key, {
+        value: normalizeJson(item, `${path}.${key}`, seen),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
     }
     seen.delete(value);
     return result;

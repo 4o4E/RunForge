@@ -754,6 +754,7 @@ export class PgStore implements Store {
           runtime_capabilities_snapshot: nullableJson(options.runtimeCapabilitiesSnapshot),
           space_config_snapshot: requiredJson(options.spaceConfigSnapshot ?? thread.spaces.config),
           space_config_version: thread.spaces.config_version,
+          plugin_lock: nullableJson(options.pluginLock),
         },
       });
 

@@ -69,6 +69,9 @@ importers:
       ai:
         specifier: ^6.0.200
         version: 6.0.201(zod@4.4.3)
+      ajv:
+        specifier: ^8.20.0
+        version: 8.20.0
       cordis:
         specifier: 4.0.0-rc.10
         version: 4.0.0-rc.10
@@ -93,6 +96,9 @@ importers:
       ws:
         specifier: ^8.18.0
         version: 8.21.0
+      yaml:
+        specifier: ^2.9.0
+        version: 2.9.0
       zod:
         specifier: ^4.4.3
         version: 4.4.3

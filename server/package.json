@@ -12,7 +12,7 @@
     "build": "tsc -p tsconfig.json && cp src/llm/model-catalog.json dist/llm/model-catalog.json",
     "start": "node dist/index.js",
     "pretest": "pnpm prisma:generate",
-    "test": "STORE=memory node --import tsx --test src/id.test.ts src/settings.test.ts src/api/auth.test.ts src/api/files.test.ts src/files/threadWorkspace.test.ts src/tools/tools.test.ts src/tools/policy.test.ts src/tools/sandbox.test.ts src/datasources/accountPool.test.ts src/mcp/client.test.ts src/llm/providers.test.ts src/llm/aiSdk.test.ts src/llm/providerRunner.test.ts src/llm/attachments.test.ts src/llm/probe.test.ts src/workflows/registry.test.ts src/plugins/runtime.test.ts src/spaces/config.test.ts src/spaces/access.test.ts src/external/service.test.ts src/agent/executor.test.ts src/agent/compaction.test.ts src/agent/persistence.test.ts src/agent/goal.test.ts src/auth/bootstrap.test.ts src/api/authRoutes.test.ts src/api/tenants.test.ts src/api/spaces.test.ts src/api/system.test.ts",
+    "test": "STORE=memory node --import tsx --test src/id.test.ts src/settings.test.ts src/api/auth.test.ts src/api/files.test.ts src/files/threadWorkspace.test.ts src/tools/tools.test.ts src/tools/policy.test.ts src/tools/sandbox.test.ts src/datasources/accountPool.test.ts src/mcp/client.test.ts src/llm/providers.test.ts src/llm/aiSdk.test.ts src/llm/providerRunner.test.ts src/llm/attachments.test.ts src/llm/probe.test.ts src/workflows/registry.test.ts src/businessPlugins/registry.test.ts src/plugins/runtime.test.ts src/spaces/config.test.ts src/spaces/access.test.ts src/external/service.test.ts src/agent/executor.test.ts src/agent/compaction.test.ts src/agent/persistence.test.ts src/agent/goal.test.ts src/auth/bootstrap.test.ts src/api/authRoutes.test.ts src/api/tenants.test.ts src/api/spaces.test.ts src/api/system.test.ts",
     "preverify:agent-core": "pnpm prisma:generate",
     "verify:agent-core": "tsx src/evals/agentCoreVerification.ts",
     "preverify:prisma-store": "pnpm prisma:generate",
@@ -41,6 +41,7 @@
     "@prisma/client": "7.10.0",
     "@runforge/contracts": "workspace:*",
     "ai": "^6.0.200",
+    "ajv": "^8.20.0",
     "cordis": "4.0.0-rc.10",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
@@ -49,6 +50,7 @@
     "pg": "^8.13.1",
     "web-push": "^3.6.7",
     "ws": "^8.18.0",
+    "yaml": "^2.9.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

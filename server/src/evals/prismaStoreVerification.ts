@@ -169,6 +169,7 @@ try {
     modelRef: resolvedExternal.modelRef,
     spaceConfig: resolvedExternal.snapshot,
     runtimeCapabilities: resolvedExternal.runtimeCapabilitiesSnapshot,
+    pluginLock: resolvedExternal.pluginLock,
   };
   const externalCreateInput = {
     requestHash: `create-hash-${suffix}`,

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Bot, Database, Image, Layers3, LogOut, Shield, ShieldCheck, Users, Wifi, Wrench } from 'lucide-react';
+import { Bot, Database, Image, Layers3, LogOut, Package, Shield, ShieldCheck, Users, Wifi, Wrench } from 'lucide-react';
 import { listSystemTenants, sysAdminLogout } from '../sysAdminApi';
 import type { TenantSummary } from '@runforge/contracts';
 import { Card, CardContent } from '@/components/ui/card';
@@ -15,11 +15,14 @@ import { RuntimeCapabilitySettingsPanel } from './settings/RuntimeCapabilitySett
 import { createSystemDatasourceControlApi, createSystemSettingsControlApi } from '../controlApi';
 import { SpaceManagementPanel } from '@/components/spaces/SpaceManagementPanel';
 import { createSystemSpaceControlApi } from '@/spaceControlApi';
+import { BusinessPluginManagementPanel } from '@/components/businessPlugins/BusinessPluginManagementPanel';
+import { createSystemBusinessPluginControlApi } from '@/businessPluginControlApi';
 
 type SysAdminPanel =
   | 'tenants'
   | 'admins'
   | 'spaces'
+  | 'business-plugins'
   | 'llm-models'
   | 'runtime-capabilities'
   | 'mcp-client'
@@ -48,6 +51,10 @@ export function SysAdminApp() {
   const settingsControlApi = useMemo(() => tenantId ? createSystemSettingsControlApi(tenantId) : null, [tenantId]);
   const datasourceControlApi = useMemo(() => tenantId ? createSystemDatasourceControlApi(tenantId) : null, [tenantId]);
   const spaceControlApi = useMemo(() => tenantId ? createSystemSpaceControlApi(tenantId) : null, [tenantId]);
+  const businessPluginControlApi = useMemo(
+    () => tenantId ? createSystemBusinessPluginControlApi(tenantId) : null,
+    [tenantId],
+  );
   const tenantScoped = isTenantScopedPanel(panel);
   const syncTenants = useCallback((rows: TenantSummary[]) => {
     setTenants(rows);
@@ -98,6 +105,9 @@ export function SysAdminApp() {
               <SectionButton active={panel === 'spaces'} icon={<Layers3 className="h-4 w-4" />} onClick={() => setPanel('spaces')}>
                 空间管理
               </SectionButton>
+              <SectionButton active={panel === 'business-plugins'} icon={<Package className="h-4 w-4" />} onClick={() => setPanel('business-plugins')}>
+                业务插件
+              </SectionButton>
             </NavGroup>
             <NavGroup label="供应商">
               <SectionButton active={panel === 'llm-models'} icon={<Bot className="h-4 w-4" />} onClick={() => setPanel('llm-models')}>
@@ -141,6 +151,7 @@ export function SysAdminApp() {
           )}
           {tenantId && settingsControlApi && panel === 'llm-models' && <LlmProviderSettingsPanel key={`${tenantId}:${panel}`} controlApi={settingsControlApi} />}
           {tenantId && spaceControlApi && panel === 'spaces' && <SpaceManagementPanel key={`${tenantId}:${panel}`} api={spaceControlApi} />}
+          {tenantId && businessPluginControlApi && panel === 'business-plugins' && <BusinessPluginManagementPanel key={`${tenantId}:${panel}`} api={businessPluginControlApi} />}
           {tenantId && settingsControlApi && panel === 'runtime-capabilities' && <RuntimeCapabilitySettingsPanel key={`${tenantId}:${panel}`} controlApi={settingsControlApi} />}
           {tenantId && settingsControlApi && panel === 'mcp-client' && <McpServerSettingsPanel key={`${tenantId}:${panel}`} controlApi={settingsControlApi} />}
           {tenantId && settingsControlApi && panel === 'tools-sandbox' && <ToolsSettingsPanel key={`${tenantId}:${panel}`} controlApi={settingsControlApi} />}

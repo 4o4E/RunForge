@@ -85,6 +85,7 @@ export function createPolicy(cfg: ToolPolicyConfig): ToolPolicy {
     const readonlyAgentRoots = [
       resolve(cfg.workspaceRoot, '.agents/skills'),
       resolve(cfg.workspaceRoot, '.agents/workflows'),
+      resolve(cfg.workspaceRoot, '.agents/business-plugins'),
     ];
 
     // 内置 agent 资源 materialize 后是只读运行时资源；写保护不依赖 sandbox 开关。
@@ -103,7 +104,7 @@ export function createPolicy(cfg: ToolPolicyConfig): ToolPolicy {
     if (meta.kind === 'exec') {
       const command = String(args.command ?? '');
       const mentionsReadonlyAgentRoot = readonlyAgentRoots.some((root) => command.includes(root) || command.includes(root.replace(`${cfg.workspaceRoot}/`, '')));
-      const writeLike = /(^|[;&|]\s*)(rm|mv|cp)\b|>\s*[^&|;]*\.agents\/(?:skills|workflows)|tee\b[^&|;]*\.agents\/(?:skills|workflows)|sed\s+-i\b/.test(command);
+      const writeLike = /(^|[;&|]\s*)(rm|mv|cp)\b|>\s*[^&|;]*\.agents\/(?:skills|workflows|business-plugins)|tee\b[^&|;]*\.agents\/(?:skills|workflows|business-plugins)|sed\s+-i\b/.test(command);
       if (mentionsReadonlyAgentRoot && writeLike) {
         return { ok: false, reason: `内置 agent 资源目录只读：${readonlyAgentRoots.join(', ')}` };
       }

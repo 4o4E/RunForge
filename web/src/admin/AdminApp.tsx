@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, KeyRound, Layers3, LogOut, Users } from 'lucide-react';
+import { ArrowLeft, KeyRound, Layers3, LogOut, Package, Users } from 'lucide-react';
 import { getCurrentUser, logout } from '../api';
 import type { TenantUserSummary } from '@runforge/contracts';
 import { Card, CardContent } from '@/components/ui/card';
@@ -10,8 +10,10 @@ import { AdminUsersPanel } from './panels/AdminUsersPanel';
 import { AdminTokensPanel } from './panels/AdminTokensPanel';
 import { SpaceManagementPanel } from '@/components/spaces/SpaceManagementPanel';
 import { createTenantSpaceControlApi } from '@/spaceControlApi';
+import { BusinessPluginManagementPanel } from '@/components/businessPlugins/BusinessPluginManagementPanel';
+import { createTenantBusinessPluginControlApi } from '@/businessPluginControlApi';
 
-type AdminPanel = 'users' | 'tokens' | 'spaces';
+type AdminPanel = 'users' | 'tokens' | 'spaces' | 'business-plugins';
 
 export function AdminApp() {
   const [user, setUser] = useState<TenantUserSummary | null>(null);
@@ -19,6 +21,10 @@ export function AdminApp() {
   const [panel, setPanel] = useState<AdminPanel>('users');
   const spaceControlApi = useMemo(
     () => user ? createTenantSpaceControlApi(user.tenantId) : null,
+    [user?.tenantId],
+  );
+  const businessPluginControlApi = useMemo(
+    () => user ? createTenantBusinessPluginControlApi(user.tenantId) : null,
     [user?.tenantId],
   );
 
@@ -87,6 +93,9 @@ export function AdminApp() {
               <SectionButton active={panel === 'spaces'} icon={<Layers3 className="h-4 w-4" />} onClick={() => setPanel('spaces')}>
                 空间管理
               </SectionButton>
+              <SectionButton active={panel === 'business-plugins'} icon={<Package className="h-4 w-4" />} onClick={() => setPanel('business-plugins')}>
+                业务插件
+              </SectionButton>
             </NavGroup>
           </CardContent>
         </Card>
@@ -95,6 +104,7 @@ export function AdminApp() {
           {panel === 'users' && <AdminUsersPanel tenantId={user.tenantId} currentUserId={user.id} currentRole={user.role} />}
           {panel === 'tokens' && user.role === 'owner' && <AdminTokensPanel tenantId={user.tenantId} />}
           {panel === 'spaces' && spaceControlApi && <SpaceManagementPanel api={spaceControlApi} />}
+          {panel === 'business-plugins' && businessPluginControlApi && <BusinessPluginManagementPanel api={businessPluginControlApi} />}
         </div>
       </div>
     </main>
