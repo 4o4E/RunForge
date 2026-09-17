@@ -17,7 +17,6 @@ export interface BusinessPluginSecretView {
   key: string;
   description: string;
   required: boolean;
-  access: Array<'backend' | 'workload'>;
   configured: boolean;
 }
 

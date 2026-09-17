@@ -16,6 +16,7 @@ const ID_PREFIXES = {
   datasourceLease: 'dl',
   workloadToken: 'wt',
   runtimeCapabilityCall: 'rc',
+  workloadSecretAccess: 'ws',
   shellSession: 'ss',
   shellCommand: 'sc',
   subagentRun: 'sr',
@@ -25,7 +26,6 @@ const ID_PREFIXES = {
   externalRequest: 'er',
   runInput: 'ri',
   artifact: 'ar',
-  pluginDeployment: 'pd',
   providerInvocation: 'pi',
   providerAttempt: 'pa',
   tenant: 'tn',
@@ -135,6 +135,10 @@ export function newRuntimeCapabilityCallId(): string {
   return newEntityId('runtimeCapabilityCall');
 }
 
+export function newWorkloadSecretAccessId(): string {
+  return newEntityId('workloadSecretAccess');
+}
+
 export function newShellSessionId(): string {
   return newEntityId('shellSession');
 }
@@ -169,10 +173,6 @@ export function newRunInputId(): string {
 
 export function newArtifactId(): string {
   return newEntityId('artifact');
-}
-
-export function newPluginDeploymentId(): string {
-  return newEntityId('pluginDeployment');
 }
 
 export function newProviderInvocationId(): string {

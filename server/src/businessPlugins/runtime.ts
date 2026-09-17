@@ -15,9 +15,14 @@ import type {
   BusinessPluginDefinition,
 } from './types.js';
 
-export type TenantSecretResolver = (
-  tenantId: string,
+export interface TenantSecretRequest {
+  stepId?: string | null,
+  workloadToken?: string | null,
   keys: readonly string[],
+}
+
+export type TenantSecretResolver = (
+  request: TenantSecretRequest,
 ) => Promise<Readonly<Record<string, string>>>;
 
 export interface BusinessPluginRuntimeInput {
@@ -33,7 +38,7 @@ export interface BusinessPluginRuntimeInput {
 export interface BusinessPluginRunHandle {
   skills: SkillIndexItem[];
   mcpServers: McpServerSettings[];
-  refreshMcpServers(): Promise<McpServerSettings[]>;
+  refreshMcpServers(stepId?: string | null): Promise<McpServerSettings[]>;
   dispose(): Promise<void>;
 }
 
@@ -265,10 +270,10 @@ export class BusinessPluginRuntimeService {
           value.definition.id,
         );
       }));
-      const refreshMcpServers = async () => {
+      const refreshMcpServers = async (stepId?: string | null) => {
         if (!runtime.catalog.mcpServers.length) return [];
-        // 一次刷新只读取一次 tenant Secret 快照，避免一个 MCP 调用按 key 重复访问数据库，
-        // 也避免同次装配混用管理员更新前后的两组值。
+        // 一次刷新只读取一次 tenant Secret 快照，避免同一 MCP 调用按 key 重复访问数据库，
+        // 也避免同次装配混用管理员更新前后的两组值。插件声明用于收集所需 key，不是授权。
         const secretKeys = [...new Set(runtime.catalog.mcpServers.flatMap((contribution) => {
           const value = contribution.value as McpContributionValue;
           return [
@@ -276,7 +281,10 @@ export class BusinessPluginRuntimeService {
             ...value.definition.headers.map((header) => header.secretKey),
           ].filter((key): key is string => Boolean(key));
         }))];
-        const secrets = await input.resolveSecrets?.(input.lock.tenantId, secretKeys) ?? {};
+        const secrets = await input.resolveSecrets?.({
+          stepId,
+          keys: secretKeys,
+        }) ?? {};
         return Promise.all(runtime.catalog.mcpServers.map((contribution) => {
           const value = contribution.value as McpContributionValue;
           return resolveMcpServer(

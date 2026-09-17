@@ -47,15 +47,12 @@ async function createPlugin(
     '    path: skills/customer-query',
     'secrets:',
     '  - key: crm.api-key',
-    '    access: [backend, workload]',
     'mcpServers:',
     '  - id: crm',
     '    url: https://mcp.example.test/api',
     '    bearerSecretKey: crm.api-key',
     'resources:',
     '  - type: database.readonly',
-    '    config:',
-    '      profile: reports',
   ].join('\n'));
   return root;
 }
@@ -190,8 +187,8 @@ test('业务插件运行时：materialize 多文件 Skill，并通过 tenant res
     workspaceRoot,
     definitions: [definition],
     lock: runLock(definition),
-    resolveSecrets: async (tenantId, keys) => {
-      requested.push(`${tenantId}:${keys.join(',')}`);
+    resolveSecrets: async ({ keys }) => {
+      requested.push(keys.join(','));
       return { 'crm.api-key': currentSecret };
     },
   });
@@ -202,10 +199,10 @@ test('业务插件运行时：materialize 多文件 Skill，并通过 tenant res
   assert.equal(handle.mcpServers[0]?.bearerToken, '');
   assert.deepEqual(requested, []);
   assert.equal((await handle.refreshMcpServers())[0]?.bearerToken, 'same-tenant-secret');
-  assert.deepEqual(requested, ['tn_business:crm.api-key']);
+  assert.deepEqual(requested, ['crm.api-key']);
   currentSecret = 'rotated-tenant-secret';
   assert.equal((await handle.refreshMcpServers())[0]?.bearerToken, 'rotated-tenant-secret');
-  assert.deepEqual(requested, ['tn_business:crm.api-key', 'tn_business:crm.api-key']);
+  assert.deepEqual(requested, ['crm.api-key', 'crm.api-key']);
 
   await handle.dispose();
   await runtime.dispose();

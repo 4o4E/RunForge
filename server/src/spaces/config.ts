@@ -375,6 +375,20 @@ export class SpaceConfigService {
       catalog.runtimeCapabilities,
       '运行时能力',
     ) as RuntimeCapabilityName[];
+    const definitions = new Map(catalog.businessPluginDefinitions.map((definition) => [definition.manifest.id, definition]));
+    const requiredRuntime = new Set<RuntimeCapabilityName>();
+    for (const pluginId of businessPlugins) {
+      const definition = definitions.get(pluginId);
+      if (!definition) throw new SpaceConfigError(`业务插件不属于当前 tenant 可用目录：${pluginId}`);
+      for (const resource of definition.manifest.resources) {
+        if (resource.type === 'database.readonly') requiredRuntime.add('datasource.credentials');
+        if (resource.type === 'llm.proxy') requiredRuntime.add('llm');
+      }
+    }
+    const missingRuntime = [...requiredRuntime].filter((capability) => !runtime.includes(capability));
+    if (missingRuntime.length) {
+      throw new SpaceConfigError(`业务插件所需运行资源未被空间授权：${missingRuntime.join(', ')}`);
+    }
 
     return {
       schemaVersion: 1,

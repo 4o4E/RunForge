@@ -13,18 +13,15 @@ export interface PublicCredentialResponse {
   connection: Record<string, unknown>;
 }
 
-export interface WorkloadTokenResponse {
-  token: string;
-  id: string;
-  runId: string;
-  skillId: string | null;
-  allowedDatasourceIds: string[];
-  allowedCapabilities: RuntimeCapabilityName[];
-  expiresAt: string;
-}
-
 export interface RuntimeCapabilityCredentialRequest {
   capability: RuntimeCapabilityName;
 }
 
 export interface RuntimeCapabilityCredentialResponse extends RuntimeCapabilityCredential {}
+
+export interface WorkloadSecretResponse {
+  key: string;
+  value: string;
+}
+
+export type WorkloadResourceType = 'database.readonly' | 'llm.proxy';

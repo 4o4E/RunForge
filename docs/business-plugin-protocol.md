@@ -51,7 +51,6 @@ configSchema:
 secrets:
   - key: crm.api-key
     required: true
-    access: [backend]
     description: CRM MCP API Key
 
 mcpServers:
@@ -59,7 +58,8 @@ mcpServers:
     urlConfigKey: endpoint
     bearerSecretKey: crm.api-key
 
-resources: []
+resources:
+  - type: database.readonly
 ```
 
 路径必须留在业务插件目录内，symlink、`..`、绝对路径、重复 ID、未声明 Secret 引用和
@@ -70,6 +70,8 @@ HTTP/HTTPS，并且 `url` 与 `urlConfigKey` 必须二选一。
 
 - tenant owner/admin 和 system admin 可在管理页配置插件的非敏感 JSON 与 tenant Secret。
 - Secret 只按 `tenant + key` 保存当前值；管理 API 只返回“是否已配置”，不回显明文。
+- `key` 是 Secret 的稳定名称，例如 `crm.api-key`。声明用于管理页生成配置项、必填检查和
+  文档说明，不是插件级权限名单。
 - 空间必须显式选择业务插件；新部署插件不会自动进入已有空间。
 - run 接纳时在已有 `runs.plugin_lock` 固定业务插件 ID、内容 hash 和非敏感 tenant 配置。
 - Secret 不进入 `plugin_lock`。业务 MCP 在激活和实际调用前读取 tenant 当前值；值变化时
@@ -81,15 +83,26 @@ HTTP/HTTPS，并且 `url` 与 `urlConfigKey` 必须二选一。
   当前空间，但仍使用 `mcp_activate` 渐进发现工具。
 - MCP Client 按 run 隔离并在 run 完成、失败、取消或等待用户时释放，不按 server ID 在
   进程全局共享。
+- 每个 run 沿用一个 `WORKLOAD_TOKEN` 作为统一系统资源凭证。Skill 脚本通过
+  `@runforge/workload-sdk` 的 `secrets.get(key)`、`resources.acquire("database.readonly")`
+  和 `resources.acquire("llm.proxy")` 获取资源；SDK 不接受 tenant、space 或插件 ID。同一
+  run 同时只有一个活动 token，等待后恢复执行时轮换，不按 Skill 或插件补签。
+- RunForge 会把 SDK 入口复制到当前 workspace 的 `.agents/runforge-workload-sdk/index.mjs`，
+  并通过 `RUNFORGE_WORKLOAD_SDK` 暴露路径，因此调用方维护的业务插件不需要在部署目录中
+  安装 RunForge 依赖。该目录与 Skill、业务插件运行副本一样受工具写保护。
+- Secret SDK 根据 `WORKLOAD_TOKEN` 反查 run 和 tenant，再按 key 读取当前值。一个 run 中
+  的可信脚本共享同一 token；插件声明不限制某个脚本只能读取自己的 key。
+- `database.readonly` 映射现有数据源账号池，只签发只读权限档位；`llm.proxy` 映射现有
+  runtime capability 代理。空间必须授权插件声明所需的系统资源，否则配置保存失败。
+- Secret 每次成功、缺失或异常读取都写入 `workload_secret_access_logs`，记录 tenant、run、
+  step、token、调用路径和 key，不保存 Secret 值。读取和审计在同一事务提交，审计失败不
+  返回明文。
+- run 完成、失败、取消或进入等待时主动撤销 token 并释放数据库租约；后台 reconciler
+  只处理异常退出等兜底场景。
 
 ## 当前未完成
 
-- `access: [workload]` 的长期 Secret 尚未接入 Workload SDK，因此包含这类声明的插件会在
-  管理页显示“待配置”，不能被空间选择。
-- `resources` 运行资源目前只完成 manifest 和 Cordis catalog 的声明链路，尚未
-  接入按业务插件隔离的 Workload SDK 申请/释放；包含资源声明的插件同样不会进入空间可用
-  目录。不能把现有 run 级全局 token 当作插件级授权临时替代。
-- Secret 读取审计尚未持久化。实现 workload Secret 与资源租约时需要先确认相应数据库
-  模型，再增加迁移。
-
-以上限制会显式阻止插件进入空间，不会静默忽略资源或把 Secret 注入模型上下文。
+- 首版 SDK 提供 ESM/Node 客户端和稳定 HTTP 协议；其他语言客户端按真实业务插件需要再补，
+  不提前维护没有调用方的包装库。
+- 标准资源目前只有 `database.readonly` 和 `llm.proxy`。新增类型必须先证明可跨业务复用，
+  再由 RunForge 增加对应的 Cordis 运行资源实现。

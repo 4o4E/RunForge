@@ -330,6 +330,10 @@ test('executeRun: 按 plugin_lock 装配并激活 tenant 业务 Skill', async ()
     assert.equal((await store.getRun(scope, run.id))?.status, 'done');
     assert.equal(sawCatalog, true);
     assert.equal(sawInstructions, true);
+    assert.match(
+      await readFile(join(workspaceRoot, '.agents/runforge-workload-sdk/index.mjs'), 'utf8'),
+      /RunForgeWorkloadClient/,
+    );
     assert.equal((await store.getEvents(scope, run.id)).some((event) => (
       event.type === 'skill_activated' && event.skillId === 'business:crm/customer-query'
     )), true);
@@ -723,7 +727,7 @@ test('executeRun: injects the current workspace root into the LLM context', asyn
   assert.match(systemText, /当前可用目录/);
 });
 
-test('executeRun: injects database workload token at run startup', async () => {
+test('executeRun: injects the unified workload token at run startup', async () => {
   const store = new MemoryStore();
   const thread = await store.createThread(scope);
   const run = await store.createRun(scope, thread.id, 'check datasource env', {
@@ -747,7 +751,7 @@ test('executeRun: injects database workload token at run startup', async () => {
         if (turn === 1) {
           sawRuntimeContext = messages.some((message) => (
             message.role === 'system'
-            && (message.content ?? '').includes('数据库访问运行环境（run 级）')
+            && (message.content ?? '').includes('统一运行资源环境（run 级）')
             && (message.content ?? '').includes('WORKLOAD_TOKEN=已注入')
           ));
           return {
@@ -769,7 +773,7 @@ test('executeRun: injects database workload token at run startup', async () => {
     publish: () => {},
     hardStepCap: 3,
     toolSettings: testToolSettings(),
-    databaseRuntimeEnv: async () => ({
+    workloadRuntimeEnv: async () => ({
       env: {
         WORKLOAD_TOKEN: 'wlt_test_runtime',
         RUNFORGE_RUNTIME_API_BASE: 'http://localhost:8080/api/runtime',
@@ -777,7 +781,7 @@ test('executeRun: injects database workload token at run startup', async () => {
         DATASOURCE_PROFILE: 'readonly',
       },
       summary: [
-        '数据库访问运行环境（run 级）:',
+        '统一运行资源环境（run 级）:',
         '- WORKLOAD_TOKEN=已注入',
         '- DATASOURCE_ID=ds_test',
       ].join('\n'),
@@ -1833,6 +1837,7 @@ test('executeRun: cancels cooperatively at a step boundary', async () => {
   // Flip the run to 'canceling' the moment the loop starts its first step, so the
   // top-of-step check observes it and stops before finalizing.
   let turn = 0;
+  let released = 0;
   await executeRun(run.id, {
     store,
     provider: {
@@ -1846,10 +1851,12 @@ test('executeRun: cancels cooperatively at a step boundary', async () => {
     publish: () => {},
     hardStepCap: 50,
     toolSettings: testToolSettings(),
+    releaseRuntimeResources: async () => { released += 1; return 0; },
   });
 
   const finished = await store.getRun(scope, run.id);
   assert.equal(finished?.status, 'canceled');
+  assert.equal(released, 1);
 });
 
 test('executeRun: ask_user pauses the run and keeps tool pairing intact', async () => {
@@ -1857,6 +1864,7 @@ test('executeRun: ask_user pauses the run and keeps tool pairing intact', async 
   const thread = await store.createThread(scope);
   const run = await store.createRun(scope, thread.id, 'needs clarification');
   const published: AgentEvent[] = [];
+  let released = 0;
 
   await executeRun(run.id, {
     store,
@@ -1879,10 +1887,12 @@ test('executeRun: ask_user pauses the run and keeps tool pairing intact', async 
     publish: (_id, e) => published.push(e),
     hardStepCap: 3,
     toolSettings: testToolSettings(),
+    releaseRuntimeResources: async () => { released += 1; return 0; },
   });
 
   const paused = await store.getRun(scope, run.id);
   assert.equal(paused?.status, 'waiting_for_user');
+  assert.equal(released, 1);
   assert.ok(published.some((e) => e.type === 'user_question' && e.question === '继续吗？'));
   const question = published.find((e) => e.type === 'user_question');
   assert.equal(question?.type === 'user_question' ? question.spec?.mode : undefined, 'single');

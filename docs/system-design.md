@@ -247,7 +247,8 @@ PostgreSQL 以执行过程为核心建模：
 - `app_settings`：运行时工具配置，env 只作为初始默认值或兜底。
 - `subagent_runs`：主 agent 派发的异步只读子任务，保存 task assignment、stage、skill、输出和 usage。
 - `shell_sessions`、`shell_commands`、`shell_command_logs`、`shell_session_events`：托管 shell 会话、命令、增量日志和审计事件。
-- `datasources`、`datasource_permission_profiles`、`datasource_accounts`、`workload_tokens`、`datasource_account_leases`：数据源账号池和短期凭证租约。
+- `datasources`、`datasource_permission_profiles`、`datasource_accounts`、`workload_tokens`、`datasource_account_leases`：统一 run 级系统资源 token、数据源账号池和短期凭证租约。
+- `workload_secret_access_logs`：通过 workload token 读取 tenant Secret 的审计，只保存上下文、key 和结果，不保存明文。
 
 重要约束：
 

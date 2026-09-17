@@ -136,6 +136,35 @@ test('space config: run 接纳解析显式能力并从 external 空间双重移�
   assert.deepEqual(resolved.runtimeCapabilitiesSnapshot.image.models, [{ id: 'image-main', label: 'Image Main' }]);
 });
 
+test('space config: 业务插件声明的系统资源必须由空间统一 WORKLOAD_TOKEN 授权', async () => {
+  const resourcePlugin = structuredClone(businessPlugin);
+  resourcePlugin.manifest.resources = [{ type: 'llm.proxy' }];
+  const service = new SpaceConfigService(async () => ({
+    ...structuredClone(catalog),
+    businessPluginDefinitions: [resourcePlugin],
+    runtimeCapabilities: ['datasource.credentials', 'llm', 'image'],
+    runtimeSettings: {
+      ...structuredClone(catalog.runtimeSettings),
+      llm: {
+        enabled: true,
+        defaultModelId: 'runtime-main',
+        models: [{ id: 'runtime-main', label: 'Runtime Main', modelRef: 'main:model-a' }],
+      },
+    },
+  }));
+
+  await assert.rejects(
+    service.normalizeForSave('tn_config', 'web', {
+      capabilities: { businessPlugins: ['crm'], runtime: ['image'] },
+    }),
+    /业务插件所需运行资源未被空间授权：llm/,
+  );
+  const accepted = await service.normalizeForSave('tn_config', 'web', {
+    capabilities: { businessPlugins: ['crm'], runtime: ['llm'] },
+  });
+  assert.deepEqual(accepted.capabilities.runtime, ['llm']);
+});
+
 test('space config: 继承的 instance 预算也不能超过模型窗口', async () => {
   const service = new SpaceConfigService(async () => ({
     ...structuredClone(catalog),

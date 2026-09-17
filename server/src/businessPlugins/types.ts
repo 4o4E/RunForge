@@ -1,4 +1,4 @@
-export type BusinessSecretAccess = 'backend' | 'workload';
+import type { WorkloadResourceType } from '@runforge/contracts';
 
 export interface BusinessSkillDeclaration {
   id: string;
@@ -27,13 +27,11 @@ export interface BusinessMcpServerDeclaration {
 export interface BusinessSecretDeclaration {
   key: string;
   required: boolean;
-  access: BusinessSecretAccess[];
   description: string;
 }
 
 export interface BusinessResourceDeclaration {
-  type: string;
-  config: Record<string, unknown>;
+  type: WorkloadResourceType;
 }
 
 /**

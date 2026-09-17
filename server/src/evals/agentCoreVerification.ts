@@ -406,9 +406,9 @@ async function runScenario(store: Store, baseToolSettings: ToolSettings, root: s
       generateThreadTitle: false,
       toolSettings: verificationToolSettings(baseToolSettings, workspaceRoot),
       mcpSettings: { servers: [] },
-      databaseRuntimeEnv: async () => ({
-        env: {},
-        summary: 'Agent core verification: database runtime is intentionally disabled for this scenario.\nAgent 核心验收：本场景故意不注入数据库运行凭证。',
+      workloadRuntimeEnv: async () => ({
+        env: { WORKLOAD_TOKEN: 'wlt_agent_core_verification' },
+        summary: 'Agent core verification: external workload resources are intentionally disabled for this scenario.\nAgent 核心验收：本场景不调用外部运行资源。',
       }),
       publish: () => {},
     });

@@ -255,12 +255,12 @@ test('shell inherits host PATH but not backend secret environment', async () => 
   }
 });
 
-test('shell blocks database CLI before database-access injects a workload token', async () => {
+test('shell blocks database CLI when the run workload token is missing', async () => {
   const blocked = text(await shellTool.run(
     { command: 'psql "$DATABASE_URL" -c "select 1"' },
     { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }) },
   ));
-  assert.match(blocked, /database-access/);
+  assert.match(blocked, /初始化异常/);
   assert.match(blocked, /WORKLOAD_TOKEN/);
 
   const allowed = text(await shellTool.run(
@@ -270,21 +270,21 @@ test('shell blocks database CLI before database-access injects a workload token'
   assert.equal(allowed, 'ok');
 });
 
-test('shell blocks database-access SDK scripts before workload token injection', async () => {
+test('shell blocks database-access SDK scripts when the run workload token is missing', async () => {
   const command = `python3 ${dir}/.agents/skills/database-access/scripts/psql_query.py --sql "select 1"`;
   assert.equal(requiresDatabaseAccess(command), true);
   const blockedShell = text(await shellTool.run(
     { command },
     { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }) },
   ));
-  assert.match(blockedShell, /database-access/);
+  assert.match(blockedShell, /初始化异常/);
   assert.match(blockedShell, /WORKLOAD_TOKEN/);
 
   const blockedManaged = text(await shellExecTool.run(
     { sessionId: 'ss_test', command, wait: 'foreground' },
     { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir, shellUseHostPath: true }), threadId: 'th_test' },
   ));
-  assert.match(blockedManaged, /database-access/);
+  assert.match(blockedManaged, /初始化异常/);
   assert.match(blockedManaged, /WORKLOAD_TOKEN/);
 });
 

@@ -156,14 +156,14 @@ export function BusinessPluginManagementPanel({ api }: { api: BusinessPluginCont
               <div className="grid gap-3">
                 <div>
                   <div className="text-sm font-medium">Tenant Secret</div>
-                  <div className="text-xs text-muted-foreground">输入框不会回显当前值；留空表示不变，清除按钮会删除当前值。</div>
+                  <div className="text-xs text-muted-foreground">key 是 tenant 级 Secret 名称；同名 key 只有一个当前值。插件声明用于配置提示，不限制运行脚本按 key 读取。输入框不会回显当前值；留空表示不变，清除按钮会删除当前值。</div>
                 </div>
                 {selected.secrets.map((secret) => (
                   <div key={secret.key} className="grid gap-2 rounded-md border p-3">
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <div className="text-sm font-medium">{secret.key}</div>
-                        <div className="text-xs text-muted-foreground">{secret.description || '无描述'} · {secret.access.join(', ')}</div>
+                        <div className="text-xs text-muted-foreground">{secret.description || '无描述'}</div>
                       </div>
                       <Badge variant={clearSecrets.has(secret.key) || !secret.configured ? 'outline' : 'secondary'}>
                         {clearSecrets.has(secret.key) || !secret.configured ? '未配置' : '已配置'}

@@ -13,6 +13,7 @@ import {
 import { estimateTokens, maskPlaceholder, totalChars } from './compaction.js';
 
 interface RuntimeCapabilitiesContextSettings {
+  allowedCapabilities?: string[];
   llm: { enabled: boolean; models: Array<{ id: string }> };
   image: { enabled: boolean; models: Array<{ id: string }> };
   video: { enabled: boolean; models: Array<{ id: string }> };
@@ -76,19 +77,21 @@ export function renderRuntimeContext(info: RuntimeContextInfo): string {
 export function renderRuntimeCapabilitiesContext(settings: RuntimeCapabilitiesContextSettings): string {
   const lines = ['运行时内部能力 / Runtime internal capabilities:'];
   const enabled: string[] = [];
+  if (settings.allowedCapabilities?.includes('datasource.credentials')) enabled.push('datasource.credentials');
   if (settings.llm.enabled) enabled.push('llm');
   if (settings.image.enabled) enabled.push('image');
   if (settings.video.enabled) enabled.push('video');
-  if (!enabled.length) return `${lines[0]}\n- 当前没有启用可通过 WORKLOAD_TOKEN 换取的额外内部能力。`;
   lines.push(
     '- WORKLOAD_TOKEN 是本次 run 的短期能力令牌；只能在脚本或程序代码里作为 Authorization Bearer 使用，不要输出、日志打印或写入仓库文件。',
     '- WORKLOAD_TOKEN is a short-lived capability token for this run; use it only in code as an Authorization Bearer token, and never print it, log it, or write it into repo files.',
-    '- SDK/helper 只负责换取短期能力凭证和内部代理端点配置，不封装 chat/image/video 调用；调用方代码自行选择 fetch、OpenAI SDK、Packy 兼容 SDK 或其它依赖。',
+    '- RUNFORGE_WORKLOAD_SDK 指向 RunForge 注入的统一 SDK；业务脚本可以动态 import 该入口，不需要在插件目录安装 RunForge 依赖。',
+    '- secrets.get(key) 按 key 读取当前 tenant 配置值；插件声明用于管理员配置和缺失提示，不是插件级 Secret 权限。Secret 只能在脚本内部使用，不能输出到模型上下文、日志或文件。',
+    '- SDK 的 resources.acquire 只负责换取短期数据库凭证和内部代理端点配置，不封装 chat/image/video 调用；调用方代码自行选择 fetch、OpenAI SDK、Packy 兼容 SDK或其它依赖。',
     '- The SDK/helper only provides temporary credentials and internal proxy endpoint config; it does not wrap chat/image/video calls. Caller code chooses fetch, OpenAI SDK, Packy-compatible SDK, or other dependencies.',
     '- 先用 SDK 获取能力凭证，SDK 会从 RUNFORGE_RUNTIME_API_BASE 推导 runtime-capabilities 代理端点；不要向模型或最终回复展示凭证内容。',
     '- 调用 llm/image/video 代理时，使用凭证返回的 models[].id，通过请求体 model 或 modelId 选择模型；不要依赖平台内部 modelRef 或上游真实密钥。',
     '- When calling llm/image/video proxy endpoints, choose models with models[].id via request body model or modelId; do not depend on internal modelRef or upstream API keys.',
-    `- 已启用能力 / Enabled capabilities: ${enabled.join(', ')}.`,
+    `- 已启用运行资源 / Enabled runtime resources: ${enabled.join(', ') || '无'}；tenant Secret 读取仍通过同一个 WORKLOAD_TOKEN。`,
   );
   if (settings.llm.enabled) lines.push(`- LLM: 可换取 llm 能力凭证，调用内部 /api/runtime-capabilities/llm/* 代理端点；可选模型 id: ${settings.llm.models.map((model) => model.id).join(', ') || '未配置'}。`);
   if (settings.image.enabled) lines.push(`- Image: 可换取 image 能力凭证，内部代理会适配 Packy GPT-Image-2；可选模型 id: ${settings.image.models.map((model) => model.id).join(', ') || '未配置'}。`);

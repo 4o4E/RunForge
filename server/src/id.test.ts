@@ -6,7 +6,7 @@ import {
   newExternalRequestId,
   newExternalTokenId,
   newId,
-  newPluginDeploymentId,
+  newWorkloadSecretAccessId,
   newProviderAttemptId,
   newProviderInvocationId,
   newRunId,
@@ -35,7 +35,7 @@ test('entity ids: include stable two-letter prefixes', () => {
   assert.match(newExternalRequestId(), /^er_[0-9A-Za-z]+$/);
   assert.match(newRunInputId(), /^ri_[0-9A-Za-z]+$/);
   assert.match(newArtifactId(), /^ar_[0-9A-Za-z]+$/);
-  assert.match(newPluginDeploymentId(), /^pd_[0-9A-Za-z]+$/);
+  assert.match(newWorkloadSecretAccessId(), /^ws_[0-9A-Za-z]+$/);
   assert.match(newProviderInvocationId(), /^pi_[0-9A-Za-z]+$/);
   assert.match(newProviderAttemptId(), /^pa_[0-9A-Za-z]+$/);
 });

@@ -70,7 +70,6 @@ export interface WorkloadTokenRow {
   id: string;
   token_hash: string;
   run_id: string;
-  skill_id: string | null;
   allowed_datasources: string[];
   allowed_capabilities: RuntimeCapabilityName[];
   expires_at: string;

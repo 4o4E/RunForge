@@ -6,8 +6,8 @@ import { join } from 'node:path';
 import { pool } from '../db/pool.js';
 import { prisma } from '../db/prisma.js';
 import { PgStore } from '../store/pgStore.js';
-import { findSetting, upsertSettings } from '../store/settingsRepository.js';
-import { tenantSettingsTemplateEntries } from '../settings.js';
+import { findSetting, updateSettingAtomically, upsertSettings } from '../store/settingsRepository.js';
+import { getToolSettings, tenantSettingsTemplateEntries } from '../settings.js';
 import { DefaultSpaceImmutableError, RunActiveError } from '../store/types.js';
 import { newArtifactId, newSpaceId } from '../id.js';
 import { SpaceAccessService } from '../spaces/access.js';
@@ -22,6 +22,20 @@ import { externalArtifactRemotePath } from '../external/artifactProtocol.js';
 import { ProviderRunner } from '../llm/providerRunner.js';
 import { PrismaProviderObservationRepository } from '../llm/observability/repository.js';
 import type { Provider } from '../llm/types.js';
+import express from 'express';
+import type { Server } from 'node:http';
+import {
+  acquireCredential,
+  createDatasource,
+  createPermissionProfile,
+  createWorkloadToken,
+  DatasourceError,
+  validateWorkloadToken,
+} from '../datasources/accountPool.js';
+import { runtimeApi } from '../api/runtime.js';
+import { RunForgeWorkloadClient } from '@runforge/workload-sdk';
+import { readAuditedWorkloadSecrets } from '../businessPlugins/secretService.js';
+import { executeRun } from '../agent/executor.js';
 
 const suffix = randomUUID().replaceAll('-', '').slice(0, 12);
 const tenantId = `prisma-verify-${suffix}`;
@@ -34,6 +48,7 @@ const spaceAccess = new SpaceAccessService(store, spaceConfig);
 const runAdmission = new RunAdmissionService(store, spaceConfig);
 const externalRepository = new PrismaExternalRepository();
 const artifactVerificationRoot = await mkdtemp(join(tmpdir(), 'runforge-prisma-artifact-'));
+let runtimeServer: Server | null = null;
 
 try {
   const provisioned = await store.createTenantWithOwner({
@@ -428,6 +443,141 @@ try {
   });
   assert.equal((await store.getRun(scope, run.id))?.goal_state?.intent, '验证 Prisma Store');
   const step = await store.createStep(scope, run.id, 1);
+  await upsertSettings(tenantId, [{
+    key: 'businessPlugins.settings',
+    value: {
+      schemaVersion: 1,
+      plugins: {},
+      secrets: {
+        'crm.api-key': 'tenant-current-secret',
+        'shared.operations-key': 'tenant-shared-secret',
+      },
+    },
+  }]);
+  const guardedDatasource = await createDatasource(scope, {
+    name: 'workload-readonly-verification',
+    type: 'postgres',
+    connection: { host: '127.0.0.1', port: 5432, database: 'unused' },
+    adminConfig: {},
+  });
+  await createPermissionProfile(scope, guardedDatasource.id, {
+    name: 'writer',
+    mode: 'limited_write',
+  });
+  const workload = await createWorkloadToken(scope, {
+    runId: run.id,
+    allowedDatasourceIds: [guardedDatasource.id],
+    allowedCapabilities: ['datasource.credentials'],
+  });
+  await assert.rejects(
+    acquireCredential(workload.token, guardedDatasource.id, 'writer'),
+    (error: unknown) => error instanceof DatasourceError && error.status === 403,
+  );
+  const runtimeApp = express();
+  runtimeApp.use(express.json());
+  runtimeApp.use('/api/runtime', runtimeApi);
+  runtimeServer = runtimeApp.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve, reject) => {
+    runtimeServer!.once('listening', resolve);
+    runtimeServer!.once('error', reject);
+  });
+  const runtimeAddress = runtimeServer.address();
+  assert.ok(runtimeAddress && typeof runtimeAddress === 'object');
+  const workloadClient = new RunForgeWorkloadClient({
+    token: workload.token,
+    runtimeApiBase: `http://127.0.0.1:${runtimeAddress.port}/api/runtime`,
+    stepId: step.id,
+  });
+  assert.equal(await workloadClient.secrets.get('crm.api-key'), 'tenant-current-secret');
+  assert.equal(await workloadClient.secrets.get('shared.operations-key'), 'tenant-shared-secret');
+  await assert.rejects(workloadClient.secrets.get('missing.key'), /tenant Secret 未配置/);
+  assert.equal(
+    (await readAuditedWorkloadSecrets(workload.token, 'backend', step.id, ['crm.api-key']))['crm.api-key'],
+    'tenant-current-secret',
+  );
+  const secretAudits = await prisma.workload_secret_access_logs.findMany({
+    where: { token_id: workload.row.id },
+  });
+  assert.equal(secretAudits.length, 4);
+  assert.equal(secretAudits.some((audit) => audit.accessor === 'workload' && audit.secret_key === 'crm.api-key' && audit.status === 'success'), true);
+  assert.equal(secretAudits.some((audit) => audit.accessor === 'workload' && audit.secret_key === 'shared.operations-key' && audit.status === 'success'), true);
+  assert.equal(secretAudits.some((audit) => audit.accessor === 'workload' && audit.secret_key === 'missing.key' && audit.status === 'error'), true);
+  assert.equal(secretAudits.some((audit) => audit.accessor === 'backend' && audit.secret_key === 'crm.api-key' && audit.status === 'success'), true);
+  assert.equal(JSON.stringify(secretAudits).includes('tenant-current-secret'), false);
+  assert.equal(JSON.stringify(secretAudits).includes('tenant-shared-secret'), false);
+  const rotatedWorkloads = await Promise.all([
+    createWorkloadToken(scope, {
+      runId: run.id,
+      allowedDatasourceIds: [guardedDatasource.id],
+      allowedCapabilities: ['datasource.credentials'],
+    }),
+    createWorkloadToken(scope, {
+      runId: run.id,
+      allowedDatasourceIds: [guardedDatasource.id],
+      allowedCapabilities: ['datasource.credentials'],
+    }),
+  ]);
+  await assert.rejects(
+    validateWorkloadToken(workload.token),
+    (error: unknown) => error instanceof DatasourceError && error.status === 401,
+  );
+  const rotatedValidations = await Promise.allSettled(
+    rotatedWorkloads.map((item) => validateWorkloadToken(item.token)),
+  );
+  assert.equal(rotatedValidations.filter((item) => item.status === 'fulfilled').length, 1);
+  assert.equal(await prisma.workload_tokens.count({
+    where: { run_id: run.id, revoked_at: null },
+  }), 1);
+  const waitingThread = await store.createThread(scope, 'Workload 等待失效验证');
+  const waitingRun = await store.createRun(scope, waitingThread.id, '等待期间撤销 token');
+  assert.equal(await store.beginRunExecution(scope, waitingRun.id), true);
+  const waitingToken = await createWorkloadToken(scope, {
+    runId: waitingRun.id,
+    allowedDatasourceIds: [],
+    allowedCapabilities: [],
+  });
+  await store.setRunStatus(scope, waitingRun.id, 'waiting_for_user');
+  await assert.rejects(
+    validateWorkloadToken(waitingToken.token),
+    (error: unknown) => error instanceof DatasourceError && error.status === 401,
+  );
+
+  await Promise.all([
+    updateSettingAtomically(tenantId, 'prisma.concurrent-setting', (current) => ({
+      ...(current && typeof current === 'object' ? current : {}),
+      left: true,
+    })),
+    updateSettingAtomically(tenantId, 'prisma.concurrent-setting', (current) => ({
+      ...(current && typeof current === 'object' ? current : {}),
+      right: true,
+    })),
+  ]);
+  assert.deepEqual(await findSetting(tenantId, 'prisma.concurrent-setting'), { left: true, right: true });
+  const cleanupThread = await store.createThread(scope, '默认执行器资源清理验证');
+  const cleanupRun = await store.createRun(scope, cleanupThread.id, '完成后撤销统一 token');
+  const cleanupToolSettings = await getToolSettings(scope);
+  await executeRun(cleanupRun.id, {
+    provider: {
+      name: 'resource-cleanup-verification',
+      async complete() {
+        return { content: 'cleanup done', toolCalls: [] };
+      },
+    },
+    stream: false,
+    publish: () => {},
+    hardStepCap: 2,
+    generateThreadTitle: false,
+    mcpSettings: { servers: [] },
+    toolSettings: {
+      ...cleanupToolSettings,
+      workspaceRoot: join(artifactVerificationRoot, 'cleanup-workspace'),
+    },
+  });
+  assert.equal((await store.getRun(scope, cleanupRun.id))?.status, 'done');
+  const cleanupTokens = await prisma.workload_tokens.findMany({ where: { run_id: cleanupRun.id } });
+  assert.equal(cleanupTokens.length, 1);
+  assert.equal(cleanupTokens[0]?.revoked_at != null, true);
+
   const verificationProvider: Provider = {
     name: 'prisma-verification',
     async complete(_messages, _tools, options) {
@@ -570,12 +720,15 @@ try {
     runId: run.id,
     messageCount: await store.countRunMessages(scope, run.id),
     providerAttemptCount: await prisma.provider_attempts.count({ where: { invocation_id: providerInvocation!.id } }),
+    workloadSecretAuditCount: secretAudits.length,
   }));
 } finally {
+  if (runtimeServer) await new Promise<void>((resolve) => runtimeServer!.close(() => resolve()));
   await rm(artifactVerificationRoot, { recursive: true, force: true });
   await prisma.app_settings.deleteMany({ where: { tenant_id: tenantId } });
   await prisma.threads.deleteMany({ where: { tenant_id: tenantId } });
   await prisma.auth_tokens.deleteMany({ where: { tenant_id: tenantId } });
+  await prisma.datasources.deleteMany({ where: { tenant_id: tenantId } });
   await prisma.tenants.updateMany({ where: { id: tenantId }, data: { default_space_id: null } });
   await prisma.spaces.deleteMany({ where: { tenant_id: tenantId } });
   await prisma.users.deleteMany({ where: { tenant_id: tenantId } });

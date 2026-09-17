@@ -1,5 +1,7 @@
 import type { PoolClient } from 'pg';
 import { pool, query } from '../db/pool.js';
+import { prisma } from '../db/prisma.js';
+import { Prisma } from '../generated/prisma/client.js';
 import {
   newDatasourceAccountId,
   newDatasourceId,
@@ -25,7 +27,9 @@ import type {
   WorkloadTokenRow,
 } from './types.js';
 
-const TERMINAL_RUN_STATUSES = new Set(['done', 'error', 'canceling', 'canceled']);
+// waiting_for_user 虽然不是 run 终态，但等待期间不应继续持有 token 或数据库租约；回答后
+// executor 会先把 run 恢复为活动状态，再签发新的 token。
+const WORKLOAD_INACTIVE_RUN_STATUSES = new Set(['done', 'error', 'canceling', 'canceled', 'waiting_for_user']);
 export const DATASOURCE_CREDENTIAL_CAPABILITY: RuntimeCapabilityName = 'datasource.credentials';
 export const RUNTIME_CAPABILITY_NAMES: RuntimeCapabilityName[] = ['datasource.credentials', 'llm', 'image', 'video'];
 const DEFAULT_TOKEN_TTL_SECONDS = 30 * 60;
@@ -87,6 +91,28 @@ function capabilityList(value: unknown, fallback: RuntimeCapabilityName[]): Runt
 
 export function tokenAllowsCapability(token: WorkloadTokenRow, capability: RuntimeCapabilityName): boolean {
   return token.allowed_capabilities.includes(capability);
+}
+
+function toWorkloadTokenRow(row: {
+  id: string;
+  token_hash: string;
+  run_id: string;
+  allowed_datasources: string[];
+  allowed_capabilities: string[];
+  expires_at: Date;
+  revoked_at: Date | null;
+  created_at: Date;
+}): WorkloadTokenRow {
+  return {
+    id: row.id,
+    token_hash: row.token_hash,
+    run_id: row.run_id,
+    allowed_datasources: row.allowed_datasources,
+    allowed_capabilities: row.allowed_capabilities as RuntimeCapabilityName[],
+    expires_at: row.expires_at.toISOString(),
+    revoked_at: row.revoked_at?.toISOString() ?? null,
+    created_at: row.created_at.toISOString(),
+  };
 }
 
 function usernameSlug(value: string): string {
@@ -324,33 +350,51 @@ async function tenantIdForRun(runId: string): Promise<string> {
   return thread.tenant_id;
 }
 
-export async function createWorkloadToken(scope: Scope, input: unknown): Promise<{ token: string; row: WorkloadTokenRow }> {
-  const body = jsonObject(input);
-  const runId = stringValue(body.runId);
+interface WorkloadTokenGrant {
+  runId: string;
+  allowedDatasourceIds: string[];
+  allowedCapabilities: RuntimeCapabilityName[];
+  ttlSeconds?: number;
+}
+
+export async function createWorkloadToken(scope: Scope, grant: WorkloadTokenGrant): Promise<{ token: string; row: WorkloadTokenRow }> {
+  const runId = grant.runId.trim();
   if (!runId) throw new DatasourceError(400, 'runId 为必填');
   const run = await store.getRun(scope, runId);
   if (!run) throw new DatasourceError(404, 'run 不存在');
-  if (TERMINAL_RUN_STATUSES.has(run.status)) throw new DatasourceError(409, `run 当前状态为 ${run.status}，不能签发 token`);
-
-  const allowed = Array.isArray(body.allowedDatasourceIds)
-    ? body.allowedDatasourceIds.map((item) => String(item).trim()).filter(Boolean)
-    : [];
-  const allowedCapabilities = capabilityList(
-    body.allowedCapabilities,
-    allowed.length ? [DATASOURCE_CREDENTIAL_CAPABILITY] : [],
-  );
-  const ttlSeconds = numberValue(body.ttlSeconds, DEFAULT_TOKEN_TTL_SECONDS);
-  const token = generateWorkloadToken();
+  if (WORKLOAD_INACTIVE_RUN_STATUSES.has(run.status)) throw new DatasourceError(409, `run 当前状态为 ${run.status}，不能签发 token`);
+  const allowed = [...new Set(grant.allowedDatasourceIds.map((item) => item.trim()).filter(Boolean))];
+  const allowedCapabilities = capabilityList(grant.allowedCapabilities, []);
+  const ttlSeconds = numberValue(grant.ttlSeconds, DEFAULT_TOKEN_TTL_SECONDS);
   const expiresAt = secondsFromNow(ttlSeconds);
-  const id = newWorkloadTokenId();
-
-  const { rows } = await query<WorkloadTokenRow>(
-    `INSERT INTO workload_tokens (id, token_hash, run_id, skill_id, allowed_datasources, allowed_capabilities, expires_at)
-     VALUES ($1, $2, $3, $4, $5::text[], $6::text[], $7)
-     RETURNING *`,
-    [id, hashWorkloadToken(token), runId, stringValue(body.skillId) || null, allowed, allowedCapabilities, expiresAt],
-  );
-  return { token, row: rows[0] };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const token = generateWorkloadToken();
+    try {
+      const created = await prisma.$transaction(async (tx) => {
+        // 一个 run 同时只保留一个活动 token；恢复执行会轮换 token，而不是按 Skill
+        // 继续签发。Serializable 隔离让并发签发竞争时至少一方重试整个轮换过程。
+        await tx.workload_tokens.updateMany({
+          where: { run_id: runId, revoked_at: null },
+          data: { revoked_at: new Date() },
+        });
+        return tx.workload_tokens.create({
+          data: {
+            id: newWorkloadTokenId(),
+            token_hash: hashWorkloadToken(token),
+            run_id: runId,
+            allowed_datasources: allowed,
+            allowed_capabilities: allowedCapabilities,
+            expires_at: expiresAt,
+          },
+        });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      return { token, row: toWorkloadTokenRow(created) };
+    } catch (error) {
+      const code = error && typeof error === 'object' ? (error as { code?: string }).code : undefined;
+      if (attempt === 2 || (code !== 'P2034' && code !== 'P2002')) throw error;
+    }
+  }
+  throw new Error('run workload token 并发签发重试耗尽');
 }
 
 export async function requireWorkloadCapability(rawToken: string, capability: RuntimeCapabilityName): Promise<ValidatedWorkloadToken> {
@@ -361,19 +405,16 @@ export async function requireWorkloadCapability(rawToken: string, capability: Ru
 
 export async function validateWorkloadToken(rawToken: string): Promise<ValidatedWorkloadToken> {
   const tokenHash = hashWorkloadToken(rawToken);
-  const { rows } = await query<WorkloadTokenRow & { run_status: string }>(
-    `SELECT wt.*, r.status AS run_status
-     FROM workload_tokens wt
-     JOIN runs r ON r.id = wt.run_id
-     WHERE wt.token_hash = $1`,
-    [tokenHash],
-  );
-  const row = rows[0];
+  const stored = await prisma.workload_tokens.findUnique({
+    where: { token_hash: tokenHash },
+    include: { runs: { select: { status: true } } },
+  });
+  const row = stored ? toWorkloadTokenRow(stored) : null;
   if (!row) throw new DatasourceError(401, 'workload token 无效');
   if (row.revoked_at) throw new DatasourceError(401, 'workload token 已撤销');
   if (new Date(row.expires_at).getTime() <= Date.now()) throw new DatasourceError(401, 'workload token 已过期');
-  if (TERMINAL_RUN_STATUSES.has(row.run_status)) throw new DatasourceError(401, `run 已结束，workload token 失效`);
-  return { token: row, runStatus: row.run_status };
+  if (WORKLOAD_INACTIVE_RUN_STATUSES.has(stored!.runs.status)) throw new DatasourceError(401, `run 当前状态为 ${stored!.runs.status}，workload token 失效`);
+  return { token: row, runStatus: stored!.runs.status };
 }
 
 async function loadDatasourceAndProfile(datasourceId: string, profileName: string): Promise<{
@@ -552,8 +593,10 @@ async function disableRemoteAccount(datasource: DatasourceRow, account: Datasour
 export async function acquireCredential(rawToken: string, datasourceId: string, profileName = 'readonly'): Promise<CredentialLease> {
   const validated = await requireWorkloadCapability(rawToken, DATASOURCE_CREDENTIAL_CAPABILITY);
   if (!tokenAllowedDatasource(validated.token, datasourceId)) throw new DatasourceError(403, 'workload token 无权访问该数据源');
-
   const { datasource, profile } = await loadDatasourceAndProfile(datasourceId, profileName);
+  if (profile.mode !== 'readonly') {
+    throw new DatasourceError(403, 'WORKLOAD_TOKEN 当前只允许申请只读数据库账号');
+  }
   // workload token 本身没有请求身份，这里是唯一的强制边界:反查 token 对应 run 所在的
   // 租户，和数据源的 tenant_id 必须一致，否则即便 token 的 allowedDatasourceIds
   // 意外带了别的租户的数据源 id，也不能真的换到凭证(docs/multi-tenancy-design.md §9)。
@@ -691,7 +734,10 @@ export async function releaseLease(leaseId: string, expectedRunId?: string): Pro
 }
 
 export async function releaseRunLeases(runId: string): Promise<number> {
-  await query(`UPDATE workload_tokens SET revoked_at = now() WHERE run_id = $1 AND revoked_at IS NULL`, [runId]);
+  await prisma.workload_tokens.updateMany({
+    where: { run_id: runId, revoked_at: null },
+    data: { revoked_at: new Date() },
+  });
   const { rows } = await query<{ id: string }>(
     `SELECT id FROM datasource_account_leases WHERE run_id = $1 AND status = 'leased' ORDER BY leased_at`,
     [runId],
@@ -710,7 +756,7 @@ export async function reconcileExpiredLeases(limit = 20): Promise<number> {
      FROM datasource_account_leases l
      LEFT JOIN runs r ON r.id = l.run_id
      WHERE l.status = 'leased'
-       AND (l.expires_at <= now() OR r.status IN ('done', 'error', 'canceling', 'canceled'))
+       AND (l.expires_at <= now() OR r.status IN ('done', 'error', 'canceling', 'canceled', 'waiting_for_user'))
      ORDER BY l.expires_at
      LIMIT $1`,
     [limit],

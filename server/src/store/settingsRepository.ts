@@ -1,5 +1,6 @@
 import { prisma } from '../db/prisma.js';
 import { requiredJson } from './prismaRows.js';
+import { Prisma } from '../generated/prisma/client.js';
 
 export interface SettingRecord {
   key: string;
@@ -49,4 +50,40 @@ export async function upsertSettings(tenantId: string, entries: readonly Setting
       update: { value, updated_at: updatedAt },
     });
   }));
+}
+
+function isRetryableSettingConflict(error: unknown): boolean {
+  const code = error && typeof error === 'object' ? (error as { code?: string }).code : undefined;
+  return code === 'P2034' || code === 'P2002';
+}
+
+/**
+ * tenant 配置是整块 JSON；读、合并、写必须处于同一串行化事务，避免两个管理员分别修改
+ * 不同插件时后提交的人覆盖先提交的内容。数据库检测到竞争后在这里重试整个合并过程。
+ */
+export async function updateSettingAtomically<T>(
+  tenantId: string,
+  key: string,
+  update: (current: unknown) => T,
+): Promise<T> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await prisma.$transaction(async (tx) => {
+        const current = await tx.app_settings.findUnique({
+          where: { tenant_id_key: { tenant_id: tenantId, key } },
+          select: { value: true },
+        });
+        const next = update(current?.value);
+        await tx.app_settings.upsert({
+          where: { tenant_id_key: { tenant_id: tenantId, key } },
+          create: { tenant_id: tenantId, key, value: requiredJson(next) },
+          update: { value: requiredJson(next), updated_at: new Date() },
+        });
+        return next;
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (error) {
+      if (attempt === 2 || !isRetryableSettingConflict(error)) throw error;
+    }
+  }
+  throw new Error('tenant 配置并发更新重试耗尽');
 }

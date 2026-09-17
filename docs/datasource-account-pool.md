@@ -1,17 +1,22 @@
 # 数据源账号池设计
 
-目标：容器内脚本保留原生数据库 CLI 直连体验，但不接触长期数据库凭证。容器只拿本次 run 的
-`workload token`，再用它向平台换取短期数据库账号密码。
+目标：脚本只持有本次 run 的统一 `workload token`，用它按需获取 tenant Secret、数据库
+短期只读账号和 LLM 代理等系统资源，不接触数据库长期管理凭证。
 
 ## 当前实现
 
 - `workload token` 每次 run 签发，表里只保存 hash。
+- 同一 run 同时只有一个活动 token；显式轮换会撤销旧 token，等待用户期间也视为失效，
+  恢复执行后重新签发。
+- 同一 run 的业务 Skill 共用该 token，不存在插件级 token；插件 Secret 声明是配置元数据，
+  不是 key 级授权名单。
 - 数据源按 `datasource + permission profile` 维护账号池。
 - 一个池账号同一时间只租给一个 run。
 - 租出前重置密码；回收时锁定账号或改废密码。
 - 池子没有 idle 账号时，在 `maxPoolSize` 内动态扩容。
 - 后台 reconciler 会回收过期租约和已结束 run 的租约。
 - 当前已实现 PostgreSQL 账号管理适配器；MySQL、MongoDB、Hive 已预留类型，适配器后续补。
+- run 终态或进入等待时主动撤销 token、释放租约；reconciler 只作异常退出兜底。
 
 ## API 流程
 
@@ -50,20 +55,8 @@ curl -X POST http://localhost:8080/api/datasources/<datasource_id>/profiles \
   }'
 ```
 
-为 run 签发 workload token(需要该 run 所属租户的登录 JWT——这个接口是在铸造 token，本身没有
-已签发的 token 可以校验，所以走普通租户身份而不是 workload token)：
-
-```bash
-curl -X POST http://localhost:8080/api/runtime/workload-tokens \
-  -H "Authorization: Bearer $TENANT_ACCESS_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "runId": "<run_id>",
-    "skillId": "sales-report",
-    "allowedDatasourceIds": ["<datasource_id>"],
-    "ttlSeconds": 1800
-  }'
-```
+正常执行时 RunForge 会在 run 启动时自动签发唯一的活动 workload token，并注入运行环境；
+不会按 Skill 或业务插件分别签发，也不对租户用户或外部调用方暴露 token 签发接口。
 
 容器脚本换取短期数据库凭证：
 
@@ -80,12 +73,8 @@ curl -X POST http://localhost:8080/api/runtime/datasources/<datasource_id>/crede
 psql "postgresql://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME"
 ```
 
-run 结束主动释放(同样需要该 run 所属租户的登录 JWT)：
-
-```bash
-curl -X POST http://localhost:8080/api/runtime/runs/<run_id>/release-datasource-leases \
-  -H "Authorization: Bearer $TENANT_ACCESS_TOKEN"
-```
+run 完成、失败、取消或进入等待时，由 executor 在服务端直接撤销 token 并释放租约；调用方
+不负责手工释放。
 
 ## PostgreSQL 业务方准备
 

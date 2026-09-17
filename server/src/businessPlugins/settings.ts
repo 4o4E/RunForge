@@ -1,6 +1,6 @@
 import Ajv, { type ErrorObject } from 'ajv';
 import { z } from 'zod';
-import { findSetting, upsertSettings } from '../store/settingsRepository.js';
+import { findSetting, updateSettingAtomically } from '../store/settingsRepository.js';
 import { BusinessPluginError } from './errors.js';
 import type { BusinessPluginDefinition } from './types.js';
 import type {
@@ -65,25 +65,12 @@ export async function getBusinessPluginTenantSettings(tenantId: string): Promise
   return normalizeBusinessPluginTenantSettings(await findSetting(tenantId, BUSINESS_PLUGIN_SETTINGS_KEY));
 }
 
-export async function saveBusinessPluginTenantSettings(
-  tenantId: string,
-  input: unknown,
-): Promise<BusinessPluginTenantSettings> {
-  const settings = normalizeBusinessPluginTenantSettings(input);
-  await upsertSettings(tenantId, [{ key: BUSINESS_PLUGIN_SETTINGS_KEY, value: settings }]);
-  return settings;
-}
-
 function readinessError(
   definition: BusinessPluginDefinition,
   settings: BusinessPluginTenantSettings,
 ): string | undefined {
   const pluginId = definition.manifest.id;
   const pluginConfig = ownValue(settings.plugins, pluginId)?.config ?? {};
-  const pendingResource = definition.manifest.resources[0];
-  if (pendingResource) return `运行资源尚未接入 Workload SDK：${pendingResource.type}`;
-  const workloadSecret = definition.manifest.secrets.find((secret) => secret.access.includes('workload'));
-  if (workloadSecret) return `workload Secret 尚未接入 Workload SDK：${workloadSecret.key}`;
   let validate;
   if (definition.manifest.configSchema.$async === true) return 'configSchema 不支持异步校验';
   try {
@@ -138,18 +125,6 @@ export function tenantBusinessPluginConfig(
   return Object.fromEntries(Object.entries(settings.plugins).map(([id, value]) => [id, value.config]));
 }
 
-/** Secret 不做历史版本；每次读取 tenant 当前值，供长连接在下一次调用时感知轮换。 */
-export async function resolveCurrentTenantSecrets(
-  tenantId: string,
-  keys: readonly string[],
-): Promise<Readonly<Record<string, string>>> {
-  const settings = await getBusinessPluginTenantSettings(tenantId);
-  return Object.fromEntries(keys.flatMap((key) => {
-    const value = ownValue(settings.secrets, key);
-    return value === undefined ? [] : [[key, value]];
-  }));
-}
-
 export function businessPluginAdminView(
   definitions: readonly BusinessPluginDefinition[],
   settings: BusinessPluginTenantSettings,
@@ -191,35 +166,33 @@ export async function updateBusinessPluginTenantSettings(
   definitions: readonly BusinessPluginDefinition[],
   input: UpdateBusinessPluginSettingsInput,
 ): Promise<BusinessPluginTenantSettings> {
-  const current = await getBusinessPluginTenantSettings(tenantId);
   const knownPlugins = new Set(definitions.map((definition) => definition.manifest.id));
   const knownSecrets = new Set(definitions.flatMap((definition) => definition.manifest.secrets.map((secret) => secret.key)));
-  const plugins = structuredClone(current.plugins);
-  const secrets = { ...current.secrets };
+  return updateSettingAtomically(tenantId, BUSINESS_PLUGIN_SETTINGS_KEY, (stored) => {
+    const current = normalizeBusinessPluginTenantSettings(stored);
+    const plugins = structuredClone(current.plugins);
+    const secrets = { ...current.secrets };
 
-  for (const [id, value] of Object.entries(input.plugins ?? {})) {
-    if (!knownPlugins.has(id)) {
-      throw new BusinessPluginError('BUSINESS_PLUGIN_CONFIG_INVALID', `tenant 没有已发现的业务插件：${id}`);
+    for (const [id, value] of Object.entries(input.plugins ?? {})) {
+      if (!knownPlugins.has(id)) {
+        throw new BusinessPluginError('BUSINESS_PLUGIN_CONFIG_INVALID', `tenant 没有已发现的业务插件：${id}`);
+      }
+      const parsed = z.object({ config: jsonObjectSchema }).strict().safeParse(value);
+      if (!parsed.success) {
+        throw new BusinessPluginError('BUSINESS_PLUGIN_CONFIG_INVALID', `业务插件 ${id} 的 config 必须是 JSON 对象`);
+      }
+      setOwnValue(plugins, id, parsed.data);
     }
-    const parsed = z.object({ config: jsonObjectSchema }).strict().safeParse(value);
-    if (!parsed.success) {
-      throw new BusinessPluginError('BUSINESS_PLUGIN_CONFIG_INVALID', `业务插件 ${id} 的 config 必须是 JSON 对象`);
+    for (const [key, value] of Object.entries(input.secrets ?? {})) {
+      if (!knownSecrets.has(key)) {
+        throw new BusinessPluginError('BUSINESS_PLUGIN_CONFIG_INVALID', `业务插件未声明 tenant Secret：${key}`);
+      }
+      if (value === null) delete secrets[key];
+      else if (typeof value === 'string' && value.length <= 100_000) setOwnValue(secrets, key, value);
+      else throw new BusinessPluginError('BUSINESS_PLUGIN_CONFIG_INVALID', `tenant Secret ${key} 格式无效`);
     }
-    setOwnValue(plugins, id, parsed.data);
-  }
-  for (const [key, value] of Object.entries(input.secrets ?? {})) {
-    if (!knownSecrets.has(key)) {
-      throw new BusinessPluginError('BUSINESS_PLUGIN_CONFIG_INVALID', `业务插件未声明 tenant Secret：${key}`);
-    }
-    if (value === null) delete secrets[key];
-    else if (typeof value === 'string' && value.length <= 100_000) setOwnValue(secrets, key, value);
-    else throw new BusinessPluginError('BUSINESS_PLUGIN_CONFIG_INVALID', `tenant Secret ${key} 格式无效`);
-  }
 
-  return saveBusinessPluginTenantSettings(tenantId, {
-    schemaVersion: 1,
-    plugins,
-    secrets,
+    return { schemaVersion: 1 as const, plugins, secrets };
   });
 }
 

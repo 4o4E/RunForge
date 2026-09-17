@@ -102,13 +102,13 @@ const mcpSchema = z.object({
 const secretSchema = z.object({
   key: secretKeySchema,
   required: z.boolean().default(true),
-  access: z.array(z.enum(['backend', 'workload'])).min(1).default(['backend']),
   description: z.string().trim().default(''),
 }).strict();
 
+// 业务插件只能声明 RunForge 已实现的标准资源；未知类型必须在部署检查阶段失败，不能到
+// Skill 真正执行时才静默缺能力。
 const resourceSchema = z.object({
-  type: idSchema,
-  config: jsonObjectSchema,
+  type: z.enum(['database.readonly', 'llm.proxy']),
 }).strict();
 
 const manifestSchema = z.object({
@@ -177,13 +177,6 @@ export function parseBusinessPluginManifest(content: string, file: string): Busi
       throw new BusinessPluginError(
         'BUSINESS_PLUGIN_SECRET_MISSING',
         `${file} 的 MCP ${server.id} 引用了未声明的 tenant Secret key：${missing}`,
-      );
-    }
-    const backendDenied = referenced.find((key) => !declaredSecrets.get(key)?.access.includes('backend'));
-    if (backendDenied) {
-      throw new BusinessPluginError(
-        'BUSINESS_PLUGIN_MANIFEST_INVALID',
-        `${file} 的 MCP ${server.id} 引用的 Secret 未授权 backend：${backendDenied}`,
       );
     }
   }

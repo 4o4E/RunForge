@@ -243,42 +243,43 @@ model push_subscriptions {
 }
 
 model runs {
-  id                                     String                      @id
+  id                                     String                        @id
   thread_id                              String
-  status                                 String                      @default("pending")
+  status                                 String                        @default("pending")
   input                                  String
   output                                 String?
   error                                  String?
   goal_state                             Json?
-  created_at                             DateTime                    @default(now()) @db.Timestamptz(6)
-  updated_at                             DateTime                    @default(now()) @db.Timestamptz(6)
+  created_at                             DateTime                      @default(now()) @db.Timestamptz(6)
+  updated_at                             DateTime                      @default(now()) @db.Timestamptz(6)
   model_ref                              String?
   parent_run_id                          String?
   runtime_capabilities_snapshot          Json?
   space_config_snapshot                  Json?
   space_config_version                   Int?
   plugin_lock                            Json?
-  external_input_open                    Boolean                     @default(false)
-  input_version                          Int                         @default(0)
+  external_input_open                    Boolean                       @default(false)
+  input_version                          Int                           @default(0)
   external_requests                      external_requests[]
   provider_invocations                   provider_invocations[]
   run_inputs                             run_inputs[]
   artifacts                              artifacts[]
   datasource_account_leases              datasource_account_leases[]
+  workload_secret_access_logs            workload_secret_access_logs[]
   datasource_accounts                    datasource_accounts[]
   events                                 events[]
   messages                               messages[]
-  runs                                   runs?                       @relation("runsToruns", fields: [parent_run_id], references: [id], onUpdate: NoAction)
-  other_runs                             runs[]                      @relation("runsToruns")
-  threads_runs_thread_idTothreads        threads                     @relation("runs_thread_idTothreads", fields: [thread_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  runs                                   runs?                         @relation("runsToruns", fields: [parent_run_id], references: [id], onUpdate: NoAction)
+  other_runs                             runs[]                        @relation("runsToruns")
+  threads_runs_thread_idTothreads        threads                       @relation("runs_thread_idTothreads", fields: [thread_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   runtime_capability_calls               runtime_capability_calls[]
   shell_commands                         shell_commands[]
   shell_sessions                         shell_sessions[]
   steps                                  steps[]
   subagent_runs                          subagent_runs[]
   thread_notices                         thread_notices[]
-  threads_threads_active_run_idToruns    threads[]                   @relation("threads_active_run_idToruns")
-  threads_threads_executing_run_idToruns threads[]                   @relation("threads_executing_run_idToruns")
+  threads_threads_active_run_idToruns    threads[]                     @relation("threads_active_run_idToruns")
+  threads_threads_executing_run_idToruns threads[]                     @relation("threads_executing_run_idToruns")
   workload_tokens                        workload_tokens[]
 
   @@unique([id, thread_id])
@@ -328,20 +329,6 @@ model artifacts {
 
   @@index([caller_id, status, created_at], map: "idx_artifacts_caller")
   @@index([space_id, thread_id, run_id], map: "idx_artifacts_scope")
-}
-
-model plugin_deployments {
-  id           String    @id
-  plugin_id    String
-  version      String
-  content_hash String
-  manifest     Json
-  status       String    @default("active")
-  deployed_at  DateTime  @default(now()) @db.Timestamptz(6)
-  deleted_at   DateTime? @db.Timestamptz(6)
-
-  @@unique([plugin_id, version, content_hash])
-  @@index([plugin_id, status], map: "idx_plugin_deployments_status")
 }
 
 model provider_invocations {
@@ -549,17 +536,18 @@ model shell_sessions {
 }
 
 model steps {
-  id                       String                     @id
-  run_id                   String
-  idx                      Int
-  created_at               DateTime                   @default(now()) @db.Timestamptz(6)
-  events                   events[]
-  messages                 messages[]
-  runtime_capability_calls runtime_capability_calls[]
-  shell_commands           shell_commands[]
-  runs                     runs                       @relation(fields: [run_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  subagent_runs            subagent_runs[]
-  provider_invocations     provider_invocations[]
+  id                          String                        @id
+  run_id                      String
+  idx                         Int
+  created_at                  DateTime                      @default(now()) @db.Timestamptz(6)
+  events                      events[]
+  messages                    messages[]
+  runtime_capability_calls    runtime_capability_calls[]
+  workload_secret_access_logs workload_secret_access_logs[]
+  shell_commands              shell_commands[]
+  runs                        runs                          @relation(fields: [run_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  subagent_runs               subagent_runs[]
+  provider_invocations        provider_invocations[]
 
   @@index([run_id, idx], map: "idx_steps_run")
 }
@@ -615,23 +603,24 @@ model system_admins {
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model tenants {
-  id                       String                     @id
-  name                     String
-  status                   String                     @default("active")
-  created_at               DateTime                   @default(now()) @db.Timestamptz(6)
-  default_space_id         String?                    @unique
-  app_settings             app_settings[]
-  auth_tokens              auth_tokens[]
-  datasources              datasources[]
-  push_subscriptions       push_subscriptions[]
-  runtime_capability_calls runtime_capability_calls[]
-  external_callers         external_callers[]
-  shell_sessions           shell_sessions[]
-  subagent_runs            subagent_runs[]
-  threads                  threads[]
-  users                    users[]
-  spaces                   spaces[]                   @relation("spaces_tenant")
-  default_space            spaces?                    @relation("tenants_default_space", fields: [default_space_id, id], references: [id, tenant_id], onDelete: NoAction, onUpdate: NoAction)
+  id                          String                        @id
+  name                        String
+  status                      String                        @default("active")
+  created_at                  DateTime                      @default(now()) @db.Timestamptz(6)
+  default_space_id            String?                       @unique
+  app_settings                app_settings[]
+  workload_secret_access_logs workload_secret_access_logs[]
+  auth_tokens                 auth_tokens[]
+  datasources                 datasources[]
+  push_subscriptions          push_subscriptions[]
+  runtime_capability_calls    runtime_capability_calls[]
+  external_callers            external_callers[]
+  shell_sessions              shell_sessions[]
+  subagent_runs               subagent_runs[]
+  threads                     threads[]
+  users                       users[]
+  spaces                      spaces[]                      @relation("spaces_tenant")
+  default_space               spaces?                       @relation("tenants_default_space", fields: [default_space_id, id], references: [id, tenant_id], onDelete: NoAction, onUpdate: NoAction)
 }
 
 model thread_notices {
@@ -710,19 +699,43 @@ model users {
 }
 
 model workload_tokens {
-  id                        String                      @id
-  token_hash                String                      @unique
-  run_id                    String
-  skill_id                  String?
-  allowed_datasources       String[]                    @default([])
-  expires_at                DateTime                    @db.Timestamptz(6)
-  revoked_at                DateTime?                   @db.Timestamptz(6)
-  created_at                DateTime                    @default(now()) @db.Timestamptz(6)
-  allowed_capabilities      String[]                    @default([])
-  datasource_account_leases datasource_account_leases[]
-  runtime_capability_calls  runtime_capability_calls[]
-  runs                      runs                        @relation(fields: [run_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  id                          String                        @id
+  token_hash                  String                        @unique
+  run_id                      String
+  /// baseline 历史兼容列；统一 run token 不再按 Skill 签发，应用始终保持 NULL。
+  skill_id                    String?                       @ignore
+  allowed_datasources         String[]                      @default([])
+  expires_at                  DateTime                      @db.Timestamptz(6)
+  revoked_at                  DateTime?                     @db.Timestamptz(6)
+  created_at                  DateTime                      @default(now()) @db.Timestamptz(6)
+  allowed_capabilities        String[]                      @default([])
+  workload_secret_access_logs workload_secret_access_logs[]
+  datasource_account_leases   datasource_account_leases[]
+  runtime_capability_calls    runtime_capability_calls[]
+  runs                        runs                          @relation(fields: [run_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([expires_at], map: "idx_workload_tokens_expiry")
   @@index([run_id], map: "idx_workload_tokens_run")
+}
+
+/// Secret 访问审计只保存读取上下文和结果，绝不保存 Secret 值。
+model workload_secret_access_logs {
+  id              String          @id
+  tenant_id       String
+  run_id          String
+  step_id         String?
+  token_id        String
+  accessor        String
+  secret_key      String
+  status          String
+  error_code      String?
+  created_at      DateTime        @default(now()) @db.Timestamptz(6)
+  tenants         tenants         @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  runs            runs            @relation(fields: [run_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  steps           steps?          @relation(fields: [step_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  workload_tokens workload_tokens @relation(fields: [token_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([tenant_id, created_at(sort: Desc)], map: "idx_workload_secret_access_tenant")
+  @@index([run_id, created_at(sort: Desc)], map: "idx_workload_secret_access_run")
+  @@index([secret_key, created_at(sort: Desc)], map: "idx_workload_secret_access_key")
 }

@@ -15,7 +15,13 @@ import {
   selectSkill,
 } from '../skills/registry.js';
 import type { SkillIndexItem, SkillActivation } from '../skills/registry.js';
-import { DATASOURCE_CREDENTIAL_CAPABILITY, createWorkloadToken, listDatasources, listPermissionProfiles } from '../datasources/accountPool.js';
+import {
+  DATASOURCE_CREDENTIAL_CAPABILITY,
+  createWorkloadToken,
+  listDatasources,
+  listPermissionProfiles,
+  releaseRunLeases,
+} from '../datasources/accountPool.js';
 import { finishGoal, initGoal, mergeGoal, parseGoalPatch, renderGoal } from './goal.js';
 import { runBus } from './bus.js';
 import type { AgentEvent, FinishReason } from './types.js';
@@ -63,9 +69,10 @@ import {
   type BusinessPluginRuntimeService,
   type TenantSecretResolver,
 } from '../businessPlugins/runtime.js';
-import { resolveCurrentTenantSecrets } from '../businessPlugins/settings.js';
+import { readAuditedWorkloadSecrets } from '../businessPlugins/secretService.js';
 import { verifySpaceRuntimeLock } from '../plugins/lock.js';
 import type { JsonValue, SpaceRuntimeLock } from '../plugins/types.js';
+import { materializeWorkloadSdk } from '../workloadSdk/materialize.js';
 
 const ASK_USER_TOOL_NAME = 'ask_user';
 const DATABASE_ACCESS_SKILL_NAME = 'database-access';
@@ -123,7 +130,7 @@ export interface ExecutorDeps {
   toolSettings?: ToolSettings;
   mcpSettings?: McpSettings;
   mcpToolLoader?: (settings: McpSettings, serverId: string) => Promise<McpActivation>;
-  databaseRuntimeEnv?: (scope: Scope, runId: string, allowedCapabilities: RuntimeCapabilityName[]) => Promise<DatabaseRuntimeEnv>;
+  workloadRuntimeEnv?: (scope: Scope, runId: string, allowedCapabilities: RuntimeCapabilityName[]) => Promise<WorkloadRuntimeEnv>;
   generateThreadTitle: boolean;
   contextSettings: AgentContextSettings;
   materializeRunArtifacts?: (
@@ -134,9 +141,10 @@ export interface ExecutorDeps {
   businessPluginRegistry: Pick<BusinessPluginRegistry, 'list' | 'resolveLock'>;
   businessPluginRuntime: Pick<BusinessPluginRuntimeService, 'startRun'>;
   businessPluginSecretResolver: TenantSecretResolver;
+  releaseRuntimeResources?: (runId: string) => Promise<number>;
 }
 
-interface DatabaseRuntimeEnv {
+interface WorkloadRuntimeEnv {
   env: Record<string, string>;
   summary: string;
 }
@@ -279,7 +287,7 @@ async function defaultDeps(
     toolSettings: overrides.toolSettings,
     mcpSettings: overrides.mcpSettings,
     mcpToolLoader: overrides.mcpToolLoader,
-    databaseRuntimeEnv: overrides.databaseRuntimeEnv,
+    workloadRuntimeEnv: overrides.workloadRuntimeEnv,
     generateThreadTitle: overrides.generateThreadTitle ?? overrides.store === undefined,
     contextSettings: overrides.contextSettings ?? (spaceConfig ? {
       modelContextWindow: spaceConfig.model.contextWindow,
@@ -293,7 +301,11 @@ async function defaultDeps(
     materializeRunArtifacts: overrides.materializeRunArtifacts,
     businessPluginRegistry: overrides.businessPluginRegistry ?? businessPluginRegistry,
     businessPluginRuntime: overrides.businessPluginRuntime ?? businessPluginRuntime,
-    businessPluginSecretResolver: overrides.businessPluginSecretResolver ?? resolveCurrentTenantSecrets,
+    businessPluginSecretResolver: overrides.businessPluginSecretResolver ?? (async (request) => {
+      if (!request.workloadToken) throw new Error('run 的 WORKLOAD_TOKEN 尚未初始化，不能读取 tenant Secret');
+      return readAuditedWorkloadSecrets(request.workloadToken, 'backend', request.stepId, request.keys);
+    }),
+    releaseRuntimeResources: overrides.releaseRuntimeResources,
   };
 }
 
@@ -475,7 +487,7 @@ function businessPluginConfigFromLock(lock: SpaceRuntimeLock): Record<string, Re
   }));
 }
 
-async function createDefaultDatabaseRuntimeEnv(scope: Scope, runId: string, allowedCapabilities: RuntimeCapabilityName[]): Promise<DatabaseRuntimeEnv> {
+async function createDefaultWorkloadRuntimeEnv(scope: Scope, runId: string, allowedCapabilities: RuntimeCapabilityName[]): Promise<WorkloadRuntimeEnv> {
   const datasourceAllowed = allowedCapabilities.includes(DATASOURCE_CREDENTIAL_CAPABILITY);
   const activeDatasources = datasourceAllowed
     ? (await listDatasources(scope)).filter((datasource) => datasource.enabled && datasource.status === 'active')
@@ -483,7 +495,6 @@ async function createDefaultDatabaseRuntimeEnv(scope: Scope, runId: string, allo
   const allowedDatasourceIds = activeDatasources.map((datasource) => datasource.id);
   const created = await createWorkloadToken(scope, {
     runId,
-    skillId: 'runtime:run',
     allowedDatasourceIds,
     allowedCapabilities,
   });
@@ -499,8 +510,8 @@ async function createDefaultDatabaseRuntimeEnv(scope: Scope, runId: string, allo
     const datasource = activeDatasources[0];
     env.DATASOURCE_ID = datasource.id;
     const profiles = await listPermissionProfiles(scope, datasource.id);
-    const readonly = profiles.find((profile) => profile.name === 'readonly');
-    env.DATASOURCE_PROFILE = readonly?.name ?? profiles[0]?.name ?? 'readonly';
+    const readonly = profiles.find((profile) => profile.mode === 'readonly');
+    env.DATASOURCE_PROFILE = readonly?.name ?? 'readonly';
   }
 
   const visible = [
@@ -515,7 +526,7 @@ async function createDefaultDatabaseRuntimeEnv(scope: Scope, runId: string, allo
   return {
     env,
     summary: [
-      '数据库访问运行环境（run 级）:',
+      '统一运行资源环境（run 级）:',
       ...visible.map((item) => `- ${item}`),
       '- WORKLOAD_TOKEN 只是换取本次 run 短期凭证和内部能力代理配置的令牌，不是数据库密码或上游 API key。',
       '- 涉及数据库 CLI 时必须使用 database-access helper 换取本 run 的短期凭证；不要复用旧 run 的数据库用户名、密码、DATABASE_URL 或宿主默认账号。',
@@ -640,6 +651,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       ...depOverrides,
       store,
       generateThreadTitle: depOverrides.generateThreadTitle ?? usesDefaultStore,
+      releaseRuntimeResources: depOverrides.releaseRuntimeResources ?? (usesDefaultStore ? releaseRunLeases : undefined),
     }, run.model_ref ?? spaceConfig?.model.modelRef, spaceConfig);
   } catch (err) {
     const message = (err as Error).message;
@@ -649,6 +661,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     publish(runId, event);
     await store.addEvent(scope, runId, null, event);
     await store.setRunStatus(scope, runId, 'error', { error: message });
+    if (usesDefaultStore) await releaseRunLeases(runId).catch(() => {});
     return;
   }
   const { provider, publish, hardStepCap, stream, resume } = deps;
@@ -750,6 +763,9 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     if (current?.status === 'canceling') {
       await emit(null, { type: 'error', step: 0, message: '用户已取消 run。' });
       await store.setRunStatus(scope, runId, 'canceled');
+      await deps.releaseRuntimeResources?.(runId).catch((error) => {
+        console.warn(`run ${runId} 取消后的运行资源释放失败：${(error as Error).message}`);
+      });
     }
     await mcpSession.dispose();
     return;
@@ -767,10 +783,16 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     await emit(null, { type: 'error', step: 0, message });
     await store.setRunStatus(scope, runId, 'error', { error: message });
   } finally {
-    await Promise.allSettled([
+    const cleanup = await Promise.allSettled([
       mcpSession.dispose(),
       runtimeResources.businessPluginHandle?.dispose() ?? Promise.resolve(),
+      deps.releaseRuntimeResources?.(runId) ?? Promise.resolve(0),
     ]);
+    for (const result of cleanup) {
+      if (result.status === 'rejected') {
+        console.warn(`run ${runId} 运行资源释放失败：${(result.reason as Error).message}`);
+      }
+    }
   }
 
   // agent 主循环保持为闭包，让 invoke_agent span 包住内部的模型调用和工具执行 span。
@@ -821,6 +843,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     const initialArtifacts = await materializeExternalArtifacts();
     const runtimeUserInput = attachExternalArtifactTokens(userInput, initialArtifacts);
     const toolPolicy = createPolicy(toolSettings);
+    let runWorkloadToken: string | null = null;
     if (pluginLock?.plugins.length) {
       let definitions;
       try {
@@ -837,7 +860,10 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         definitions,
         lock: pluginLock,
         tenantConfig: businessPluginConfigFromLock(pluginLock),
-        resolveSecrets: deps.businessPluginSecretResolver,
+        resolveSecrets: (request) => deps.businessPluginSecretResolver({
+          ...request,
+          workloadToken: runWorkloadToken,
+        }),
       });
     }
     const tenantMcpSettings = deps.mcpSettings ?? (deps.store === defaultStore ? await getMcpSettings(scope) : { servers: [] });
@@ -848,11 +874,11 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     const mcpSettings: McpSettings = {
       servers: [...selectedTenantMcpSettings.servers, ...(runtimeResources.businessPluginHandle?.mcpServers ?? [])],
     };
-    const refreshBusinessMcpServers = async (): Promise<void> => {
+    const refreshBusinessMcpServers = async (stepId?: string | null): Promise<void> => {
       const handle = runtimeResources.businessPluginHandle;
       if (!handle) return;
       const businessIds = new Set(handle.mcpServers.map((server) => server.id));
-      const refreshed = await handle.refreshMcpServers();
+      const refreshed = await handle.refreshMcpServers(stepId);
       handle.mcpServers.splice(0, handle.mcpServers.length, ...refreshed);
       mcpSettings.servers = [
         ...mcpSettings.servers.filter((server) => !businessIds.has(server.id)),
@@ -868,16 +894,15 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       : null;
     const capabilitySnapshot = await loadRuntimeCapabilitiesSnapshot(store, scope, runId);
     const toolEnv: Record<string, string> = {};
-    const databaseRuntimeEnvProvider = deps.databaseRuntimeEnv ?? (deps.store === defaultStore ? createDefaultDatabaseRuntimeEnv : null);
-    let databaseRuntimeSummary = '';
-    if (databaseRuntimeEnvProvider) {
-      try {
-        const runtime = await databaseRuntimeEnvProvider(scope, runId, capabilitySnapshot.allowedCapabilities);
-        Object.assign(toolEnv, runtime.env);
-        databaseRuntimeSummary = runtime.summary;
-      } catch (err) {
-        databaseRuntimeSummary = `数据库访问运行环境（run 级）注入失败：${(err as Error).message}`;
-      }
+    toolEnv.RUNFORGE_WORKLOAD_SDK = await materializeWorkloadSdk(toolSettings.workspaceRoot);
+    const workloadRuntimeEnvProvider = deps.workloadRuntimeEnv ?? (deps.store === defaultStore ? createDefaultWorkloadRuntimeEnv : null);
+    let workloadRuntimeSummary = '';
+    if (workloadRuntimeEnvProvider) {
+      const runtime = await workloadRuntimeEnvProvider(scope, runId, capabilitySnapshot.allowedCapabilities);
+      Object.assign(toolEnv, runtime.env);
+      runWorkloadToken = runtime.env.WORKLOAD_TOKEN ?? null;
+      if (!runWorkloadToken) throw new Error('统一运行资源环境没有返回 WORKLOAD_TOKEN');
+      workloadRuntimeSummary = runtime.summary;
     }
     const skillIndex = [
       ...await loadSkillIndex(toolSettings.workspaceRoot),
@@ -889,9 +914,9 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       return activateSkillItem(skill);
     };
     const workflowIndex = await loadWorkflowIndex(toolSettings.workspaceRoot);
-    const mcpToolLoader = async (settings: McpSettings, serverId: string): Promise<McpActivation> => {
+    const mcpToolLoader = async (settings: McpSettings, serverId: string, stepId?: string | null): Promise<McpActivation> => {
       if (runtimeResources.businessPluginHandle?.mcpServers.some((server) => server.id === serverId)) {
-        await refreshBusinessMcpServers();
+        await refreshBusinessMcpServers(stepId);
       }
       return deps.mcpToolLoader
         ? deps.mcpToolLoader(settings, serverId)
@@ -909,7 +934,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       }
       if (event.type === 'mcp_activated' && !activeMcp.has(event.serverId)) {
         try {
-          activeMcp.set(event.serverId, await mcpToolLoader(mcpSettings, event.serverId));
+          activeMcp.set(event.serverId, await mcpToolLoader(mcpSettings, event.serverId, null));
         } catch (err) {
           console.warn(`恢复 run ${runId} 的 MCP ${event.serverId} 激活状态失败：${(err as Error).message}`);
         }
@@ -922,7 +947,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     const spaceRuntimeRules = spaceConfig?.mode === 'external'
       ? '当前 run 来自 external 空间：不能向 Web 用户提问或进入 waiting_for_user；信息不足时采用合理假设，或在最终结果中明确说明缺失信息。'
       : '';
-    const runtimeContext = `${renderRuntimeContext(toolSettings)}\n\n${spaceRuntimeRules}\n\n${databaseRuntimeSummary}\n\n${workflowRuntimeContext}\n\n${skillRuntimeContext}\n\n${renderMcpSystemRules()}`;
+    const runtimeContext = `${renderRuntimeContext(toolSettings)}\n\n${spaceRuntimeRules}\n\n${workloadRuntimeSummary}\n\n${workflowRuntimeContext}\n\n${skillRuntimeContext}\n\n${renderMcpSystemRules()}`;
     const ctx = new ContextManager(prior, runtimeUserInput, renderGoal(goal), {
       appendUserInput: !hasPersistedMessages,
       userInputPrefix: capabilityCatalog,
@@ -1013,43 +1038,12 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       RUNFORGE_STEP_ID: stepId,
     });
 
-    const ensureDatabaseToolEnv = async (activation: SkillActivation): Promise<string> => {
+    const databaseToolEnvMessage = (): string => {
       if (!capabilitySnapshot.allowedCapabilities.includes(DATASOURCE_CREDENTIAL_CAPABILITY)) {
         return '当前空间没有授权 datasource.credentials，不能注入数据库短期凭证。';
       }
       if (toolEnv.WORKLOAD_TOKEN) return '数据库访问运行环境已在 run 初始化时注入；database-access skill 只提供脚本和操作规范。';
-
-      const activeDatasources = (await listDatasources(scope)).filter((datasource) => datasource.enabled && datasource.status === 'active');
-      const allowedDatasourceIds = activeDatasources.map((datasource) => datasource.id);
-      const created = await createWorkloadToken(scope, {
-        runId,
-        skillId: activation.skill.id,
-        allowedDatasourceIds,
-        allowedCapabilities: capabilitySnapshot.allowedCapabilities,
-      });
-
-      toolEnv.WORKLOAD_TOKEN = created.token;
-      toolEnv.RUNFORGE_RUNTIME_API_BASE = runtimeApiBase();
-      toolEnv.MY_AGENT_RUNTIME_API_BASE = toolEnv.RUNFORGE_RUNTIME_API_BASE;
-      toolEnv.DATASOURCE_PROFILE = 'readonly';
-
-      if (activeDatasources.length === 1) {
-        const datasource = activeDatasources[0];
-        toolEnv.DATASOURCE_ID = datasource.id;
-        const profiles = await listPermissionProfiles(scope, datasource.id);
-        const readonly = profiles.find((profile) => profile.name === 'readonly');
-        toolEnv.DATASOURCE_PROFILE = readonly?.name ?? profiles[0]?.name ?? 'readonly';
-      }
-
-      const visible = [
-        `WORKLOAD_TOKEN=已注入`,
-        `RUNFORGE_RUNTIME_API_BASE=${toolEnv.RUNFORGE_RUNTIME_API_BASE}`,
-        toolEnv.DATASOURCE_ID ? `DATASOURCE_ID=${toolEnv.DATASOURCE_ID}` : 'DATASOURCE_ID=未自动选择',
-        `DATASOURCE_PROFILE=${toolEnv.DATASOURCE_PROFILE}`,
-        `allowedDatasourceIds=${allowedDatasourceIds.length ? allowedDatasourceIds.join(',') : '无'}`,
-        `allowedCapabilities=${capabilitySnapshot.allowedCapabilities.join(',') || '无'}`,
-      ];
-      return `数据库访问运行环境已注入：${visible.join('；')}。不要输出 token 或短期凭证。`;
+      return 'run 的统一 WORKLOAD_TOKEN 初始化失败，不能通过激活 Skill 补签 token。';
     };
 
     const renderSubagentRow = (row: SubagentRunRow, includeTask: boolean): string => {
@@ -1627,11 +1621,10 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         }
         let runtimeEnvMessage = '';
         if (activation.skill.name === DATABASE_ACCESS_SKILL_NAME) {
-          try {
-            runtimeEnvMessage = `\n\n${await ensureDatabaseToolEnv(activation)}`;
-          } catch (err) {
-            runtimeEnvMessage = `\n\n数据库访问运行环境注入失败：${(err as Error).message}`;
-          }
+          runtimeEnvMessage = `\n\n${databaseToolEnvMessage()}`;
+        }
+        if (activation.skill.source === 'business' && toolEnv.WORKLOAD_TOKEN) {
+          runtimeEnvMessage += '\n\n业务 Skill 可动态 import 环境变量 RUNFORGE_WORKLOAD_SDK 指向的统一 SDK，并使用本 run 的 WORKLOAD_TOKEN 获取 tenant Secret 和空间已授权的运行资源；插件声明用于管理员配置提示，不是 key 级权限边界。不要输出 token、Secret 或短期凭证。';
         }
         ctx.setActivationContext(renderRunActivationContext(activeSkills, activeMcp));
         // Skill 入口通过工具结果进入上下文，也必须遵守统一单条输出上限。
@@ -1642,7 +1635,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         const id = serverId.trim();
         const existing = activeMcp.get(id);
         if (existing) return `MCP ${id} 已在当前 run 激活，共 ${existing.tools.length} 个工具。`;
-        const activation = await mcpToolLoader(mcpSettings, id);
+        const activation = await mcpToolLoader(mcpSettings, id, step.id);
         activeMcp.set(id, activation);
         ctx.setActivationContext(renderRunActivationContext(activeSkills, activeMcp));
         await emit(step.id, {
@@ -1798,7 +1791,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
                 mcpCallTool: async (name, input, settings, context) => {
                   const parsed = parseMcpToolName(name);
                   if (parsed && runtimeResources.businessPluginHandle?.mcpServers.some((server) => server.id === parsed.serverId)) {
-                    await refreshBusinessMcpServers();
+                    await refreshBusinessMcpServers(step.id);
                   }
                   return mcpSession.callTool(name, input, settings, context);
                 },

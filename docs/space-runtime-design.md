@@ -305,13 +305,15 @@ Cordis 只负责业务插件的服务依赖和生命周期，不替换 Agent loo
 - run 配置副本和 `plugin_lock` 不复制 secret 明文或版本，只固定业务插件及其声明；每次
   使用时读取该 tenant 的当前值。
 - 更新 secret 后，后续读取立即使用新值；使用旧值的 MCP 长连接必须关闭并重连。
-- 服务端可信 Cordis 插件通过内部 `SecretService` 取得当前业务插件声明过的 key。
+- 服务端可信 Cordis 插件通过内部 `SecretService` 和本 run 的 `WORKLOAD_TOKEN` 取得 tenant
+  当前 Secret。
 - 经过审核的 Skill 脚本通过 run-scoped `WORKLOAD_TOKEN` 调用 Workload SDK；服务端从 token
-  推导 tenant、space、run 和业务插件，SDK 不接受脚本提交 tenantId。
+  推导 tenant、space 和 run，SDK 不接受脚本提交 tenantId、spaceId 或插件 ID。
 - 数据库临时账号、LLM 代理 API Key 等自动轮换能力属于短期运行资源，不作为长期 secret
   存储；脚本通过 Workload SDK 申请并在 run 结束时释放或失效。
 - 记录读取审计，但不记录 secret 明文。
-- 不把所有 secret 自动注入脚本环境；只允许读取当前业务插件声明并授权给 workload 的 key。
+- 不把所有 secret 自动注入脚本环境；脚本按 key 主动读取。插件声明只用于管理员配置、
+  必填检查和说明，不构成插件级 Secret 权限；同一 run 的可信脚本共享一个 token。
 - secret 不进入模型上下文、工具 schema、工具参数、Provider 请求 body、事件或普通日志。
 
 ## 10. Store 和访问边界
@@ -444,8 +446,8 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
    - 外部附件和产物的 caller/space/thread/run 归属、存储 key、MIME、大小和状态。
 9. `provider_invocations` 与 `provider_attempts`
    - 逻辑模型调用和真实 HTTP attempt 的完整关联。
-10. `plugin_deployments` 或等价 registry
-    - 已部署插件的版本、hash、manifest 和可恢复状态。
+10. `workload_secret_access_logs`
+    - workload token 读取 tenant Secret 的 run/step/token/key 和结果，不保存 Secret 值。
 
 迁移只追加新 migration，不改写已经执行的旧迁移。旧 thread 回填 default space 时不移动
 历史内容或 workspace。
@@ -558,8 +560,9 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
 16. Workspace：default 保留用户级目录，其他空间使用 `{workspaceBase}/{threadId}`。
 17. Cordis：仅负责可信业务插件依赖和生命周期，不建立第二套 Agent runtime。
 18. 动态能力：内置能力保持强类型，插件能力使用 registry 管理 namespaced ID。
-19. Secret：长期 secret 按 tenant + key 只保存当前值，run 不保存明文或版本；内部组件和
-    Workload SDK 只读取业务插件已声明并授权的 key，更新后立即生效。
+19. Secret：长期 secret 按 tenant + key 只保存当前值，run 不保存明文或版本；一个 run
+    使用同一 `WORKLOAD_TOKEN` 按 key 获取 Secret 和短期资源，插件声明只用于配置提示，
+    更新后立即生效。
 20. Store 权限：拆开执行归属和查看授权，禁止通过冒充 execution user 读取。
 21. Provider 观测：保留现有 run/step/message/event，由 RunForge ProviderRunner 控制重试，
     invocation/attempt 完整记录逻辑请求、wire body、原始流和标准化响应。
