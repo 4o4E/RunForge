@@ -30,8 +30,8 @@
 
 ### LLM 集成与工具调用
 
-- 默认 provider 是 `aisdk`，复用 Vercel AI SDK 处理协议、流式、重试和工具拼装。
-- 旧的 `openai-responses`、`openai-chat`、`anthropic` 保留为兼容和回滚路径。
+- 三种 LLM 协议都复用 Vercel AI SDK 处理协议、流式解析和工具拼装。
+- RunForge `ProviderRunner` 管理重试，并记录每次真实 HTTP attempt。
 - 工具通过统一 registry 执行，内置 shell、托管 shell、文件读写/编辑、glob、grep、web fetch、web search、ask user、update plan、skill、workflow、subagent 和数据源访问。
 - 工具结果以 tool message 回填，并保留 `toolCallId`，满足主流模型协议对工具调用配对的要求。
 - reasoning（推理信息）只用于前端展示，不回填上下文。

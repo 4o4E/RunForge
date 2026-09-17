@@ -11,14 +11,13 @@ RunForge 需要在保留现有 run/step/message/event 的基础上，回答一�
 
 本阶段只观测与 run 关联的模型调用：主 Agent、标题生成、上下文压缩摘要、subagent 和
 run-scoped LLM capability。管理端模型列表探测和测试对话没有 run 归属，不写入 run 关联
-观测表。mock provider 没有真实网络请求，只保存 invocation，不伪造 attempt。
+观测表。
 
 ## 实现
 
 - `ProviderRunner` 在调用 adapter 前创建 `provider_invocations`，并根据租户 Provider 配置
   执行统一退避重试。
-- AI SDK 固定 `maxRetries=0`；手写 OpenAI Responses、OpenAI Chat 和 Anthropic adapter
-  固定内部重试为 0。所有 adapter 都可接收当前 attempt 的 observing fetch。
+- AI SDK 固定 `maxRetries=0`。三种协议都接收当前 attempt 的 observing fetch。
 - observing fetch 从克隆的最终 `Request` 读取实际 URL 和序列化 body；请求头既不建模，
   也不写数据库或文件。URL 中的 API key、裸 `key`、token、secret、signature 等查询参数
   在持久化前替换为 `[REDACTED]`。

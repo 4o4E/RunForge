@@ -6,17 +6,20 @@ import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, Command
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
 
-export function llmModelRef(providerId: string, model: string): string {
+function llmModelRef(providerId: string, model: string): string {
   return `${providerId}:${model}`;
 }
 
 export function llmOptionsFromSettings(settings: LlmSettings): LlmModelOption[] {
   return settings.providers.flatMap((provider) =>
-    provider.models.map((model) => ({
+    provider.models.filter((model) => {
+      const capability = provider.modelCapabilities.find((item) => item.model === model);
+      return Boolean(capability?.contextWindow && capability.inputModalities.length);
+    }).map((model) => ({
       ref: llmModelRef(provider.id, model),
       providerId: provider.id,
       providerLabel: provider.label || provider.id,
-      provider: provider.provider,
+      protocol: provider.protocol,
       model,
       label: `${provider.label || provider.id} · ${model}`,
     })),
@@ -78,7 +81,7 @@ export function ModelSearchSelect({
               {options.map((option) => (
                 <CommandItem
                   key={option.ref}
-                  value={`${option.providerLabel} ${option.providerId} ${option.provider} ${option.model} ${option.ref}`}
+                  value={`${option.providerLabel} ${option.providerId} ${option.protocol} ${option.model} ${option.ref}`}
                   onSelect={() => {
                     onChange(option.ref);
                     setOpen(false);

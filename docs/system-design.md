@@ -17,7 +17,7 @@
 ## 当前能力
 
 - 通过 Agent 执行循环完成多步任务：计划、调用工具、观察结果、继续推进。
-- 支持多 LLM provider：`aisdk`、`openai-responses`、`openai-chat`、`anthropic`、`mock`。
+- 通过 AI SDK 支持 `openai-responses`、`openai-chat`、`anthropic-messages` 三种 LLM 协议。
 - 内置通用工具：shell、托管 shell、文件读写/编辑、glob、grep、web fetch、web search、ask user、update plan、skill、workflow、subagent 和数据源访问。
 - LLM 请求支持超时、流式输出和由 RunForge `ProviderRunner` 统一控制的瞬态错误重试。
 - 暴露 REST API 和 WebSocket 事件流。
@@ -55,7 +55,7 @@ Server (Node.js / TypeScript 单体)
   |-- Agent 执行循环
   |     |-- ContextManager: system prompt、Goal 锚点、历史消息、压缩视图
   |     |-- ProviderRunner: invocation/attempt 持久化、统一重试、原始流观测
-  |     |     `-- Provider 抽象: aisdk / openai-responses / openai-chat / anthropic / mock
+  |     |     `-- Provider 抽象: AI SDK 协议实现
   |     |-- Skill / MCP / Workflow registry: 按 run 渐进加载外部能力和任务流程
   |     |-- Tool registry: 工具注册、策略检查、输出截断
   |     |-- Subagent runner: 异步只读子任务
@@ -137,9 +137,8 @@ Web 创建 thread
   原始响应、标准化结果和错误分类。
 - `observability/repository.ts`：Provider 观测的 Prisma/内存持久化边界。
 - `observability/trace.ts`：按日追加本地 JSONL attempt trace，并保留最近 7 个自然日。
-- `providers/aiSdk.ts`：默认 provider 路径，基于 AI SDK。
-- `providers/openaiResponses.ts`、`openaiChat.ts`、`anthropic.ts`：手写旧 provider，仅作为兼容和回滚路径。
-- `providers/mock.ts`：离线确定性 provider，用于测试和本地演示。
+- `providers/aiSdk.ts`：通过 AI SDK 创建三种受支持协议的模型，并统一转换中立消息、工具调用和响应。
+- `model-catalog.json`、`modelCatalog.ts`：开发人员维护的模型能力目录、精确名称匹配和资料来源校验。
 
 `server/src/tools/`
 
@@ -212,19 +211,22 @@ Provider.complete(messages, tools) -> { content, reasoning, toolCalls, usage }
 Provider.completeStream(messages, tools, onDelta)
 ```
 
-各 provider adapter 负责把中立消息、工具定义和工具结果翻译成目标协议，并通过调用参数
-接收当前 attempt 的 observing fetch。AI SDK 的 `maxRetries` 和手写 provider 的内部重试均
-固定关闭，重试只由 `ProviderRunner` 决定，避免 SDK 内部请求绕过 attempt 记录。
+AI SDK 负责把中立消息、工具定义和工具结果翻译成目标协议，并通过调用参数接收当前
+attempt 的 observing fetch。AI SDK 的 `maxRetries` 固定为 `0`，重试只由 `ProviderRunner`
+决定，确保每次 HTTP 请求都有独立 attempt 记录。
 
 当前支持：
 
-- `aisdk`：默认路径，基于 Vercel AI SDK，可选择 OpenAI、OpenAI-compatible、Anthropic flavor。
-- `openai-responses`：手写 OpenAI Responses API provider，保留为回滚路径。
-- `openai-chat`：手写 Chat Completions provider，可兼容部分 OpenAI-compatible 服务，保留为回滚路径。
-- `anthropic`：手写 Anthropic Messages provider，保留为回滚路径。
-- `mock`：离线 deterministic provider，不需要密钥和网络。
+- `openai-responses`：使用 `@ai-sdk/openai` 的 Responses API。
+- `openai-chat`：使用 `@ai-sdk/openai-compatible` 的 Chat Completions API。
+- `anthropic-messages`：使用 `@ai-sdk/anthropic` 的 Messages API。
 
-运行时优先读取租户 LLM 配置；环境变量只提供初始默认值或配置读取失败时的兜底。
+LLM 配置保存在 tenant 的 `app_settings` 中，管理界面直接选择协议。模型列表接口只发现模型
+名称。上下文窗口和输入类型由本地目录按规范化后的完整名称或明确别名匹配；未匹配的模型
+必须由管理员填写。目录中的每项能力都保存官方资料链接、检查日期和资料覆盖字段。运行时
+遇到缺失能力会立即拒绝创建 Provider。
+
+模型 reasoning 只读取协议返回的独立字段。正文中的 `<think>` 标签按普通正文处理。
 
 一次运行期模型调用先建立 `provider_invocations`，再为每次真实 HTTP 请求建立
 `provider_attempts`。主 Agent、标题生成、上下文摘要、subagent 和 run-scoped LLM capability

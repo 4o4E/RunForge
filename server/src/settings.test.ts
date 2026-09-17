@@ -29,13 +29,13 @@ test('agent context settings: 按模型窗口计算预算，并忽略非法环�
   }
 });
 
-test('llm settings: 旧模型列表会自动补齐能力，人工配置最终覆盖自动值', () => {
+test('llm settings: 目录模型自动补齐能力，人工配置保持原值', () => {
   const settings = normalizeLlmSettings({
     defaultModelRef: 'openai:gpt-4.1-mini',
     providers: [{
       id: 'openai',
       label: 'OpenAI',
-      provider: 'aisdk',
+      protocol: 'openai-responses',
       baseUrl: 'https://api.openai.com/v1',
       apiKey: '',
       discoveredModels: ['gpt-4.1-mini', 'custom-model'],
@@ -52,30 +52,35 @@ test('llm settings: 旧模型列表会自动补齐能力，人工配置最终覆
       timeoutMs: 120_000,
       retries: 2,
       stream: true,
-      aisdkFlavor: 'openai-compatible',
-      reasoningTag: 'think',
     }],
   });
 
   const provider = settings.providers[0];
-  assert.equal(provider.modelCapabilities.find((item) => item.model === 'gpt-4.1-mini')?.contextWindow, 1_048_576);
+  assert.equal(provider.modelCapabilities.find((item) => item.model === 'gpt-4.1-mini')?.contextWindow, 1_047_576);
+  assert.equal(provider.modelCapabilities.find((item) => item.model === 'gpt-4.1-mini')?.references.length, 1);
   assert.deepEqual(provider.modelCapabilities.find((item) => item.model === 'custom-model'), {
     model: 'custom-model',
     contextWindow: 32_000,
     contextWindowSource: 'manual',
     inputModalities: ['text', 'audio'],
     inputModalitiesSource: 'manual',
+    references: [],
   });
 });
 
-test('llm settings: 已保存的自动默认值会按更具体的前缀目录刷新', () => {
+test('llm settings: 已保存的目录值按完整别名刷新', () => {
   const settings = normalizeLlmSettings({
     providers: [{
       id: 'deepseek',
       models: ['deepseek-v4-flash-260425'],
       discoveredModels: ['deepseek-v4-flash-260425'],
-      discoveredModelCapabilities: [{ model: 'deepseek-v4-flash-260425', contextWindow: 128_000, inputModalities: ['text'] }],
-      modelCapabilities: [{ model: 'deepseek-v4-flash-260425', contextWindow: 128_000, inputModalities: ['text'] }],
+      modelCapabilities: [{
+        model: 'deepseek-v4-flash-260425',
+        contextWindow: 128_000,
+        contextWindowSource: 'catalog',
+        inputModalities: ['text'],
+        inputModalitiesSource: 'catalog',
+      }],
     }],
   });
 
@@ -84,12 +89,41 @@ test('llm settings: 已保存的自动默认值会按更具体的前缀目录刷
   assert.equal(capability.contextWindowSource, 'catalog');
 });
 
+test('llm settings: 旧 AI SDK 配置转换为明确协议并删除旧字段', () => {
+  const settings = normalizeLlmSettings({
+    providers: [{
+      id: 'legacy',
+      provider: 'aisdk',
+      aisdkFlavor: 'anthropic',
+      reasoningTag: 'think',
+      models: ['claude-sonnet-4-6'],
+    }],
+  });
+
+  assert.equal(settings.providers[0].protocol, 'anthropic-messages');
+  assert.equal('provider' in settings.providers[0], false);
+  assert.equal('aisdkFlavor' in settings.providers[0], false);
+  assert.equal('reasoningTag' in settings.providers[0], false);
+});
+
 test('llm settings: 输出 token 上限允许显式设为空', () => {
   const settings = normalizeLlmSettings({
     providers: [{ id: 'no-local-output-limit', maxTokens: null }],
   });
 
   assert.equal(settings.providers[0].maxTokens, null);
+});
+
+test('llm settings: 未登记模型不会生成默认能力', () => {
+  const settings = normalizeLlmSettings({ providers: [{ id: 'custom', models: ['private-model'] }] });
+  assert.deepEqual(settings.providers[0].modelCapabilities[0], {
+    model: 'private-model',
+    contextWindow: null,
+    contextWindowSource: 'manual',
+    inputModalities: [],
+    inputModalitiesSource: 'manual',
+    references: [],
+  });
 });
 
 test('runtime capability settings: 支持每个能力配置多个可选模型', () => {

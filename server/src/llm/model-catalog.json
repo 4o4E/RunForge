@@ -1,132 +1,121 @@
 [
-  { "vendor": "OpenAI", "version": "GPT 5.2", "contextWindow": 400000, "inputModalities": ["text", "image"] },
-  { "vendor": "OpenAI", "version": "GPT 5.1", "contextWindow": 400000, "inputModalities": ["text", "image"] },
-  { "vendor": "OpenAI", "version": "GPT 5", "contextWindow": 400000, "inputModalities": ["text", "image"] },
-  { "vendor": "OpenAI", "version": "GPT 4.1", "contextWindow": 1048576, "inputModalities": ["text", "image"] },
-  { "vendor": "OpenAI", "version": "GPT 4o", "contextWindow": 128000, "inputModalities": ["text", "image"] },
-  { "vendor": "OpenAI", "version": "GPT 4.5", "contextWindow": 128000, "inputModalities": ["text", "image"] },
-  { "vendor": "OpenAI", "version": "GPT 4 Turbo", "contextWindow": 128000, "inputModalities": ["text", "image"] },
-  { "vendor": "OpenAI", "version": "GPT 4", "contextWindow": 8192, "inputModalities": ["text"] },
-  { "vendor": "OpenAI", "version": "GPT 3.5 Turbo", "contextWindow": 16385, "inputModalities": ["text"] },
-  { "vendor": "OpenAI", "version": "o4", "contextWindow": 200000, "inputModalities": ["text", "image"] },
-  { "vendor": "OpenAI", "version": "o3", "contextWindow": 200000, "inputModalities": ["text", "image"] },
-  { "vendor": "OpenAI", "version": "o1", "contextWindow": 200000, "inputModalities": ["text", "image"] },
-
-  { "vendor": "Anthropic", "version": "Claude Opus 4.6", "contextWindow": 200000, "inputModalities": ["text", "image"] },
-  { "vendor": "Anthropic", "version": "Claude Opus 4.5", "contextWindow": 200000, "inputModalities": ["text", "image"] },
-  { "vendor": "Anthropic", "version": "Claude Opus 4.1", "contextWindow": 200000, "inputModalities": ["text", "image"] },
-  { "vendor": "Anthropic", "version": "Claude Opus 4", "contextWindow": 200000, "inputModalities": ["text", "image"] },
-  { "vendor": "Anthropic", "version": "Claude Sonnet 4.6", "contextWindow": 200000, "inputModalities": ["text", "image"] },
-  { "vendor": "Anthropic", "version": "Claude Sonnet 4.5", "contextWindow": 200000, "inputModalities": ["text", "image"] },
-  { "vendor": "Anthropic", "version": "Claude Sonnet 4", "contextWindow": 200000, "inputModalities": ["text", "image"] },
-  { "vendor": "Anthropic", "version": "Claude Sonnet 3.7", "aliases": ["Claude 3.7 Sonnet"], "contextWindow": 200000, "inputModalities": ["text", "image"] },
-  { "vendor": "Anthropic", "version": "Claude Sonnet 3.5", "aliases": ["Claude 3.5 Sonnet"], "contextWindow": 200000, "inputModalities": ["text", "image"] },
-  { "vendor": "Anthropic", "version": "Claude Haiku 4.5", "contextWindow": 200000, "inputModalities": ["text", "image"] },
-  { "vendor": "Anthropic", "version": "Claude Haiku 3.5", "contextWindow": 200000, "inputModalities": ["text", "image"] },
-  { "vendor": "Anthropic", "version": "Claude 3 Opus", "contextWindow": 200000, "inputModalities": ["text", "image"] },
-  { "vendor": "Anthropic", "version": "Claude 3 Sonnet", "contextWindow": 200000, "inputModalities": ["text", "image"] },
-  { "vendor": "Anthropic", "version": "Claude 3 Haiku", "contextWindow": 200000, "inputModalities": ["text", "image"] },
-  { "vendor": "Anthropic", "version": "Claude 2.1", "contextWindow": 200000, "inputModalities": ["text"] },
-  { "vendor": "Anthropic", "version": "Claude 2", "contextWindow": 100000, "inputModalities": ["text"] },
-
-  { "vendor": "Google", "version": "Gemini 3.1", "contextWindow": 1048576, "inputModalities": ["text", "image", "audio", "video"] },
-  { "vendor": "Google", "version": "Gemini 3", "contextWindow": 1048576, "inputModalities": ["text", "image", "audio", "video"] },
-  { "vendor": "Google", "version": "Gemini 2.5", "contextWindow": 1048576, "inputModalities": ["text", "image", "audio", "video"] },
-  { "vendor": "Google", "version": "Gemini 2.0", "contextWindow": 1048576, "inputModalities": ["text", "image", "audio", "video"] },
-  { "vendor": "Google", "version": "Gemini 1.5 Pro", "contextWindow": 2097152, "inputModalities": ["text", "image", "audio", "video"] },
-  { "vendor": "Google", "version": "Gemini 1.5 Flash", "contextWindow": 1048576, "inputModalities": ["text", "image", "audio", "video"] },
-  { "vendor": "Google", "version": "Gemini 1.5", "contextWindow": 1048576, "inputModalities": ["text", "image", "audio", "video"] },
-  { "vendor": "Google", "version": "Gemini 1.0 Pro", "contextWindow": 32768, "inputModalities": ["text", "image"] },
-  { "vendor": "Google", "version": "Gemma 3", "contextWindow": 131072, "inputModalities": ["text", "image"] },
-  { "vendor": "Google", "version": "Gemma 2", "contextWindow": 8192, "inputModalities": ["text"] },
-
-  { "vendor": "DeepSeek", "version": "DeepSeek V4", "contextWindow": 1048576, "inputModalities": ["text"] },
-  { "vendor": "DeepSeek", "version": "DeepSeek V3.2", "contextWindow": 128000, "inputModalities": ["text"] },
-  { "vendor": "DeepSeek", "version": "DeepSeek V3.1", "contextWindow": 128000, "inputModalities": ["text"] },
-  { "vendor": "DeepSeek", "version": "DeepSeek V3", "contextWindow": 128000, "inputModalities": ["text"] },
-  { "vendor": "DeepSeek", "version": "DeepSeek V2.5", "contextWindow": 128000, "inputModalities": ["text"] },
-  { "vendor": "DeepSeek", "version": "DeepSeek Coder V2", "contextWindow": 128000, "inputModalities": ["text"] },
-  { "vendor": "DeepSeek", "version": "DeepSeek V2", "contextWindow": 128000, "inputModalities": ["text"] },
-  { "vendor": "DeepSeek", "version": "DeepSeek R1", "contextWindow": 128000, "inputModalities": ["text"] },
-
-  { "vendor": "Zhipu AI", "version": "GLM 5.2", "contextWindow": 1048576, "inputModalities": ["text"] },
-  { "vendor": "Zhipu AI", "version": "GLM 5", "contextWindow": 200000, "inputModalities": ["text"] },
-  { "vendor": "Zhipu AI", "version": "GLM 4.7", "contextWindow": 200000, "inputModalities": ["text"] },
-  { "vendor": "Zhipu AI", "version": "GLM 4.6", "contextWindow": 200000, "inputModalities": ["text"] },
-  { "vendor": "Zhipu AI", "version": "GLM 4.5V", "contextWindow": 65536, "inputModalities": ["text", "image"] },
-  { "vendor": "Zhipu AI", "version": "GLM 4.5", "contextWindow": 131072, "inputModalities": ["text"] },
-  { "vendor": "Zhipu AI", "version": "GLM 4 Plus", "contextWindow": 128000, "inputModalities": ["text"] },
-  { "vendor": "Zhipu AI", "version": "GLM 4", "contextWindow": 128000, "inputModalities": ["text"] },
-  { "vendor": "Zhipu AI", "version": "GLM 4V", "contextWindow": 16384, "inputModalities": ["text", "image"] },
-  { "vendor": "Zhipu AI", "version": "ChatGLM 3", "contextWindow": 32768, "inputModalities": ["text"] },
-
-  { "vendor": "Moonshot AI", "version": "Kimi K3", "contextWindow": 1048576, "inputModalities": ["text", "image", "video"] },
-  { "vendor": "Moonshot AI", "version": "Kimi K2.7 Code", "contextWindow": 262144, "inputModalities": ["text", "image", "video"] },
-  { "vendor": "Moonshot AI", "version": "Kimi K2.6", "contextWindow": 262144, "inputModalities": ["text", "image", "video"] },
-  { "vendor": "Moonshot AI", "version": "Kimi K2.5", "contextWindow": 262144, "inputModalities": ["text", "image", "video"] },
-  { "vendor": "Moonshot AI", "version": "Kimi K2", "contextWindow": 131072, "inputModalities": ["text"] },
-  { "vendor": "Moonshot AI", "version": "Kimi K1.5", "contextWindow": 131072, "inputModalities": ["text", "image"] },
-  { "vendor": "Moonshot AI", "version": "Moonshot V1", "contextWindow": 131072, "inputModalities": ["text"] },
-
-  { "vendor": "Alibaba Cloud", "version": "Qwen 3.5", "aliases": ["Qwen3.5"], "contextWindow": 1048576, "inputModalities": ["text", "image", "video"] },
-  { "vendor": "Alibaba Cloud", "version": "Qwen 3 VL", "aliases": ["Qwen3 VL"], "contextWindow": 262144, "inputModalities": ["text", "image", "video"] },
-  { "vendor": "Alibaba Cloud", "version": "Qwen 3 Max", "aliases": ["Qwen3 Max"], "contextWindow": 262144, "inputModalities": ["text"] },
-  { "vendor": "Alibaba Cloud", "version": "Qwen 3", "aliases": ["Qwen3"], "contextWindow": 131072, "inputModalities": ["text"] },
-  { "vendor": "Alibaba Cloud", "version": "Qwen 2.5 VL", "aliases": ["Qwen2.5 VL"], "contextWindow": 131072, "inputModalities": ["text", "image", "video"] },
-  { "vendor": "Alibaba Cloud", "version": "Qwen 2.5 Coder", "aliases": ["Qwen2.5 Coder"], "contextWindow": 131072, "inputModalities": ["text"] },
-  { "vendor": "Alibaba Cloud", "version": "Qwen 2.5", "aliases": ["Qwen2.5"], "contextWindow": 131072, "inputModalities": ["text"] },
-  { "vendor": "Alibaba Cloud", "version": "Qwen 2 VL", "aliases": ["Qwen2 VL"], "contextWindow": 32768, "inputModalities": ["text", "image", "video"] },
-  { "vendor": "Alibaba Cloud", "version": "Qwen 2", "aliases": ["Qwen2"], "contextWindow": 131072, "inputModalities": ["text"] },
-  { "vendor": "Alibaba Cloud", "version": "Qwen 1.5", "aliases": ["Qwen1.5"], "contextWindow": 32768, "inputModalities": ["text"] },
-  { "vendor": "Alibaba Cloud", "version": "QwQ 32B", "contextWindow": 131072, "inputModalities": ["text"] },
-
-  { "vendor": "xAI", "version": "Grok 4", "contextWindow": 256000, "inputModalities": ["text", "image"] },
-  { "vendor": "xAI", "version": "Grok 3", "contextWindow": 131072, "inputModalities": ["text", "image"] },
-  { "vendor": "xAI", "version": "Grok 2", "contextWindow": 131072, "inputModalities": ["text", "image"] },
-  { "vendor": "xAI", "version": "Grok 1.5", "contextWindow": 131072, "inputModalities": ["text"] },
-  { "vendor": "xAI", "version": "Grok 1", "contextWindow": 8192, "inputModalities": ["text"] },
-
-  { "vendor": "Meta", "version": "Llama 4", "contextWindow": 1048576, "inputModalities": ["text", "image"] },
-  { "vendor": "Meta", "version": "Llama 3.3", "contextWindow": 131072, "inputModalities": ["text"] },
-  { "vendor": "Meta", "version": "Llama 3.2", "contextWindow": 131072, "inputModalities": ["text", "image"] },
-  { "vendor": "Meta", "version": "Llama 3.1", "contextWindow": 131072, "inputModalities": ["text"] },
-  { "vendor": "Meta", "version": "Llama 3", "contextWindow": 8192, "inputModalities": ["text"] },
-  { "vendor": "Meta", "version": "Llama 2", "contextWindow": 4096, "inputModalities": ["text"] },
-
-  { "vendor": "Mistral AI", "version": "Mistral Large 3", "contextWindow": 262144, "inputModalities": ["text", "image"] },
-  { "vendor": "Mistral AI", "version": "Mistral Large 2", "contextWindow": 131072, "inputModalities": ["text"] },
-  { "vendor": "Mistral AI", "version": "Mistral Medium 3", "contextWindow": 131072, "inputModalities": ["text", "image"] },
-  { "vendor": "Mistral AI", "version": "Mistral Small 3.2", "contextWindow": 131072, "inputModalities": ["text", "image"] },
-  { "vendor": "Mistral AI", "version": "Mistral Small 3.1", "contextWindow": 131072, "inputModalities": ["text", "image"] },
-  { "vendor": "Mistral AI", "version": "Mixtral 8x22B", "contextWindow": 65536, "inputModalities": ["text"] },
-  { "vendor": "Mistral AI", "version": "Mixtral 8x7B", "contextWindow": 32768, "inputModalities": ["text"] },
-  { "vendor": "Mistral AI", "version": "Mistral 7B", "contextWindow": 32768, "inputModalities": ["text"] },
-  { "vendor": "Mistral AI", "version": "Pixtral Large", "contextWindow": 131072, "inputModalities": ["text", "image"] },
-  { "vendor": "Mistral AI", "version": "Codestral", "contextWindow": 262144, "inputModalities": ["text"] },
-
-  { "vendor": "Cohere", "version": "Command A", "contextWindow": 256000, "inputModalities": ["text"] },
-  { "vendor": "Cohere", "version": "Command R Plus", "contextWindow": 128000, "inputModalities": ["text"] },
-  { "vendor": "Cohere", "version": "Command R7B", "contextWindow": 128000, "inputModalities": ["text"] },
-  { "vendor": "Cohere", "version": "Command R", "contextWindow": 128000, "inputModalities": ["text"] },
-  { "vendor": "Cohere", "version": "Aya Expanse", "contextWindow": 128000, "inputModalities": ["text"] },
-
-  { "vendor": "MiniMax", "version": "MiniMax M2.5", "contextWindow": 204800, "inputModalities": ["text"] },
-  { "vendor": "MiniMax", "version": "MiniMax M2.1", "contextWindow": 204800, "inputModalities": ["text"] },
-  { "vendor": "MiniMax", "version": "MiniMax Text 01", "contextWindow": 1048576, "inputModalities": ["text"] },
-  { "vendor": "Baidu", "version": "ERNIE 4.5", "contextWindow": 128000, "inputModalities": ["text", "image"] },
-  { "vendor": "Baidu", "version": "ERNIE 4.0", "contextWindow": 128000, "inputModalities": ["text"] },
-  { "vendor": "Tencent", "version": "Hunyuan T1", "contextWindow": 131072, "inputModalities": ["text"] },
-  { "vendor": "Tencent", "version": "Hunyuan Large", "contextWindow": 262144, "inputModalities": ["text"] },
-  { "vendor": "Amazon", "version": "Nova Premier", "contextWindow": 1048576, "inputModalities": ["text", "image", "video"] },
-  { "vendor": "Amazon", "version": "Nova Pro", "contextWindow": 300000, "inputModalities": ["text", "image", "video"] },
-  { "vendor": "Amazon", "version": "Nova Lite", "contextWindow": 300000, "inputModalities": ["text", "image", "video"] },
-  { "vendor": "Amazon", "version": "Nova Micro", "contextWindow": 128000, "inputModalities": ["text"] },
-
-  { "vendor": "Microsoft", "version": "Phi 4", "contextWindow": 16384, "inputModalities": ["text"] },
-  { "vendor": "Microsoft", "version": "Phi 3.5", "contextWindow": 131072, "inputModalities": ["text"] },
-  { "vendor": "AI21 Labs", "version": "Jamba 1.5", "contextWindow": 262144, "inputModalities": ["text"] },
-  { "vendor": "Databricks", "version": "DBRX", "contextWindow": 32768, "inputModalities": ["text"] },
-  { "vendor": "IBM", "version": "Granite 3.3", "contextWindow": 131072, "inputModalities": ["text"] },
-
-  { "vendor": "RunForge", "version": "Mock", "contextWindow": 128000, "inputModalities": ["text"] }
+  {
+    "model": "gpt-5.5",
+    "aliases": [],
+    "contextWindow": 1050000,
+    "inputModalities": ["text", "image"],
+    "references": [{ "title": "OpenAI GPT-5.5 model", "url": "https://developers.openai.com/api/docs/models/gpt-5.5", "checkedAt": "2026-09-18", "fields": ["contextWindow", "inputModalities"] }]
+  },
+  {
+    "model": "gpt-5.6-luna",
+    "aliases": [],
+    "contextWindow": 1050000,
+    "inputModalities": ["text", "image"],
+    "references": [{ "title": "OpenAI GPT-5.6 Luna model", "url": "https://developers.openai.com/api/docs/models/gpt-5.6-luna", "checkedAt": "2026-09-18", "fields": ["contextWindow", "inputModalities"] }]
+  },
+  {
+    "model": "gpt-5.6-sol",
+    "aliases": [],
+    "contextWindow": 1050000,
+    "inputModalities": ["text", "image"],
+    "references": [{ "title": "OpenAI GPT-5.6 Sol model", "url": "https://developers.openai.com/api/docs/models/gpt-5.6-sol", "checkedAt": "2026-09-18", "fields": ["contextWindow", "inputModalities"] }]
+  },
+  {
+    "model": "gpt-5.6-terra",
+    "aliases": [],
+    "contextWindow": 1050000,
+    "inputModalities": ["text", "image"],
+    "references": [{ "title": "OpenAI GPT-5.6 Terra model", "url": "https://developers.openai.com/api/docs/models/gpt-5.6-terra", "checkedAt": "2026-09-18", "fields": ["contextWindow", "inputModalities"] }]
+  },
+  {
+    "model": "gpt-6-astra",
+    "aliases": [],
+    "contextWindow": 1050000,
+    "inputModalities": ["text", "image"],
+    "references": [{ "title": "OpenAI GPT-6 Astra model", "url": "https://developers.openai.com/api/docs/models/gpt-6-astra", "checkedAt": "2026-09-18", "fields": ["contextWindow", "inputModalities"] }]
+  },
+  {
+    "model": "gpt-4.1",
+    "aliases": ["gpt-4.1-2025-04-14"],
+    "contextWindow": 1047576,
+    "inputModalities": ["text", "image"],
+    "references": [{ "title": "OpenAI GPT-4.1 model", "url": "https://developers.openai.com/api/docs/models/gpt-4.1", "checkedAt": "2026-09-18", "fields": ["contextWindow", "inputModalities"] }]
+  },
+  {
+    "model": "gpt-4.1-mini",
+    "aliases": ["gpt-4.1-mini-2025-04-14"],
+    "contextWindow": 1047576,
+    "inputModalities": ["text", "image"],
+    "references": [{ "title": "OpenAI GPT-4.1 mini model", "url": "https://developers.openai.com/api/docs/models/gpt-4.1-mini", "checkedAt": "2026-09-18", "fields": ["contextWindow", "inputModalities"] }]
+  },
+  {
+    "model": "gpt-4o-mini",
+    "aliases": ["gpt-4o-mini-2024-07-18"],
+    "contextWindow": 128000,
+    "inputModalities": ["text", "image"],
+    "references": [{ "title": "OpenAI GPT-4o mini model", "url": "https://developers.openai.com/api/docs/models/gpt-4o-mini", "checkedAt": "2026-09-18", "fields": ["contextWindow", "inputModalities"] }]
+  },
+  {
+    "model": "glm-5.2",
+    "aliases": ["glm-5-2-260617", "glm-5-2-260810", "zai-org/glm-5.2", "zai-org/glm-5-2-260617", "zai-org/glm-5-2-260810", "zhipu-ai/glm-5.2", "zhipu-ai/glm-5-2-260617", "zhipu-ai/glm-5-2-260810"],
+    "contextWindow": 1048576,
+    "inputModalities": ["text"],
+    "references": [{ "title": "Z.ai GLM-5.2 model card", "url": "https://huggingface.co/zai-org/GLM-5.2", "checkedAt": "2026-09-18", "fields": ["contextWindow", "inputModalities"] }]
+  },
+  {
+    "model": "deepseek-v4-flash",
+    "aliases": ["deepseek-v4-flash-260425", "deepseek-v4-flash-ga-260731", "deepseek-ai/deepseek-v4-flash-260425", "deepseek-ai/deepseek-v4-flash-ga-260731"],
+    "contextWindow": 1048576,
+    "inputModalities": ["text"],
+    "references": [{ "title": "DeepSeek V4 Flash model card", "url": "https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash", "checkedAt": "2026-09-18", "fields": ["contextWindow", "inputModalities"] }]
+  },
+  {
+    "model": "deepseek-v4-pro",
+    "aliases": ["deepseek-v4-pro-260425", "deepseek-v4-pro-ga-260813", "deepseek-ai/deepseek-v4-pro-260425", "deepseek-ai/deepseek-v4-pro-ga-260813"],
+    "contextWindow": 1048576,
+    "inputModalities": ["text"],
+    "references": [{ "title": "DeepSeek V4 Pro model card", "url": "https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro", "checkedAt": "2026-09-18", "fields": ["contextWindow", "inputModalities"] }]
+  },
+  {
+    "model": "kimi-k2.6",
+    "aliases": ["kimi-k2-6-260701", "moonshotai/kimi-k2.6", "moonshotai/kimi-k2-6-260701"],
+    "contextWindow": 262144,
+    "inputModalities": ["text", "image", "video"],
+    "references": [{ "title": "Moonshot AI Kimi K2.6 model card", "url": "https://huggingface.co/moonshotai/Kimi-K2.6", "checkedAt": "2026-09-18", "fields": ["contextWindow", "inputModalities"] }]
+  },
+  {
+    "model": "claude-opus-4-6",
+    "aliases": [],
+    "contextWindow": 1000000,
+    "inputModalities": ["text", "image"],
+    "references": [{ "title": "Anthropic Claude Opus 4.6", "url": "https://platform.claude.com/docs/en/models/opus-4-6/overview", "checkedAt": "2026-09-18", "fields": ["contextWindow", "inputModalities"] }]
+  },
+  {
+    "model": "claude-sonnet-4-6",
+    "aliases": [],
+    "contextWindow": 1000000,
+    "inputModalities": ["text", "image"],
+    "references": [{ "title": "Anthropic Claude Sonnet 4.6", "url": "https://platform.claude.com/docs/en/models/sonnet-4-6/overview", "checkedAt": "2026-09-18", "fields": ["contextWindow", "inputModalities"] }]
+  },
+  {
+    "model": "claude-haiku-4-5",
+    "aliases": [],
+    "contextWindow": 200000,
+    "inputModalities": ["text", "image"],
+    "references": [{ "title": "Anthropic Claude Haiku 4.5", "url": "https://platform.claude.com/docs/en/models/haiku-4-5/overview", "checkedAt": "2026-09-18", "fields": ["contextWindow", "inputModalities"] }]
+  },
+  {
+    "model": "gemini-2.5-pro",
+    "aliases": ["models/gemini-2.5-pro"],
+    "contextWindow": 1048576,
+    "inputModalities": ["text", "image", "audio", "video", "document"],
+    "references": [{ "title": "Google Gemini models", "url": "https://ai.google.dev/gemini-api/docs/models", "checkedAt": "2026-09-18", "fields": ["contextWindow", "inputModalities"] }]
+  },
+  {
+    "model": "gemini-2.5-flash",
+    "aliases": ["models/gemini-2.5-flash"],
+    "contextWindow": 1048576,
+    "inputModalities": ["text", "image", "audio", "video", "document"],
+    "references": [{ "title": "Google Gemini models", "url": "https://ai.google.dev/gemini-api/docs/models", "checkedAt": "2026-09-18", "fields": ["contextWindow", "inputModalities"] }]
+  }
 ]

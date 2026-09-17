@@ -1,42 +1,12 @@
-import { config } from '../config.js';
+import type { LlmProtocol } from '@runforge/contracts';
 import type { LlmConfig, Provider } from './types.js';
-import { createAiSdkProvider, type AiSdkFlavor } from './providers/aiSdk.js';
-import { createOpenAIResponsesProvider } from './providers/openaiResponses.js';
-import { createOpenAIChatProvider } from './providers/openaiChat.js';
-import { createAnthropicProvider } from './providers/anthropic.js';
-import { createMockProvider } from './providers/mock.js';
+import { createAiSdkProvider } from './providers/aiSdk.js';
 import { getLlmSettings, type LlmProviderSettings } from '../settings.js';
 import type { TenantScope } from '../store/types.js';
-import { mergeModelCapability } from './modelCatalog.js';
 import type { ProviderDescriptor } from './providerRunner.js';
 
-// `aisdk` is the default (Phase 2). The legacy hand-written providers are kept
-// selectable as a rollback path until the AI SDK path is validated in real use.
-export type ProviderName = 'aisdk' | 'openai-responses' | 'openai-chat' | 'anthropic' | 'mock';
-
-interface ProviderCreateOptions {
-  aisdkFlavor?: AiSdkFlavor;
-  reasoningTag?: string;
-}
-
-export function createProvider(name: ProviderName, cfg: LlmConfig, opts: ProviderCreateOptions = {}): Provider {
-  switch (name) {
-    case 'aisdk':
-      return createAiSdkProvider(cfg, {
-        flavor: opts.aisdkFlavor ?? (config.llm.aisdkFlavor as AiSdkFlavor),
-        reasoningTag: opts.reasoningTag ?? config.llm.reasoningTag,
-      });
-    case 'openai-responses':
-      return createOpenAIResponsesProvider(cfg);
-    case 'openai-chat':
-      return createOpenAIChatProvider(cfg);
-    case 'anthropic':
-      return createAnthropicProvider(cfg);
-    case 'mock':
-      return createMockProvider();
-    default:
-      throw new Error(`Unknown LLM provider: ${name}`);
-  }
+export function createProvider(protocol: LlmProtocol, cfg: LlmConfig): Provider {
+  return createAiSdkProvider(cfg, { protocol });
 }
 
 function parseModelRef(ref: string): { providerId: string; model: string } | null {
@@ -58,10 +28,7 @@ function configFromProvider(provider: LlmProviderSettings, model: string): LlmCo
 }
 
 export function createProviderFromSettings(provider: LlmProviderSettings, model: string): Provider {
-  return createProvider(provider.provider, configFromProvider(provider, model), {
-    aisdkFlavor: provider.aisdkFlavor,
-    reasoningTag: provider.reasoningTag,
-  });
+  return createProvider(provider.protocol, configFromProvider(provider, model));
 }
 
 export async function getConfiguredProvider(scope: TenantScope, modelRef?: string): Promise<{
@@ -74,11 +41,15 @@ export async function getConfiguredProvider(scope: TenantScope, modelRef?: strin
   const settings = await getLlmSettings(scope);
   const ref = modelRef?.trim() || settings.defaultModelRef;
   const parsed = parseModelRef(ref);
-  if (!parsed) throw new Error(`模型引用格式无效：${ref}。请使用 provider:model，例如 default:${config.llm.model}`);
+  if (!parsed) throw new Error(`模型引用格式无效：${ref}。请使用 provider:model，例如 default:gpt-4o-mini`);
   const providerSettings = settings.providers.find((item) => item.id === parsed.providerId);
   if (!providerSettings) throw new Error(`没有找到 LLM 供应商：${parsed.providerId}`);
   if (!providerSettings.models.includes(parsed.model)) {
     throw new Error(`供应商 ${providerSettings.id} 未配置模型：${parsed.model}`);
+  }
+  const capability = providerSettings.modelCapabilities.find((item) => item.model === parsed.model);
+  if (!capability?.contextWindow || !capability.inputModalities.length) {
+    throw new Error(`模型 ${ref} 的上下文长度或输入类型尚未配置`);
   }
   const provider = createProviderFromSettings(providerSettings, parsed.model);
   return {
@@ -90,27 +61,8 @@ export async function getConfiguredProvider(scope: TenantScope, modelRef?: strin
     },
     modelRef: ref,
     stream: providerSettings.stream,
-    contextWindow: providerSettings.modelCapabilities.find((item) => item.model === parsed.model)?.contextWindow
-      ?? mergeModelCapability(parsed.model).contextWindow,
+    contextWindow: capability.contextWindow,
   };
-}
-
-let cached: Provider | null = null;
-
-/** The process-wide provider selected by config (LLM_PROVIDER). */
-export function getProvider(): Provider {
-  if (!cached) {
-    cached = createProvider(config.llm.provider as ProviderName, {
-      baseUrl: config.llm.baseUrl,
-      apiKey: config.llm.apiKey,
-      model: config.llm.model,
-      maxTokens: config.llm.maxTokens,
-      timeoutMs: config.llm.timeoutMs,
-      retries: config.llm.retries,
-      stream: config.llm.stream,
-    });
-  }
-  return cached;
 }
 
 export type { Provider } from './types.js';

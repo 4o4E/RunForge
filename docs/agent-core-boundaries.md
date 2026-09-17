@@ -16,7 +16,7 @@
 
 用途：
 
-- 统一模型调用入口，当前默认 provider 是 `aisdk`。
+- 统一模型调用入口，租户配置从三种 AI SDK 协议中选择。
 - 负责 OpenAI、OpenAI-compatible、Anthropic 等模型协议适配。
 - 负责 `generateText`、`streamText`、流式增量、usage 和 tool call 拼装。
 - 负责把 RunForge 的中立 `LlmMessage`、`LlmTool` 映射到模型可接受的消息和工具定义。

@@ -319,36 +319,20 @@ export function McpServerSettingsPanel({ controlApi }: { controlApi: SettingsCon
   );
 }
 
-const PROVIDER_OPTIONS: Array<{ value: LlmProviderSettings['provider']; label: string }> = [
-  { value: 'aisdk', label: 'AI SDK' },
+const PROTOCOL_OPTIONS: Array<{ value: LlmProviderSettings['protocol']; label: string }> = [
   { value: 'openai-responses', label: 'OpenAI Responses' },
-  { value: 'openai-chat', label: 'OpenAI Chat' },
-  { value: 'anthropic', label: 'Anthropic' },
-  { value: 'mock', label: 'Mock' },
+  { value: 'openai-chat', label: 'OpenAI Chat Completions' },
+  { value: 'anthropic-messages', label: 'Anthropic Messages' },
 ];
 
-const FLAVOR_OPTIONS: Array<{ value: LlmProviderSettings['aisdkFlavor']; label: string }> = [
-  { value: 'openai-compatible', label: 'OpenAI Compatible' },
-  { value: 'openai', label: 'OpenAI' },
-  { value: 'anthropic', label: 'Anthropic' },
-];
-
-function defaultProvider(index: number): LlmProviderSettings {
-  const defaultCapability: LlmModelCapabilitySettings = {
-    model: 'gpt-4o-mini',
-    contextWindow: 128_000,
-    contextWindowSource: 'catalog',
-    inputModalities: ['text', 'image'],
-    inputModalitiesSource: 'catalog',
-  };
+function defaultProvider(index: number, defaultCapability: LlmModelCapabilitySettings): LlmProviderSettings {
   return {
     id: `provider-${index + 1}`,
     label: `供应商 ${index + 1}`,
-    provider: 'aisdk',
+    protocol: 'openai-responses',
     baseUrl: 'https://api.openai.com/v1',
     apiKey: '',
     discoveredModels: ['gpt-4o-mini'],
-    discoveredModelCapabilities: [defaultCapability],
     models: ['gpt-4o-mini'],
     modelCapabilities: [defaultCapability],
     defaultModel: 'gpt-4o-mini',
@@ -356,8 +340,6 @@ function defaultProvider(index: number): LlmProviderSettings {
     timeoutMs: 120_000,
     retries: 2,
     stream: true,
-    aisdkFlavor: 'openai-compatible',
-    reasoningTag: 'think',
   };
 }
 
@@ -384,33 +366,25 @@ function groupModels(models: string[]): Array<{ prefix: string; models: string[]
 function fallbackCapability(model: string): LlmModelCapabilitySettings {
   return {
     model,
-    contextWindow: 128_000,
-    contextWindowSource: 'default',
-    inputModalities: ['text'],
-    inputModalitiesSource: 'default',
+    contextWindow: null,
+    contextWindowSource: 'manual',
+    inputModalities: [],
+    inputModalitiesSource: 'manual',
+    references: [],
   };
 }
 
-function mergeAutomaticCapability(
-  current: LlmModelCapabilitySettings,
-  discovered: LlmModelCapabilitySettings,
-): LlmModelCapabilitySettings {
-  return {
-    model: current.model,
-    contextWindow: current.contextWindowSource === 'manual' ? current.contextWindow : discovered.contextWindow,
-    contextWindowSource: current.contextWindowSource === 'manual' ? 'manual' : discovered.contextWindowSource,
-    inputModalities: current.inputModalitiesSource === 'manual' ? current.inputModalities : discovered.inputModalities,
-    inputModalitiesSource: current.inputModalitiesSource === 'manual' ? 'manual' : discovered.inputModalitiesSource,
-  };
-}
-
-const MULTIMODAL_OPTIONS: Array<{ value: Exclude<LlmInputModality, 'text'>; label: string }> = [
+const INPUT_MODALITY_OPTIONS: Array<{ value: LlmInputModality; label: string }> = [
+  { value: 'text', label: '文本' },
   { value: 'image', label: '图片' },
   { value: 'audio', label: '音频' },
   { value: 'video', label: '视频' },
+  { value: 'document', label: '文档' },
 ];
 
 const CONTEXT_WINDOW_PRESETS = [
+  { value: 1_050_000, label: '1.05M · 1,050,000' },
+  { value: 1_047_576, label: 'GPT 4.1 · 1,047,576' },
   { value: 1_048_576, label: '1M · 1,048,576' },
   { value: 400_000, label: '400K · 400,000' },
   { value: 262_144, label: '256K · 262,144' },
@@ -422,7 +396,7 @@ const CONTEXT_WINDOW_PRESETS = [
   { value: 16_384, label: '16K · 16,384' },
 ] as const;
 
-function contextWindowPresetValue(contextWindow: number): string {
+function contextWindowPresetValue(contextWindow: number | null): string {
   return CONTEXT_WINDOW_PRESETS.some((preset) => preset.value === contextWindow) ? String(contextWindow) : 'custom';
 }
 
@@ -471,18 +445,31 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
   const candidates = draft ? providerCandidates(draft) : [];
   const groupedCandidates = groupModels(candidates);
 
-  function setProviderDraft(patch: Partial<LlmProviderSettings>) {
-    if (!draft) return;
-    const next = { ...draft, ...patch };
-    if (patch.models && !next.models.includes(next.defaultModel)) next.defaultModel = next.models[0] ?? '';
-    setDraft(next);
+  function setProviderDraft(
+    patch: Partial<LlmProviderSettings> | ((current: LlmProviderSettings) => Partial<LlmProviderSettings>),
+  ) {
+    setDraft((current) => {
+      if (!current) return current;
+      const resolved = typeof patch === 'function' ? patch(current) : patch;
+      const next = { ...current, ...resolved };
+      if (resolved.models && !next.models.includes(next.defaultModel)) next.defaultModel = next.models[0] ?? '';
+      return next;
+    });
   }
 
-  function beginCreate() {
-    setEditIndex(currentSettings.providers.length);
-    setDraft(defaultProvider(currentSettings.providers.length));
-    setPendingDelete(null);
-    setCustomModel('');
+  async function beginCreate() {
+    setBusyAction('create');
+    try {
+      const capability = await controlApi.resolveLlmModelCapability('gpt-4o-mini');
+      setEditIndex(currentSettings.providers.length);
+      setDraft(defaultProvider(currentSettings.providers.length, capability));
+      setPendingDelete(null);
+      setCustomModel('');
+    } catch (err) {
+      notify({ variant: 'error', title: '默认模型能力读取失败', description: (err as Error).message });
+    } finally {
+      setBusyAction('');
+    }
   }
 
   function beginEdit() {
@@ -491,9 +478,12 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
     setDraft({
       ...selected,
       discoveredModels: [...selected.discoveredModels],
-      discoveredModelCapabilities: selected.discoveredModelCapabilities.map((item) => ({ ...item, inputModalities: [...item.inputModalities] })),
       models: [...selected.models],
-      modelCapabilities: selected.modelCapabilities.map((item) => ({ ...item, inputModalities: [...item.inputModalities] })),
+      modelCapabilities: selected.modelCapabilities.map((item) => ({
+        ...item,
+        inputModalities: [...item.inputModalities],
+        references: item.references.map((reference) => ({ ...reference, fields: [...reference.fields] })),
+      })),
     });
     setPendingDelete(null);
     setCustomModel('');
@@ -565,17 +555,9 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
     setBusyAction('probe');
     try {
       const result = await controlApi.probeLlmProviderModels(draft);
-      const nextCapabilities = new Map(draft.discoveredModelCapabilities.map((item) => [item.model, item]));
-      for (const capability of result.modelCapabilities) nextCapabilities.set(capability.model, capability);
-      const probedByModel = new Map(result.modelCapabilities.map((item) => [item.model, item]));
-      setProviderDraft({
-        discoveredModels: [...new Set([...draft.discoveredModels, ...result.models])].sort(),
-        discoveredModelCapabilities: [...nextCapabilities.values()].sort((a, b) => a.model.localeCompare(b.model)),
-        modelCapabilities: draft.modelCapabilities.map((current) => {
-          const probed = probedByModel.get(current.model);
-          return probed ? mergeAutomaticCapability(current, probed) : current;
-        }),
-      });
+      setProviderDraft((current) => ({
+        discoveredModels: [...new Set([...current.discoveredModels, ...result.models])].sort(),
+      }));
       notify({ variant: 'success', title: '模型列表拉取成功', description: `发现 ${result.models.length} 个候选模型` });
     } catch (err) {
       notify({ variant: 'error', title: '模型列表拉取失败', description: (err as Error).message });
@@ -614,49 +596,70 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
     }
   }
 
-  function toggleModel(model: string, checked: boolean) {
+  async function toggleModel(model: string, checked: boolean) {
     if (!draft) return;
-    const models = new Set(draft.models);
-    const capabilities = new Map(draft.modelCapabilities.map((item) => [item.model, item]));
-    if (checked) {
-      models.add(model);
-      capabilities.set(model, draft.discoveredModelCapabilities.find((item) => item.model === model) ?? fallbackCapability(model));
-    } else {
-      models.delete(model);
-      capabilities.delete(model);
+    let resolvedCapability: LlmModelCapabilitySettings | null = null;
+    if (checked && !draft.modelCapabilities.some((item) => item.model === model)) {
+      setBusyAction(`catalog:${model}`);
+      try {
+        resolvedCapability = await controlApi.resolveLlmModelCapability(model);
+      } catch (err) {
+        notify({ variant: 'error', title: '模型能力匹配失败', description: (err as Error).message });
+        return;
+      } finally {
+        setBusyAction('');
+      }
     }
-    setProviderDraft({
-      models: [...models].sort(),
-      modelCapabilities: [...capabilities.values()].filter((item) => models.has(item.model)).sort((a, b) => a.model.localeCompare(b.model)),
+    setProviderDraft((current) => {
+      const models = new Set(current.models);
+      const capabilities = new Map(current.modelCapabilities.map((item) => [item.model, item]));
+      if (checked) {
+        models.add(model);
+        if (!capabilities.has(model) && resolvedCapability) capabilities.set(model, resolvedCapability);
+      } else {
+        models.delete(model);
+        capabilities.delete(model);
+      }
+      return {
+        models: [...models].sort(),
+        modelCapabilities: [...capabilities.values()].filter((item) => models.has(item.model)).sort((a, b) => a.model.localeCompare(b.model)),
+      };
     });
   }
 
   function updateModelCapability(model: string, patch: Partial<LlmModelCapabilitySettings>) {
     if (!draft) return;
-    const current = draft.modelCapabilities.find((item) => item.model === model)
-      ?? draft.discoveredModelCapabilities.find((item) => item.model === model)
-      ?? fallbackCapability(model);
-    const next: LlmModelCapabilitySettings = {
-      ...current,
-      ...patch,
-      model,
-      contextWindowSource: patch.contextWindow !== undefined ? 'manual' : current.contextWindowSource,
-      inputModalitiesSource: patch.inputModalities !== undefined ? 'manual' : current.inputModalitiesSource,
-    };
-    setProviderDraft({
-      modelCapabilities: draft.models.map((item) => item === model
-        ? next
-        : draft.modelCapabilities.find((capability) => capability.model === item)
-          ?? draft.discoveredModelCapabilities.find((capability) => capability.model === item)
-          ?? fallbackCapability(item)),
+    setProviderDraft((provider) => {
+      const current = provider.modelCapabilities.find((item) => item.model === model)
+        ?? fallbackCapability(model);
+      const next: LlmModelCapabilitySettings = {
+        ...current,
+        ...patch,
+        model,
+        contextWindowSource: patch.contextWindow !== undefined ? 'manual' : current.contextWindowSource,
+        inputModalitiesSource: patch.inputModalities !== undefined ? 'manual' : current.inputModalitiesSource,
+        references: current.references.flatMap((reference) => {
+          const fields = reference.fields.filter((field) => (
+            field !== 'contextWindow' || patch.contextWindow === undefined
+          ) && (
+            field !== 'inputModalities' || patch.inputModalities === undefined
+          ));
+          return fields.length ? [{ ...reference, fields }] : [];
+        }),
+      };
+      return {
+        modelCapabilities: provider.models.map((item) => item === model
+          ? next
+          : provider.modelCapabilities.find((capability) => capability.model === item)
+            ?? fallbackCapability(item)),
+      };
     });
   }
 
-  function toggleModality(model: string, modality: Exclude<LlmInputModality, 'text'>, checked: boolean) {
+  function toggleModality(model: string, modality: LlmInputModality, checked: boolean) {
     if (!draft) return;
     const current = draft.modelCapabilities.find((item) => item.model === model) ?? fallbackCapability(model);
     const modalities = new Set<LlmInputModality>(current.inputModalities);
-    modalities.add('text');
     if (checked) modalities.add(modality);
     else modalities.delete(modality);
     updateModelCapability(model, { inputModalities: [...modalities] });
@@ -668,15 +671,14 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
     setBusyAction('catalog');
     try {
       const capability = await controlApi.resolveLlmModelCapability(model);
-      const discoveredCapabilities = new Map(draft.discoveredModelCapabilities.map((item) => [item.model, item]));
-      const selectedCapabilities = new Map(draft.modelCapabilities.map((item) => [item.model, item]));
-      discoveredCapabilities.set(model, capability);
-      if (!selectedCapabilities.has(model)) selectedCapabilities.set(model, capability);
-      setProviderDraft({
-        discoveredModels: [...new Set([...draft.discoveredModels, model])].sort(),
-        discoveredModelCapabilities: [...discoveredCapabilities.values()].sort((a, b) => a.model.localeCompare(b.model)),
-        models: [...new Set([...draft.models, model])].sort(),
-        modelCapabilities: [...selectedCapabilities.values()].sort((a, b) => a.model.localeCompare(b.model)),
+      setProviderDraft((current) => {
+        const selectedCapabilities = new Map(current.modelCapabilities.map((item) => [item.model, item]));
+        if (!selectedCapabilities.has(model)) selectedCapabilities.set(model, capability);
+        return {
+          discoveredModels: [...new Set([...current.discoveredModels, model])].sort(),
+          models: [...new Set([...current.models, model])].sort(),
+          modelCapabilities: [...selectedCapabilities.values()].sort((a, b) => a.model.localeCompare(b.model)),
+        };
       });
       setCustomModel('');
     } catch (err) {
@@ -690,7 +692,7 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
     <PanelShell
       title="LLM 供应商"
       description="左侧选择供应商，默认查看摘要；只有编辑状态才加载完整配置表单"
-      actions={<Button onClick={beginCreate} disabled={editing || defaultDraft !== null}><Plus className="h-4 w-4" />新增供应商</Button>}
+      actions={<Button onClick={() => void beginCreate()} disabled={editing || defaultDraft !== null || Boolean(busyAction)}><Plus className="h-4 w-4" />新增供应商</Button>}
     >
       <div className="grid h-full min-h-0 gap-4 xl:grid-rows-[auto_minmax(0,1fr)]">
         <Card className="rounded-lg shadow-sm">
@@ -717,7 +719,7 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
               className={cn('grid gap-1 rounded-md border p-3 text-left transition-colors', index === selectedIndex && !editing ? 'border-primary bg-primary/5' : 'hover:bg-accent/60')}
             >
               <span className="truncate text-sm font-medium">{provider.label || provider.id}</span>
-              <span className="truncate text-xs text-muted-foreground">{provider.id} · {provider.provider}</span>
+              <span className="truncate text-xs text-muted-foreground">{provider.id} · {provider.protocol}</span>
               <span className="text-xs text-muted-foreground">{provider.models.length} 个已启用模型</span>
             </button>
           ))}
@@ -735,19 +737,17 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
                 <div className="grid gap-3 md:grid-cols-3">
                   <Field label="供应商 ID"><Input value={draft.id} onChange={(event) => setProviderDraft({ id: event.target.value })} /></Field>
                   <Field label="显示名称"><Input value={draft.label} onChange={(event) => setProviderDraft({ label: event.target.value })} /></Field>
-                  <Field label="适配器"><Select value={draft.provider} onValueChange={(value) => setProviderDraft({ provider: value as LlmProviderSettings['provider'] })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{PROVIDER_OPTIONS.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></Field>
+                  <Field label="协议"><Select value={draft.protocol} onValueChange={(value) => setProviderDraft({ protocol: value as LlmProviderSettings['protocol'] })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{PROTOCOL_OPTIONS.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></Field>
                   <Field label="Base URL"><Input value={draft.baseUrl} onChange={(event) => setProviderDraft({ baseUrl: event.target.value })} /></Field>
                   <Field label="API Key"><Input type="text" name="llm-provider-api-key" autoComplete="off" spellCheck={false} data-1p-ignore data-lpignore="true" data-bwignore="true" className="[-webkit-text-security:disc]" value={draft.apiKey} onChange={(event) => setProviderDraft({ apiKey: event.target.value })} /></Field>
-                  <Field label="AI SDK Flavor"><Select value={draft.aisdkFlavor} onValueChange={(value) => setProviderDraft({ aisdkFlavor: value as LlmProviderSettings['aisdkFlavor'] })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{FLAVOR_OPTIONS.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></Field>
                   <Field label="默认模型"><Select value={draft.defaultModel || 'none'} onValueChange={(value) => setProviderDraft({ defaultModel: value === 'none' ? '' : value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">未设置</SelectItem>{draft.models.map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}</SelectContent></Select></Field>
                   <Field label="输出 token 上限（可选）"><Input type="number" min={1} value={draft.maxTokens ?? ''} placeholder="不设置本地上限" onChange={(event) => setProviderDraft({ maxTokens: event.target.value === '' ? null : Number(event.target.value) })} /></Field>
                   <Field label="超时毫秒"><Input type="number" min={1000} value={draft.timeoutMs} onChange={(event) => setProviderDraft({ timeoutMs: Number(event.target.value) })} /></Field>
                   <Field label="重试次数"><Input type="number" min={0} value={draft.retries} onChange={(event) => setProviderDraft({ retries: Number(event.target.value) })} /></Field>
-                  <Field label="Reasoning Tag"><Input value={draft.reasoningTag} onChange={(event) => setProviderDraft({ reasoningTag: event.target.value })} /></Field>
                   <div className="flex items-center justify-between rounded-md border p-3"><div><div className="text-sm font-medium">流式输出</div><div className="text-xs text-muted-foreground">后端向前端推送增量内容</div></div><Switch checked={draft.stream} onCheckedChange={(stream) => setProviderDraft({ stream })} /></div>
                 </div>
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div><div className="text-sm font-medium">候选模型</div><div className="text-xs text-muted-foreground">按模型类别展开后选择；拉取时会同时读取上下文和多模态能力</div></div>
+                  <div><div className="text-sm font-medium">候选模型</div><div className="text-xs text-muted-foreground">供应商接口只发现名称；选择模型时使用本地能力目录自动填写</div></div>
                   <div className="flex items-center gap-2">
                     <Button type="button" variant="ghost" size="sm" onClick={() => setModelGroupsOpen(Object.fromEntries(groupedCandidates.map((group) => [`${draft.id}:${group.prefix}`, true])))}>展开全部</Button>
                     <Button type="button" variant="ghost" size="sm" onClick={() => setModelGroupsOpen(Object.fromEntries(groupedCandidates.map((group) => [`${draft.id}:${group.prefix}`, false])))}>收起全部</Button>
@@ -771,7 +771,7 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
                             </button>
                           </CollapsibleTrigger>
                           <CollapsibleContent className="grid md:grid-cols-2">
-                            {group.models.map((model) => <label key={model} className="flex cursor-pointer items-center gap-2 border-t p-3 hover:bg-accent/60"><Checkbox checked={draft.models.includes(model)} onCheckedChange={(checked) => toggleModel(model, checked === true)} /><span className="min-w-0 truncate text-sm">{model}</span></label>)}
+                            {group.models.map((model) => <label key={model} className="flex cursor-pointer items-center gap-2 border-t p-3 hover:bg-accent/60"><Checkbox checked={draft.models.includes(model)} disabled={Boolean(busyAction)} onCheckedChange={(checked) => void toggleModel(model, checked === true)} /><span className="min-w-0 truncate text-sm">{model}</span></label>)}
                           </CollapsibleContent>
                         </Collapsible>
                       );
@@ -780,12 +780,12 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
                 </ScrollArea>
                 <Field label="添加自定义模型"><div className="flex gap-2"><Input value={customModel} onChange={(event) => setCustomModel(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void addCustomModel(); } }} /><Button variant="outline" onClick={() => void addCustomModel()} disabled={Boolean(busyAction)}>{busyAction === 'catalog' ? <Spinner className="h-4 w-4" /> : <Plus className="h-4 w-4" />}添加并选择</Button></div></Field>
                 <div className="grid gap-3">
-                  <div><div className="text-sm font-medium">已选择模型</div><div className="text-xs text-muted-foreground">自动值来自供应商元数据和静态模型目录；这里的人工配置最终生效</div></div>
+                  <div><div className="text-sm font-medium">已选择模型</div><div className="text-xs text-muted-foreground">匹配本地目录时自动填写；未匹配时必须人工填写上下文长度并选择输入类型</div></div>
                   {!draft.models.length && <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">尚未选择模型</div>}
                   {draft.models.map((model) => {
                     const capability = draft.modelCapabilities.find((item) => item.model === model)
-                      ?? draft.discoveredModelCapabilities.find((item) => item.model === model)
                       ?? fallbackCapability(model);
+                    const incomplete = capability.contextWindow === null || capability.inputModalities.length === 0;
                     return (
                       <Card key={model} className="rounded-md shadow-none">
                         <CardContent className="grid gap-3 p-4">
@@ -793,7 +793,7 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
                           <div className="grid gap-3 lg:grid-cols-[minmax(12rem,0.8fr)_minmax(18rem,1.2fr)]">
                             <Field label="上下文长度（tokens）">
                               <div className="flex gap-2">
-                                <Input className="min-w-0 flex-1" type="number" min={1} max={10000000} value={capability.contextWindow} onChange={(event) => updateModelCapability(model, { contextWindow: Number(event.target.value) })} />
+                                <Input className="min-w-0 flex-1" type="number" min={1} max={10000000} value={capability.contextWindow ?? ''} placeholder="必须填写" onChange={(event) => updateModelCapability(model, { contextWindow: event.target.value === '' ? null : Number(event.target.value) })} />
                                 <Select value={contextWindowPresetValue(capability.contextWindow)} onValueChange={(value) => { if (value !== 'custom') updateModelCapability(model, { contextWindow: Number(value) }); }}>
                                   <SelectTrigger className="w-44 shrink-0"><SelectValue placeholder="常用长度" /></SelectTrigger>
                                   <SelectContent>
@@ -805,10 +805,14 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
                             </Field>
                             <Field label="多模态输入">
                               <div className="flex min-h-10 flex-wrap items-center gap-4 rounded-md border px-3 py-2">
-                                <label className="flex items-center gap-2 text-sm"><Checkbox checked disabled />文本</label>
-                                {MULTIMODAL_OPTIONS.map((option) => <label key={option.value} className="flex items-center gap-2 text-sm"><Checkbox checked={capability.inputModalities.includes(option.value)} onCheckedChange={(checked) => toggleModality(model, option.value, checked === true)} />{option.label}</label>)}
+                                {INPUT_MODALITY_OPTIONS.map((option) => <label key={option.value} className="flex items-center gap-2 text-sm"><Checkbox checked={capability.inputModalities.includes(option.value)} onCheckedChange={(checked) => toggleModality(model, option.value, checked === true)} />{option.label}</label>)}
                               </div>
                             </Field>
+                          </div>
+                          <div className="grid gap-2 rounded-md bg-muted/30 p-3 text-xs text-muted-foreground">
+                            <div>模型声明能力：上下文 {capability.contextWindowSource === 'catalog' ? '本地目录' : '人工配置'}；输入类型 {capability.inputModalitiesSource === 'catalog' ? '本地目录' : '人工配置'}。RunForge 当前可直接发送文本和图片。</div>
+                            {incomplete && <div className="text-destructive">该模型的能力配置尚未完成，保存会被拒绝。</div>}
+                            {capability.references.map((reference) => <a key={`${reference.url}:${reference.fields.join(',')}`} className="w-fit underline underline-offset-4" href={reference.url} target="_blank" rel="noreferrer">{reference.title} · 检查于 {reference.checkedAt}</a>)}
                           </div>
                         </CardContent>
                       </Card>
@@ -821,7 +825,7 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
             <Card className="rounded-lg shadow-sm">
               <CardHeader>
                 <div className="flex items-start justify-between gap-3">
-                  <div><CardTitle>{selected.label || selected.id}</CardTitle><CardDescription>{selected.id} · {selected.provider}</CardDescription></div>
+                  <div><CardTitle>{selected.label || selected.id}</CardTitle><CardDescription>{selected.id} · {selected.protocol}</CardDescription></div>
                   <div className="flex flex-wrap justify-end gap-2">
                     <Button variant="outline" size="sm" onClick={() => void pingProvider(selected)} disabled={Boolean(busyAction)}><Wifi className="h-4 w-4" />Ping</Button>
                     <Button variant="outline" size="sm" onClick={() => openChat(selected)} disabled={Boolean(busyAction) || providerCandidates(selected).length === 0}><MessageSquare className="h-4 w-4" />模拟对话</Button>
@@ -832,7 +836,7 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
               </CardHeader>
               <CardContent className="grid gap-4">
                 <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                  <SummaryRow label="适配器" value={selected.provider} />
+                  <SummaryRow label="协议" value={selected.protocol} />
                   <SummaryRow label="Base URL" value={selected.baseUrl} />
                   <SummaryRow label="API Key" value={selected.apiKey ? '已配置' : '未配置'} />
                   <SummaryRow label="默认模型" value={selected.defaultModel || '未设置'} />
@@ -844,7 +848,7 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
                   {!selected.models.length && <span className="text-sm text-muted-foreground">未启用模型</span>}
                   {selected.models.map((model) => {
                     const capability = selected.modelCapabilities.find((item) => item.model === model) ?? fallbackCapability(model);
-                    return <div key={model} className="flex flex-wrap items-center gap-2 rounded-md border p-3"><span className="mr-auto break-all text-sm font-medium">{model}</span><Badge variant="outline">{capability.contextWindow.toLocaleString()} tokens</Badge>{capability.inputModalities.map((modality) => <Badge key={modality} variant="secondary">{modality}</Badge>)}</div>;
+                    return <div key={model} className="flex flex-wrap items-center gap-2 rounded-md border p-3"><span className="mr-auto break-all text-sm font-medium">{model}</span><Badge variant="outline">{capability.contextWindow === null ? '待填写上下文' : `${capability.contextWindow.toLocaleString()} tokens`}</Badge>{capability.inputModalities.map((modality) => <Badge key={modality} variant="secondary">{modality}</Badge>)}</div>;
                   })}
                 </div>
               </CardContent>

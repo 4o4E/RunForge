@@ -1,31 +1,24 @@
 import { readFileSync } from 'node:fs';
-import type { LlmInputModality, LlmModelCapabilitySettings } from '@runforge/contracts';
+import type {
+  LlmInputModality,
+  LlmModelCapabilityField,
+  LlmModelCapabilityReference,
+  LlmModelCapabilitySettings,
+} from '@runforge/contracts';
 
 interface CatalogEntry {
-  vendor: string;
-  version: string;
-  aliases?: string[];
+  model: string;
+  aliases: string[];
   contextWindow: number;
   inputModalities: LlmInputModality[];
+  references: LlmModelCapabilityReference[];
 }
 
-const KNOWN_MODALITIES = new Set<LlmInputModality>(['text', 'image', 'audio', 'video']);
-const DEFAULT_CAPABILITY: Omit<LlmModelCapabilitySettings, 'model'> = {
-  contextWindow: 128_000,
-  contextWindowSource: 'default',
-  inputModalities: ['text'],
-  inputModalitiesSource: 'default',
-};
-
+const KNOWN_MODALITIES = new Set<LlmInputModality>(['text', 'image', 'audio', 'video', 'document']);
+const KNOWN_FIELDS = new Set<LlmModelCapabilityField>(['contextWindow', 'inputModalities']);
 const catalog = JSON.parse(readFileSync(new URL('./model-catalog.json', import.meta.url), 'utf8')) as CatalogEntry[];
 
-function modelNames(model: string): string[] {
-  const normalized = normalizeModelName(model);
-  const leaf = normalizeModelName(model.split('/').at(-1) ?? model);
-  return [...new Set([normalized, leaf])];
-}
-
-/** 供应商常把版本里的点号或空格改成短横线，统一后再按完整 token 边界匹配。 */
+/** 模型名称只统一大小写和分隔符；匹配仍要求完整名称相等。 */
 export function normalizeModelName(value: string): string {
   return value
     .trim()
@@ -34,67 +27,68 @@ export function normalizeModelName(value: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
-function matchScore(entry: CatalogEntry, names: string[]): number {
-  const identities = [entry.version, ...(entry.aliases ?? []), `${entry.vendor} ${entry.version}`]
-    .map(normalizeModelName)
-    .filter(Boolean);
-  return Math.max(-1, ...identities.map((identity) => {
-    const matched = names.some((name) => name === identity
-      || name.startsWith(`${identity}-`)
-      || name.endsWith(`-${identity}`)
-      || name.includes(`-${identity}-`));
-    return matched ? identity.length : -1;
-  }));
+function validateCatalogEntry(entry: CatalogEntry, index: number): void {
+  if (!normalizeModelName(entry.model)) throw new Error(`模型能力目录第 ${index + 1} 项缺少模型名称`);
+  if (!Number.isInteger(entry.contextWindow) || entry.contextWindow <= 0) {
+    throw new Error(`模型能力目录 ${entry.model} 的上下文长度无效`);
+  }
+  if (!entry.inputModalities.length || entry.inputModalities.some((item) => !KNOWN_MODALITIES.has(item))) {
+    throw new Error(`模型能力目录 ${entry.model} 的输入类型无效`);
+  }
+  if (!entry.references.length || entry.references.some((reference) => (
+    !reference.title.trim()
+    || !reference.url.startsWith('https://')
+    || !/^\d{4}-\d{2}-\d{2}$/.test(reference.checkedAt)
+    || !reference.fields.length
+    || reference.fields.some((field) => !KNOWN_FIELDS.has(field))
+  ))) {
+    throw new Error(`模型能力目录 ${entry.model} 的资料来源无效`);
+  }
+  for (const field of KNOWN_FIELDS) {
+    if (!entry.references.some((reference) => reference.fields.includes(field))) {
+      throw new Error(`模型能力目录 ${entry.model} 缺少 ${field} 的资料来源`);
+    }
+  }
+}
+
+const catalogByName = new Map<string, CatalogEntry>();
+for (const [index, entry] of catalog.entries()) {
+  validateCatalogEntry(entry, index);
+  for (const name of [entry.model, ...entry.aliases]) {
+    const normalized = normalizeModelName(name);
+    const existing = catalogByName.get(normalized);
+    if (existing && existing !== entry) throw new Error(`模型能力目录名称重复：${name}`);
+    catalogByName.set(normalized, entry);
+  }
 }
 
 function findCatalogEntry(model: string): CatalogEntry | undefined {
-  const names = modelNames(model);
-  return catalog
-    .map((entry) => ({ entry, score: matchScore(entry, names) }))
-    .filter((item) => item.score >= 0)
-    .sort((a, b) => b.score - a.score)[0]?.entry;
+  return catalogByName.get(normalizeModelName(model));
 }
 
-function normalizeModalities(value: unknown): LlmInputModality[] {
-  if (!Array.isArray(value)) return [];
-  const normalized = value.flatMap((item) => {
-    const modality = String(item).trim().toLowerCase();
-    if (modality === 'vision' || modality === 'images') return ['image' as const];
-    if (modality === 'audios') return ['audio' as const];
-    if (modality === 'videos') return ['video' as const];
-    return KNOWN_MODALITIES.has(modality as LlmInputModality) ? [modality as LlmInputModality] : [];
-  });
-  return [...new Set<LlmInputModality>(['text', ...normalized])];
+function cloneReferences(references: LlmModelCapabilityReference[]): LlmModelCapabilityReference[] {
+  return references.map((reference) => ({ ...reference, fields: [...reference.fields] }));
 }
 
-/** 静态目录用于补齐上游没有返回的模型能力，未知模型使用保守默认值。 */
+/** 未登记模型返回待人工填写状态，任何字段都不会生成推测值。 */
 export function catalogCapability(model: string): LlmModelCapabilitySettings {
   const matched = findCatalogEntry(model);
+  if (!matched) {
+    return {
+      model,
+      contextWindow: null,
+      contextWindowSource: 'manual',
+      inputModalities: [],
+      inputModalitiesSource: 'manual',
+      references: [],
+    };
+  }
   return {
     model,
-    contextWindow: matched?.contextWindow ?? DEFAULT_CAPABILITY.contextWindow,
-    contextWindowSource: matched ? 'catalog' : 'default',
-    inputModalities: normalizeModalities(matched?.inputModalities ?? DEFAULT_CAPABILITY.inputModalities),
-    inputModalitiesSource: matched ? 'catalog' : 'default',
-  };
-}
-
-/** 上游元数据优先，缺失字段才由静态目录补齐。 */
-export function mergeModelCapability(
-  model: string,
-  upstream: Partial<Omit<LlmModelCapabilitySettings, 'model'>> = {},
-): LlmModelCapabilitySettings {
-  const fallback = catalogCapability(model);
-  const modalities = normalizeModalities(upstream.inputModalities);
-  return {
-    model,
-    contextWindow: Number.isFinite(upstream.contextWindow) && Number(upstream.contextWindow) > 0
-      ? Math.floor(Number(upstream.contextWindow))
-      : fallback.contextWindow,
-    contextWindowSource: Number.isFinite(upstream.contextWindow) && Number(upstream.contextWindow) > 0
-      ? upstream.contextWindowSource ?? 'provider'
-      : fallback.contextWindowSource,
-    inputModalities: modalities.length ? modalities : fallback.inputModalities,
-    inputModalitiesSource: modalities.length ? upstream.inputModalitiesSource ?? 'provider' : fallback.inputModalitiesSource,
+    contextWindow: matched.contextWindow,
+    contextWindowSource: 'catalog',
+    inputModalities: [...matched.inputModalities],
+    inputModalitiesSource: 'catalog',
+    references: cloneReferences(matched.references),
   };
 }

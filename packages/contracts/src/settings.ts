@@ -65,27 +65,34 @@ export interface McpServerProbeResult {
   tools: McpToolOption[];
 }
 
-export type LlmProviderName = 'aisdk' | 'openai-responses' | 'openai-chat' | 'anthropic' | 'mock';
-export type LlmAiSdkFlavor = 'openai-compatible' | 'openai' | 'anthropic';
-export type LlmInputModality = 'text' | 'image' | 'audio' | 'video';
-export type LlmModelCapabilitySource = 'provider' | 'catalog' | 'default' | 'manual';
+export type LlmProtocol = 'openai-responses' | 'openai-chat' | 'anthropic-messages';
+export type LlmInputModality = 'text' | 'image' | 'audio' | 'video' | 'document';
+export type LlmModelCapabilitySource = 'catalog' | 'manual';
+export type LlmModelCapabilityField = 'contextWindow' | 'inputModalities';
+
+export interface LlmModelCapabilityReference {
+  title: string;
+  url: string;
+  checkedAt: string;
+  fields: LlmModelCapabilityField[];
+}
 
 export interface LlmModelCapabilitySettings {
   model: string;
-  contextWindow: number;
+  contextWindow: number | null;
   contextWindowSource: LlmModelCapabilitySource;
   inputModalities: LlmInputModality[];
   inputModalitiesSource: LlmModelCapabilitySource;
+  references: LlmModelCapabilityReference[];
 }
 
 export interface LlmProviderSettings {
   id: string;
   label: string;
-  provider: LlmProviderName;
+  protocol: LlmProtocol;
   baseUrl: string;
   apiKey: string;
   discoveredModels: string[];
-  discoveredModelCapabilities: LlmModelCapabilitySettings[];
   models: string[];
   modelCapabilities: LlmModelCapabilitySettings[];
   defaultModel: string;
@@ -93,15 +100,13 @@ export interface LlmProviderSettings {
   timeoutMs: number;
   retries: number;
   stream: boolean;
-  aisdkFlavor: LlmAiSdkFlavor;
-  reasoningTag: string;
 }
 
 export interface LlmModelOption {
   ref: string;
   providerId: string;
   providerLabel: string;
-  provider: LlmProviderName;
+  protocol: LlmProtocol;
   model: string;
   label: string;
 }
@@ -177,7 +182,6 @@ export interface RuntimeCapabilityCredential {
 
 export interface LlmProviderProbeResult {
   models: string[];
-  modelCapabilities: LlmModelCapabilitySettings[];
   source: string;
 }
 

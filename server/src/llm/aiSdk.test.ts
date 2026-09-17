@@ -130,7 +130,7 @@ test('AI SDK provider: configured streaming also applies to complete()', async (
       timeoutMs: 1_000,
       retries: 0,
       stream: true,
-    }, { flavor: 'openai', reasoningTag: '' });
+    }, { protocol: 'openai-responses' });
 
     await assert.rejects(provider.complete(
       [{ role: 'user', content: '你好' }],

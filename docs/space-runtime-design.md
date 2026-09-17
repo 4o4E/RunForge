@@ -346,7 +346,7 @@ Cordis 只负责业务插件的服务依赖和生命周期，不替换 Agent loo
 
 - AI SDK 会把中立 message、tool schema 和 provider options 翻译成供应商 wire body；
   messages 表保存的是翻译前的逻辑内容。
-- AI SDK 内部重试时，一个 step 可能产生多个 HTTP attempt；当前 steps/events 没有 attempt
+- SDK 或调用层发生重试时，一个 step 可能产生多个 HTTP attempt；steps/events 没有 attempt
   ID，也无法区分各次请求。
 - 当前没有保存最终序列化后的请求 body、Provider response/request ID 和每个 attempt 的
   状态。
@@ -380,17 +380,16 @@ AI SDK 在这里仅负责协议转换、流解析和工具调用组装，不拥�
 7. 流式请求只有在尚未向 Agent runtime 发布任何增量时才允许自动重试；已经发布部分流后
    的失败作为当前 attempt 和 invocation 失败处理，避免重复输出。
 
-手写兼容 provider 在已有 wire body 构造点接入同一个 ProviderRunner/observer。所有重试都
-由 RunForge 统一控制，不能让某个 SDK 或 provider adapter 在观测边界之外自行重试。
-现有 messages/events 继续承担上下文原文和前端回放，不重复替代。
+三种协议共用 AI SDK Provider，并接入同一个 ProviderRunner/observer。所有重试都由 RunForge
+统一控制，现有 messages/events 继续承担上下文原文和前端回放。
 
 本地文件继续记录 LLM API 流式 trace 和运行控制日志，保留 7 天；数据库 invocation/
 attempt 记录不由该清理任务删除。
 
 当前实现覆盖主 Agent、标题生成、上下文压缩摘要、subagent 和 run-scoped LLM capability。
-管理端模型列表探测和测试对话不属于 run，不写入这两张 run 关联表。无网络的 mock provider
-会产生 invocation，但不会伪造 HTTP attempt。attempt 错误分为 `http`、`transport`、
-`parse` 和 `runtime`，便于区分上游状态码、传输中断、响应解析失败和本地运行错误。
+管理端模型列表探测和测试对话不属于 run，不写入这两张 run 关联表。attempt 错误分为
+`http`、`transport`、`parse` 和 `runtime`，便于区分上游状态码、传输中断、响应解析失败和
+本地运行错误。
 
 完整原始流会在单次调用期间于内存中聚合，并同时写入数据库和 7 日 JSONL。这是为了满足
 逐 attempt 完整复盘的已确认要求；首版单实例且暂不做资源配额，因此本阶段不增加截断、
@@ -508,7 +507,7 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
 ### 阶段 8：Provider 观测和本地 trace
 
 - ✅ 实现 RunForge 自己的 ProviderRunner 重试状态机，并关闭 SDK 内部重试。
-- ✅ 接入 observing fetch、流式 tap 和手写 provider observer。
+- ✅ 三种 AI SDK 协议接入 observing fetch 和流式 tap。
 - ✅ 保存逻辑请求、invocation/attempt、wire body、原始流聚合和标准化响应，不保存请求头。
 - ✅ 实现本地 JSONL attempt trace 和 7 天清理；数据库记录独立保留。
 

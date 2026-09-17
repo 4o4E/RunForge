@@ -151,10 +151,10 @@ function enabledRuntimeCapabilities(
 }
 
 function contextWindows(settings: Awaited<ReturnType<typeof getLlmSettings>>): Record<string, number> {
-  return Object.fromEntries(settings.providers.flatMap((provider) => provider.models.map((model) => [
-    `${provider.id}:${model}`,
-    provider.modelCapabilities.find((capability) => capability.model === model)?.contextWindow ?? 128_000,
-  ])));
+  return Object.fromEntries(settings.providers.flatMap((provider) => provider.models.flatMap((model) => {
+    const contextWindow = provider.modelCapabilities.find((capability) => capability.model === model)?.contextWindow;
+    return contextWindow ? [[`${provider.id}:${model}`, contextWindow] as const] : [];
+  })));
 }
 
 async function loadCatalogFromTenant(tenantId: string): Promise<TenantSpaceCapabilityCatalog> {
@@ -170,7 +170,7 @@ async function loadCatalogFromTenant(tenantId: string): Promise<TenantSpaceCapab
         ref: modelRef,
         providerId: 'default',
         providerLabel: 'Default',
-        provider: 'mock',
+        protocol: 'openai-chat',
         model: instanceConfig.llm.model,
         label: instanceConfig.llm.model,
       }],

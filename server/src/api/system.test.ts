@@ -198,7 +198,7 @@ test('系统设置接口: system admin 可按租户读取，租户身份不能�
     const resolvedCapability = await fetch(`${base}/system/tenants/tn_system_settings/settings/llm/model-capability`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-      body: JSON.stringify({ model: 'zhipu-ai/glm-5-2-flash' }),
+      body: JSON.stringify({ model: 'zhipu-ai/glm-5-2-260617' }),
     });
     assert.equal(resolvedCapability.status, 200);
     assert.equal(((await resolvedCapability.json()) as { contextWindow: number }).contextWindow, 1_048_576);

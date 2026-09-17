@@ -1,13 +1,12 @@
 import { resolve } from 'node:path';
 import { mkdir } from 'node:fs/promises';
 import type {
-  LlmAiSdkFlavor,
   LlmInputModality,
   LlmModelCapabilitySettings,
   LlmModelCapabilitySource,
   LlmModelOption,
-  LlmProviderName,
   LlmProviderSettings,
+  LlmProtocol,
   LlmSettings,
   McpHeaderSettings,
   McpServerSettings,
@@ -24,7 +23,7 @@ import { config } from './config.js';
 import type { Scope, TenantScope } from './store/types.js';
 import { findSetting, findSettings, insertMissingSettings, upsertSettings } from './store/settingsRepository.js';
 import { resolveWorkspaceRoot } from './files/workspaceRoot.js';
-import { mergeModelCapability } from './llm/modelCatalog.js';
+import { catalogCapability } from './llm/modelCatalog.js';
 
 const DEFAULT_TENANT_ID = 'default';
 
@@ -97,14 +96,23 @@ function shellPathModeValue(value: unknown, fallback: ToolSettings['shellPathMod
   return value === 'system' || value === 'custom' ? value : fallback;
 }
 
-function llmProviderNameValue(value: unknown, fallback: LlmProviderName): LlmProviderName {
-  return value === 'aisdk' || value === 'openai-responses' || value === 'openai-chat' || value === 'anthropic' || value === 'mock'
-    ? value
-    : fallback;
-}
+function llmProtocolValue(body: Record<string, unknown>, fallback: LlmProtocol): LlmProtocol {
+  if (body.protocol === 'openai-responses' || body.protocol === 'openai-chat' || body.protocol === 'anthropic-messages') {
+    return body.protocol;
+  }
+  if (body.protocol !== undefined) throw new Error(`不支持的 LLM 协议：${String(body.protocol)}`);
 
-function llmAiSdkFlavorValue(value: unknown, fallback: LlmAiSdkFlavor): LlmAiSdkFlavor {
-  return value === 'openai-compatible' || value === 'openai' || value === 'anthropic' ? value : fallback;
+  const legacyProvider = body.provider;
+  if (legacyProvider === undefined) return fallback;
+  if (legacyProvider === 'openai-responses') return 'openai-responses';
+  if (legacyProvider === 'openai-chat') return 'openai-chat';
+  if (legacyProvider === 'anthropic') return 'anthropic-messages';
+  if (legacyProvider === 'aisdk') {
+    if (body.aisdkFlavor === 'openai') return 'openai-responses';
+    if (body.aisdkFlavor === 'anthropic') return 'anthropic-messages';
+    if (body.aisdkFlavor === 'openai-compatible' || body.aisdkFlavor === undefined) return 'openai-chat';
+  }
+  throw new Error(`旧 LLM 配置无法转换为受支持协议：${String(legacyProvider)}`);
 }
 
 function providerIdValue(value: unknown, fallback: string): string {
@@ -130,9 +138,9 @@ function uniqStrings(items: string[]): string[] {
 
 function llmModalities(value: unknown, fallback: LlmInputModality[]): LlmInputModality[] {
   if (!Array.isArray(value)) return fallback;
-  const allowed = new Set<LlmInputModality>(['text', 'image', 'audio', 'video']);
+  const allowed = new Set<LlmInputModality>(['text', 'image', 'audio', 'video', 'document']);
   const normalized = value.map((item) => String(item).trim()).filter((item): item is LlmInputModality => allowed.has(item as LlmInputModality));
-  return [...new Set<LlmInputModality>(['text', ...normalized])];
+  return [...new Set<LlmInputModality>(normalized)];
 }
 
 function normalizeLlmModelCapabilities(
@@ -148,26 +156,39 @@ function normalizeLlmModelCapabilities(
   }));
   const fallbackByModel = new Map(fallback.map((item) => [item.model, item]));
   return models.map((model) => {
-    const inherited = fallbackByModel.get(model) ?? mergeModelCapability(model);
+    const catalog = catalogCapability(model);
+    const inherited = fallbackByModel.get(model);
     const row = rowByModel.get(model);
-    if (!row) return inherited;
-    const contextSource = llmCapabilitySource(row.contextWindowSource);
-    const modalitiesSource = llmCapabilitySource(row.inputModalitiesSource);
-    return mergeModelCapability(model, {
-      contextWindow: contextSource === 'manual' || contextSource === 'provider'
-        ? positiveIntValue(row.contextWindow, inherited.contextWindow, 1, 10_000_000)
-        : inherited.contextWindow,
-      contextWindowSource: contextSource === 'manual' || contextSource === 'provider' ? contextSource : inherited.contextWindowSource,
-      inputModalities: modalitiesSource === 'manual' || modalitiesSource === 'provider'
-        ? llmModalities(row.inputModalities, inherited.inputModalities)
-        : inherited.inputModalities,
-      inputModalitiesSource: modalitiesSource === 'manual' || modalitiesSource === 'provider' ? modalitiesSource : inherited.inputModalitiesSource,
-    });
+    const contextSource = llmCapabilitySource(row?.contextWindowSource ?? inherited?.contextWindowSource);
+    const modalitiesSource = llmCapabilitySource(row?.inputModalitiesSource ?? inherited?.inputModalitiesSource);
+    const manualContext = contextSource === 'manual'
+      ? optionalPositiveIntValue(row?.contextWindow ?? inherited?.contextWindow, null, 1, 10_000_000)
+      : null;
+    const manualModalities = modalitiesSource === 'manual'
+      ? llmModalities(row?.inputModalities ?? inherited?.inputModalities, [])
+      : [];
+    const contextWindowSource = manualContext !== null ? 'manual' : catalog.contextWindowSource;
+    const inputModalitiesSource = manualModalities.length ? 'manual' : catalog.inputModalitiesSource;
+    const catalogFields = new Set([
+      ...(contextWindowSource === 'catalog' ? ['contextWindow' as const] : []),
+      ...(inputModalitiesSource === 'catalog' ? ['inputModalities' as const] : []),
+    ]);
+    return {
+      model,
+      contextWindow: manualContext ?? catalog.contextWindow,
+      contextWindowSource,
+      inputModalities: manualModalities.length ? manualModalities : catalog.inputModalities,
+      inputModalitiesSource,
+      references: catalog.references.flatMap((reference) => {
+        const fields = reference.fields.filter((field) => catalogFields.has(field));
+        return fields.length ? [{ ...reference, fields }] : [];
+      }),
+    };
   });
 }
 
 function llmCapabilitySource(value: unknown): LlmModelCapabilitySource | null {
-  return value === 'provider' || value === 'catalog' || value === 'default' || value === 'manual' ? value : null;
+  return value === 'catalog' || value === 'manual' ? value : null;
 }
 
 function keyValueList(value: unknown): McpHeaderSettings[] {
@@ -218,25 +239,21 @@ function modelRef(providerId: string, model: string): string {
 }
 
 function defaultLlmProviderSettings(): LlmProviderSettings {
-  const provider = llmProviderNameValue(config.llm.provider, 'aisdk');
   const defaultModel = stringValue(config.llm.model, 'gpt-4o-mini');
   return {
     id: 'default',
     label: '默认供应商',
-    provider,
+    protocol: config.llm.protocol,
     baseUrl: config.llm.baseUrl,
     apiKey: config.llm.apiKey,
     discoveredModels: [defaultModel],
-    discoveredModelCapabilities: [mergeModelCapability(defaultModel)],
     models: [defaultModel],
-    modelCapabilities: [mergeModelCapability(defaultModel)],
+    modelCapabilities: [catalogCapability(defaultModel)],
     defaultModel,
     maxTokens: positiveIntValue(config.llm.maxTokens, 4096, 1, 200_000),
     timeoutMs: positiveIntValue(config.llm.timeoutMs, 120_000, 1000, 600_000),
     retries: positiveIntValue(config.llm.retries, 2, 0, 10),
     stream: config.llm.stream,
-    aisdkFlavor: llmAiSdkFlavorValue(config.llm.aisdkFlavor, 'openai-compatible'),
-    reasoningTag: typeof config.llm.reasoningTag === 'string' ? config.llm.reasoningTag : 'think',
   };
 }
 
@@ -460,15 +477,10 @@ function normalizeLlmProvider(input: unknown, fallback: LlmProviderSettings, use
   const models = uniqStrings(stringList(body.models, fallbackModels));
   const discoveredModels = uniqStrings(stringList(body.discoveredModels, [...fallback.discoveredModels, ...models]));
   const allDiscoveredModels = uniqStrings([...discoveredModels, ...models]);
-  const discoveredModelCapabilities = normalizeLlmModelCapabilities(
-    body.discoveredModelCapabilities,
-    allDiscoveredModels,
-    fallback.discoveredModelCapabilities,
-  );
   const modelCapabilities = normalizeLlmModelCapabilities(
     body.modelCapabilities,
     models,
-    discoveredModelCapabilities,
+    fallback.modelCapabilities,
   );
   const requestedDefaultModel = typeof body.defaultModel === 'string' && body.defaultModel.trim() ? body.defaultModel.trim() : fallback.defaultModel;
   const defaultModel = models.includes(requestedDefaultModel) ? requestedDefaultModel : models[0] ?? '';
@@ -476,11 +488,10 @@ function normalizeLlmProvider(input: unknown, fallback: LlmProviderSettings, use
   return {
     id,
     label: stringValue(body.label, fallback.label || id),
-    provider: llmProviderNameValue(body.provider, fallback.provider),
+    protocol: llmProtocolValue(body, fallback.protocol),
     baseUrl: stringValue(body.baseUrl, fallback.baseUrl),
     apiKey: typeof body.apiKey === 'string' ? body.apiKey : fallback.apiKey,
     discoveredModels: allDiscoveredModels,
-    discoveredModelCapabilities,
     models,
     modelCapabilities,
     defaultModel,
@@ -488,18 +499,19 @@ function normalizeLlmProvider(input: unknown, fallback: LlmProviderSettings, use
     timeoutMs: positiveIntValue(body.timeoutMs, fallback.timeoutMs, 1000, 600_000),
     retries: positiveIntValue(body.retries, fallback.retries, 0, 10),
     stream: boolValue(body.stream, fallback.stream),
-    aisdkFlavor: llmAiSdkFlavorValue(body.aisdkFlavor, fallback.aisdkFlavor),
-    reasoningTag: typeof body.reasoningTag === 'string' ? body.reasoningTag : fallback.reasoningTag,
   };
 }
 
 export function llmModelOptions(settings: LlmSettings): LlmModelOption[] {
   return settings.providers.flatMap((provider) =>
-    provider.models.map((model) => ({
+    provider.models.filter((model) => {
+      const capability = provider.modelCapabilities.find((item) => item.model === model);
+      return Boolean(capability?.contextWindow && capability.inputModalities.length);
+    }).map((model) => ({
       ref: modelRef(provider.id, model),
       providerId: provider.id,
       providerLabel: provider.label || provider.id,
-      provider: provider.provider,
+      protocol: provider.protocol,
       model,
       label: `${provider.label || provider.id} · ${model}`,
     })),
@@ -522,24 +534,29 @@ export function normalizeLlmSettings(input: unknown): LlmSettings {
 }
 
 export async function getLlmSettings(scope: TenantScope): Promise<LlmSettings> {
-  try {
-    const value = await readTenantJsonSetting(scope.tenantId, LLM_SETTINGS_KEY);
-    if (value === undefined) {
-      const defaults = defaultLlmSettings();
-      if (scope.tenantId === DEFAULT_TENANT_ID) {
-        await insertMissingSettings(DEFAULT_TENANT_ID, [{ key: LLM_SETTINGS_KEY, value: defaults }]);
-      }
-      return defaults;
+  const value = await readTenantJsonSetting(scope.tenantId, LLM_SETTINGS_KEY);
+  if (value === undefined) {
+    const defaults = defaultLlmSettings();
+    if (scope.tenantId === DEFAULT_TENANT_ID) {
+      await insertMissingSettings(DEFAULT_TENANT_ID, [{ key: LLM_SETTINGS_KEY, value: defaults }]);
     }
-    return normalizeLlmSettings(value);
-  } catch (err) {
-    warnOnce('llm-settings-fallback', `LLM settings fallback to env defaults: ${(err as Error).message}`);
-    return defaultLlmSettings();
+    return defaults;
   }
+  return normalizeLlmSettings(value);
 }
 
 export async function saveLlmSettings(scope: TenantScope, input: unknown): Promise<LlmSettings> {
   const settings = normalizeLlmSettings(input);
+  for (const provider of settings.providers) {
+    for (const capability of provider.modelCapabilities) {
+      if (capability.contextWindow === null || capability.contextWindow <= 0) {
+        throw new Error(`模型 ${provider.id}:${capability.model} 未填写有效的上下文长度`);
+      }
+      if (!capability.inputModalities.length) {
+        throw new Error(`模型 ${provider.id}:${capability.model} 未选择输入类型`);
+      }
+    }
+  }
   await upsertTenantJsonSetting(scope.tenantId, LLM_SETTINGS_KEY, settings);
   return settings;
 }

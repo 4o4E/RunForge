@@ -5,7 +5,7 @@
 项目目标不是做某个垂直领域助手，而是验证一套可扩展的 Cloud Agent Platform（云端 Agent 运行平台）基础能力：
 
 - Agent 编排：围绕 `thread -> run -> step` 组织多轮任务和执行步骤。
-- LLM 集成：支持 AI SDK、OpenAI Responses、OpenAI Chat、Anthropic 和离线 mock。
+- LLM 集成：通过 AI SDK 支持 OpenAI Responses、OpenAI Chat Completions 和 Anthropic Messages 三种协议。
 - 工具调用：原生工具默认加载；Skill 与 MCP 按 run 激活，另有 shell、文件读写、web、workflow、subagent 等能力。
 - 执行可观测：通过 REST/WebSocket 输出 step、reasoning、tool_call、tool_result、subagent、shell、final 等事件。
 - 持久化：使用 PostgreSQL 保存 thread、run、step、message、event、shell session、subagent run 和运行配置。
@@ -95,7 +95,7 @@ DATABASE_URL=postgres://<user>:<password>@localhost:5432/runforge
 createdb runforge
 ```
 
-Prisma 7 migration 会创建核心执行表：`threads`、`runs`、`steps`、`messages`、`events`、`app_settings`，以及 `subagent_runs`、`shell_sessions`、`shell_commands`、`shell_command_logs`、`shell_session_events` 和数据源账号池相关表。其中 `app_settings` 保存运行时工具配置；保存过设置后，数据库里的值会优先于 env 默认值。
+Prisma 7 migration 会创建核心执行表：`threads`、`runs`、`steps`、`messages`、`events`、`app_settings`，以及 `subagent_runs`、`shell_sessions`、`shell_commands`、`shell_command_logs`、`shell_session_events` 和数据源账号池相关表。其中 `app_settings` 保存按租户隔离的工具、MCP、LLM 和运行时能力配置。
 
 ### 3. 配置 `.env`
 
@@ -113,15 +113,6 @@ RUNFORGE_ACCESS_TOKEN=<strong-access-token>
 RUNFORGE_SHARE_SECRET=<strong-share-secret>
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/runforge
 
-LLM_PROVIDER=aisdk
-LLM_AISDK_FLAVOR=openai-compatible
-LLM_REASONING_TAG=think
-LLM_BASE_URL=https://tokenhub.tencentmaas.com/v1
-LLM_API_KEY=<your-api-key>
-LLM_MODEL=deepseek-v4-pro-202606
-LLM_MAX_TOKENS=4096
-LLM_TIMEOUT_MS=120000
-
 AGENT_HARD_STEP_CAP=1000
 
 TOOL_SANDBOX=enforce
@@ -138,7 +129,10 @@ OFFICE_PREVIEW_CONVERTER_URL=http://127.0.0.1:3002
 
 Office 预览走后端转换：`doc/docx/ppt/pptx/xls/xlsx` 等文件先通过 `OFFICE_PREVIEW_CONVERTER_URL` 指向的 LibreOffice 转换服务生成 PDF，前端再用 PDF.js 只读渲染。RunForge 后端和转换服务在同一个 Docker 网络时，建议填服务名地址；如果转换服务单独绑定在宿主机端口，再填宿主机可访问地址。转换容器需要按部署环境挂载常用中英文字体，否则 LibreOffice 可能因字体替换产生版式偏移；字体目录或转换服务镜像变更后，递增 `OFFICE_PREVIEW_CACHE_VERSION` 可让旧 PDF 预览缓存自动失效。
 
-当前开发和真实链路调试主要使用 DeepSeek V4 Pro，也就是 `LLM_MODEL=deepseek-v4-pro-202606`。代码保留 OpenAI、Anthropic、mock 等 provider 兼容路径，但本轮没有针对其他模型做专门提示词、参数或行为调优。
+服务启动后，由系统管理员在 `/sys-admin` 选择 tenant 并配置 LLM 供应商。每个供应商直接选择
+`OpenAI Responses`、`OpenAI Chat Completions` 或 `Anthropic Messages` 协议。模型名称匹配本地
+能力目录时会自动填写上下文窗口、输入类型和资料来源；未匹配时必须由管理员填写后才能保存。
+LLM API Key 只保存在 tenant 的数据库配置中。
 
 注意：旧配置 `AGENT_MAX_STEPS` 已不是当前代码读取项，请使用 `AGENT_HARD_STEP_CAP`。`TOOL_MAX_OUTPUT` 当前建议为 `40000`；即使数据库里旧值是 `100000`，运行时也会被代码限制到 40000。
 
@@ -210,13 +204,6 @@ pnpm run restart
 - 最终输出默认使用 Markdown/Mermaid/LaTeX；复杂报告可通过 shell 或文件写入工具生成 HTML artifact，计划收口后直接以最终汇报完成。
 - 数据库中能查到对应 run、step、message 和 event。
 - 人为降低 `LLM_CONTEXT_BUDGET` 时，可以观察到 `compaction` 事件。
-
-离线运行可用于验证 API 和事件流，不代表真实模型效果：
-
-```bash
-cd server
-STORE=memory LLM_PROVIDER=mock node --import tsx src/index.ts
-```
 
 测试：
 

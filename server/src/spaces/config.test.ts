@@ -36,8 +36,8 @@ const catalog: TenantSpaceCapabilityCatalog = {
   },
   modelRefs: ['main:model-a', 'main:model-b'],
   modelOptions: [
-    { ref: 'main:model-a', providerId: 'main', providerLabel: 'Main', provider: 'mock', model: 'model-a', label: 'Model A' },
-    { ref: 'main:model-b', providerId: 'main', providerLabel: 'Main', provider: 'mock', model: 'model-b', label: 'Model B' },
+    { ref: 'main:model-a', providerId: 'main', providerLabel: 'Main', protocol: 'openai-chat', model: 'model-a', label: 'Model A' },
+    { ref: 'main:model-b', providerId: 'main', providerLabel: 'Main', protocol: 'openai-chat', model: 'model-b', label: 'Model B' },
   ],
   toolNames: ['file_read', 'file_write', 'ask_user'],
   mcpServerIds: ['browser', 'docs'],

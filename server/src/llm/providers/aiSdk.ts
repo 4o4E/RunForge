@@ -1,28 +1,19 @@
-// AI SDK-backed provider (Phase 2). Implements the same neutral `Provider`
-// contract the executor already depends on, but delegates protocol mapping,
-// streaming parsing and tool-call assembly to the Vercel AI SDK. Retry and
-// attempt observability stay in RunForge ProviderRunner so no request escapes
-// the persistence boundary. This replaces
-// the hand-written openai-chat / openai-responses / anthropic wire translation.
-//
-// It is a *single-turn* provider: like the legacy providers, it returns the
-// model's text + tool calls and lets the executor run the agent loop. Tools are
-// registered WITHOUT `execute`, so the SDK surfaces the tool calls instead of
-// running them — keeping the existing executor / WS / PG contract unchanged.
+// 三种 LLM 协议共用这个单轮 Provider。AI SDK 负责协议转换、流式解析和工具调用组装；
+// RunForge ProviderRunner 负责重试和每次 HTTP attempt 的完整观测。
+// 工具不注册 execute，SDK 只返回 tool call，Agent executor 继续执行多轮循环。
 
 import {
   streamText,
   generateText,
   jsonSchema,
   tool,
-  wrapLanguageModel,
-  extractReasoningMiddleware,
   type ModelMessage,
   type TextPart,
   type ImagePart,
   type ToolCallPart,
   type LanguageModel,
 } from 'ai';
+import type { LlmProtocol } from '@runforge/contracts';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAnthropic } from '@ai-sdk/anthropic';
@@ -30,17 +21,8 @@ import type { LlmConfig, LlmDelta, LlmMessage, LlmProviderState, LlmResult, LlmT
 import { config } from '../../config.js';
 import { toolArgumentsForModel } from '../toolArgs.js';
 
-export type AiSdkFlavor = 'openai-compatible' | 'openai' | 'anthropic';
-
 export interface AiSdkOptions {
-  /** Which underlying AI SDK provider to instantiate. */
-  flavor: AiSdkFlavor;
-  /**
-   * If set, wrap the model with `extractReasoningMiddleware` to split
-   * `<tag>…</tag>` chain-of-thought out of the content stream (DeepSeek style).
-   * Empty string disables it.
-   */
-  reasoningTag?: string;
+  protocol: LlmProtocol;
 }
 
 type ReasoningModelPart = {
@@ -50,32 +32,20 @@ type ReasoningModelPart = {
 };
 
 function buildModel(cfg: LlmConfig, opts: AiSdkOptions, fetcher?: typeof globalThis.fetch): LanguageModel {
-  let model: LanguageModel;
-  switch (opts.flavor) {
-    case 'openai':
-      model = createOpenAI({ baseURL: cfg.baseUrl, apiKey: cfg.apiKey, fetch: fetcher })(cfg.model);
-      break;
-    case 'anthropic':
-      model = createAnthropic({ baseURL: cfg.baseUrl, apiKey: cfg.apiKey, fetch: fetcher })(cfg.model);
-      break;
-    case 'openai-compatible':
-    default:
-      model = createOpenAICompatible({
+  switch (opts.protocol) {
+    case 'openai-responses':
+      return createOpenAI({ baseURL: cfg.baseUrl, apiKey: cfg.apiKey, fetch: fetcher }).responses(cfg.model);
+    case 'anthropic-messages':
+      return createAnthropic({ baseURL: cfg.baseUrl, apiKey: cfg.apiKey, fetch: fetcher }).messages(cfg.model);
+    case 'openai-chat':
+      return createOpenAICompatible({
         name: 'maas',
         baseURL: cfg.baseUrl,
         apiKey: cfg.apiKey,
         includeUsage: true,
         fetch: fetcher,
-      })(cfg.model);
-      break;
+      }).chatModel(cfg.model);
   }
-  if (opts.reasoningTag) {
-    model = wrapLanguageModel({
-      model,
-      middleware: extractReasoningMiddleware({ tagName: opts.reasoningTag }),
-    });
-  }
-  return model;
 }
 
 /** Map neutral `LlmMessage[]` onto AI SDK `ModelMessage[]`. Tool results need a
@@ -189,13 +159,13 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
     maxRetries: 0,
     abortSignal: AbortSignal.timeout(cfg.timeoutMs),
     // OpenAI Responses 走无状态模式，确保 reasoning item 返回不可解密的
-    // encrypted_content，并由 RunForge 自己持久化；其他 flavor 不发送此选项。
-    providerOptions: opts.flavor === 'openai' ? { openai: { store: false } } : undefined,
+    // encrypted_content，并由 RunForge 自己持久化；其他协议不发送此选项。
+    providerOptions: opts.protocol === 'openai-responses' ? { openai: { store: false } } : undefined,
     // OTEL GenAI spans (chat + tool calls) when telemetry is on. No-op otherwise.
     experimental_telemetry: {
       isEnabled: config.telemetry.enabled,
       functionId,
-      metadata: { model: cfg.model, flavor: opts.flavor },
+      metadata: { model: cfg.model, protocol: opts.protocol },
     },
   });
 
@@ -247,7 +217,7 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
   }
 
   return {
-    name: `aisdk:${opts.flavor}`,
+    name: `ai-sdk:${opts.protocol}`,
 
     async complete(messages, tools, callOptions): Promise<LlmResult> {
       // 标题和压缩摘要同样必须遵守供应商的流式传输约束。

@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import { resolve } from 'node:path';
+import { catalogCapability } from './llm/modelCatalog.js';
 
 // Load .env from repo root (one level up from server/)
 dotenv.config({ path: resolve(process.cwd(), '../.env') });
@@ -33,20 +34,14 @@ function networkMode(v: string | undefined): 'enabled' | 'disabled' {
   return 'disabled';
 }
 
-function modelContextWindow(model: string): number {
-  const m = model.toLowerCase();
-  if (m.includes('gpt-4.1') || m.includes('gpt-5')) return 1_000_000;
-  if (m.includes('claude-3-7') || m.includes('claude-3.7') || m.includes('claude-sonnet-4')) return 200_000;
-  if (m.includes('claude') || m.includes('gemini') || m.includes('deepseek')) return 128_000;
-  if (m.includes('gpt-4o') || m.includes('o3') || m.includes('o4')) return 128_000;
-  if (m.includes('gpt-3.5')) return 16_000;
-  return 128_000;
-}
+const DEFAULT_LLM_MODEL = 'gpt-4o-mini';
+const DEFAULT_LLM_CONTEXT_WINDOW = catalogCapability(DEFAULT_LLM_MODEL).contextWindow;
+if (DEFAULT_LLM_CONTEXT_WINDOW === null) throw new Error(`默认模型 ${DEFAULT_LLM_MODEL} 缺少能力目录`);
 
-function contextBudget(model: string): number {
+function contextBudget(modelContextWindow: number): number {
   const configured = Number(process.env.LLM_CONTEXT_BUDGET);
   if (Number.isFinite(configured) && configured > 0) return Math.floor(configured);
-  return Math.floor(modelContextWindow(model) * 0.5);
+  return Math.floor(modelContextWindow * 0.5);
 }
 
 export interface AgentContextSettings {
@@ -121,21 +116,15 @@ export const config = {
     bootstrapSysadminPassword: process.env.RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD ?? '',
   },
   llm: {
-    // aisdk | openai-responses | openai-chat | anthropic | mock
-    provider: process.env.LLM_PROVIDER ?? 'aisdk',
-    baseUrl: process.env.LLM_BASE_URL ?? 'https://api.openai.com/v1',
-    apiKey: process.env.LLM_API_KEY ?? '',
-    model: process.env.LLM_MODEL ?? 'gpt-4o-mini',
-    maxTokens: Number(process.env.LLM_MAX_TOKENS ?? 4096),
-    timeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 120000),
-    retries: Number(process.env.LLM_MAX_RETRIES ?? 2),
-    stream: (process.env.LLM_STREAM ?? 'true') !== 'false',
-    // AI SDK provider (used when provider === 'aisdk'):
-    //   flavor: openai-compatible (tencentmaas/deepseek/vLLM/…) | openai | anthropic
-    //   reasoningTag: split <tag>…</tag> chain-of-thought out of content (DeepSeek);
-    //                 empty disables. Default 'think'.
-    aisdkFlavor: process.env.LLM_AISDK_FLAVOR ?? 'openai-compatible',
-    reasoningTag: process.env.LLM_REASONING_TAG ?? 'think',
+    // 仅用于首次创建 default tenant 的可编辑模板；生产运行读取 app_settings。
+    protocol: 'openai-responses' as const,
+    baseUrl: 'https://api.openai.com/v1',
+    apiKey: '',
+    model: DEFAULT_LLM_MODEL,
+    maxTokens: 4096,
+    timeoutMs: 120_000,
+    retries: 2,
+    stream: true,
   },
   agent: {
     // Safety backstop only — NOT the primary control. Long tasks terminate when the
@@ -144,8 +133,8 @@ export const config = {
     hardStepCap: Number(process.env.AGENT_HARD_STEP_CAP ?? 1000),
     // Context budget in estimated tokens. Kept conservatively below the model window
     // to avoid context rot. Compaction (mask → window) keeps the working set under it.
-    modelContextWindow: modelContextWindow(process.env.LLM_MODEL ?? 'gpt-4o-mini'),
-    contextBudget: contextBudget(process.env.LLM_MODEL ?? 'gpt-4o-mini'),
+    modelContextWindow: DEFAULT_LLM_CONTEXT_WINDOW,
+    contextBudget: contextBudget(DEFAULT_LLM_CONTEXT_WINDOW),
     contextBudgetSource: Number.isFinite(Number(process.env.LLM_CONTEXT_BUDGET)) && Number(process.env.LLM_CONTEXT_BUDGET) > 0 ? 'env' : 'model-default',
     // Fraction of budget that triggers L1 observation masking of old tool results.
     compactWarnRatio: Number(process.env.AGENT_COMPACT_WARN_RATIO ?? 0.75),
