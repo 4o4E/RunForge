@@ -4,6 +4,8 @@ FROM node:24-bookworm-slim AS build
 
 WORKDIR /workspace
 RUN npm install --global pnpm@11.5.3
+RUN apt-get update && apt-get install --yes --no-install-recommends openssl \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY server/package.json server/package.json
@@ -16,7 +18,7 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
     pnpm install --frozen-lockfile
 
 COPY . .
-RUN pnpm build
+RUN DATABASE_URL=postgresql://runforge@127.0.0.1:5432/runforge pnpm build
 RUN pnpm --filter server deploy --prod --legacy /opt/runforge-server
 
 FROM node:24-bookworm-slim AS runtime
@@ -39,6 +41,7 @@ RUN apt-get update && apt-get install --yes --no-install-recommends \
       gawk \
       git \
       grep \
+      openssl \
       postgresql-client \
       python3 \
       ripgrep \
