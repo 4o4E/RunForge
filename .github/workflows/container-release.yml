@@ -103,7 +103,8 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             deploy/compose.postgres.yml \
             deploy/compose.external-postgres.yml \
-            .env.docker.example \
+            deploy/.env.postgres.example \
+            deploy/.env.external-postgres.example \
             --verify-tag \
             --generate-notes \
             --title "RunForge ${GITHUB_REF_NAME}"

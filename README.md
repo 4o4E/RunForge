@@ -18,10 +18,10 @@
 发布镜像为 `ghcr.io/4o4e/runforge`。镜像同时包含 React 前端和 Node.js 后端，容器启动时会
 先执行所有尚未应用的 Prisma migration，再启动 HTTP 和 WebSocket 服务。
 
-复制 Docker 密钥模板并替换所有 `replace-with-...` 值：
+使用自带 PostgreSQL 时，复制对应的密钥模板并替换所有 `replace-with-...` 值：
 
 ```bash
-cp .env.docker.example .env.docker
+cp deploy/.env.postgres.example .env.docker
 ```
 
 使用自带 PostgreSQL 的 Compose：
@@ -30,21 +30,26 @@ cp .env.docker.example .env.docker
 docker compose --env-file .env.docker -f deploy/compose.postgres.yml up -d
 ```
 
-使用外部 PostgreSQL 时，在 `.env.docker` 中填写 `DATABASE_URL`，然后启动应用容器：
+使用外部 PostgreSQL 时，复制只包含外部连接串和 RunForge 密钥的模板：
+
+```bash
+cp deploy/.env.external-postgres.example .env.docker
+```
+
+然后启动应用容器：
 
 ```bash
 docker compose --env-file .env.docker -f deploy/compose.external-postgres.yml up -d
 ```
 
 两套 Compose 都在 `http://localhost:8080` 提供 Web 控制台、REST API 和 WebSocket。
-`.env.docker` 只保存数据库密码、签名密钥、初始账号密码和上游 API 密钥；镜像版本、端口、
-模型参数、工具参数及外部服务地址直接在对应 Compose 文件中修改。`runforge-data` 卷保存用户
-workspace、Provider 记录和业务插件目录；自带 PostgreSQL 的版本额外使用
-`runforge-postgres` 卷保存数据库。
+`.env.docker` 只保存当前 Compose 实际使用的数据库密钥、签名密钥和初始账号密码。LLM
+Provider 在服务启动后由管理员写入租户配置。镜像版本、端口、工具参数及外部服务地址直接在
+对应 Compose 文件中修改。`runforge-data` 卷保存用户 workspace、Provider 记录和业务插件目录；
+自带 PostgreSQL 的版本额外使用 `runforge-postgres` 卷保存数据库。
 
 业务插件可以直接写入 `runforge-data` 卷内的 `/var/lib/runforge/business-plugins`，也可以在
-Compose 中为该目录增加只读 bind mount。Office 转换服务、OpenTelemetry 接收端等外部服务
-地址也直接写入 Compose。
+Compose 中为该目录增加只读 bind mount。Office 转换服务地址也直接写入 Compose。
 
 发布流程接受 `v*.*.*` tag。它会构建 `linux/amd64` 和 `linux/arm64` 镜像，推送版本标签与
 `latest`，验证匿名拉取，并创建带两套 Compose 和环境变量模板的 GitHub Release。
@@ -245,7 +250,7 @@ RunForge/
 ├── scripts/             # Linux 启停脚本
 ├── workspace/           # 默认工作区
 ├── Dockerfile           # 前后端单镜像构建
-├── docker-compose.yml   # 源代码开发使用的 PostgreSQL 与 Jaeger
+├── docker-compose.yml   # 源代码开发使用的 PostgreSQL
 └── package.json         # pnpm workspace 根配置
 ```
 

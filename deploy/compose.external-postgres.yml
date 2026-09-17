@@ -8,39 +8,36 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
+      # 服务监听地址。容器内固定监听全部网络接口。
       HOST: 0.0.0.0
+      # 服务在容器内监听的端口，与上面的容器端口保持一致。
       PORT: "8080"
+      # 外部 PostgreSQL 完整连接串，来自本部署对应的密钥文件。
       DATABASE_URL: ${DATABASE_URL:?请设置 DATABASE_URL}
+      # 租户用户 JWT 的签名密钥。
       RUNFORGE_JWT_SECRET: ${RUNFORGE_JWT_SECRET:?请设置 RUNFORGE_JWT_SECRET}
+      # 文件分享链接的签名密钥。
       RUNFORGE_SHARE_SECRET: ${RUNFORGE_SHARE_SECRET:?请设置 RUNFORGE_SHARE_SECRET}
+      # 首次启动时创建的 default 租户管理员密码。
       RUNFORGE_BOOTSTRAP_ADMIN_PASSWORD: ${RUNFORGE_BOOTSTRAP_ADMIN_PASSWORD:?请设置 RUNFORGE_BOOTSTRAP_ADMIN_PASSWORD}
+      # 首次启动时创建的系统管理员密码。
       RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD: ${RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD:?请设置 RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD}
-      RUNFORGE_ACCESS_TOKEN: ${RUNFORGE_ACCESS_TOKEN:-}
-      LLM_PROVIDER: aisdk
-      LLM_AISDK_FLAVOR: openai-compatible
-      LLM_REASONING_TAG: think
-      LLM_BASE_URL: https://api.openai.com/v1
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_MODEL: gpt-4o-mini
-      LLM_MAX_TOKENS: "4096"
-      LLM_TIMEOUT_MS: "120000"
-      LLM_MAX_RETRIES: "2"
-      LLM_STREAM: "true"
+      # Agent 单次运行的最大步骤数，必须为正整数。
       AGENT_HARD_STEP_CAP: "1000"
+      # 工具路径和命令限制。可选值：off、enforce。
       TOOL_SANDBOX: "off"
+      # Shell 隔离后端。可选值：auto、none、bwrap。
       TOOL_SANDBOX_BACKEND: auto
+      # 工具网络访问。可选值：disabled、enabled。
       TOOL_NETWORK: disabled
+      # 单条工具结果的最大字符数，可选范围：1000 至 40000。
       TOOL_MAX_OUTPUT: "40000"
+      # Office 转换服务地址；空值关闭 Office 文件预览。
       OFFICE_PREVIEW_CONVERTER_URL: ""
+      # Office 转换请求超时时间，单位为毫秒，必须为正整数。
       OFFICE_PREVIEW_TIMEOUT_MS: "180000"
+      # Office 预览缓存版本；空值使用默认缓存，修改该值会使旧缓存失效。
       OFFICE_PREVIEW_CACHE_VERSION: ""
-      OTEL_ENABLED: "false"
-      OTEL_EXPORTER_OTLP_ENDPOINT: ""
-      OTEL_CONSOLE: "false"
-      OTEL_SERVICE_NAME: runforge
-      WEB_PUSH_VAPID_PUBLIC_KEY: ""
-      WEB_PUSH_VAPID_PRIVATE_KEY: ${WEB_PUSH_VAPID_PRIVATE_KEY:-}
-      WEB_PUSH_SUBJECT: mailto:admin@runforge.local
     volumes:
       - runforge-data:/var/lib/runforge
     healthcheck:

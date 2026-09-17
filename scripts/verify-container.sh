@@ -12,8 +12,6 @@ RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD=runforge-ci-sysadmin-password
 export POSTGRES_PASSWORD
 export RUNFORGE_JWT_SECRET RUNFORGE_SHARE_SECRET
 export RUNFORGE_BOOTSTRAP_ADMIN_PASSWORD RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD
-export LLM_API_KEY=''
-export WEB_PUSH_VAPID_PRIVATE_KEY=''
 
 cleanup() {
   docker compose --project-name runforge-ci-postgres -f deploy/compose.postgres.yml down --volumes --remove-orphans >/dev/null 2>&1 || true

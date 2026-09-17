@@ -9,6 +9,5 @@ workspace
 .env
 .env.*
 !.env.example
-!.env.docker.example
 *.log
 *.tsbuildinfo
