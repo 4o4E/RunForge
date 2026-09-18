@@ -1,6 +1,6 @@
 services:
   runforge:
-    image: ghcr.io/4o4e/runforge:v0.1.0
+    image: ghcr.io/4o4e/runforge:v0.2.0
     init: true
     restart: unless-stopped
     ports:
