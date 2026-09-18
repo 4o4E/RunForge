@@ -4,9 +4,12 @@ import {
   type RuntimeCapabilityName,
   type LlmModelOption,
   type SpaceConfig,
+  type SpaceDebugMcpSchema,
+  type SpaceDebugView,
   type SpaceMode,
   type SpaceOptions,
 } from '@runforge/contracts';
+import { resolve } from 'node:path';
 import { agentContextSettings, config as instanceConfig } from '../config.js';
 import { listAuthorizedDatasources } from '../datasources/accountPool.js';
 import {
@@ -16,8 +19,9 @@ import {
   llmModelOptions,
 } from '../settings.js';
 import type { SpaceWithVisibilityRow } from '../store/types.js';
-import { builtinToolNames } from '../tools/registry.js';
+import { builtinToolNames, getTool } from '../tools/registry.js';
 import { createBusinessPluginSelection } from '../businessPlugins/cordis.js';
+import { resolveBusinessPluginMcpServer } from '../businessPlugins/runtime.js';
 import { businessPluginRegistry } from '../businessPlugins/registry.js';
 import {
   businessPluginReadiness,
@@ -26,6 +30,8 @@ import {
 import type { BusinessPluginDefinition } from '../businessPlugins/types.js';
 import { createSpaceRuntimeLock } from '../plugins/lock.js';
 import type { JsonValue, SpaceRuntimeLock } from '../plugins/types.js';
+import { loadBuiltinSkillDocuments, readSkillEntryDocument } from '../skills/registry.js';
+import { probeMcpServer } from '../mcp/client.js';
 
 export class SpaceConfigError extends Error {
   readonly code = 'SPACE_CONFIG_INVALID';
@@ -43,7 +49,7 @@ export interface TenantSpaceCapabilityCatalog {
   modelOptions: LlmModelOption[];
   toolNames: string[];
   mcpServerIds: string[];
-  mcpServers: Array<{ id: string; label: string }>;
+  mcpServers: Array<{ id: string; label: string; description?: string }>;
   businessPluginIds: string[];
   businessPlugins: Array<{ id: string; label: string; description: string; contentHash: string }>;
   businessPluginDefinitions: BusinessPluginDefinition[];
@@ -226,7 +232,11 @@ async function loadCatalogFromTenant(tenantId: string): Promise<TenantSpaceCapab
     modelOptions: models,
     toolNames: builtinToolNames(),
     mcpServerIds: enabledMcpServers.map((server) => server.id),
-    mcpServers: enabledMcpServers.map((server) => ({ id: server.id, label: server.label || server.id })),
+    mcpServers: enabledMcpServers.map((server) => ({
+      id: server.id,
+      label: server.label || server.id,
+      description: server.description,
+    })),
     businessPluginIds: readyPlugins.map((definition) => definition.manifest.id),
     businessPlugins: readyPlugins.map((definition) => ({
       id: definition.manifest.id,
@@ -344,9 +354,114 @@ export class SpaceConfigService {
       defaultModelRef: catalog.defaultModelRef,
       models: catalog.modelOptions,
       tools: catalog.toolNames,
-      mcpServers: catalog.mcpServers,
+      mcpServers: catalog.mcpServers.map(({ id, label }) => ({ id, label })),
       businessPlugins: catalog.businessPlugins,
       runtimeCapabilities: catalog.runtimeCapabilities,
+    };
+  }
+
+  async debugView(
+    tenantId: string,
+    configVersion: number,
+    value: unknown,
+  ): Promise<SpaceDebugView> {
+    const config = normalizeSpaceConfig(value);
+    const catalog = await this.loadCatalog(tenantId);
+    const tools = config.capabilities.tools.map((name) => {
+      const tool = getTool(name);
+      if (!tool) throw new SpaceConfigError(`空间配置引用了不存在的工具：${name}`);
+      return { name: tool.name, description: tool.description, parameters: tool.parameters };
+    });
+
+    const systemMcp = new Map(catalog.mcpServers.map((server) => [server.id, server]));
+    const mcpServers: SpaceDebugView['mcpServers'] = config.capabilities.mcpServers.map((id) => {
+      const server = systemMcp.get(id);
+      if (!server) throw new SpaceConfigError(`空间配置引用了不可用的 MCP Server：${id}`);
+      return { id: server.id, label: server.label, description: server.description ?? '' };
+    });
+
+    const definitions = new Map(
+      catalog.businessPluginDefinitions.map((definition) => [definition.manifest.id, definition]),
+    );
+    const skills: SpaceDebugView['skills'] = (await loadBuiltinSkillDocuments()).map((skill) => ({
+      id: skill.id,
+      name: skill.name,
+      description: skill.description,
+      content: skill.content,
+    }));
+    for (const pluginId of config.capabilities.businessPlugins) {
+      const definition = definitions.get(pluginId);
+      if (!definition) throw new SpaceConfigError(`空间配置引用了不可用的业务插件：${pluginId}`);
+      const pluginSkills = await Promise.all(definition.manifest.skills.map(async (skill) => {
+        const root = resolve(definition.root, skill.path);
+        const entry = await readSkillEntryDocument(root);
+        if (entry.name !== skill.id) {
+          throw new Error(`${resolve(root, 'SKILL.md')} 的 name 必须是 ${skill.id}`);
+        }
+        return {
+          id: `business:${pluginId}/${skill.id}`,
+          name: entry.name,
+          description: entry.description,
+          content: entry.content,
+        };
+      }));
+      skills.push(...pluginSkills);
+      mcpServers.push(...definition.manifest.mcpServers.map((server) => ({
+        id: `business-${pluginId}-${server.id}`,
+        label: server.label,
+        description: server.description,
+      })));
+    }
+
+    return {
+      configVersion,
+      systemPrompt: config.systemPrompt,
+      tools,
+      skills,
+      mcpServers,
+    };
+  }
+
+  async debugMcpSchema(
+    tenantId: string,
+    value: unknown,
+    mcpId: string,
+  ): Promise<SpaceDebugMcpSchema> {
+    const config = normalizeSpaceConfig(value);
+    const catalog = await this.loadCatalog(tenantId);
+    let server;
+    if (config.capabilities.mcpServers.includes(mcpId)) {
+      const settings = await getSystemMcpSettings();
+      server = settings.servers.find((candidate) => candidate.id === mcpId && candidate.enabled);
+      if (!server) throw new SpaceConfigError(`空间配置引用了不可用的 MCP Server：${mcpId}`);
+    } else {
+      const definitions = new Map(
+        catalog.businessPluginDefinitions.map((definition) => [definition.manifest.id, definition]),
+      );
+      const selected = config.capabilities.businessPlugins
+        .map((pluginId) => definitions.get(pluginId))
+        .find((definition) => definition?.manifest.mcpServers.some((candidate) => (
+          `business-${definition.manifest.id}-${candidate.id}` === mcpId
+        )));
+      if (!selected) throw new SpaceConfigError(`空间配置没有声明 MCP Server：${mcpId}`);
+      const declaration = selected.manifest.mcpServers.find((candidate) => (
+        `business-${selected.manifest.id}-${candidate.id}` === mcpId
+      ))!;
+      const settings = await getBusinessPluginTenantSettings(tenantId);
+      server = resolveBusinessPluginMcpServer(
+        selected,
+        declaration.id,
+        settings.plugins[selected.manifest.id]?.config ?? {},
+        settings.secrets,
+      );
+    }
+    const tools = await probeMcpServer(server);
+    return {
+      tools: tools.map((tool) => ({
+        name: tool.mappedName,
+        description: tool.description,
+        parameters: tool.parameters,
+      })),
     };
   }
 

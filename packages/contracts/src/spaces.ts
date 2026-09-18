@@ -59,6 +59,38 @@ export interface SpaceOptions {
   runtimeCapabilities: RuntimeCapabilityName[];
 }
 
+export interface SpaceDebugTool {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+export interface SpaceDebugSkill {
+  id: string;
+  name: string;
+  description: string;
+  content: string;
+}
+
+export interface SpaceDebugMcpServer {
+  id: string;
+  label: string;
+  description: string;
+}
+
+/** 对话页管理员调试区使用的当前空间配置视图，不包含密钥和运行时激活状态。 */
+export interface SpaceDebugView {
+  configVersion: number;
+  systemPrompt: string;
+  tools: SpaceDebugTool[];
+  skills: SpaceDebugSkill[];
+  mcpServers: SpaceDebugMcpServer[];
+}
+
+export interface SpaceDebugMcpSchema {
+  tools: SpaceDebugTool[];
+}
+
 export interface CreateSpaceInput {
   mode: SpaceMode;
   name: string;

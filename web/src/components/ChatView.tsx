@@ -47,6 +47,7 @@ interface Props {
   onToggleWide: () => void;
   debugMode: boolean;
   onToggleDebug: () => void;
+  canInspectSpace: boolean;
   onRemoveAttachment: (path: string) => void;
   rightPanelOpen: boolean;
   onToggleRightPanel: () => void;
@@ -96,6 +97,7 @@ export function ChatView({
   onToggleWide,
   debugMode,
   onToggleDebug,
+  canInspectSpace,
   onRemoveAttachment,
   rightPanelOpen,
   onToggleRightPanel,
@@ -243,6 +245,7 @@ export function ChatView({
           onForkFromRun={onForkFromRun}
           readOnly={readOnly}
           showToc={false}
+          debugSpaceId={canInspectSpace ? space?.id ?? null : null}
         />
       </div>
 

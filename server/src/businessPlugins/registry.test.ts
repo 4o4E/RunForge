@@ -11,7 +11,7 @@ import { extractBusinessPluginArchive, normalizedArchivePath } from './archive.j
 import { BusinessPluginError } from './errors.js';
 import { createBusinessPluginCordisDefinition, createBusinessPluginSelection } from './cordis.js';
 import { BusinessPluginRegistry, loadBusinessPlugin, loadBusinessPluginIndex } from './registry.js';
-import { BusinessPluginRuntimeService } from './runtime.js';
+import { BusinessPluginRuntimeService, resolveBusinessPluginMcpServer } from './runtime.js';
 import { businessPluginAdminView, businessPluginReadiness, normalizeBusinessPluginTenantSettings } from './settings.js';
 import { createSpaceRuntimeLock } from '../plugins/lock.js';
 
@@ -306,6 +306,14 @@ test('业务插件运行时：materialize 多文件 Skill，并通过 tenant res
   assert.equal(handle.skills[0]?.id, 'business:crm/customer-query');
   assert.equal(existsSync(join(handle.skills[0]!.root, 'references', 'schema.md')), true);
   assert.equal(handle.mcpServers[0]?.bearerToken, '');
+  const debugServer = resolveBusinessPluginMcpServer(
+    definition,
+    'crm',
+    {},
+    { 'crm.api-key': 'same-tenant-secret' },
+  );
+  assert.equal(debugServer.id, 'business-crm-crm');
+  assert.equal(debugServer.bearerToken, 'same-tenant-secret');
   assert.deepEqual(requested, []);
   assert.equal((await handle.refreshMcpServers())[0]?.bearerToken, 'same-tenant-secret');
   assert.deepEqual(requested, ['crm.api-key']);

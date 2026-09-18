@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { MemoryStore } from '../store/memoryStore.js';
 import {
   normalizeSpaceConfig,
@@ -69,6 +72,69 @@ const catalog: TenantSpaceCapabilityCatalog = {
 function configService() {
   return new SpaceConfigService(async () => structuredClone(catalog));
 }
+
+test('space config: 调试视图按当前配置列出工具 Schema、业务 Skill 和 MCP', async () => {
+  const pluginRoot = await mkdtemp(join(tmpdir(), 'runforge-space-debug-'));
+  try {
+    const skillRoot = join(pluginRoot, 'skills', 'customer-query');
+    await mkdir(skillRoot, { recursive: true });
+    await writeFile(join(skillRoot, 'SKILL.md'), [
+      '---',
+      'name: customer-query',
+      'description: 查询客户资料。',
+      '---',
+      '',
+      '# Customer Query',
+    ].join('\n'));
+    const definition: BusinessPluginDefinition = {
+      ...businessPlugin,
+      root: pluginRoot,
+      manifestPath: join(pluginRoot, 'runforge.plugin.yaml'),
+      manifest: {
+        ...businessPlugin.manifest,
+        skills: [{ id: 'customer-query', path: 'skills/customer-query' }],
+        mcpServers: [{
+          id: 'crm-records',
+          label: 'CRM Records',
+          description: '查询 CRM 记录。',
+          transport: 'streamable-http',
+          url: 'https://crm.example.test/mcp',
+          headers: [],
+          timeoutMs: 60_000,
+          maxOutput: 40_000,
+        }],
+      },
+    };
+    const service = new SpaceConfigService(async () => ({
+      ...structuredClone(catalog),
+      mcpServers: [{ id: 'docs', label: 'Docs', description: '文档服务。' }],
+      businessPluginDefinitions: [definition],
+    }));
+    const view = await service.debugView('tn_config', 7, {
+      systemPrompt: '只输出审查结论。',
+      capabilities: {
+        tools: ['file_read'],
+        mcpServers: ['docs'],
+        businessPlugins: ['crm'],
+        runtime: [],
+      },
+    });
+
+    assert.equal(view.systemPrompt, '只输出审查结论。');
+    assert.equal(view.tools[0]?.name, 'file_read');
+    assert.equal((view.tools[0]?.parameters.properties as Record<string, unknown>).path !== undefined, true);
+    assert.deepEqual(view.skills.find((skill) => skill.id === 'business:crm/customer-query'), {
+      id: 'business:crm/customer-query',
+      name: 'customer-query',
+      description: '查询客户资料。',
+      content: '# Customer Query',
+    });
+    assert.ok(view.skills.some((skill) => skill.id.startsWith('builtin:')));
+    assert.deepEqual(view.mcpServers.map((server) => server.id), ['docs', 'business-crm-crm-records']);
+  } finally {
+    await rm(pluginRoot, { recursive: true, force: true });
+  }
+});
 
 test('space config: 创建时复制能力目录，未知字段和越权能力被拒绝', async () => {
   const service = configService();

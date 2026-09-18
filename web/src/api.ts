@@ -21,6 +21,8 @@ import type {
   ShellCommandAttachment,
   ShellCommandLog,
   ShellSession,
+  SpaceDebugMcpSchema,
+  SpaceDebugView,
   SpaceSummary,
   SubagentRun,
   TenantUserSummary,
@@ -260,6 +262,14 @@ async function json<T>(res: Response): Promise<T> {
 }
 
 export const listSpaces = () => authFetch('/api/spaces').then(json<{ spaces: SpaceSummary[] }>);
+
+export const getSpaceDebugView = (spaceId: string) => authFetch(
+  `/api/spaces/${encodeURIComponent(spaceId)}/debug`,
+).then(json<SpaceDebugView>);
+
+export const getSpaceDebugMcpSchema = (spaceId: string, mcpId: string) => authFetch(
+  `/api/spaces/${encodeURIComponent(spaceId)}/debug/mcp/${encodeURIComponent(mcpId)}`,
+).then(json<SpaceDebugMcpSchema>);
 
 export const listThreads = (options: { archived?: boolean; spaceId?: string | null } = {}) => {
   const params = new URLSearchParams();

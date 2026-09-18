@@ -15,11 +15,6 @@ function userLabel(users: TenantUserSummary[], id: string | null): string {
   return user ? `${user.email} · ${user.role}` : id;
 }
 
-function listLabel(values: string[]): string {
-  if (!values.length) return '禁用全部';
-  return values.join(', ');
-}
-
 export function SpaceManagementPanel({ api }: { api: SpaceControlApi }) {
   const [spaces, setSpaces] = useState<SpaceSummary[]>([]);
   const [users, setUsers] = useState<TenantUserSummary[]>([]);
@@ -187,19 +182,6 @@ export function SpaceManagementPanel({ api }: { api: SpaceControlApi }) {
                 <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">模式</div><div className="mt-1 text-sm font-medium">{selected.mode === 'external' ? '外部运行 · Web 只读' : 'Web 对话'}</div></div>
                 <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">执行用户</div><div className="mt-1 truncate text-sm font-medium" title={selected.executionUserId ?? ''}>{userLabel(users, selected.executionUserId)}</div></div>
                 <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">可见 member</div><div className="mt-1 text-sm font-medium">{selected.visibleUserIds.length} 人</div></div>
-                <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">默认模型</div><div className="mt-1 break-all text-sm font-medium">{selected.config.model.defaultModelRef ?? '未配置'}</div></div>
-                <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">上下文预算</div><div className="mt-1 text-sm font-medium">{selected.config.model.contextBudget?.toLocaleString() ?? '自动计算'}</div></div>
-                <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">系统提示词</div><div className="mt-1 truncate text-sm font-medium" title={selected.config.systemPrompt}>{selected.config.systemPrompt || '无'}</div></div>
-              </div>
-
-              <div className="grid gap-2 rounded-md border p-3 text-sm">
-                <div><span className="text-muted-foreground">模型：</span>{listLabel(selected.config.model.allowedModelRefs)}</div>
-                <div><span className="text-muted-foreground">工具：</span>{listLabel(selected.config.capabilities.tools)}</div>
-                <div><span className="text-muted-foreground">MCP：</span>{listLabel(selected.config.capabilities.mcpServers)}</div>
-                <div><span className="text-muted-foreground">运行时能力：</span>{listLabel(selected.config.capabilities.runtime)}</div>
-                {selected.mode === 'external' && (
-                  <div><span className="text-muted-foreground">外部策略：</span>trustedPrompt {selected.config.external.allowTrustedPrompt ? '允许' : '禁止'} · next_step {selected.config.external.allowNextStep ? '允许' : '禁止'}</div>
-                )}
               </div>
 
               {selected.mode === 'external' && !selected.deletedAt && (

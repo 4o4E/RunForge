@@ -1,6 +1,8 @@
 import type {
   CreateSpaceInput,
   SpaceMode,
+  SpaceDebugMcpSchema,
+  SpaceDebugView,
   SpaceSummary,
   TenantUserRole,
   UpdateSpaceInput,
@@ -199,6 +201,34 @@ export class SpaceAccessService {
     const actor = await this.resolveManagerActor(actorContext);
     const tenant = await this.requireTenant(actor.tenantId);
     return this.toSummary(await this.requireSpace(actor.tenantId, spaceId), tenant.default_space_id);
+  }
+
+  async debugView(actorContext: SpaceActorContext, spaceId: string): Promise<SpaceDebugView> {
+    const space = await this.requireManagedSpace(actorContext, spaceId);
+    try {
+      return await this.configService.debugView(
+        space.tenantId,
+        space.configVersion,
+        space.config,
+      );
+    } catch (error) {
+      if (error instanceof SpaceConfigError) throw new SpaceAccessError(409, error.code, error.message);
+      throw error;
+    }
+  }
+
+  async debugMcpSchema(
+    actorContext: SpaceActorContext,
+    spaceId: string,
+    mcpId: string,
+  ): Promise<SpaceDebugMcpSchema> {
+    const space = await this.requireManagedSpace(actorContext, spaceId);
+    try {
+      return await this.configService.debugMcpSchema(space.tenantId, space.config, mcpId);
+    } catch (error) {
+      if (error instanceof SpaceConfigError) throw new SpaceAccessError(409, error.code, error.message);
+      throw error;
+    }
   }
 
   /** Web 创建和修改 thread 前统一走这里；external 空间即使管理员可见也始终只读。 */

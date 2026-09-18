@@ -229,6 +229,12 @@
   contain: layout paint;
 }
 
+/* 长对话中的历史消息保留真实 DOM 和交互状态，视口外跳过布局与绘制；12rem 只用于尚未测量的高度。 */
+.conversation-history-message {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 12rem;
+}
+
 [data-streamdown='mermaid'] {
   background-color: #fff;
   contain: layout paint;

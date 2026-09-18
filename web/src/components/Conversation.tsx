@@ -20,6 +20,7 @@ import type { StreamdownProps } from 'streamdown';
 import { AskUserQuestionCard, emptyAskUserDraft, type AskUserDraft } from './AskUserCard';
 import type { AgentEvent, AskUserAnswer, AskUserSpec, GoalState, PlanItem, StreamStats } from '@/api';
 import type { RunBranchInfo, ThreadNoticeData } from '../history';
+import { SpaceDebugMessages } from './SpaceDebugMessages';
 
 type Part = UIMessage['parts'][number];
 type Timing = { startedAt?: string; endedAt?: string; durationMs?: number };
@@ -1378,6 +1379,7 @@ export function Conversation({
   contentRef,
   embedded = false,
   showToc = true,
+  debugSpaceId = null,
   emptyTitle = 'RunForge',
   emptyDescription = '通用 AI Agent。描述一个任务，它会自主调用工具（shell、文件、glob/grep、web）逐步完成。',
 }: {
@@ -1398,6 +1400,7 @@ export function Conversation({
   readOnly?: boolean;
   embedded?: boolean;
   showToc?: boolean;
+  debugSpaceId?: string | null;
   emptyTitle?: string;
   emptyDescription?: string;
 }) {
@@ -1427,6 +1430,7 @@ export function Conversation({
               embedded ? 'max-w-none gap-4 px-3 py-4' : wide ? 'max-w-5xl gap-8' : 'max-w-3xl gap-8',
             )}
           >
+            {debugSpaceId && <SpaceDebugMessages key={debugSpaceId} spaceId={debugSpaceId} />}
             {messages.length === 0 ? (
               <ConversationEmptyState
                 icon={<Bot className="size-6" />}
@@ -1439,6 +1443,9 @@ export function Conversation({
                   <Message
                     from={m.role}
                     key={m.id}
+                    className={cn(
+                      !(busy && m.id === activeAssistantId) && 'conversation-history-message',
+                    )}
                     data-toc-message={m.role === 'user' ? 'user' : undefined}
                     data-toc-title={m.role === 'user' ? userTocTitle(m) : undefined}
                     data-toc-time={m.role === 'user' ? messageTime(m) ?? undefined : undefined}

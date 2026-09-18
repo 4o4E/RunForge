@@ -230,6 +230,22 @@ function resolveMcpServer(
   };
 }
 
+export function resolveBusinessPluginMcpServer(
+  definition: BusinessPluginDefinition,
+  serverId: string,
+  config: Readonly<Record<string, unknown>>,
+  secrets: Readonly<Record<string, string>>,
+): McpServerSettings {
+  const mcp = definition.manifest.mcpServers.find((server) => server.id === serverId);
+  if (!mcp) {
+    throw new BusinessPluginError(
+      'BUSINESS_PLUGIN_NOT_READY',
+      `业务插件 ${definition.manifest.id} 没有声明 MCP ${serverId}`,
+    );
+  }
+  return resolveMcpServer({ businessPluginId: definition.manifest.id, definition: mcp }, config, secrets);
+}
+
 export class BusinessPluginRuntimeService {
   private readonly manager = new CordisRuntimeManager();
   private readonly registered = new Set<string>();

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { config } from '../config.js';
 import { signSystemAccessToken, signTenantAccessToken } from '../auth/jwt.js';
 import { store } from '../store/index.js';
-import type { SpaceOptions, SpaceSummary } from '@runforge/contracts';
+import type { SpaceDebugView, SpaceOptions, SpaceSummary } from '@runforge/contracts';
 import { buildApp, listen, seedOwner, seedSystemAdmin } from './testHelpers.js';
 import { newThreadId } from '../id.js';
 import type { ThreadRow } from '../store/types.js';
@@ -47,6 +47,30 @@ test('space API: 管理权限、可见名单、execution user 和软删除语义
     assert.deepEqual(webSpace.visibleUserIds, [member.id]);
     assert.equal(webSpace.config.schemaVersion, 1);
     assert.equal(webSpace.config.systemPrompt, 'v1');
+
+    const ownerDebugResponse = await fetch(`${base}/spaces/${webSpace.id}/debug`, { headers: bearer(ownerToken) });
+    assert.equal(ownerDebugResponse.status, 200);
+    const ownerDebug = (await ownerDebugResponse.json()) as SpaceDebugView;
+    assert.equal(ownerDebug.configVersion, webSpace.configVersion);
+    assert.equal(ownerDebug.systemPrompt, 'v1');
+    assert.ok(ownerDebug.tools.some((tool) => (
+      tool.name === 'file_read'
+      && (tool.parameters.properties as Record<string, unknown>).path !== undefined
+    )));
+    assert.ok(ownerDebug.skills.some((skill) => skill.id.startsWith('builtin:') && skill.content.length > 0));
+
+    const memberDebugResponse = await fetch(`${base}/spaces/${webSpace.id}/debug`, { headers: bearer(memberToken) });
+    assert.equal(memberDebugResponse.status, 403);
+    assert.equal(((await memberDebugResponse.json()) as { code: string }).code, 'SPACE_MANAGE_FORBIDDEN');
+
+    const unknownMcpSchema = await fetch(`${base}/spaces/${webSpace.id}/debug/mcp/missing`, {
+      headers: bearer(ownerToken),
+    });
+    assert.equal(unknownMcpSchema.status, 409);
+    const memberMcpSchema = await fetch(`${base}/spaces/${webSpace.id}/debug/mcp/missing`, {
+      headers: bearer(memberToken),
+    });
+    assert.equal(memberMcpSchema.status, 403);
 
     const externalResponse = await fetch(`${base}/spaces`, {
       method: 'POST',

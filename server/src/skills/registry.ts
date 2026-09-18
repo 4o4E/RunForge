@@ -25,6 +25,16 @@ interface Frontmatter {
   description: string;
 }
 
+export interface SkillEntryDocument {
+  name: string;
+  description: string;
+  content: string;
+}
+
+export interface BuiltinSkillDocument extends SkillEntryDocument {
+  id: string;
+}
+
 const SKILL_NAME_RE = /^[a-z0-9-]+$/;
 const BUILTIN_SOURCE_ROOT = resolve(process.cwd(), 'src/skills/builtin');
 
@@ -85,6 +95,12 @@ export function parseSkillDocument(content: string, file: string): { frontmatter
   return { frontmatter: { name, description }, body };
 }
 
+export async function readSkillEntryDocument(root: string): Promise<SkillEntryDocument> {
+  const skillPath = join(root, 'SKILL.md');
+  const { frontmatter, body } = parseSkillDocument(await readFile(skillPath, 'utf8'), skillPath);
+  return { ...frontmatter, content: body.trim() };
+}
+
 function stripInternalComments(content: string): string {
   return content.replace(/<!--\s*@internal[\s\S]*?-->\n?/g, '');
 }
@@ -137,15 +153,14 @@ export async function readSkillIndexItem(
   id = `${source}:${basename(root)}`,
   expectedName = basename(root),
 ): Promise<SkillIndexItem> {
-  const skillPath = join(root, 'SKILL.md');
-  const { frontmatter } = parseSkillDocument(await readFile(skillPath, 'utf8'), skillPath);
-  if (frontmatter.name !== expectedName) {
-    throw new Error(`${skillPath} 的 name 必须是 ${expectedName}`);
+  const entry = await readSkillEntryDocument(root);
+  if (entry.name !== expectedName) {
+    throw new Error(`${join(root, 'SKILL.md')} 的 name 必须是 ${expectedName}`);
   }
   return {
     id,
-    name: frontmatter.name,
-    description: frontmatter.description,
+    name: entry.name,
+    description: entry.description,
     source,
     root,
     readonly,
@@ -162,6 +177,19 @@ async function listSkillDirs(root: string): Promise<string[]> {
     if (existsSync(join(path, 'SKILL.md'))) dirs.push(path);
   }
   return dirs.sort();
+}
+
+export async function loadBuiltinSkillDocuments(
+  builtinSourceRoot = BUILTIN_SOURCE_ROOT,
+): Promise<BuiltinSkillDocument[]> {
+  return Promise.all((await listSkillDirs(builtinSourceRoot)).map(async (root) => {
+    const entry = await readSkillEntryDocument(root);
+    const expectedName = basename(root);
+    if (entry.name !== expectedName) {
+      throw new Error(`${join(root, 'SKILL.md')} 的 name 必须是 ${expectedName}`);
+    }
+    return { id: `builtin:${entry.name}`, ...entry };
+  }));
 }
 
 export async function loadSkillIndex(workspaceRoot: string, builtinSourceRoot = BUILTIN_SOURCE_ROOT): Promise<SkillIndexItem[]> {

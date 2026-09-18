@@ -1623,6 +1623,7 @@ export function App() {
           onToggleWide={() => setWide((v) => !v)}
           debugMode={debugMode}
           onToggleDebug={() => setDebugMode((enabled) => !enabled)}
+          canInspectSpace={currentUserRole === 'owner' || currentUserRole === 'admin'}
           onRemoveAttachment={(path) => setAttachments((current) => current.filter((a) => a.path !== path))}
           rightPanelOpen={conversationRightPanelOpen}
           onToggleRightPanel={toggleRightPanel}

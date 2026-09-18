@@ -9,6 +9,21 @@ interface TocItem {
 }
 
 const MESSAGE_SELECTOR = '[data-toc-message]';
+const TOC_MEDIA_QUERY = '(min-width: 1536px)';
+
+function useTocViewport(): boolean {
+  const [enabled, setEnabled] = useState(() => (
+    typeof window !== 'undefined' && window.matchMedia(TOC_MEDIA_QUERY).matches
+  ));
+  useEffect(() => {
+    const media = window.matchMedia(TOC_MEDIA_QUERY);
+    const sync = () => setEnabled(media.matches);
+    sync();
+    media.addEventListener('change', sync);
+    return () => media.removeEventListener('change', sync);
+  }, []);
+  return enabled;
+}
 
 /** 找到真实滚动对话内容的最近父容器。 */
 function getScrollParent(node: HTMLElement | null): HTMLElement | null {
@@ -30,23 +45,42 @@ function scrollInsideContainer(container: HTMLElement, target: HTMLElement) {
   container.scrollTo({ top: Math.max(0, nextTop), behavior: 'smooth' });
 }
 
-function computeActiveIndex(root: HTMLElement, targets: HTMLElement[]): number | null {
-  const scrollParent = getScrollParent(root);
+function computeActiveIndex(
+  root: HTMLElement,
+  scrollParent: HTMLElement | null,
+  targets: HTMLElement[],
+): number | null {
+  if (!targets.length) return null;
   const viewport = scrollParent?.getBoundingClientRect() ?? root.getBoundingClientRect();
-  const visible = targets
-    .map((target, index) => ({ index, rect: target.getBoundingClientRect() }))
-    .filter(({ rect }) => rect.bottom > viewport.top && rect.top < viewport.bottom);
+  const rects = new Map<number, DOMRect>();
+  const rectAt = (index: number) => {
+    const cached = rects.get(index);
+    if (cached) return cached;
+    const rect = targets[index].getBoundingClientRect();
+    rects.set(index, rect);
+    return rect;
+  };
 
-  if (visible.length > 0) {
-    visible.sort((a, b) => Math.max(a.rect.top, viewport.top) - Math.max(b.rect.top, viewport.top));
-    return visible[0].index;
+  let low = 0;
+  let high = targets.length - 1;
+  let nearestPast = -1;
+  // 用户消息节点的 DOM 顺序就是垂直顺序，二分查找避免长对话每次滚动扫描全部节点。
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (rectAt(middle).top <= viewport.top) {
+      nearestPast = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
   }
 
-  let nearestPast: number | null = null;
-  for (const { index, rect } of targets.map((target, index) => ({ index, rect: target.getBoundingClientRect() }))) {
-    if (rect.top <= viewport.top) nearestPast = index;
+  if (nearestPast >= 0 && rectAt(nearestPast).bottom > viewport.top) {
+    return nearestPast;
   }
-  return nearestPast ?? (targets.length > 0 ? 0 : null);
+  const next = nearestPast + 1;
+  if (next < targets.length && rectAt(next).top < viewport.bottom) return next;
+  return nearestPast >= 0 ? nearestPast : 0;
 }
 
 function hasTocMessageNode(node: Node): boolean {
@@ -84,6 +118,7 @@ export function TableOfContents({
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const targetsRef = useRef<HTMLElement[]>([]);
   const itemsRef = useRef<TocItem[]>([]);
+  const enabled = useTocViewport();
 
   const collectTargets = useCallback((root: HTMLElement) => {
     const targets: HTMLElement[] = [];
@@ -102,13 +137,21 @@ export function TableOfContents({
 
   // 只在顶层消息列表变化时重建大纲，流式输出内部节点变化不参与扫描。
   useEffect(() => {
+    if (!enabled) {
+      targetsRef.current = [];
+      itemsRef.current = [];
+      setItems([]);
+      setActiveIndex(null);
+      return;
+    }
     const root = contentRef.current;
     if (!root) return;
     let activeFrame = 0;
     let collectFrame = 0;
+    const scrollParent = getScrollParent(root);
     const applyActive = () => {
       setActiveIndex((previous) => {
-        const next = computeActiveIndex(root, targetsRef.current);
+        const next = computeActiveIndex(root, scrollParent, targetsRef.current);
         return previous === next ? previous : next;
       });
     };
@@ -135,7 +178,6 @@ export function TableOfContents({
         collect();
       });
     };
-    const scrollParent = getScrollParent(root);
     collect();
     const mo = new MutationObserver((records) => {
       if (shouldCollectTargets(records)) scheduleCollect();
@@ -152,7 +194,7 @@ export function TableOfContents({
       scrollParent?.removeEventListener('scroll', scheduleActive);
       window.removeEventListener('resize', scheduleActive);
     };
-  }, [collectTargets, contentRef]);
+  }, [collectTargets, contentRef, enabled]);
 
   const handleClick = useCallback(
     (index: number) => {
@@ -168,7 +210,7 @@ export function TableOfContents({
     [collectTargets, contentRef],
   );
 
-  if (items.length === 0) return null;
+  if (!enabled || items.length === 0) return null;
 
   return (
     <nav
