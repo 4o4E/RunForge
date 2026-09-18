@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-IMAGE="${1:-runforge:ci}"
 POSTGRES_USER=runforge
 POSTGRES_PASSWORD=runforge-ci-password
 POSTGRES_DB=runforge
@@ -12,18 +11,32 @@ RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD=runforge-ci-sysadmin-password
 export POSTGRES_PASSWORD
 export RUNFORGE_JWT_SECRET RUNFORGE_SHARE_SECRET
 export RUNFORGE_BOOTSTRAP_ADMIN_PASSWORD RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD
+export DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@host.docker.internal:55432/${POSTGRES_DB}"
+
+POSTGRES_COMPOSE=(
+  docker compose
+  --project-name runforge-ci-postgres
+  -f deploy/compose.postgres.yml
+  -f deploy/compose.ci.yml
+)
+EXTERNAL_COMPOSE=(
+  docker compose
+  --project-name runforge-ci-external
+  -f deploy/compose.external-postgres.yml
+  -f deploy/compose.ci.yml
+)
 
 cleanup() {
-  docker compose --project-name runforge-ci-postgres -f deploy/compose.postgres.yml down --volumes --remove-orphans >/dev/null 2>&1 || true
-  docker compose --project-name runforge-ci-external -f deploy/compose.external-postgres.yml down --volumes --remove-orphans >/dev/null 2>&1 || true
+  "${POSTGRES_COMPOSE[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  "${EXTERNAL_COMPOSE[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
   docker rm --force runforge-ci-external-postgres >/dev/null 2>&1 || true
 }
 
 finish() {
   local status="$?"
   if [[ "${status}" -ne 0 ]]; then
-    docker compose --project-name runforge-ci-postgres -f deploy/compose.postgres.yml logs --no-color || true
-    docker compose --project-name runforge-ci-external -f deploy/compose.external-postgres.yml logs --no-color || true
+    "${POSTGRES_COMPOSE[@]}" logs --no-color || true
+    "${EXTERNAL_COMPOSE[@]}" logs --no-color || true
     docker logs runforge-ci-external-postgres || true
   fi
   cleanup
@@ -43,11 +56,10 @@ wait_http() {
   return 1
 }
 
-docker image tag "${IMAGE}" ghcr.io/4o4e/runforge:v0.1.0
-docker compose --project-name runforge-ci-postgres -f deploy/compose.postgres.yml config --quiet
-docker compose --project-name runforge-ci-postgres -f deploy/compose.postgres.yml up --detach
+"${POSTGRES_COMPOSE[@]}" config --quiet
+"${POSTGRES_COMPOSE[@]}" up --detach
 wait_http http://127.0.0.1:8080
-docker compose --project-name runforge-ci-postgres -f deploy/compose.postgres.yml down --volumes
+"${POSTGRES_COMPOSE[@]}" down --volumes
 
 docker run --detach \
   --name runforge-ci-external-postgres \
@@ -65,7 +77,6 @@ for _ in {1..60}; do
 done
 docker exec runforge-ci-external-postgres pg_isready --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}"
 
-export DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@host.docker.internal:55432/${POSTGRES_DB}"
-docker compose --project-name runforge-ci-external -f deploy/compose.external-postgres.yml config --quiet
-docker compose --project-name runforge-ci-external -f deploy/compose.external-postgres.yml up --detach
+"${EXTERNAL_COMPOSE[@]}" config --quiet
+"${EXTERNAL_COMPOSE[@]}" up --detach
 wait_http http://127.0.0.1:8080
