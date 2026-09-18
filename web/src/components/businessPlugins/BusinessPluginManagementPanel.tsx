@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { RefreshCw, Save, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { RefreshCw, Save, Trash2, Upload } from 'lucide-react';
 import type { BusinessPluginAdminItem } from '@runforge/contracts';
 import type { BusinessPluginControlApi } from '@/businessPluginControlApi';
 import { Badge } from '@/components/ui/badge';
@@ -19,6 +19,7 @@ export function BusinessPluginManagementPanel({ api }: { api: BusinessPluginCont
   const [clearSecrets, setClearSecrets] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const archiveInputRef = useRef<HTMLInputElement>(null);
 
   const selected = useMemo(
     () => plugins?.find((plugin) => plugin.id === selectedId) ?? plugins?.[0] ?? null,
@@ -90,6 +91,28 @@ export function BusinessPluginManagementPanel({ api }: { api: BusinessPluginCont
     }
   }
 
+  async function importArchive(file: File) {
+    setBusy(true);
+    setError('');
+    try {
+      const result = await api.importArchive(file);
+      setPlugins(result.view.plugins);
+      setSelectedId(result.pluginId);
+      notify({
+        variant: 'success',
+        title: result.replaced ? '业务插件已更新' : '业务插件已导入',
+        description: result.pluginId,
+      });
+    } catch (reason) {
+      const message = (reason as Error).message;
+      setError(message);
+      notify({ variant: 'error', title: '业务插件导入失败', description: message });
+    } finally {
+      setBusy(false);
+      if (archiveInputRef.current) archiveInputRef.current.value = '';
+    }
+  }
+
   if (!plugins) return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">{error || '正在读取业务插件...'}</div>;
 
   return (
@@ -98,10 +121,26 @@ export function BusinessPluginManagementPanel({ api }: { api: BusinessPluginCont
         <div>
           <h2 className="text-lg font-semibold">业务插件</h2>
           <p className="mt-1 text-sm text-muted-foreground">配置 tenant 级非敏感参数和统一 Secret；空间只负责选择是否启用。</p>
+          <p className="mt-1 text-xs text-muted-foreground">支持 ZIP、TGZ 和 .tar.gz；导入相同插件 ID 会更新现有内容并保留配置。</p>
         </div>
-        <Button variant="outline" onClick={() => void reload()} disabled={busy}>
-          <RefreshCw className="h-4 w-4" />重新加载目录
-        </Button>
+        <div className="flex shrink-0 gap-2">
+          <input
+            ref={archiveInputRef}
+            className="hidden"
+            type="file"
+            accept=".zip,.tgz,.tar.gz,application/zip,application/gzip"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void importArchive(file);
+            }}
+          />
+          <Button variant="outline" onClick={() => archiveInputRef.current?.click()} disabled={busy}>
+            <Upload className="h-4 w-4" />导入压缩包
+          </Button>
+          <Button variant="outline" onClick={() => void reload()} disabled={busy}>
+            <RefreshCw className="h-4 w-4" />重新加载目录
+          </Button>
+        </div>
       </div>
 
       <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[18rem_minmax(0,1fr)]">

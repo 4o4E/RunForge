@@ -14,8 +14,8 @@ model app_settings {
   key        String
   value      Json
   updated_at DateTime @default(now()) @db.Timestamptz(6)
-  tenant_id  String   @default("default")
-  tenants    tenants  @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  tenant_id  String
+  tenants    tenants  @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: Cascade)
 
   @@id([tenant_id, key])
 }
@@ -31,7 +31,7 @@ model auth_tokens {
   expires_at DateTime? @db.Timestamptz(6)
   revoked_at DateTime? @db.Timestamptz(6)
   created_at DateTime  @default(now()) @db.Timestamptz(6)
-  tenants    tenants   @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  tenants    tenants   @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
   users      users     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([user_id, kind, revoked_at], map: "idx_auth_tokens_user")
@@ -117,11 +117,11 @@ model datasources {
   created_at                     DateTime                         @default(now()) @db.Timestamptz(6)
   updated_at                     DateTime                         @default(now()) @db.Timestamptz(6)
   enabled                        Boolean                          @default(true)
-  tenant_id                      String                           @default("default")
+  tenant_id                      String
   datasource_account_leases      datasource_account_leases[]
   datasource_accounts            datasource_accounts[]
   datasource_permission_profiles datasource_permission_profiles[]
-  tenants                        tenants                          @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  tenants                        tenants                          @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: Cascade)
 
   @@unique([tenant_id, name], map: "idx_datasources_name_tenant")
 }
@@ -153,8 +153,8 @@ model external_callers {
   external_requests external_requests[]
   external_tokens   external_tokens[]
   run_inputs        run_inputs[]
-  spaces            spaces              @relation(fields: [space_id, tenant_id], references: [id, tenant_id], onDelete: Cascade, onUpdate: NoAction)
-  tenants           tenants             @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  spaces            spaces              @relation(fields: [space_id, tenant_id], references: [id, tenant_id], onDelete: Cascade, onUpdate: Cascade)
+  tenants           tenants             @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
   threads           threads[]
 
   @@index([space_id, status], map: "idx_external_callers_space")
@@ -234,9 +234,9 @@ model push_subscriptions {
   last_error      String?
   created_at      DateTime  @default(now()) @db.Timestamptz(6)
   updated_at      DateTime  @default(now()) @db.Timestamptz(6)
-  tenant_id       String    @default("default")
+  tenant_id       String
   user_id         String?
-  tenants         tenants   @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  tenants         tenants   @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: Cascade)
   users           users?    @relation(fields: [user_id], references: [id], onUpdate: NoAction)
 
   @@index([enabled, updated_at(sort: Desc)], map: "idx_push_subscriptions_enabled")
@@ -350,9 +350,9 @@ model provider_invocations {
   ended_at            DateTime?           @db.Timestamptz(6)
   provider_attempts   provider_attempts[]
   runs                runs                @relation(fields: [run_id, thread_id], references: [id, thread_id], onDelete: Cascade, onUpdate: NoAction)
-  spaces              spaces              @relation(fields: [space_id, tenant_id], references: [id, tenant_id], onDelete: NoAction, onUpdate: NoAction)
+  spaces              spaces              @relation(fields: [space_id, tenant_id], references: [id, tenant_id], onDelete: NoAction, onUpdate: Cascade)
   steps               steps?              @relation(fields: [step_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
-  threads             threads             @relation(fields: [thread_id, space_id, tenant_id], references: [id, space_id, tenant_id], onDelete: Cascade, onUpdate: NoAction)
+  threads             threads             @relation(fields: [thread_id, space_id, tenant_id], references: [id, space_id, tenant_id], onDelete: Cascade, onUpdate: Cascade)
 
   @@index([run_id, started_at], map: "idx_provider_invocations_run")
   @@index([tenant_id, space_id, started_at], map: "idx_provider_invocations_space")
@@ -397,10 +397,10 @@ model spaces {
   external_callers     external_callers[]
   provider_invocations provider_invocations[]
   space_visible_users  space_visible_users[]
-  tenants              tenants                @relation("spaces_tenant", fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  tenants              tenants                @relation("spaces_tenant", fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
   default_for_tenants  tenants[]              @relation("tenants_default_space")
-  execution_user       users?                 @relation("spaces_execution_user", fields: [execution_user_id, tenant_id], references: [id, tenant_id], onDelete: NoAction, onUpdate: NoAction)
-  created_by_user      users?                 @relation("spaces_created_by", fields: [created_by_user_id, tenant_id], references: [id, tenant_id], onDelete: NoAction, onUpdate: NoAction)
+  execution_user       users?                 @relation("spaces_execution_user", fields: [execution_user_id, tenant_id], references: [id, tenant_id], onDelete: NoAction, onUpdate: Cascade)
+  created_by_user      users?                 @relation("spaces_created_by", fields: [created_by_user_id, tenant_id], references: [id, tenant_id], onDelete: NoAction, onUpdate: Cascade)
   threads              threads[]
 
   @@unique([id, tenant_id])
@@ -413,8 +413,8 @@ model space_visible_users {
   user_id    String
   tenant_id  String
   created_at DateTime @default(now()) @db.Timestamptz(6)
-  spaces     spaces   @relation(fields: [space_id, tenant_id], references: [id, tenant_id], onDelete: Cascade, onUpdate: NoAction)
-  users      users    @relation(fields: [user_id, tenant_id], references: [id, tenant_id], onDelete: Cascade, onUpdate: NoAction)
+  spaces     spaces   @relation(fields: [space_id, tenant_id], references: [id, tenant_id], onDelete: Cascade, onUpdate: Cascade)
+  users      users    @relation(fields: [user_id, tenant_id], references: [id, tenant_id], onDelete: Cascade, onUpdate: Cascade)
 
   @@id([space_id, user_id])
   @@index([user_id, space_id], map: "idx_space_visible_users_user")
@@ -439,7 +439,7 @@ model runtime_capability_calls {
   ended_at         DateTime         @default(now()) @db.Timestamptz(6)
   runs             runs             @relation(fields: [run_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   steps            steps?           @relation(fields: [step_id], references: [id], onUpdate: NoAction)
-  tenants          tenants          @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  tenants          tenants          @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: Cascade)
   workload_tokens  workload_tokens? @relation(fields: [token_id], references: [id], onUpdate: NoAction)
 
   @@index([run_id, started_at(sort: Desc)], map: "idx_runtime_capability_calls_run")
@@ -524,11 +524,11 @@ model shell_sessions {
   owner                String                 @default("agent")
   config_snapshot      Json?
   deleted_at           DateTime?              @db.Timestamptz(6)
-  tenant_id            String                 @default("default")
+  tenant_id            String
   shell_commands       shell_commands?
   shell_session_events shell_session_events[]
   runs                 runs?                  @relation(fields: [lease_run_id], references: [id], onUpdate: NoAction)
-  tenants              tenants                @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  tenants              tenants                @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: Cascade)
   threads              threads                @relation(fields: [thread_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([thread_id, workspace_root, deleted_at], map: "idx_shell_sessions_active")
@@ -570,10 +570,10 @@ model subagent_runs {
   created_at         DateTime  @default(now()) @db.Timestamptz(6)
   updated_at         DateTime  @default(now()) @db.Timestamptz(6)
   finished_at        DateTime? @db.Timestamptz(6)
-  tenant_id          String    @default("default")
+  tenant_id          String
   runs               runs      @relation(fields: [parent_run_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   steps              steps?    @relation(fields: [parent_step_id], references: [id], onUpdate: NoAction)
-  tenants            tenants   @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  tenants            tenants   @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: Cascade)
 
   @@index([parent_run_id, created_at], map: "idx_subagent_runs_parent")
   @@index([parent_run_id, stage_id], map: "idx_subagent_runs_stage")
@@ -607,6 +607,7 @@ model tenants {
   id                          String                        @id
   name                        String
   status                      String                        @default("active")
+  is_bootstrap                Boolean                       @default(false)
   created_at                  DateTime                      @default(now()) @db.Timestamptz(6)
   default_space_id            String?                       @unique
   app_settings                app_settings[]
@@ -621,7 +622,9 @@ model tenants {
   threads                     threads[]
   users                       users[]
   spaces                      spaces[]                      @relation("spaces_tenant")
-  default_space               spaces?                       @relation("tenants_default_space", fields: [default_space_id, id], references: [id, tenant_id], onDelete: NoAction, onUpdate: NoAction)
+  default_space               spaces?                       @relation("tenants_default_space", fields: [default_space_id, id], references: [id, tenant_id], onDelete: NoAction, onUpdate: Cascade)
+
+  @@unique([is_bootstrap], map: "uq_tenants_bootstrap", where: raw("is_bootstrap"))
 }
 
 model thread_notices {
@@ -649,7 +652,7 @@ model threads {
   archived_at                                             DateTime?              @db.Timestamptz(6)
   active_run_id                                           String?
   executing_run_id                                        String?
-  tenant_id                                               String                 @default("default")
+  tenant_id                                               String
   user_id                                                 String?
   space_id                                                String
   source_type                                             String                 @default("web")
@@ -666,8 +669,8 @@ model threads {
   runs_threads_active_run_idToruns                        runs?                  @relation("threads_active_run_idToruns", fields: [active_run_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
   runs_threads_executing_run_idToruns                     runs?                  @relation("threads_executing_run_idToruns", fields: [executing_run_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
   external_callers                                        external_callers?      @relation(fields: [source_caller_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
-  spaces                                                  spaces                 @relation(fields: [space_id, tenant_id], references: [id, tenant_id], onDelete: NoAction, onUpdate: NoAction)
-  tenants                                                 tenants                @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  spaces                                                  spaces                 @relation(fields: [space_id, tenant_id], references: [id, tenant_id], onDelete: NoAction, onUpdate: Cascade)
+  tenants                                                 tenants                @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: Cascade)
   users                                                   users?                 @relation(fields: [user_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
 
   @@unique([id, space_id, tenant_id])
@@ -693,7 +696,7 @@ model users {
   spaces_execution    spaces[]              @relation("spaces_execution_user")
   spaces_created      spaces[]              @relation("spaces_created_by")
   space_visible_users space_visible_users[]
-  tenants             tenants               @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  tenants             tenants               @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   @@unique([tenant_id, email])
   @@unique([id, tenant_id])
@@ -731,7 +734,7 @@ model workload_secret_access_logs {
   status          String
   error_code      String?
   created_at      DateTime        @default(now()) @db.Timestamptz(6)
-  tenants         tenants         @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  tenants         tenants         @relation(fields: [tenant_id], references: [id], onDelete: NoAction, onUpdate: Cascade)
   runs            runs            @relation(fields: [run_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   steps           steps?          @relation(fields: [step_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
   workload_tokens workload_tokens @relation(fields: [token_id], references: [id], onDelete: Cascade, onUpdate: NoAction)

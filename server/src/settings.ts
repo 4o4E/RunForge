@@ -25,8 +25,7 @@ import type { Scope, TenantScope } from './store/types.js';
 import { findSetting, findSettings, insertMissingSettings, upsertSettings } from './store/settingsRepository.js';
 import { resolveWorkspaceRoot } from './files/workspaceRoot.js';
 import { catalogCapability } from './llm/modelCatalog.js';
-
-export const SYSTEM_RESOURCE_TENANT_ID = 'default';
+import { getSystemResourceTenantId } from './systemResourceTenant.js';
 
 type SettingRow = { key: string; value: unknown };
 const PAGE_STATE_KEY = 'ui.pageState';
@@ -289,11 +288,14 @@ function defaultRuntimeCapabilitiesSettings(): RuntimeCapabilitiesSettings {
 }
 
 /** 新 tenant 只创建自己的授权记录。系统资源统一由系统设置维护，不复制进 tenant。 */
-export function tenantSettingsTemplateEntries(): Array<{ key: string; value: unknown }> {
+export function tenantSettingsTemplateEntries(options: { bootstrap?: boolean } = {}): Array<{ key: string; value: unknown }> {
   return [
     {
       key: TENANT_RESOURCE_AUTHORIZATION_KEY,
-      value: { llmProviderIds: [], datasourceIds: [] } satisfies TenantResourceAuthorization,
+      value: {
+        llmProviderIds: options.bootstrap ? [defaultLlmProviderSettings().id] : [],
+        datasourceIds: [],
+      } satisfies TenantResourceAuthorization,
     },
   ];
 }
@@ -331,20 +333,21 @@ async function readSettingRows(tenantId: string, keys: readonly string[]): Promi
 }
 
 /** 系统工具设置缺项时,用启动配置补齐系统资源记录。 */
-async function insertMissingDefaults(rows: SettingRow[]): Promise<void> {
+async function insertMissingDefaults(tenantId: string, rows: SettingRow[]): Promise<void> {
   const existing = new Set(rows.map((row) => row.key));
   const missing = toolSettingsToEntries(defaultToolSettings())
     .filter(([key]) => !existing.has(key))
     .map(([key, value]) => ({ key, value }));
-  await insertMissingSettings(SYSTEM_RESOURCE_TENANT_ID, missing);
+  await insertMissingSettings(tenantId, missing);
 }
 
 /** 读取系统统一维护的工具策略和 workspace 基础目录。 */
 export async function getSystemToolSettings(): Promise<ToolSettings> {
+  const tenantId = await getSystemResourceTenantId();
   try {
-    const systemRows = await readSettingRows(SYSTEM_RESOURCE_TENANT_ID, TOOL_SETTING_KEYS);
-    if (systemRows.length < TOOL_SETTING_KEYS.length) await insertMissingDefaults(systemRows);
-    const mergedMap = rowsToMap(await readSettingRows(SYSTEM_RESOURCE_TENANT_ID, TOOL_SETTING_KEYS));
+    const systemRows = await readSettingRows(tenantId, TOOL_SETTING_KEYS);
+    if (systemRows.length < TOOL_SETTING_KEYS.length) await insertMissingDefaults(tenantId, systemRows);
+    const mergedMap = rowsToMap(await readSettingRows(tenantId, TOOL_SETTING_KEYS));
     return mergeToolSettings(mergedMap);
   } catch (err) {
     warnOnce('settings-fallback', `Tool settings fallback to env defaults: ${(err as Error).message}`);
@@ -387,7 +390,7 @@ export function shellPathForSettings(settings: ToolSettings): string {
 }
 
 export async function saveToolSettings(scope: TenantScope, input: unknown): Promise<ToolSettings> {
-  if (scope.tenantId !== SYSTEM_RESOURCE_TENANT_ID) throw new Error('工具设置只能由系统管理员修改');
+  if (scope.tenantId !== await getSystemResourceTenantId()) throw new Error('工具设置只能由系统管理员修改');
   const settings = normalizeToolSettings(input);
   await upsertSettings(scope.tenantId, toolSettingsToEntries(settings).map(([key, value]) => ({ key, value })));
   await mkdir(settings.workspaceRoot, { recursive: true });
@@ -470,11 +473,12 @@ export async function saveTenantResourceAuthorization(
 }
 
 export async function getSystemMcpSettings(): Promise<McpSettings> {
+  const tenantId = await getSystemResourceTenantId();
   try {
-    const value = await readTenantJsonSetting(SYSTEM_RESOURCE_TENANT_ID, MCP_SETTINGS_KEY);
+    const value = await readTenantJsonSetting(tenantId, MCP_SETTINGS_KEY);
     if (value === undefined) {
       const defaults = defaultMcpSettings();
-      await insertMissingSettings(SYSTEM_RESOURCE_TENANT_ID, [{ key: MCP_SETTINGS_KEY, value: defaults }]);
+      await insertMissingSettings(tenantId, [{ key: MCP_SETTINGS_KEY, value: defaults }]);
       return defaults;
     }
     return normalizeMcpSettings(value);
@@ -485,7 +489,7 @@ export async function getSystemMcpSettings(): Promise<McpSettings> {
 }
 
 export async function saveMcpSettings(scope: TenantScope, input: unknown): Promise<McpSettings> {
-  if (scope.tenantId !== SYSTEM_RESOURCE_TENANT_ID) throw new Error('MCP 设置只能由系统管理员修改');
+  if (scope.tenantId !== await getSystemResourceTenantId()) throw new Error('MCP 设置只能由系统管理员修改');
   const settings = normalizeMcpSettings(input);
   await upsertTenantJsonSetting(scope.tenantId, MCP_SETTINGS_KEY, settings);
   return settings;
@@ -557,10 +561,11 @@ export function normalizeLlmSettings(input: unknown): LlmSettings {
 }
 
 export async function getSystemLlmSettings(): Promise<LlmSettings> {
-  const value = await readTenantJsonSetting(SYSTEM_RESOURCE_TENANT_ID, LLM_SETTINGS_KEY);
+  const tenantId = await getSystemResourceTenantId();
+  const value = await readTenantJsonSetting(tenantId, LLM_SETTINGS_KEY);
   if (value === undefined) {
     const defaults = defaultLlmSettings();
-    await insertMissingSettings(SYSTEM_RESOURCE_TENANT_ID, [{ key: LLM_SETTINGS_KEY, value: defaults }]);
+    await insertMissingSettings(tenantId, [{ key: LLM_SETTINGS_KEY, value: defaults }]);
     return defaults;
   }
   return normalizeLlmSettings(value);
@@ -581,7 +586,7 @@ export async function getLlmSettings(scope: TenantScope): Promise<LlmSettings> {
 }
 
 export async function saveLlmSettings(scope: TenantScope, input: unknown): Promise<LlmSettings> {
-  if (scope.tenantId !== SYSTEM_RESOURCE_TENANT_ID) throw new Error('LLM 设置只能由系统管理员修改');
+  if (scope.tenantId !== await getSystemResourceTenantId()) throw new Error('LLM 设置只能由系统管理员修改');
   const settings = normalizeLlmSettings(input);
   for (const provider of settings.providers) {
     for (const capability of provider.modelCapabilities) {
@@ -694,11 +699,12 @@ export function normalizeRuntimeCapabilitiesSettings(input: unknown): RuntimeCap
 }
 
 export async function getSystemRuntimeCapabilitiesSettings(): Promise<RuntimeCapabilitiesSettings> {
+  const tenantId = await getSystemResourceTenantId();
   try {
-    const value = await readTenantJsonSetting(SYSTEM_RESOURCE_TENANT_ID, RUNTIME_CAPABILITIES_SETTINGS_KEY);
+    const value = await readTenantJsonSetting(tenantId, RUNTIME_CAPABILITIES_SETTINGS_KEY);
     if (value === undefined) {
       const defaults = defaultRuntimeCapabilitiesSettings();
-      await insertMissingSettings(SYSTEM_RESOURCE_TENANT_ID, [{ key: RUNTIME_CAPABILITIES_SETTINGS_KEY, value: defaults }]);
+      await insertMissingSettings(tenantId, [{ key: RUNTIME_CAPABILITIES_SETTINGS_KEY, value: defaults }]);
       return defaults;
     }
     return normalizeRuntimeCapabilitiesSettings(value);
@@ -729,7 +735,7 @@ export async function getRuntimeCapabilitiesSettings(scope: TenantScope): Promis
 }
 
 export async function saveRuntimeCapabilitiesSettings(scope: TenantScope, input: unknown): Promise<RuntimeCapabilitiesSettings> {
-  if (scope.tenantId !== SYSTEM_RESOURCE_TENANT_ID) throw new Error('运行时能力设置只能由系统管理员修改');
+  if (scope.tenantId !== await getSystemResourceTenantId()) throw new Error('运行时能力设置只能由系统管理员修改');
   const settings = normalizeRuntimeCapabilitiesSettings(input);
   await upsertTenantJsonSetting(scope.tenantId, RUNTIME_CAPABILITIES_SETTINGS_KEY, settings);
   return settings;
@@ -744,7 +750,7 @@ function normalizePageState(input: unknown): Record<string, unknown> {
   return JSON.parse(json) as Record<string, unknown>;
 }
 
-// pageState 是纯 UI 状态,不是策略配置,只按本租户存取,不做 default 租户回退。
+// pageState 是纯 UI 状态，只按本租户存取。
 export async function getPageState(scope: TenantScope): Promise<Record<string, unknown>> {
   return normalizePageState(await findSetting(scope.tenantId, PAGE_STATE_KEY));
 }

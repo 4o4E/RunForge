@@ -24,7 +24,6 @@ import {
   saveRuntimeCapabilitiesSettings,
   saveToolSettings,
   shellPathForSettings,
-  SYSTEM_RESOURCE_TENANT_ID,
   tenantSettingsTemplateEntries,
 } from '../settings.js';
 import { getMcpSettingsOptions, getToolSettingsOptions, shellCommandOptions } from './settings.js';
@@ -34,6 +33,8 @@ import { probeMcpServer } from '../mcp/client.js';
 import { scanExecutableNames } from '../tools/sandbox.js';
 import type { Datasource, LlmProviderSettings, McpServerProbeResult, ShellCommandScanInput } from '@runforge/contracts';
 import type { TenantScope } from '../store/types.js';
+import { newTenantId } from '../id.js';
+import { getSystemResourceTenantId } from '../systemResourceTenant.js';
 import {
   createDatasource,
   createPermissionProfile,
@@ -51,20 +52,30 @@ import {
 import { testDatasourceById, testDatasourceDraft } from '../datasources/introspection.js';
 import type { DatasourceRow } from '../datasources/types.js';
 import { systemSpacesApi } from './spaces.js';
-import { loadBusinessPluginAdminView, updateBusinessPluginAdminView } from '../businessPlugins/settings.js';
+import {
+  importBusinessPluginAdminView,
+  loadBusinessPluginAdminView,
+  updateBusinessPluginAdminView,
+} from '../businessPlugins/settings.js';
 import { BusinessPluginError } from '../businessPlugins/errors.js';
+import {
+  businessPluginArchiveBody,
+  parseBusinessPluginArchiveRequest,
+} from '../businessPlugins/archiveHttp.js';
 import {
   createTenantUser,
   TenantUserError,
   updateTenantUser,
 } from '../tenants/users.js';
+import { spaceConfigService } from '../spaces/config.js';
 
 export const systemApi = Router();
 
 systemApi.use('/tenants/:tenantId/spaces', systemSpacesApi);
 
-const TENANT_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
-const systemResourceScope: TenantScope = { tenantId: SYSTEM_RESOURCE_TENANT_ID };
+async function systemResourceScope(): Promise<TenantScope> {
+  return { tenantId: await getSystemResourceTenantId() };
+}
 
 async function systemTenantScope(req: Request, res: Response): Promise<TenantScope | null> {
   const tenantId = req.params.tenantId;
@@ -170,28 +181,32 @@ systemApi.post('/tenants/:tenantId/business-plugins/reload', async (req, res) =>
   }
 });
 
+systemApi.post('/tenants/:tenantId/business-plugins/import', businessPluginArchiveBody, async (req, res) => {
+  const scope = await systemTenantScope(req, res);
+  if (!scope) return;
+  try {
+    const { archive, format } = parseBusinessPluginArchiveRequest(req);
+    const result = await importBusinessPluginAdminView(scope.tenantId, archive, format);
+    res.status(result.replaced ? 200 : 201).json(result);
+  } catch (error) {
+    handleBusinessPluginError(res, error);
+  }
+});
+
 // tenant、首个 owner、初始租户设置和 default space 由 Store 在同一事务中创建；任何一步
 // 失败都不留下无法登录或缺少运行配置的半成品 tenant。
 systemApi.post('/tenants', async (req, res) => {
   const body = req.body as Partial<CreateTenantInput> | undefined;
-  const id = typeof body?.id === 'string' ? body.id.trim() : '';
   const name = typeof body?.name === 'string' ? body.name.trim() : '';
   const ownerEmail = typeof body?.ownerEmail === 'string' ? body.ownerEmail.trim() : '';
   const ownerPassword = typeof body?.ownerPassword === 'string' ? body.ownerPassword : '';
-  if (!id || !name || !ownerEmail || !ownerPassword) {
-    res.status(400).json({ error: '缺少 id / name / ownerEmail / ownerPassword' });
-    return;
-  }
-  if (!TENANT_ID_RE.test(id)) {
-    res.status(400).json({ error: 'id 只能包含字母、数字、下划线和短横线，且不能以下划线/短横线开头' });
+  if (!name || !ownerEmail || !ownerPassword) {
+    res.status(400).json({ error: '缺少 name / ownerEmail / ownerPassword' });
     return;
   }
 
-  const existing = await store.findTenant(id);
-  if (existing) {
-    res.status(409).json({ error: '该租户 id 已存在' });
-    return;
-  }
+  const id = newTenantId();
+  const defaultSpaceConfig = await spaceConfigService.snapshotForCreate(id, 'web', {}, false);
 
   const { tenant, owner } = await store.createTenantWithOwner({
     id,
@@ -199,6 +214,7 @@ systemApi.post('/tenants', async (req, res) => {
     ownerEmail,
     ownerPasswordHash: hashPassword(ownerPassword),
     settingsTemplate: tenantSettingsTemplateEntries(),
+    defaultSpaceConfig,
   });
 
   const response: CreateTenantResponse = { tenant: toTenantSummary(tenant), owner: toUserSummary(owner) };
@@ -247,7 +263,7 @@ systemApi.post('/admins', async (req, res) => {
   res.status(201).json(toSystemAdminSummary(admin));
 });
 
-// 系统资源在全系统统一维护；default tenant_id 只是复用现有存储结构的内部资源归属。
+// 系统资源在全系统统一维护，使用 bootstrap tenant 的当前 ID 作为内部存储作用域。
 systemApi.get('/settings/llm', async (_req, res) => {
   res.json(await getSystemLlmSettings());
 });
@@ -259,7 +275,7 @@ systemApi.get('/settings/llm/options', async (_req, res) => {
 
 systemApi.put('/settings/llm', async (req, res) => {
   try {
-    res.json(await saveLlmSettings(systemResourceScope, req.body));
+    res.json(await saveLlmSettings(await systemResourceScope(), req.body));
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }
@@ -302,7 +318,7 @@ systemApi.get('/settings/runtime-capabilities', async (_req, res) => {
 
 systemApi.put('/settings/runtime-capabilities', async (req, res) => {
   try {
-    res.json(await saveRuntimeCapabilitiesSettings(systemResourceScope, req.body));
+    res.json(await saveRuntimeCapabilitiesSettings(await systemResourceScope(), req.body));
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }
@@ -318,7 +334,7 @@ systemApi.get('/settings/mcp/options', async (_req, res) => {
 
 systemApi.put('/settings/mcp', async (req, res) => {
   try {
-    res.json(await saveMcpSettings(systemResourceScope, req.body));
+    res.json(await saveMcpSettings(await systemResourceScope(), req.body));
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }
@@ -358,7 +374,7 @@ systemApi.get('/settings/tools/options', async (_req, res) => {
 
 systemApi.put('/settings/tools', async (req, res) => {
   try {
-    res.json(await saveToolSettings(systemResourceScope, req.body));
+    res.json(await saveToolSettings(await systemResourceScope(), req.body));
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }
@@ -376,7 +392,7 @@ systemApi.post('/settings/tools/shell-commands/scan', async (req, res) => {
 
 systemApi.get('/datasources', async (_req, res) => {
   try {
-    res.json({ datasources: (await listDatasources(systemResourceScope)).map(publicDatasource) });
+    res.json({ datasources: (await listDatasources(await systemResourceScope())).map(publicDatasource) });
   } catch (err) {
     handleDatasourceError(res, err);
   }
@@ -384,7 +400,7 @@ systemApi.get('/datasources', async (_req, res) => {
 
 systemApi.post('/datasources', async (req, res) => {
   try {
-    const datasource = await createDatasource(systemResourceScope, req.body);
+    const datasource = await createDatasource(await systemResourceScope(), req.body);
     res.status(201).json({ datasource: publicDatasource(datasource), poolDefaults: poolDefaults() });
   } catch (err) {
     handleDatasourceError(res, err);
@@ -401,11 +417,12 @@ systemApi.post('/datasources/test', async (req, res) => {
 
 systemApi.get('/datasources/:datasourceId', async (req, res) => {
   try {
-    const datasource = await getDatasource(systemResourceScope, req.params.datasourceId);
+    const scope = await systemResourceScope();
+    const datasource = await getDatasource(scope, req.params.datasourceId);
     if (!datasource) return res.status(404).json({ error: '数据源不存在' });
-    const profiles = await listPermissionProfiles(systemResourceScope, datasource.id);
-    const accounts = await listDatasourceAccounts(systemResourceScope, datasource.id);
-    const leases = await listDatasourceLeases(systemResourceScope, datasource.id);
+    const profiles = await listPermissionProfiles(scope, datasource.id);
+    const accounts = await listDatasourceAccounts(scope, datasource.id);
+    const leases = await listDatasourceLeases(scope, datasource.id);
     res.json({ datasource: publicDatasource(datasource), profiles, accounts, leases });
   } catch (err) {
     handleDatasourceError(res, err);
@@ -414,7 +431,7 @@ systemApi.get('/datasources/:datasourceId', async (req, res) => {
 
 systemApi.patch('/datasources/:datasourceId', async (req, res) => {
   try {
-    res.json({ datasource: publicDatasource(await updateDatasource(systemResourceScope, req.params.datasourceId, req.body)) });
+    res.json({ datasource: publicDatasource(await updateDatasource(await systemResourceScope(), req.params.datasourceId, req.body)) });
   } catch (err) {
     handleDatasourceError(res, err);
   }
@@ -422,7 +439,7 @@ systemApi.patch('/datasources/:datasourceId', async (req, res) => {
 
 systemApi.post('/datasources/:datasourceId/test', async (req, res) => {
   try {
-    res.json(await testDatasourceById(systemResourceScope, req.params.datasourceId, req.body));
+    res.json(await testDatasourceById(await systemResourceScope(), req.params.datasourceId, req.body));
   } catch (err) {
     handleDatasourceError(res, err);
   }
@@ -430,7 +447,7 @@ systemApi.post('/datasources/:datasourceId/test', async (req, res) => {
 
 systemApi.post('/datasources/:datasourceId/profiles', async (req, res) => {
   try {
-    res.status(201).json({ profile: await createPermissionProfile(systemResourceScope, req.params.datasourceId, req.body) });
+    res.status(201).json({ profile: await createPermissionProfile(await systemResourceScope(), req.params.datasourceId, req.body) });
   } catch (err) {
     handleDatasourceError(res, err);
   }
@@ -438,7 +455,7 @@ systemApi.post('/datasources/:datasourceId/profiles', async (req, res) => {
 
 systemApi.post('/datasources/:datasourceId/profiles/readonly-default', async (req, res) => {
   try {
-    res.status(201).json({ profile: await ensureReadonlyPermissionProfile(systemResourceScope, req.params.datasourceId) });
+    res.status(201).json({ profile: await ensureReadonlyPermissionProfile(await systemResourceScope(), req.params.datasourceId) });
   } catch (err) {
     handleDatasourceError(res, err);
   }
@@ -446,18 +463,19 @@ systemApi.post('/datasources/:datasourceId/profiles/readonly-default', async (re
 
 systemApi.patch('/datasources/:datasourceId/profiles/:profileId', async (req, res) => {
   try {
-    res.json({ profile: await updatePermissionProfile(systemResourceScope, req.params.datasourceId, req.params.profileId, req.body) });
+    res.json({ profile: await updatePermissionProfile(await systemResourceScope(), req.params.datasourceId, req.params.profileId, req.body) });
   } catch (err) {
     handleDatasourceError(res, err);
   }
 });
 
 async function tenantResourceAuthorizationView(tenantId: string) {
-  const [storedAuthorization, llm, datasources] = await Promise.all([
+  const [storedAuthorization, llm, resourceScope] = await Promise.all([
     getTenantResourceAuthorization(tenantId),
     getSystemLlmSettings(),
-    listDatasources(systemResourceScope),
+    systemResourceScope(),
   ]);
+  const datasources = await listDatasources(resourceScope);
   const knownProviderIds = new Set(llm.providers.map((provider) => provider.id));
   const knownDatasourceIds = new Set(datasources.map((datasource) => datasource.id));
   return {
@@ -491,7 +509,8 @@ systemApi.get('/tenant-access/:tenantId', async (req, res) => {
 systemApi.put('/tenant-access/:tenantId', async (req, res) => {
   const scope = await systemTenantScope(req, res);
   if (!scope) return;
-  const [llm, datasources] = await Promise.all([getSystemLlmSettings(), listDatasources(systemResourceScope)]);
+  const [llm, resourceScope] = await Promise.all([getSystemLlmSettings(), systemResourceScope()]);
+  const datasources = await listDatasources(resourceScope);
   const requested = req.body && typeof req.body === 'object'
     ? req.body as { llmProviderIds?: unknown; datasourceIds?: unknown }
     : {};

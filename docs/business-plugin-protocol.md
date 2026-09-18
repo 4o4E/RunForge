@@ -6,9 +6,9 @@
 
 Issue 中的 v0.2 草案是协议基线；本文记录仓库当前已经实现的行为和尚未完成的边界。
 
-## 部署目录
+## 部署与导入
 
-`RUNFORGE_BUSINESS_PLUGIN_ROOTS` 配置一个或多个只读根目录。目录必须按 tenant 隔离：
+`RUNFORGE_BUSINESS_PLUGIN_ROOTS` 配置一个或多个根目录。目录必须按 tenant 隔离：
 
 ```text
 <configured-root>/
@@ -23,9 +23,19 @@ Issue 中的 v0.2 草案是协议基线；本文记录仓库当前已经实现�
           assets/
 ```
 
-RunForge 不拉取 Git、不接收压缩包，也不维护业务插件发布仓库。调用方或部署流水线负责把
-完整目录原子地放到上述位置。管理页的“重新加载目录”才会切换当前索引，不会每个 run
-扫描磁盘。
+业务插件有两种交付方式：
+
+- 调用方或部署流水线把完整目录原子地放到上述位置，再由管理员执行“重新加载目录”。
+- tenant owner/admin 或 system admin 在业务插件管理页手动导入 ZIP、TGZ 或 `.tar.gz`。
+
+手动导入使用第一个配置根目录；未配置环境变量时使用仓库下的 `business-plugins`。压缩包
+可以直接以 `runforge.plugin.yaml` 为根，也可以只包含一个顶层插件目录。RunForge 会先在
+临时目录解压和校验，再按 manifest ID 安装；ID 已存在时原子替换当前目录并重新加载索引，
+tenant 非敏感配置和 Secret 继续按相同插件 ID 保留。压缩包限制为 50 MiB，解压后限制为
+200 MiB、10000 个条目和 32 层目录；路径穿越、符号链接、硬链接和特殊文件都会被拒绝。
+
+RunForge 不拉取 Git，也不建设业务插件发布仓库。活动 run 在首次启动时保存的工作副本继续
+使用原内容；更新后的内容只供之后接纳的新 run 使用。
 
 ## Manifest
 

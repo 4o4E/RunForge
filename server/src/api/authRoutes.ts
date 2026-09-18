@@ -6,16 +6,17 @@ import { generateOpaqueToken, hashOpaqueToken } from '../auth/tokens.js';
 import { signTenantAccessToken } from '../auth/jwt.js';
 import { toUserSummary } from '../auth/view.js';
 import type { LoginRequest, LoginResponse, RefreshRequest, RefreshResponse } from '@runforge/contracts';
+import { getSystemResourceTenantId } from '../systemResourceTenant.js';
 
 export const authApi = Router();
-
-const DEFAULT_TENANT_ID = 'default';
 
 authApi.post('/login', async (req, res) => {
   const body = req.body as Partial<LoginRequest> | undefined;
   const email = typeof body?.email === 'string' ? body.email.trim() : '';
   const password = typeof body?.password === 'string' ? body.password : '';
-  const tenantId = typeof body?.tenantId === 'string' && body.tenantId.trim() ? body.tenantId.trim() : DEFAULT_TENANT_ID;
+  const tenantId = typeof body?.tenantId === 'string' && body.tenantId.trim()
+    ? body.tenantId.trim()
+    : await getSystemResourceTenantId();
   if (!email || !password) {
     res.status(400).json({ error: '缺少 email 或 password' });
     return;

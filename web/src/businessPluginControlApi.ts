@@ -1,5 +1,6 @@
 import type {
   BusinessPluginAdminView,
+  BusinessPluginImportResponse,
   UpdateBusinessPluginSettingsInput,
 } from '@runforge/contracts';
 import { authFetch } from './api';
@@ -9,6 +10,7 @@ export interface BusinessPluginControlApi {
   get(): Promise<BusinessPluginAdminView>;
   update(input: UpdateBusinessPluginSettingsInput): Promise<BusinessPluginAdminView>;
   reload(): Promise<BusinessPluginAdminView>;
+  importArchive(file: File): Promise<BusinessPluginImportResponse>;
 }
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -35,6 +37,23 @@ function createBusinessPluginControlApi(base: string, fetcher: Fetcher): Busines
       body: JSON.stringify(input),
     }).then(json<BusinessPluginAdminView>),
     reload: () => fetcher(`${base}/reload`, { method: 'POST' }).then(json<BusinessPluginAdminView>),
+    importArchive: (file) => {
+      const lowerName = file.name.toLowerCase();
+      const format = lowerName.endsWith('.zip')
+        ? 'zip'
+        : lowerName.endsWith('.tgz') || lowerName.endsWith('.tar.gz')
+          ? 'tgz'
+          : null;
+      if (!format) return Promise.reject(new Error('只支持 .zip、.tgz 和 .tar.gz 文件'));
+      return fetcher(`${base}/import`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': format === 'zip' ? 'application/zip' : 'application/gzip',
+          'X-RunForge-Archive-Format': format,
+        },
+        body: file,
+      }).then(json<BusinessPluginImportResponse>);
+    },
   };
 }
 

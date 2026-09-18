@@ -70,22 +70,42 @@ function configService() {
   return new SpaceConfigService(async () => structuredClone(catalog));
 }
 
-test('space config: 空配置保持兼容，未知字段和越权能力被拒绝', async () => {
+test('space config: 创建时复制能力目录，未知字段和越权能力被拒绝', async () => {
   const service = configService();
   assert.deepEqual(normalizeSpaceConfig({}), {
     schemaVersion: 1,
     systemPrompt: '',
-    model: { defaultModelRef: null, allowedModelRefs: null, contextBudget: null },
-    capabilities: { tools: null, mcpServers: null, businessPlugins: [], runtime: null },
+    model: { defaultModelRef: null, allowedModelRefs: [], contextBudget: null },
+    capabilities: { tools: [], mcpServers: [], businessPlugins: [], runtime: [] },
     external: { allowTrustedPrompt: false, allowNextStep: false },
   });
+  assert.deepEqual(await service.snapshotForCreate('tn_config', 'web'), {
+    schemaVersion: 1,
+    systemPrompt: '',
+    model: {
+      defaultModelRef: 'main:model-a',
+      allowedModelRefs: ['main:model-a', 'main:model-b'],
+      contextBudget: null,
+    },
+    capabilities: {
+      tools: ['file_read', 'file_write', 'ask_user'],
+      mcpServers: ['browser', 'docs'],
+      businessPlugins: [],
+      runtime: ['datasource.credentials', 'image'],
+    },
+    external: { allowTrustedPrompt: false, allowNextStep: false },
+  });
+  assert.deepEqual(
+    (await service.snapshotForCreate('tn_config', 'external')).capabilities.tools,
+    ['file_read', 'file_write'],
+  );
   assert.throws(() => normalizeSpaceConfig({ unknown: true }), SpaceConfigError);
   await assert.rejects(
-    service.normalizeForSave('tn_config', 'web', { capabilities: { tools: ['shell'] } }),
+    service.snapshotForCreate('tn_config', 'web', { capabilities: { tools: ['shell'] } }),
     (error: unknown) => error instanceof SpaceConfigError && /shell/.test(error.message),
   );
   await assert.rejects(
-    service.normalizeForSave('tn_config', 'web', { model: { allowedModelRefs: [] } }),
+    service.snapshotForCreate('tn_config', 'web', { model: { allowedModelRefs: [] } }),
     (error: unknown) => error instanceof SpaceConfigError && /至少需要允许一个/.test(error.message),
   );
 });
@@ -144,7 +164,7 @@ test('space config: 空间预算只有进一步收紧模型阈值时才成为有
     mode: 'web' as const,
     name: 'Tighter Budget',
     execution_user_id: null,
-    config: normalizeSpaceConfig({ model: { contextBudget: 40_000 } }),
+    config: await service.snapshotForCreate('tn_config', 'web', { model: { contextBudget: 40_000 } }),
     config_version: 1,
     created_by_user_id: null,
     visible_user_ids: [],
@@ -176,18 +196,18 @@ test('space config: 业务插件声明的系统资源必须由空间统一 WORKL
   }));
 
   await assert.rejects(
-    service.normalizeForSave('tn_config', 'web', {
+    service.snapshotForCreate('tn_config', 'web', {
       capabilities: { businessPlugins: ['crm'], runtime: ['image'] },
     }),
     /业务插件所需运行资源未被空间授权：llm/,
   );
-  const accepted = await service.normalizeForSave('tn_config', 'web', {
+  const accepted = await service.snapshotForCreate('tn_config', 'web', {
     capabilities: { businessPlugins: ['crm'], runtime: ['llm'] },
   });
   assert.deepEqual(accepted.capabilities.runtime, ['llm']);
 });
 
-test('space config: 继承的 instance 预算也不能超过模型窗口', async () => {
+test('space config: 系统 instance 预算不能超过模型窗口', async () => {
   const service = new SpaceConfigService(async () => ({
     ...structuredClone(catalog),
     defaultModelRef: 'main:model-small',
@@ -203,7 +223,7 @@ test('space config: 继承的 instance 预算也不能超过模型窗口', async
       mode: 'web',
       name: 'Budget',
       execution_user_id: null,
-      config: normalizeSpaceConfig({}),
+      config: await service.snapshotForCreate('tn_config', 'web'),
       config_version: 1,
       created_by_user_id: null,
       visible_user_ids: [],

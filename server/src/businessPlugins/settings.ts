@@ -5,9 +5,11 @@ import { BusinessPluginError } from './errors.js';
 import type { BusinessPluginDefinition } from './types.js';
 import type {
   BusinessPluginAdminView,
+  BusinessPluginImportResponse,
   UpdateBusinessPluginSettingsInput,
 } from '@runforge/contracts';
 import { businessPluginRegistry } from './registry.js';
+import type { BusinessPluginArchiveFormat } from './archive.js';
 
 const BUSINESS_PLUGIN_SETTINGS_KEY = 'businessPlugins.settings';
 const jsonObjectSchema = z.record(z.string(), z.unknown());
@@ -213,4 +215,20 @@ export async function updateBusinessPluginAdminView(
   const definitions = await businessPluginRegistry.list(tenantId);
   const settings = await updateBusinessPluginTenantSettings(tenantId, definitions, input);
   return businessPluginAdminView(definitions, settings);
+}
+
+export async function importBusinessPluginAdminView(
+  tenantId: string,
+  archive: Buffer,
+  format: BusinessPluginArchiveFormat,
+): Promise<BusinessPluginImportResponse> {
+  const imported = await businessPluginRegistry.importArchive(tenantId, archive, format);
+  return {
+    pluginId: imported.definition.manifest.id,
+    replaced: imported.replaced,
+    view: businessPluginAdminView(
+      await businessPluginRegistry.list(tenantId),
+      await getBusinessPluginTenantSettings(tenantId),
+    ),
+  };
 }

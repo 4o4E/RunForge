@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Bot, Database, Image, KeyRound, Layers3, LogOut, Package, Shield, ShieldCheck, Users, Wifi, Wrench } from 'lucide-react';
+import { ArrowLeft, Bot, Database, Image, KeyRound, Layers3, LogOut, Package, Shield, ShieldCheck, Users, Wifi, Wrench } from 'lucide-react';
 import type { TenantSummary } from '@runforge/contracts';
 import { listSystemTenants, sysAdminLogout } from '../sysAdminApi';
 import { Card, CardContent } from '@/components/ui/card';
@@ -204,6 +204,12 @@ export function SysAdminApp() {
               </SelectContent>
             </Select>
           )}
+          <Button variant="outline" size="sm" asChild>
+            <a href="/">
+              <ArrowLeft className="h-4 w-4" />
+              返回聊天
+            </a>
+          </Button>
           <Button
             variant="outline"
             size="sm"

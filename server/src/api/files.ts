@@ -124,11 +124,11 @@ async function resolveFileAccess(
       return null;
     }
   }
-  const tenantId = typeof req.query.tenant === 'string' && req.query.tenant.trim() ? req.query.tenant.trim() : 'default';
+  const tenantId = typeof req.query.tenant === 'string' ? req.query.tenant.trim() : '';
   const userId = typeof req.query.user === 'string' && req.query.user.trim() ? req.query.user.trim() : '';
   const threadId = requestedThreadId(req);
-  if (!userId) {
-    res.status(403).json({ error: '文件分享缺少用户身份' });
+  if (!tenantId || !userId) {
+    res.status(403).json({ error: '文件分享缺少租户或用户身份' });
     return null;
   }
   const { workspaceRoot: baseRoot } = await getSystemToolSettings();

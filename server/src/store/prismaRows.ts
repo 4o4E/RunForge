@@ -118,6 +118,7 @@ export function toTenantRow(row: tenants): TenantRow {
     id: row.id,
     name: row.name,
     status: row.status as TenantRow['status'],
+    is_bootstrap: row.is_bootstrap,
     default_space_id: row.default_space_id,
     created_at: timestamp(row.created_at)!,
   };

@@ -1693,7 +1693,9 @@ export class PgStore implements Store {
     const ownerId = newUserId();
     const defaultSpaceId = newSpaceId();
     const result = await prisma.$transaction(async (tx) => {
-      const tenant = await tx.tenants.create({ data: { id: input.id, name: input.name } });
+      const tenant = await tx.tenants.create({
+        data: { id: input.id, name: input.name, is_bootstrap: input.isBootstrap ?? false },
+      });
       const owner = await tx.users.create({
         data: {
           id: ownerId,
@@ -1705,7 +1707,7 @@ export class PgStore implements Store {
       });
 
       // tenant 只写入自己的静态初始配置。LLM、MCP、运行时、工具和数据源由系统统一维护，
-      // 不能复制 default tenant 中的系统凭证或资源配置。
+      // 不能复制 bootstrap tenant 中的系统凭证或资源配置。
       const settings = new Map(input.settingsTemplate.map((entry) => [entry.key, entry.value]));
       if (settings.size) {
         await tx.app_settings.createMany({
@@ -1723,6 +1725,7 @@ export class PgStore implements Store {
           tenant_id: input.id,
           mode: 'web',
           name: 'Default',
+          config: requiredJson(input.defaultSpaceConfig ?? {}),
           created_by_user_id: owner.id,
         },
       });
@@ -1742,6 +1745,20 @@ export class PgStore implements Store {
   async findTenant(id: string): Promise<TenantRow | null> {
     const row = await prisma.tenants.findUnique({ where: { id } });
     return row ? toTenantRow(row) : null;
+  }
+
+  async findBootstrapTenant(): Promise<TenantRow | null> {
+    const rows = await prisma.tenants.findMany({ where: { is_bootstrap: true }, take: 2 });
+    if (rows.length > 1) throw new Error('数据库中存在多个 bootstrap tenant');
+    return rows[0] ? toTenantRow(rows[0]) : null;
+  }
+
+  async migrateBootstrapTenantId(currentId: string, nextId: string): Promise<TenantRow> {
+    const row = await prisma.tenants.update({
+      where: { id: currentId },
+      data: { id: nextId, is_bootstrap: true },
+    });
+    return toTenantRow(row);
   }
 
   async listTenants(): Promise<TenantRow[]> {
@@ -1816,10 +1833,6 @@ export class PgStore implements Store {
     const row = await prisma.$transaction(async (tx) => {
       const current = await tx.spaces.findFirst({ where: { id, tenant_id: tenantId } });
       if (!current) return null;
-      const tenant = await tx.tenants.findUnique({ where: { id: tenantId }, select: { default_space_id: true } });
-      if (tenant?.default_space_id === id && fields.name !== undefined && fields.name !== current.name) {
-        throw new DefaultSpaceImmutableError('default 空间不能重命名');
-      }
       const updated = await tx.spaces.updateMany({
         // Service 层先给出“已删除，请先恢复”的稳定错误；这里的 deleted_at 条件处理
         // 更新与软删除并发的窄窗口，避免已经删除的空间被随后到达的更新写穿。

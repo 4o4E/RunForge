@@ -16,8 +16,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 
-const INHERIT_MODEL = '__inherit__';
-
 interface Draft {
   name: string;
   mode: SpaceMode;
@@ -26,14 +24,10 @@ interface Draft {
   systemPrompt: string;
   defaultModelRef: string;
   contextBudget: string;
-  inheritModels: boolean;
   allowedModelRefs: string[];
-  inheritTools: boolean;
   tools: string[];
-  inheritMcp: boolean;
   mcpServers: string[];
   businessPlugins: string[];
-  inheritRuntime: boolean;
   runtime: RuntimeCapabilityName[];
   allowTrustedPrompt: boolean;
   allowNextStep: boolean;
@@ -58,16 +52,12 @@ function initialDraft(space: SpaceSummary | null, options: SpaceOptions | null):
     executionUserId: space?.executionUserId ?? '',
     visibleUserIds: space?.visibleUserIds ?? [],
     systemPrompt: config?.systemPrompt ?? '',
-    defaultModelRef: config?.model.defaultModelRef ?? INHERIT_MODEL,
+    defaultModelRef: config?.model.defaultModelRef ?? options?.defaultModelRef ?? options?.models[0]?.ref ?? '',
     contextBudget: config?.model.contextBudget == null ? '' : String(config.model.contextBudget),
-    inheritModels: config?.model.allowedModelRefs == null,
     allowedModelRefs: config?.model.allowedModelRefs ?? options?.models.map((model) => model.ref) ?? [],
-    inheritTools: config?.capabilities.tools == null,
     tools: config?.capabilities.tools ?? options?.tools ?? [],
-    inheritMcp: config?.capabilities.mcpServers == null,
     mcpServers: config?.capabilities.mcpServers ?? options?.mcpServers.map((server) => server.id) ?? [],
     businessPlugins: config?.capabilities.businessPlugins ?? [],
-    inheritRuntime: config?.capabilities.runtime == null,
     runtime: config?.capabilities.runtime ?? options?.runtimeCapabilities ?? [],
     allowTrustedPrompt: config?.external.allowTrustedPrompt ?? false,
     allowNextStep: config?.external.allowNextStep ?? false,
@@ -78,15 +68,31 @@ function toggleValue<T extends string>(values: T[], value: T, checked: boolean):
   return checked ? [...new Set([...values, value])] : values.filter((item) => item !== value);
 }
 
+function includeUnavailable(
+  available: Array<{ id: string; label: string }>,
+  selected: readonly string[],
+): Array<{ id: string; label: string }> {
+  const availableIds = new Set(available.map((item) => item.id));
+  return [
+    ...available,
+    ...selected
+      .filter((id) => !availableIds.has(id))
+      .map((id) => ({ id, label: `${id}（当前不可用）` })),
+  ];
+}
+
+function unavailableIds(available: readonly string[], selected: readonly string[]): string[] {
+  const availableIds = new Set(available);
+  return selected.filter((id) => !availableIds.has(id));
+}
+
 function OptionGrid({
   values,
   selected,
-  disabled,
   onChange,
 }: {
   values: Array<{ id: string; label: string }>;
   selected: string[];
-  disabled: boolean;
   onChange: (values: string[]) => void;
 }) {
   if (!values.length) return <div className="text-xs text-muted-foreground">当前租户没有可用项</div>;
@@ -96,7 +102,6 @@ function OptionGrid({
         <label key={item.id} className="flex min-w-0 items-center gap-2 rounded-md border px-3 py-2 text-sm">
           <Checkbox
             checked={selected.includes(item.id)}
-            disabled={disabled}
             onCheckedChange={(checked) => onChange(toggleValue(selected, item.id, checked))}
           />
           <span className="min-w-0 truncate" title={item.id}>{item.label}</span>
@@ -109,27 +114,17 @@ function OptionGrid({
 function CapabilitySection({
   label,
   description,
-  inherit,
-  onInheritChange,
   children,
 }: {
   label: string;
   description: string;
-  inherit: boolean;
-  onInheritChange: (value: boolean) => void;
   children: ReactNode;
 }) {
   return (
     <div className="grid gap-2 rounded-md border p-3">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <div className="text-sm font-medium">{label}</div>
-          <div className="text-xs text-muted-foreground">{description}</div>
-        </div>
-        <label className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
-          <Checkbox checked={inherit} onCheckedChange={onInheritChange} />
-          自动继承
-        </label>
+      <div>
+        <div className="text-sm font-medium">{label}</div>
+        <div className="text-xs text-muted-foreground">{description}</div>
       </div>
       {children}
     </div>
@@ -148,29 +143,42 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
     () => (options?.tools ?? []).filter((tool) => draft.mode !== 'external' || tool !== 'ask_user'),
     [draft.mode, options?.tools],
   );
-  const businessPluginValues = useMemo(() => {
-    const available = (options?.businessPlugins ?? []).map((plugin) => ({ id: plugin.id, label: plugin.label }));
-    const availableIds = new Set(available.map((plugin) => plugin.id));
-    return [
-      ...available,
-      ...draft.businessPlugins
-        .filter((id) => !availableIds.has(id))
-        .map((id) => ({ id, label: `${id}（当前不可用）` })),
-    ];
-  }, [draft.businessPlugins, options?.businessPlugins]);
+  const modelValues = includeUnavailable(
+    (options?.models ?? []).map((model) => ({ id: model.ref, label: model.label })),
+    draft.allowedModelRefs,
+  );
+  const toolValues = includeUnavailable(
+    availableTools.map((tool) => ({ id: tool, label: tool })),
+    draft.tools,
+  );
+  const mcpValues = includeUnavailable(options?.mcpServers ?? [], draft.mcpServers);
+  const businessPluginValues = includeUnavailable(
+    (options?.businessPlugins ?? []).map((plugin) => ({ id: plugin.id, label: plugin.label })),
+    draft.businessPlugins,
+  );
+  const runtimeValues = includeUnavailable(
+    (options?.runtimeCapabilities ?? []).map((capability) => ({ id: capability, label: capability })),
+    draft.runtime,
+  );
+  const unavailableModels = unavailableIds((options?.models ?? []).map((model) => model.ref), draft.allowedModelRefs);
+  const unavailableTools = unavailableIds(availableTools, draft.tools);
+  const unavailableMcpServers = unavailableIds((options?.mcpServers ?? []).map((server) => server.id), draft.mcpServers);
   const unavailableBusinessPlugins = draft.businessPlugins.filter(
     (id) => !(options?.businessPlugins ?? []).some((plugin) => plugin.id === id),
   );
-  const defaultModelInvalid = draft.defaultModelRef !== INHERIT_MODEL
-    && !draft.inheritModels
-    && !draft.allowedModelRefs.includes(draft.defaultModelRef);
-  const explicitModelsEmpty = !draft.inheritModels && draft.allowedModelRefs.length === 0;
+  const unavailableRuntime = unavailableIds(options?.runtimeCapabilities ?? [], draft.runtime);
+  const defaultModelInvalid = !draft.allowedModelRefs.includes(draft.defaultModelRef);
+  const explicitModelsEmpty = draft.allowedModelRefs.length === 0;
   const executionUserMissing = draft.mode === 'external' && !draft.executionUserId;
   const canSave = Boolean(draft.name.trim())
     && !defaultModelInvalid
     && !explicitModelsEmpty
     && !executionUserMissing
+    && unavailableModels.length === 0
+    && unavailableTools.length === 0
+    && unavailableMcpServers.length === 0
     && unavailableBusinessPlugins.length === 0
+    && unavailableRuntime.length === 0
     && !saving;
 
   function submit() {
@@ -180,15 +188,15 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
       schemaVersion: 1 as const,
       systemPrompt: draft.systemPrompt,
       model: {
-        defaultModelRef: draft.defaultModelRef === INHERIT_MODEL ? null : draft.defaultModelRef,
-        allowedModelRefs: draft.inheritModels ? null : draft.allowedModelRefs,
+        defaultModelRef: draft.defaultModelRef,
+        allowedModelRefs: draft.allowedModelRefs,
         contextBudget: Number.isInteger(contextBudget) && Number(contextBudget) > 0 ? Number(contextBudget) : null,
       },
       capabilities: {
-        tools: draft.inheritTools ? null : draft.tools.filter((tool) => availableTools.includes(tool)),
-        mcpServers: draft.inheritMcp ? null : draft.mcpServers,
+        tools: draft.tools.filter((tool) => availableTools.includes(tool)),
+        mcpServers: draft.mcpServers,
         businessPlugins: draft.businessPlugins,
-        runtime: draft.inheritRuntime ? null : draft.runtime,
+        runtime: draft.runtime,
       },
       external: {
         allowTrustedPrompt: draft.mode === 'external' && draft.allowTrustedPrompt,
@@ -197,7 +205,7 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
     };
     if (space) {
       onSave({
-        ...(!space.isDefault ? { name: draft.name.trim() } : {}),
+        name: draft.name.trim(),
         ...(space.mode === 'external' ? { executionUserId: draft.executionUserId } : {}),
         visibleUserIds: draft.visibleUserIds,
         config,
@@ -219,7 +227,7 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
         <DialogHeader>
           <DialogTitle>{space ? '编辑空间' : '新建空间'}</DialogTitle>
           <DialogDescription>
-            自动继承表示每次创建 run 时使用 tenant 当时可用的完整目录；关闭后固定为空间选择的子集。
+            新建时会复制租户当前可用能力，保存后由空间独立维护选择列表。
           </DialogDescription>
         </DialogHeader>
 
@@ -229,7 +237,6 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
               <span className="font-medium">名称</span>
               <Input
                 value={draft.name}
-                disabled={space?.isDefault}
                 onChange={(event) => setDraft({ ...draft, name: event.target.value })}
               />
             </label>
@@ -272,7 +279,6 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
             <OptionGrid
               values={visibleMembers.map((user) => ({ id: user.id, label: `${user.email}${user.status === 'disabled' ? ' · 已禁用' : ''}` }))}
               selected={draft.visibleUserIds}
-              disabled={false}
               onChange={(visibleUserIds) => setDraft({ ...draft, visibleUserIds })}
             />
           </div>
@@ -290,16 +296,13 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
           <CapabilitySection
             label="主 Agent 模型"
             description="默认模型必须在允许列表中；上下文预算为空时使用系统计算值。"
-            inherit={draft.inheritModels}
-            onInheritChange={(inheritModels) => setDraft({ ...draft, inheritModels })}
           >
             <div className="grid gap-3 sm:grid-cols-2">
               <Select value={draft.defaultModelRef} onValueChange={(defaultModelRef) => setDraft({ ...draft, defaultModelRef })}>
                 <SelectTrigger><SelectValue placeholder="默认模型" /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value={INHERIT_MODEL}>继承 tenant 默认模型</SelectItem>
-                  {(options?.models ?? []).map((model) => (
-                    <SelectItem key={model.ref} value={model.ref}>{model.label}</SelectItem>
+                  {modelValues.map((model) => (
+                    <SelectItem key={model.id} value={model.id}>{model.label}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -312,24 +315,32 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
               />
             </div>
             <OptionGrid
-              values={(options?.models ?? []).map((model) => ({ id: model.ref, label: model.label }))}
+              values={modelValues}
               selected={draft.allowedModelRefs}
-              disabled={draft.inheritModels}
               onChange={(allowedModelRefs) => setDraft({ ...draft, allowedModelRefs })}
             />
             {(defaultModelInvalid || explicitModelsEmpty) && (
               <div className="text-xs text-destructive">
-                {explicitModelsEmpty ? '显式模型列表至少选择一项。' : '默认模型必须包含在允许列表中。'}
+                {explicitModelsEmpty ? '模型列表至少选择一项。' : '默认模型必须包含在允许列表中。'}
               </div>
+            )}
+            {unavailableModels.length > 0 && (
+              <div className="text-xs text-destructive">当前不可用的模型必须取消选择后才能保存空间。</div>
             )}
           </CapabilitySection>
 
-          <CapabilitySection label="工具" description="external 模式固定不暴露 ask_user。" inherit={draft.inheritTools} onInheritChange={(inheritTools) => setDraft({ ...draft, inheritTools })}>
-            <OptionGrid values={availableTools.map((tool) => ({ id: tool, label: tool }))} selected={draft.tools} disabled={draft.inheritTools} onChange={(tools) => setDraft({ ...draft, tools })} />
+          <CapabilitySection label="工具" description="external 模式固定不暴露 ask_user。">
+            <OptionGrid values={toolValues} selected={draft.tools} onChange={(tools) => setDraft({ ...draft, tools })} />
+            {unavailableTools.length > 0 && (
+              <div className="text-xs text-destructive">当前不可用的工具必须取消选择后才能保存空间。</div>
+            )}
           </CapabilitySection>
 
-          <CapabilitySection label="MCP Server" description="只显示 tenant 当前已启用的 MCP 服务。" inherit={draft.inheritMcp} onInheritChange={(inheritMcp) => setDraft({ ...draft, inheritMcp })}>
-            <OptionGrid values={options?.mcpServers ?? []} selected={draft.mcpServers} disabled={draft.inheritMcp} onChange={(mcpServers) => setDraft({ ...draft, mcpServers })} />
+          <CapabilitySection label="MCP Server" description="只显示 tenant 当前已启用的 MCP 服务。">
+            <OptionGrid values={mcpValues} selected={draft.mcpServers} onChange={(mcpServers) => setDraft({ ...draft, mcpServers })} />
+            {unavailableMcpServers.length > 0 && (
+              <div className="text-xs text-destructive">当前不可用的 MCP Server 必须取消选择后才能保存空间。</div>
+            )}
           </CapabilitySection>
 
           <div className="grid gap-2 rounded-md border p-3">
@@ -340,7 +351,6 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
             <OptionGrid
               values={businessPluginValues}
               selected={draft.businessPlugins}
-              disabled={false}
               onChange={(businessPlugins) => setDraft({ ...draft, businessPlugins })}
             />
             {unavailableBusinessPlugins.length > 0 && (
@@ -348,13 +358,15 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
             )}
           </div>
 
-          <CapabilitySection label="运行时能力" description="包括数据源临时凭证、LLM、图片和视频能力。" inherit={draft.inheritRuntime} onInheritChange={(inheritRuntime) => setDraft({ ...draft, inheritRuntime })}>
+          <CapabilitySection label="运行时能力" description="包括数据源临时凭证、LLM、图片和视频能力。">
             <OptionGrid
-              values={(options?.runtimeCapabilities ?? []).map((capability) => ({ id: capability, label: capability }))}
+              values={runtimeValues}
               selected={draft.runtime}
-              disabled={draft.inheritRuntime}
               onChange={(runtime) => setDraft({ ...draft, runtime: runtime as RuntimeCapabilityName[] })}
             />
+            {unavailableRuntime.length > 0 && (
+              <div className="text-xs text-destructive">当前不可用的运行时能力必须取消选择后才能保存空间。</div>
+            )}
           </CapabilitySection>
 
           {draft.mode === 'external' && (

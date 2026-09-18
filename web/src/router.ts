@@ -14,13 +14,10 @@ function decodePathValue(value: string): string {
 
 export function readChatRoute(loc: Location = window.location): ChatRoute {
   const pathValues = loc.pathname.split('/').filter(Boolean);
-  const rawSpaceId = pathValues[0];
-  const rawThreadId = pathValues[1];
+  const rawId = pathValues.length === 1 ? decodePathValue(pathValues[0]) : '';
   const search = new URLSearchParams(loc.search);
-  const spaceId = rawSpaceId?.startsWith('sp_') ? decodePathValue(rawSpaceId) : null;
-  const threadId = (spaceId || rawSpaceId === 'chat') && rawThreadId?.startsWith('th_')
-    ? decodePathValue(rawThreadId)
-    : null;
+  const spaceId = rawId.startsWith('sp_') ? rawId : null;
+  const threadId = rawId.startsWith('th_') ? rawId : null;
 
   return {
     draft: search.get('draft') ?? '',
@@ -30,9 +27,8 @@ export function readChatRoute(loc: Location = window.location): ChatRoute {
 }
 
 export function buildChatPath(route: ChatRoute): string {
-  const path = route.spaceId
-    ? `/${encodeURIComponent(route.spaceId)}${route.threadId ? `/${encodeURIComponent(route.threadId)}` : ''}`
-    : '/';
+  const id = route.threadId ?? route.spaceId;
+  const path = id ? `/${encodeURIComponent(id)}` : '/';
   const search = new URLSearchParams();
 
   if (route.draft) {

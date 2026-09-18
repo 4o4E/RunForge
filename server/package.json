@@ -1,6 +1,6 @@
 {
   "name": "server",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -14,7 +14,7 @@
     "model-catalog:check": "tsx src/llm/updateModelCatalog.ts --check",
     "start": "node dist/index.js",
     "pretest": "pnpm --filter @runforge/workload-sdk build && pnpm prisma:generate",
-    "test": "STORE=memory node --import tsx --test src/id.test.ts src/settings.test.ts src/api/auth.test.ts src/api/files.test.ts src/files/threadWorkspace.test.ts src/web/static.test.ts src/tools/tools.test.ts src/tools/policy.test.ts src/tools/sandbox.test.ts src/datasources/accountPool.test.ts src/mcp/client.test.ts src/llm/aiSdk.test.ts src/llm/providerRunner.test.ts src/llm/attachments.test.ts src/llm/probe.test.ts src/workflows/registry.test.ts src/businessPlugins/registry.test.ts src/plugins/runtime.test.ts src/spaces/config.test.ts src/spaces/access.test.ts src/external/service.test.ts src/agent/executor.test.ts src/agent/compaction.test.ts src/agent/persistence.test.ts src/agent/goal.test.ts src/auth/bootstrap.test.ts src/api/authRoutes.test.ts src/api/tenants.test.ts src/api/spaces.test.ts src/api/system.test.ts",
+    "test": "STORE=memory node --import tsx --test src/id.test.ts src/settings.test.ts src/api/auth.test.ts src/api/files.test.ts src/files/threadWorkspace.test.ts src/web/static.test.ts src/tools/tools.test.ts src/tools/policy.test.ts src/tools/sandbox.test.ts src/datasources/accountPool.test.ts src/mcp/client.test.ts src/llm/aiSdk.test.ts src/llm/providerRunner.test.ts src/llm/attachments.test.ts src/llm/probe.test.ts src/workflows/registry.test.ts src/businessPlugins/registry.test.ts src/plugins/runtime.test.ts src/spaces/config.test.ts src/spaces/materialize.test.ts src/spaces/access.test.ts src/external/service.test.ts src/agent/executor.test.ts src/agent/compaction.test.ts src/agent/persistence.test.ts src/agent/goal.test.ts src/auth/bootstrap.test.ts src/api/authRoutes.test.ts src/api/businessPluginImport.test.ts src/api/tenants.test.ts src/api/spaces.test.ts src/api/system.test.ts",
     "preverify:agent-core": "pnpm --filter @runforge/workload-sdk build && pnpm prisma:generate",
     "verify:agent-core": "tsx src/evals/agentCoreVerification.ts",
     "preverify:prisma-store": "pnpm --filter @runforge/workload-sdk build && pnpm prisma:generate",
@@ -52,9 +52,11 @@
     "jsonwebtoken": "^9.0.3",
     "pg": "^8.13.1",
     "prisma": "7.10.0",
+    "tar": "^7.5.22",
     "web-push": "^3.6.7",
     "ws": "^8.18.0",
     "yaml": "^2.9.0",
+    "yauzl": "^3.4.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -65,7 +67,10 @@
     "@types/pg": "^8.11.10",
     "@types/web-push": "^3.6.4",
     "@types/ws": "^8.5.13",
+    "@types/yauzl": "^3.4.0",
+    "@types/yazl": "^3.3.1",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "yazl": "^3.3.1"
   }
 }

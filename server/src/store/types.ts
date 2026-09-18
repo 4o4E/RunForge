@@ -247,6 +247,7 @@ export interface TenantRow {
   id: string;
   name: string;
   status: 'active' | 'suspended';
+  is_bootstrap: boolean;
   default_space_id: string | null;
   created_at: string;
 }
@@ -286,7 +287,7 @@ export interface UpdateSpaceRecordInput {
   visibleUserIds?: string[];
 }
 
-/** default space 的名称和生命周期是 tenant 不变量，持久化层必须再次防守。 */
+/** default space 的生命周期是 tenant 不变量，持久化层必须再次防守。 */
 export class DefaultSpaceImmutableError extends Error {
   readonly code = 'DEFAULT_SPACE_IMMUTABLE';
 
@@ -322,9 +323,11 @@ export interface TenantConfigTemplateEntry {
 export interface CreateTenantWithOwnerInput {
   id: string;
   name: string;
+  isBootstrap?: boolean;
   ownerEmail: string;
   ownerPasswordHash: string;
   settingsTemplate: readonly TenantConfigTemplateEntry[];
+  defaultSpaceConfig?: Record<string, unknown>;
 }
 
 export interface TenantProvisioningResult {
@@ -611,6 +614,8 @@ export interface Store {
   /** tenant、首个 owner、初始租户设置和 default space 必须在同一事务内创建。 */
   createTenantWithOwner(input: CreateTenantWithOwnerInput): Promise<TenantProvisioningResult>;
   findTenant(id: string): Promise<TenantRow | null>;
+  findBootstrapTenant(): Promise<TenantRow | null>;
+  migrateBootstrapTenantId(currentId: string, nextId: string): Promise<TenantRow>;
   listTenants(): Promise<TenantRow[]>;
   updateTenantStatus(id: string, status: 'active' | 'suspended'): Promise<TenantRow | null>;
   getDefaultSpace(tenantId: string): Promise<SpaceRow | null>;

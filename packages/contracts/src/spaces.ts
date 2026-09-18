@@ -3,28 +3,27 @@ import type { LlmModelOption, RuntimeCapabilityName } from './settings.js';
 
 export type SpaceMode = 'web' | 'external';
 
-const nullableIdListSchema = z.array(z.string().trim().min(1)).nullable().default(null);
+const idListSchema = z.array(z.string().trim().min(1)).default([]);
 const runtimeCapabilityNames = ['datasource.credentials', 'llm', 'image', 'video'] as const satisfies readonly RuntimeCapabilityName[];
 
 /**
- * 空间保存的是对 tenant 能力目录的选择规则；null 表示在创建 run 时继承当时可用项，
- * 显式空数组表示禁用该类能力。run 接纳后会把规则解析成不含密钥的完整快照。
+ * 空间保存创建或编辑时选择的完整能力列表。run 接纳后会把配置解析成不含密钥的完整快照。
  */
 export const spaceConfigSchema = z.object({
   schemaVersion: z.literal(1).default(1),
   systemPrompt: z.string().default(''),
   model: z.object({
     defaultModelRef: z.string().trim().min(1).nullable().default(null),
-    allowedModelRefs: nullableIdListSchema,
+    allowedModelRefs: idListSchema,
     contextBudget: z.number().int().positive().nullable().default(null),
-  }).strict().default({ defaultModelRef: null, allowedModelRefs: null, contextBudget: null }),
+  }).strict().default({ defaultModelRef: null, allowedModelRefs: [], contextBudget: null }),
   capabilities: z.object({
-    tools: nullableIdListSchema,
-    mcpServers: nullableIdListSchema,
+    tools: idListSchema,
+    mcpServers: idListSchema,
     // 业务插件承载成组的业务权限，必须由管理员显式选择；部署新增插件不能自动扩权。
     businessPlugins: z.array(z.string().trim().min(1)).default([]),
-    runtime: z.array(z.enum(runtimeCapabilityNames)).nullable().default(null),
-  }).strict().default({ tools: null, mcpServers: null, businessPlugins: [], runtime: null }),
+    runtime: z.array(z.enum(runtimeCapabilityNames)).default([]),
+  }).strict().default({ tools: [], mcpServers: [], businessPlugins: [], runtime: [] }),
   external: z.object({
     allowTrustedPrompt: z.boolean().default(false),
     allowNextStep: z.boolean().default(false),

@@ -21,7 +21,6 @@ export function SysAdminTenantsPanel({
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [createOpen, setCreateOpen] = useState(false);
-  const [id, setId] = useState('');
   const [name, setName] = useState('');
   const [ownerEmail, setOwnerEmail] = useState('');
   const [ownerPassword, setOwnerPassword] = useState('');
@@ -48,9 +47,8 @@ export function SysAdminTenantsPanel({
     setCreating(true);
     setMessage('');
     try {
-      await createSystemTenant({ id: id.trim(), name: name.trim(), ownerEmail: ownerEmail.trim(), ownerPassword });
+      await createSystemTenant({ name: name.trim(), ownerEmail: ownerEmail.trim(), ownerPassword });
       setCreateOpen(false);
-      setId('');
       setName('');
       setOwnerEmail('');
       setOwnerPassword('');
@@ -140,7 +138,6 @@ export function SysAdminTenantsPanel({
             <DialogDescription>会同时创建该租户的第一个 owner 账号，否则新租户没人能登录。</DialogDescription>
           </DialogHeader>
           <div className="grid gap-3">
-            <Input placeholder="租户 ID（字母/数字/下划线/短横线）" value={id} onChange={(event) => setId(event.target.value)} />
             <Input placeholder="租户名称" value={name} onChange={(event) => setName(event.target.value)} />
             <Input type="email" placeholder="owner 邮箱" value={ownerEmail} onChange={(event) => setOwnerEmail(event.target.value)} />
             <Input type="password" placeholder="owner 密码" value={ownerPassword} onChange={(event) => setOwnerPassword(event.target.value)} />
@@ -149,7 +146,7 @@ export function SysAdminTenantsPanel({
             <Button variant="outline" onClick={() => setCreateOpen(false)}>取消</Button>
             <Button
               onClick={() => void createTenant()}
-              disabled={creating || !id.trim() || !name.trim() || !ownerEmail.trim() || !ownerPassword}
+              disabled={creating || !name.trim() || !ownerEmail.trim() || !ownerPassword}
             >
               {creating ? '创建中…' : '创建'}
             </Button>

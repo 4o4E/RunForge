@@ -17,7 +17,7 @@
 - 租户内部支持**多用户**,每个用户有独立身份(账号)和登录态,而不是把整个 tenant 当成一个不可再分的责任主体。
 - 认证从静态共享 token 升级为 **JWT**,携带用户和租户身份,支持有效期和吊销,而不是"一个 token 打天下"。
 - 提供一条**显式、留痕**的管理员审计路径:租户管理员能看自己租户范围内用户的对话,系统管理员能跨租户查看,服务合规审计和平台侧 observability/debug 需求——但这条路径和普通用户的默认使用路径是分开的,不是角色权限的隐式副作用(细节见 §4)。
-- 现有单租户部署可以**零改动升级**,全新部署也能**开箱即用**——两者都靠同一套启动期 bootstrap 逻辑,自动确保存在一个 `default` tenant 和至少一个 `owner` 账号(见 §4)。
+- 现有单租户部署可以**零改动升级**,全新部署也能**开箱即用**——两者都靠同一套启动期 bootstrap 逻辑,自动确保存在一个名称为 `Default` 的引导 tenant 和至少一个 `owner` 账号(见 §4)。
 - 隔离强度可以分层生效:先保证数据库和文件系统的逻辑隔离,再逐步收紧到执行层的强隔离(沙箱/容器)。
 
 非目标(明确不做,或留给更后续的迭代):
@@ -40,7 +40,7 @@
 - 系统管理员授予的一组系统资源,当前包括 LLM provider 和数据源。
 - 租户内独立管理的用户、空间和业务插件。
 
-`tenant_id` 是贯穿改造的主键,取值为短字符串(如 `tnt_xxx`),不对外暴露内部自增 id。单租户部署使用一个固定的 `default` tenant,行为与今天完全一致(不管是迁移还是全新部署,启动时都会自动确保这个 tenant 和一个默认管理员账号存在,见 §4 的 bootstrap 逻辑)。
+`tenant_id` 是贯穿改造的主键。所有新租户均由服务端使用雪花 ID + Base62 生成，并带 `tn_` 前缀；名称与 ID 相互独立，`Default` 只表示引导租户的初始名称。`tenants.is_bootstrap` 标记承载系统资源和默认登录入口的引导租户。现有数据库中旧的 `id='default'` 会在启动时迁移为新的 `tn_` ID，所有关联外键通过 `ON UPDATE CASCADE` 同步更新。
 
 ### 租户角色 vs 系统管理员
 
@@ -144,9 +144,9 @@ Web 带 JWT access token 发起请求
 
 ```json
 {
-  "sub": "usr_xxx",
+  "sub": "us_xxx",
   "scope": "tenant",
-  "tenant_id": "tnt_xxx",
+  "tenant_id": "tn_xxx",
   "role": "member",
   "iat": 1752460800,
   "exp": 1752464400
@@ -247,12 +247,15 @@ CREATE INDEX idx_auth_tokens_user ON auth_tokens(user_id, kind, revoked_at);
 
 ```text
 启动时:
-1. 确保 tenants 表有一行 id = 'default'(不存在则插入,已存在则跳过)
-2. 确保 default tenant 下至少有一个 status='active' 的 owner 用户
+1. 查找唯一的 `is_bootstrap = true` tenant
+   -> 已存在:继续使用其 `tn_` ID
+   -> 不存在且发现旧 `id = 'default'`:生成新的 `tn_` ID，更新主键并标记 `is_bootstrap = true`
+   -> 两者都不存在:生成新的 `tn_` ID，创建名称为 `Default` 的 bootstrap tenant
+2. 确保 bootstrap tenant 下至少有一个 status='active' 的 owner 用户
    -> 已存在:什么都不做(幂等,不会在每次重启时重置密码或重复建号)
    -> 不存在,分两种情况:
       a. 迁移场景:配置了 RUNFORGE_ACCESS_TOKEN
-         -> 创建 users 记录(email='admin@local', tenant_id='default', role='owner')
+         -> 创建 users 记录(email='admin@local', tenant_id=<bootstrap tenant ID>, role='owner')
          -> 把 RUNFORGE_ACCESS_TOKEN 的值注册成一条 auth_tokens(kind='api') 记录,绑定这个用户
          -> 现有依赖静态 token 的脚本/集成不需要改动就能继续工作,同时有了一个可登录、
             可以再创建其他用户和颁发/吊销 token 的入口账号
@@ -293,12 +296,12 @@ CREATE INDEX idx_auth_tokens_user ON auth_tokens(user_id, kind, revoked_at);
 `server/prisma/migrations/` 为准：
 
 ```sql
-ALTER TABLE threads              ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default' REFERENCES tenants(id);
+ALTER TABLE threads              ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL REFERENCES tenants(id) ON UPDATE CASCADE;
 ALTER TABLE threads              ADD COLUMN IF NOT EXISTS user_id   TEXT REFERENCES users(id) ON DELETE SET NULL;
-ALTER TABLE subagent_runs        ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default' REFERENCES tenants(id);
-ALTER TABLE shell_sessions       ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default' REFERENCES tenants(id);
-ALTER TABLE datasources          ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default' REFERENCES tenants(id);
-ALTER TABLE push_subscriptions   ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default' REFERENCES tenants(id);
+ALTER TABLE subagent_runs        ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL REFERENCES tenants(id) ON UPDATE CASCADE;
+ALTER TABLE shell_sessions       ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL REFERENCES tenants(id) ON UPDATE CASCADE;
+ALTER TABLE datasources          ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL REFERENCES tenants(id) ON UPDATE CASCADE;
+ALTER TABLE push_subscriptions   ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL REFERENCES tenants(id) ON UPDATE CASCADE;
 ```
 
 `threads.user_id` 落地 §2 的可见性规则:记录创建者,任何查询(包括 owner/admin 发起的)都按 `tenant_id = ? AND user_id = ?` 过滤,没有放开 `user_id` 条件的例外路径。允许为空(`ON DELETE SET NULL`)是因为通过服务 API token 发起的调用绑定的是某个具体用户,但如果这个用户后续被删除,历史 thread 不应该级联删除,只需要断开归属显示为"已删除用户"(此时该 thread 对所有人都不再可查——`user_id IS NULL` 不会匹配任何 `user_id = ?` 条件,数据仍在但等同不可达,如需清理由运维直接按 `tenant_id` 批量导出/删除)。
@@ -356,12 +359,12 @@ CREATE INDEX idx_audit_access_log_target ON audit_access_log(tenant_id, target_u
 `app_settings` 使用 `(tenant_id, key)` 保存 JSON 配置:
 
 ```sql
-ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default' REFERENCES tenants(id);
+ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL REFERENCES tenants(id) ON UPDATE CASCADE;
 ALTER TABLE app_settings DROP CONSTRAINT app_settings_pkey;
 ALTER TABLE app_settings ADD PRIMARY KEY (tenant_id, key);
 ```
 
-系统资源配置使用内部 `tenant_id = 'default'` 保存,包括 LLM provider、工具沙箱策略、MCP servers 和运行时能力。租户自己的 `tenant.resourceAuthorization` 保存 LLM provider ID 与数据源 ID 授权列表。创建 tenant 时只写入空授权记录和 default 空间,不会复制系统凭证。`getLlmSettings(scope)` 和数据源目录先读取系统资源,再按目标租户的授权列表过滤。
+系统资源配置使用 `is_bootstrap = true` 租户的当前 ID 保存,包括 LLM provider、工具沙箱策略、MCP servers 和运行时能力。租户自己的 `tenant.resourceAuthorization` 保存 LLM provider ID 与数据源 ID 授权列表。创建 tenant 时只写入空授权记录和 default 空间,不会复制系统凭证。`getLlmSettings(scope)` 和数据源目录先读取系统资源,再按目标租户的授权列表过滤。
 
 Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, userId}` 参数(`role` 只用于 API 层的操作权限判断,不参与数据查询过滤,见 §2),SQL 里对应加 `AND tenant_id = $n AND user_id = $m`,或者对间接表加等价的 `thread_id IN (...)` 子查询。RLS 作为兜底防线,不作为唯一防线——应用层显式过滤仍然要做,因为 RLS 依赖每个数据库连接正确 `SET app.tenant_id / app.user_id`,一旦连接池复用时忘记重置就会失效,不能单独依赖它。
 
@@ -371,11 +374,7 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 
 系统管理员通过 `/api/system/settings/tools` 维护 `workspaceRoot` 基础目录。运行时再按空间类型派生实际目录:
 
-```text
-default 空间 + default tenant: <workspaceRoot>/users/<user_id>/workspace
-default 空间 + 其他 tenant: <workspaceRoot>/tenants/<tenant_id>/users/<user_id>/workspace
-非 default 空间: <workspaceRoot>/<thread_id>
-```
+默认空间统一使用 `<workspaceRoot>/tenants/<tenant_id>/users/<user_id>/workspace`；其他空间使用 `<workspaceRoot>/<thread_id>`。
 
 - `getSystemToolSettings()` 读取系统工具策略和 `workspaceRoot` 基础目录；租户身份无法读取或修改这组配置。
 - `getToolSettings(scope)` 使用系统基础目录派生 default 空间的用户目录。Agent、文件 API 和 shell session 在处理具体 thread 时共同调用 `resolveWorkspaceRootForThread(...)`,保证同一个 thread 使用同一路径。
@@ -383,7 +382,7 @@ default 空间 + 其他 tenant: <workspaceRoot>/tenants/<tenant_id>/users/<user_
 - `normalizeRemotePath`/`isWithin`(`server/src/files/workspace.ts`)的围栏逻辑不需要改——它们已经是"给定一个 root,判断路径是否在 root 内",只要传入的 root 换成用户专属路径即可。
 - Office 预览缓存(`server/src/files/officePreview.ts`)的 `officeCacheDir` 同理按租户 + 用户分目录,`officePdfCacheKey` 的哈希输入也带 `tenantId`/`userId`(目录隔离和哈希隔离是两个独立的加固点,防止未来目录结构变化时退化成只靠哈希去重)。
 - 签名文件分享链接(`/api/files/{raw,preview,hex,pdf-preview}` 的免身份分支)本身不带身份,匿名访问时的 `tenantId`/`userId` 只能来自请求方自己在 query 里声明的 `tenant`/`user` 参数——`signFileShare`/`verifyFileShare` 把二者一起签进 HMAC；非 default 空间还会签入 `threadId`，防止篡改 query 让同一个签名在另一个用户或 thread workspace 下"重放"。
-- 单租户部署:`tenant_id = 'default'` 时不额外套 `tenants/default/` 前缀,但仍按 `users/<user_id>/workspace` 分离同租户用户;已有全局 workspace 文件需要按用户迁移或复制到对应用户目录。
+- 从旧 `id='default'` 升级时，启动引导把已有 `<workspaceRoot>/users/` 原子移动到新 ID 对应的 `<workspaceRoot>/tenants/<tenant_id>/users/`。目标路径已经存在时立即终止启动，避免覆盖文件。
 
 ---
 

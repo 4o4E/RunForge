@@ -1,10 +1,12 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { lstat, readdir, readFile, realpath } from 'node:fs/promises';
-import { basename, join, relative, resolve, sep } from 'node:path';
+import { cp, lstat, mkdir, readdir, readFile, realpath, rename, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { config } from '../config.js';
 import type { SpaceRuntimeLock } from '../plugins/types.js';
 import { parseSkillDocument } from '../skills/registry.js';
+import { extractBusinessPluginArchive, type BusinessPluginArchiveFormat } from './archive.js';
 import { BusinessPluginError } from './errors.js';
 import { parseBusinessPluginManifest } from './manifest.js';
 import type { BusinessPluginDefinition } from './types.js';
@@ -124,7 +126,7 @@ export async function loadBusinessPluginIndex(roots: readonly string[]): Promise
     const sourceRoot = resolve(configuredRoot);
     if (!existsSync(sourceRoot)) continue;
     for (const entry of (await readdir(sourceRoot, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
-      if (!entry.isDirectory()) continue;
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
       const pluginRoot = join(sourceRoot, entry.name);
       if (!existsSync(join(pluginRoot, MANIFEST_FILE))) continue;
       const definition = await loadBusinessPlugin(pluginRoot);
@@ -142,10 +144,14 @@ export async function loadBusinessPluginIndex(roots: readonly string[]): Promise
   return definitions.sort((a, b) => a.manifest.id.localeCompare(b.manifest.id));
 }
 
-async function tenantSourceRoots(roots: readonly string[], tenantId: string): Promise<string[]> {
+function assertTenantDirectoryName(tenantId: string): void {
   if (!tenantId || tenantId === '.' || tenantId === '..' || basename(tenantId) !== tenantId) {
     throw new BusinessPluginError('BUSINESS_PLUGIN_PATH_INVALID', `tenant ID 不能用于业务插件目录：${tenantId}`);
   }
+}
+
+async function tenantSourceRoots(roots: readonly string[], tenantId: string): Promise<string[]> {
+  assertTenantDirectoryName(tenantId);
   const tenantRoots: string[] = [];
   for (const configuredRoot of roots) {
     const configured = resolve(configuredRoot);
@@ -173,6 +179,11 @@ function deploymentKey(definition: BusinessPluginDefinition): string {
   return `business.${definition.manifest.id}\u0000${version}\u0000${definition.contentHash}`;
 }
 
+export interface BusinessPluginImportResult {
+  definition: BusinessPluginDefinition;
+  replaced: boolean;
+}
+
 /**
  * 业务插件目录按 `<configured-root>/<tenantId>/<plugin>/` 隔离。索引只在首次访问或显式
  * reload 时扫描；旧 definition 会在当前进程保留，供已经接纳的 run 按 plugin_lock 恢复。
@@ -181,6 +192,7 @@ export class BusinessPluginRegistry {
   private readonly currentByTenant = new Map<string, BusinessPluginDefinition[]>();
   private readonly deploymentsByTenant = new Map<string, Map<string, BusinessPluginDefinition>>();
   private readonly loadingByTenant = new Map<string, Promise<BusinessPluginDefinition[]>>();
+  private readonly importingByTenant = new Map<string, Promise<void>>();
 
   constructor(private readonly roots: readonly string[]) {}
 
@@ -199,9 +211,32 @@ export class BusinessPluginRegistry {
   }
 
   async reload(tenantId: string): Promise<BusinessPluginDefinition[]> {
+    const importing = this.importingByTenant.get(tenantId);
+    if (importing) await importing;
+    return this.reloadIndex(tenantId);
+  }
+
+  private async reloadIndex(tenantId: string): Promise<BusinessPluginDefinition[]> {
     const loading = this.loadingByTenant.get(tenantId);
     if (loading) await loading;
     return this.load(tenantId);
+  }
+
+  async importArchive(
+    tenantId: string,
+    archive: Buffer,
+    format: BusinessPluginArchiveFormat,
+  ): Promise<BusinessPluginImportResult> {
+    assertTenantDirectoryName(tenantId);
+    const previous = this.importingByTenant.get(tenantId) ?? Promise.resolve();
+    const pending = previous.then(() => this.installArchive(tenantId, archive, format));
+    const lock = pending.then(() => undefined, () => undefined);
+    this.importingByTenant.set(tenantId, lock);
+    try {
+      return await pending;
+    } finally {
+      if (this.importingByTenant.get(tenantId) === lock) this.importingByTenant.delete(tenantId);
+    }
   }
 
   async resolveLock(tenantId: string, lock: SpaceRuntimeLock): Promise<BusinessPluginDefinition[]> {
@@ -220,6 +255,73 @@ export class BusinessPluginRegistry {
       }
       return definition;
     });
+  }
+
+  private async installArchive(
+    tenantId: string,
+    archive: Buffer,
+    format: BusinessPluginArchiveFormat,
+  ): Promise<BusinessPluginImportResult> {
+    const managedRoot = this.roots[0];
+    if (!managedRoot) {
+      throw new BusinessPluginError('BUSINESS_PLUGIN_PATH_INVALID', '没有可用于导入的业务插件根目录');
+    }
+    const extracted = await extractBusinessPluginArchive(archive, format, tmpdir());
+    try {
+      const candidate = await loadBusinessPlugin(extracted.pluginRoot);
+      const current = await this.reloadIndex(tenantId);
+      const existing = current.find((definition) => definition.manifest.id === candidate.manifest.id);
+      if (existing?.contentHash === candidate.contentHash) {
+        return { definition: existing, replaced: true };
+      }
+
+      const target = existing?.root ?? join(resolve(managedRoot), tenantId, candidate.manifest.id);
+      const parent = dirname(target);
+      await mkdir(parent, { recursive: true });
+      const staging = join(parent, `.runforge-import-${candidate.manifest.id}-${randomUUID()}`);
+      const backup = join(parent, `.runforge-backup-${candidate.manifest.id}-${randomUUID()}`);
+      let movedExisting = false;
+      let installed = false;
+      try {
+        await cp(candidate.root, staging, { recursive: true, errorOnExist: true });
+        const staged = await loadBusinessPlugin(staging);
+        if (staged.manifest.id !== candidate.manifest.id || staged.contentHash !== candidate.contentHash) {
+          throw new BusinessPluginError('BUSINESS_PLUGIN_ARCHIVE_INVALID', '业务插件复制后的内容校验失败');
+        }
+        if (existsSync(target)) {
+          if (!existing) {
+            throw new BusinessPluginError('BUSINESS_PLUGIN_PATH_INVALID', `业务插件目标目录已经存在：${target}`);
+          }
+          await rename(target, backup);
+          movedExisting = true;
+        }
+        await rename(staging, target);
+        installed = true;
+        const definition = await loadBusinessPlugin(target);
+        if (definition.manifest.id !== candidate.manifest.id || definition.contentHash !== candidate.contentHash) {
+          throw new BusinessPluginError('BUSINESS_PLUGIN_ARCHIVE_INVALID', '业务插件安装后的内容校验失败');
+        }
+        if (movedExisting) await rm(backup, { recursive: true, force: true });
+
+        const next = [
+          ...current.filter((item) => item.manifest.id !== definition.manifest.id),
+          definition,
+        ].sort((a, b) => a.manifest.id.localeCompare(b.manifest.id));
+        const deployments = this.deploymentsByTenant.get(tenantId) ?? new Map<string, BusinessPluginDefinition>();
+        deployments.set(deploymentKey(definition), definition);
+        this.deploymentsByTenant.set(tenantId, deployments);
+        this.currentByTenant.set(tenantId, next);
+        return { definition, replaced: Boolean(existing) };
+      } catch (error) {
+        if (installed) await rm(target, { recursive: true, force: true });
+        if (movedExisting) await rename(backup, target);
+        throw error;
+      } finally {
+        await rm(staging, { recursive: true, force: true });
+      }
+    } finally {
+      await rm(extracted.temporaryRoot, { recursive: true, force: true });
+    }
   }
 
   private async load(tenantId: string): Promise<BusinessPluginDefinition[]> {

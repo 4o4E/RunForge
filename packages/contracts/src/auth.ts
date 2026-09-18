@@ -76,7 +76,6 @@ export interface TenantSummary {
 }
 
 export interface CreateTenantInput {
-  id: string;
   name: string;
   ownerEmail: string;
   ownerPassword: string;

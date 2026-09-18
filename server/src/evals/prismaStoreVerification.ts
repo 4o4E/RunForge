@@ -11,9 +11,9 @@ import {
   getSystemLlmSettings,
   getToolSettings,
   saveTenantResourceAuthorization,
-  SYSTEM_RESOURCE_TENANT_ID,
   tenantSettingsTemplateEntries,
 } from '../settings.js';
+import { getSystemResourceTenantId } from '../systemResourceTenant.js';
 import { DefaultSpaceImmutableError, RunActiveError } from '../store/types.js';
 import { newArtifactId, newSpaceId } from '../id.js';
 import { SpaceAccessService } from '../spaces/access.js';
@@ -56,6 +56,7 @@ const externalRepository = new PrismaExternalRepository();
 const artifactVerificationRoot = await mkdtemp(join(tmpdir(), 'runforge-prisma-artifact-'));
 let runtimeServer: Server | null = null;
 let systemDatasourceId: string | null = null;
+const systemResourceTenantId = await getSystemResourceTenantId();
 
 try {
   const provisioned = await store.createTenantWithOwner({
@@ -82,6 +83,10 @@ try {
     llmProviderIds: systemLlmProviderIds,
     datasourceIds: [],
   });
+  const initializedDefaultSpace = await store.updateSpace(tenantId, defaultSpace.id, {
+    config: await spaceConfig.snapshotForCreate(tenantId, 'web'),
+  });
+  assert.ok(initializedDefaultSpace);
 
   const otherTenant = await store.createTenantWithOwner({
     id: otherTenantId,
@@ -470,7 +475,7 @@ try {
       },
     },
   }]);
-  const guardedDatasource = await createDatasource({ tenantId: SYSTEM_RESOURCE_TENANT_ID }, {
+  const guardedDatasource = await createDatasource({ tenantId: systemResourceTenantId }, {
     name: 'workload-readonly-verification',
     type: 'postgres',
     connection: { host: '127.0.0.1', port: 5432, database: 'unused' },
@@ -481,7 +486,7 @@ try {
     llmProviderIds: systemLlmProviderIds,
     datasourceIds: [guardedDatasource.id],
   });
-  await createPermissionProfile({ tenantId: SYSTEM_RESOURCE_TENANT_ID }, guardedDatasource.id, {
+  await createPermissionProfile({ tenantId: systemResourceTenantId }, guardedDatasource.id, {
     name: 'writer',
     mode: 'limited_write',
   });

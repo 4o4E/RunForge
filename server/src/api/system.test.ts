@@ -56,7 +56,7 @@ test('system auth: 登录返回 refreshToken，refresh/logout 流程可用', asy
   }
 });
 
-test('POST /api/system/tenants: 创建租户会同时建一个 owner，重复 id 返回 409', async () => {
+test('POST /api/system/tenants: 服务端生成租户 ID 并同时创建 owner', async () => {
   await seedSystemAdmin('sysadmin@tenants.test', 'sys-pw');
   const { port, close } = await listen(buildApp());
   try {
@@ -66,11 +66,11 @@ test('POST /api/system/tenants: 创建租户会同时建一个 owner，重复 id
     const created = await fetch(`${base}/system/tenants`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-      body: JSON.stringify({ id: 'tn_new_acme', name: 'Acme', ownerEmail: 'owner@acme.test', ownerPassword: 'Passw0rd!' }),
+      body: JSON.stringify({ name: 'Acme', ownerEmail: 'owner@acme.test', ownerPassword: 'Passw0rd!' }),
     });
     assert.equal(created.status, 201);
     const body = (await created.json()) as { tenant: { id: string }; owner: { email: string; role: string } };
-    assert.equal(body.tenant.id, 'tn_new_acme');
+    assert.match(body.tenant.id, /^tn_[0-9A-Za-z]+$/);
     assert.equal(body.owner.email, 'owner@acme.test');
     assert.equal(body.owner.role, 'owner');
 
@@ -78,16 +78,17 @@ test('POST /api/system/tenants: 创建租户会同时建一个 owner，重复 id
     const ownerLogin = await fetch(`${base}/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: 'owner@acme.test', password: 'Passw0rd!', tenantId: 'tn_new_acme' }),
+      body: JSON.stringify({ email: 'owner@acme.test', password: 'Passw0rd!', tenantId: body.tenant.id }),
     });
     assert.equal(ownerLogin.status, 200);
 
-    const duplicate = await fetch(`${base}/system/tenants`, {
+    const sameName = await fetch(`${base}/system/tenants`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-      body: JSON.stringify({ id: 'tn_new_acme', name: 'Acme Again', ownerEmail: 'other@acme.test', ownerPassword: 'pw' }),
+      body: JSON.stringify({ name: 'Acme', ownerEmail: 'other@acme.test', ownerPassword: 'pw' }),
     });
-    assert.equal(duplicate.status, 409);
+    assert.equal(sameName.status, 201);
+    assert.notEqual(((await sameName.json()) as { tenant: { id: string } }).tenant.id, body.tenant.id);
   } finally {
     close();
   }

@@ -57,6 +57,22 @@ function normalizedUserIds(value: unknown, fieldName: string): string[] {
   return [...new Set(ids)];
 }
 
+function mergeSpaceConfig(current: Record<string, unknown>, update: Record<string, unknown>): Record<string, unknown> {
+  const currentModel = isPlainRecord(current.model) ? current.model : {};
+  const updateModel = isPlainRecord(update.model) ? update.model : {};
+  const currentCapabilities = isPlainRecord(current.capabilities) ? current.capabilities : {};
+  const updateCapabilities = isPlainRecord(update.capabilities) ? update.capabilities : {};
+  const currentExternal = isPlainRecord(current.external) ? current.external : {};
+  const updateExternal = isPlainRecord(update.external) ? update.external : {};
+  return {
+    ...current,
+    ...update,
+    model: { ...currentModel, ...updateModel },
+    capabilities: { ...currentCapabilities, ...updateCapabilities },
+    external: { ...currentExternal, ...updateExternal },
+  };
+}
+
 export function parseCreateSpaceInput(value: unknown): CreateSpaceInput {
   if (!isPlainRecord(value)) throw new SpaceAccessError(400, 'SPACE_INPUT_INVALID', '请求体必须是对象');
   if (value.mode !== 'web' && value.mode !== 'external') {
@@ -203,7 +219,7 @@ export class SpaceAccessService {
   private async createManaged(tenantId: string, createdByUserId: string | null, input: CreateSpaceInput): Promise<SpaceSummary> {
     const executionUserId = await this.validateExecutionUser(tenantId, input.mode, input.executionUserId ?? null);
     const visibleUserIds = await this.validateVisibleUsers(tenantId, input.visibleUserIds ?? []);
-    const config = await this.normalizeConfigForSave(tenantId, input.mode, input.config ?? {});
+    const config = await this.snapshotConfigForCreate(tenantId, input.mode, input.config ?? {});
     const row = await this.store.createSpace({
       tenantId,
       mode: input.mode,
@@ -221,9 +237,6 @@ export class SpaceAccessService {
     const current = await this.requireSpace(tenantId, spaceId);
     if (current.deleted_at) throw new SpaceAccessError(409, 'SPACE_DELETED', '空间已删除，请先恢复后再修改');
     const tenant = await this.requireTenant(tenantId);
-    if (tenant.default_space_id === spaceId && input.name !== undefined && input.name !== current.name) {
-      throw new SpaceAccessError(409, 'DEFAULT_SPACE_IMMUTABLE', 'default 空间不能重命名');
-    }
     let executionUserId = input.executionUserId;
     if (current.mode === 'external') {
       executionUserId = await this.validateExecutionUser(
@@ -239,22 +252,19 @@ export class SpaceAccessService {
       : await this.validateVisibleUsers(tenantId, input.visibleUserIds);
     const config = input.config === undefined
       ? undefined
-      : await this.normalizeConfigForSave(tenantId, current.mode, input.config);
-    try {
-      const updated = await this.store.updateSpace(tenantId, spaceId, {
-        name: input.name,
-        executionUserId,
-        config,
-        visibleUserIds,
-      });
-      if (!updated) throw new SpaceAccessError(404, 'SPACE_NOT_FOUND', '空间不存在');
-      return this.toSummary(updated, tenant.default_space_id);
-    } catch (error) {
-      if (error instanceof DefaultSpaceImmutableError) {
-        throw new SpaceAccessError(409, error.code, error.message);
-      }
-      throw error;
-    }
+      : await this.normalizeConfigForSave(
+          tenantId,
+          current.mode,
+          mergeSpaceConfig(current.config, input.config as Record<string, unknown>),
+        );
+    const updated = await this.store.updateSpace(tenantId, spaceId, {
+      name: input.name,
+      executionUserId,
+      config,
+      visibleUserIds,
+    });
+    if (!updated) throw new SpaceAccessError(404, 'SPACE_NOT_FOUND', '空间不存在');
+    return this.toSummary(updated, tenant.default_space_id);
   }
 
   private async deleteManaged(tenantId: string, spaceId: string): Promise<SpaceSummary> {
@@ -345,6 +355,15 @@ export class SpaceAccessService {
   private async normalizeConfigForSave(tenantId: string, mode: SpaceMode, value: unknown) {
     try {
       return await this.configService.normalizeForSave(tenantId, mode, value);
+    } catch (error) {
+      if (error instanceof SpaceConfigError) throw new SpaceAccessError(400, error.code, error.message);
+      throw error;
+    }
+  }
+
+  private async snapshotConfigForCreate(tenantId: string, mode: SpaceMode, value: unknown) {
+    try {
+      return await this.configService.snapshotForCreate(tenantId, mode, value);
     } catch (error) {
       if (error instanceof SpaceConfigError) throw new SpaceAccessError(400, error.code, error.message);
       throw error;

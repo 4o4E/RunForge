@@ -192,7 +192,8 @@ test('space API: 管理权限、可见名单、execution user 和软删除语义
       headers: bearer(ownerToken),
       body: JSON.stringify({ name: 'Renamed' }),
     });
-    assert.equal(renameDefault.status, 409);
+    assert.equal(renameDefault.status, 200);
+    assert.equal(((await renameDefault.json()) as SpaceSummary).name, 'Renamed');
     const deleteDefault = await fetch(`${base}/spaces/${defaultSpace.id}`, {
       method: 'DELETE',
       headers: bearer(ownerToken),

@@ -9,8 +9,16 @@ import type {
   CreateApiTokenResponse,
   UpdateBusinessPluginSettingsInput,
 } from '@runforge/contracts';
-import { loadBusinessPluginAdminView, updateBusinessPluginAdminView } from '../businessPlugins/settings.js';
+import {
+  importBusinessPluginAdminView,
+  loadBusinessPluginAdminView,
+  updateBusinessPluginAdminView,
+} from '../businessPlugins/settings.js';
 import { BusinessPluginError } from '../businessPlugins/errors.js';
+import {
+  businessPluginArchiveBody,
+  parseBusinessPluginArchiveRequest,
+} from '../businessPlugins/archiveHttp.js';
 import {
   createTenantUser,
   TenantUserError,
@@ -73,6 +81,22 @@ tenantsApi.post('/:id/business-plugins/reload', requireMatchingTenantParam('id')
     handleBusinessPluginError(res, error);
   }
 });
+
+tenantsApi.post(
+  '/:id/business-plugins/import',
+  requireMatchingTenantParam('id'),
+  requireOwnerOrAdmin,
+  businessPluginArchiveBody,
+  async (req, res) => {
+    try {
+      const { archive, format } = parseBusinessPluginArchiveRequest(req);
+      const result = await importBusinessPluginAdminView(req.params.id, archive, format);
+      res.status(result.replaced ? 200 : 201).json(result);
+    } catch (error) {
+      handleBusinessPluginError(res, error);
+    }
+  },
+);
 
 tenantsApi.post('/:id/tokens', requireMatchingTenantParam('id'), requireOwner, async (req, res) => {
   const identity = getIdentity();

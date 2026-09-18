@@ -100,7 +100,7 @@ export function AdminLoginGate({ children }: { children: React.ReactNode }) {
         </div>
         <Input autoFocus type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="邮箱" />
         <Input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="密码" />
-        <Input value={tenantId} onChange={(event) => setTenantId(event.target.value)} placeholder="租户 ID（留空使用 default）" />
+        <Input value={tenantId} onChange={(event) => setTenantId(event.target.value)} placeholder="租户 ID（留空使用默认租户）" />
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
         <Button type="submit" disabled={!email.trim() || !password || submitting}>
           {submitting ? '登录中…' : '登录'}

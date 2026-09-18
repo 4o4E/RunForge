@@ -59,12 +59,12 @@ export function AdminApp() {
           <p className="mt-1 text-sm text-muted-foreground">{user.email} · {user.role} · 只管理租户 {user.tenantId}</p>
         </div>
         <div className="flex items-center gap-2">
-          <a href="/">
-            <Button variant="outline" size="sm">
+          <Button variant="outline" size="sm" asChild>
+            <a href="/">
               <ArrowLeft className="h-4 w-4" />
               返回聊天
-            </Button>
-          </a>
+            </a>
+          </Button>
           <Button
             variant="outline"
             size="sm"

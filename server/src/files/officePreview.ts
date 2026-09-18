@@ -35,11 +35,11 @@ function converterUrl(): string {
   return config.preview.officeConverterUrl.trim().replace(/\/+$/, '');
 }
 
-// workspaceKey 区分 default 用户目录和非 default thread 目录；它和 tenantId 都进入
+// workspaceKey 区分默认空间的用户目录和其他空间的 thread 目录；它和 tenantId 都进入
 // 哈希，避免同名文件跨 workspace 复用预览缓存。
 function cacheRoot(tenantId: string): string {
   const base = config.preview.officeCacheDir.trim() || join(tmpdir(), 'runforge-office-previews');
-  return tenantId === 'default' ? base : join(base, 'tenants', tenantId);
+  return join(base, 'tenants', tenantId);
 }
 
 async function convertWithLibreOffice(file: string, signal: AbortSignal): Promise<Buffer> {

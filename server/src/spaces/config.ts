@@ -111,15 +111,13 @@ function normalizeParsedConfig(config: SpaceConfig): SpaceConfig {
     systemPrompt: config.systemPrompt.trim(),
     model: {
       ...config.model,
-      allowedModelRefs: config.model.allowedModelRefs === null ? null : unique(config.model.allowedModelRefs),
+      allowedModelRefs: unique(config.model.allowedModelRefs),
     },
     capabilities: {
-      tools: config.capabilities.tools === null ? null : unique(config.capabilities.tools),
-      mcpServers: config.capabilities.mcpServers === null ? null : unique(config.capabilities.mcpServers),
+      tools: unique(config.capabilities.tools),
+      mcpServers: unique(config.capabilities.mcpServers),
       businessPlugins: unique(config.capabilities.businessPlugins),
-      runtime: config.capabilities.runtime === null
-        ? null
-        : [...new Set(config.capabilities.runtime)],
+      runtime: [...new Set(config.capabilities.runtime)],
     },
   };
 }
@@ -136,6 +134,14 @@ export function normalizeSpaceConfig(value: unknown): SpaceConfig {
 
 function missingValues(selected: readonly string[], available: ReadonlySet<string>): string[] {
   return selected.filter((value) => !available.has(value));
+}
+
+function configObject(value: unknown, field: string): Record<string, unknown> {
+  if (value === undefined) return {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new SpaceConfigError(`${field}必须是对象`);
+  }
+  return value as Record<string, unknown>;
 }
 
 function enabledRuntimeCapabilities(
@@ -244,11 +250,11 @@ async function loadCatalogFromTenant(tenantId: string): Promise<TenantSpaceCapab
 }
 
 function selectValues(
-  configured: readonly string[] | null,
+  configured: readonly string[],
   available: readonly string[],
   label: string,
 ): string[] {
-  const selected = configured === null ? unique(available) : unique(configured);
+  const selected = unique(configured);
   const missing = missingValues(selected, new Set(available));
   if (missing.length) throw new SpaceConfigError(`${label} 不属于当前 tenant 可用目录：${missing.join(', ')}`);
   return selected;
@@ -291,6 +297,44 @@ export class SpaceConfigService {
   async normalizeForSave(tenantId: string, mode: SpaceMode, value: unknown): Promise<SpaceConfig> {
     const config = normalizeSpaceConfig(value);
     this.resolve(mode, config, await this.loadCatalog(tenantId));
+    return config;
+  }
+
+  async snapshotForCreate(
+    tenantId: string,
+    mode: SpaceMode,
+    value: unknown = {},
+    requireRunnable = true,
+  ): Promise<SpaceConfig> {
+    const catalog = await this.loadCatalog(tenantId);
+    const body = configObject(value, '空间配置');
+    const model = configObject(body.model, 'model');
+    const capabilities = configObject(body.capabilities, 'capabilities');
+    const allowedModelRefs = Array.isArray(model.allowedModelRefs)
+      ? model.allowedModelRefs
+      : catalog.modelRefs;
+    const selectedTools = Array.isArray(capabilities.tools) ? capabilities.tools : catalog.toolNames;
+    const defaultModelRef = typeof model.defaultModelRef === 'string' && model.defaultModelRef.trim()
+      ? model.defaultModelRef
+      : allowedModelRefs.includes(catalog.defaultModelRef)
+        ? catalog.defaultModelRef
+        : allowedModelRefs[0] ?? null;
+    const config = normalizeSpaceConfig({
+      ...body,
+      model: {
+        ...model,
+        defaultModelRef,
+        allowedModelRefs,
+      },
+      capabilities: {
+        ...capabilities,
+        tools: mode === 'external' ? selectedTools.filter((tool) => tool !== 'ask_user') : selectedTools,
+        mcpServers: Array.isArray(capabilities.mcpServers) ? capabilities.mcpServers : catalog.mcpServerIds,
+        businessPlugins: Array.isArray(capabilities.businessPlugins) ? capabilities.businessPlugins : [],
+        runtime: Array.isArray(capabilities.runtime) ? capabilities.runtime : catalog.runtimeCapabilities,
+      },
+    });
+    if (requireRunnable) this.resolve(mode, config, catalog);
     return config;
   }
 
@@ -355,10 +399,7 @@ export class SpaceConfigService {
     if (configuredDefault && !allowedModelRefs.includes(configuredDefault)) {
       throw new SpaceConfigError(`默认模型不在空间允许列表中：${configuredDefault}`);
     }
-    const inheritedDefault = allowedModelRefs.includes(catalog.defaultModelRef)
-      ? catalog.defaultModelRef
-      : allowedModelRefs[0];
-    const modelRef = requestedModelRef?.trim() || configuredDefault || inheritedDefault;
+    const modelRef = requestedModelRef?.trim() || configuredDefault || allowedModelRefs[0];
     if (!allowedModelRefs.includes(modelRef)) {
       throw new SpaceConfigError(`模型未被当前空间允许：${modelRef}`);
     }

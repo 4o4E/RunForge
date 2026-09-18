@@ -4,6 +4,7 @@ import { config } from '../config.js';
 import { store as defaultStore } from '../store/index.js';
 import { findSetting, insertMissingSettings } from '../store/settingsRepository.js';
 import type { PushSubscriptionRow, Scope, Store } from '../store/types.js';
+import { getSystemResourceTenantId } from '../systemResourceTenant.js';
 
 const VAPID_SETTING_KEY = 'web_push_vapid';
 
@@ -56,14 +57,14 @@ async function readOrCreateVapidSetting(): Promise<VapidSetting> {
     return { publicKey: config.webPush.publicKey, privateKey: config.webPush.privateKey };
   }
 
-  // VAPID 密钥是这一个部署实例的 Web Push 身份,不是租户策略——固定放在 default
-  // 租户分区下,不管调用方是哪个租户(docs/multi-tenancy-design.md §9)。
-  const stored = await findSetting('default', VAPID_SETTING_KEY) as VapidSetting | undefined;
+  // VAPID 密钥是当前部署实例的 Web Push 身份，固定放在 bootstrap tenant 的系统资源分区。
+  const tenantId = await getSystemResourceTenantId();
+  const stored = await findSetting(tenantId, VAPID_SETTING_KEY) as VapidSetting | undefined;
   if (stored?.publicKey && stored?.privateKey) return stored;
 
   const generated = webPush.generateVAPIDKeys();
-  await insertMissingSettings('default', [{ key: VAPID_SETTING_KEY, value: generated }]);
-  return await findSetting('default', VAPID_SETTING_KEY) as VapidSetting ?? generated;
+  await insertMissingSettings(tenantId, [{ key: VAPID_SETTING_KEY, value: generated }]);
+  return await findSetting(tenantId, VAPID_SETTING_KEY) as VapidSetting ?? generated;
 }
 
 export async function getWebPushPublicKey(): Promise<{ enabled: boolean; publicKey: string | null; reason?: string }> {

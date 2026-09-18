@@ -2,6 +2,17 @@ import { prisma } from '../db/prisma.js';
 import { requiredJson } from './prismaRows.js';
 import { Prisma } from '../generated/prisma/client.js';
 
+const useMemory = process.env.STORE === 'memory';
+const memorySettings = new Map<string, Map<string, unknown>>();
+
+function memoryTenantSettings(tenantId: string): Map<string, unknown> {
+  const existing = memorySettings.get(tenantId);
+  if (existing) return existing;
+  const created = new Map<string, unknown>();
+  memorySettings.set(tenantId, created);
+  return created;
+}
+
 export interface SettingRecord {
   key: string;
   value: unknown;
@@ -13,6 +24,10 @@ export interface SettingEntry {
 }
 
 export async function findSettings(tenantId: string, keys: readonly string[]): Promise<SettingRecord[]> {
+  if (useMemory) {
+    const settings = memoryTenantSettings(tenantId);
+    return keys.flatMap((key) => settings.has(key) ? [{ key, value: structuredClone(settings.get(key)) }] : []);
+  }
   return prisma.app_settings.findMany({
     where: { tenant_id: tenantId, key: { in: [...keys] } },
     select: { key: true, value: true },
@@ -20,6 +35,10 @@ export async function findSettings(tenantId: string, keys: readonly string[]): P
 }
 
 export async function findSetting(tenantId: string, key: string): Promise<unknown> {
+  if (useMemory) {
+    const settings = memoryTenantSettings(tenantId);
+    return settings.has(key) ? structuredClone(settings.get(key)) : undefined;
+  }
   const row = await prisma.app_settings.findUnique({
     where: { tenant_id_key: { tenant_id: tenantId, key } },
     select: { value: true },
@@ -29,6 +48,13 @@ export async function findSetting(tenantId: string, key: string): Promise<unknow
 
 export async function insertMissingSettings(tenantId: string, entries: readonly SettingEntry[]): Promise<void> {
   if (!entries.length) return;
+  if (useMemory) {
+    const settings = memoryTenantSettings(tenantId);
+    for (const entry of entries) {
+      if (!settings.has(entry.key)) settings.set(entry.key, structuredClone(entry.value));
+    }
+    return;
+  }
   await prisma.app_settings.createMany({
     data: entries.map((entry) => ({
       tenant_id: tenantId,
@@ -41,6 +67,11 @@ export async function insertMissingSettings(tenantId: string, entries: readonly 
 
 export async function upsertSettings(tenantId: string, entries: readonly SettingEntry[]): Promise<void> {
   if (!entries.length) return;
+  if (useMemory) {
+    const settings = memoryTenantSettings(tenantId);
+    for (const entry of entries) settings.set(entry.key, structuredClone(entry.value));
+    return;
+  }
   const updatedAt = new Date();
   await prisma.$transaction(entries.map((entry) => {
     const value = requiredJson(entry.value);
@@ -66,6 +97,12 @@ export async function updateSettingAtomically<T>(
   key: string,
   update: (current: unknown) => T,
 ): Promise<T> {
+  if (useMemory) {
+    const settings = memoryTenantSettings(tenantId);
+    const next = update(settings.has(key) ? structuredClone(settings.get(key)) : undefined);
+    settings.set(key, structuredClone(next));
+    return next;
+  }
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       return await prisma.$transaction(async (tx) => {

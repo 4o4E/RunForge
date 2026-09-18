@@ -11,7 +11,8 @@ import {
 } from '../id.js';
 import { store } from '../store/index.js';
 import type { Scope, TenantScope } from '../store/types.js';
-import { getTenantResourceAuthorization, SYSTEM_RESOURCE_TENANT_ID } from '../settings.js';
+import { getTenantResourceAuthorization } from '../settings.js';
+import { getSystemResourceTenantId } from '../systemResourceTenant.js';
 import { disablePostgresAccount, ensurePostgresAccount, ensurePostgresReadonlyTemplateRole } from './postgresAdapter.js';
 import { generateWorkloadToken, hashWorkloadToken, iso, randomPassword, secondsFromNow } from './token.js';
 import type { RuntimeCapabilityName } from '@runforge/contracts';
@@ -172,10 +173,11 @@ export async function listDatasources(scope: TenantScope): Promise<DatasourceRow
 }
 
 export async function listAuthorizedDatasources(scope: TenantScope): Promise<DatasourceRow[]> {
-  const [datasources, authorization] = await Promise.all([
-    listDatasources({ tenantId: SYSTEM_RESOURCE_TENANT_ID }),
+  const [systemTenantId, authorization] = await Promise.all([
+    getSystemResourceTenantId(),
     getTenantResourceAuthorization(scope.tenantId),
   ]);
+  const datasources = await listDatasources({ tenantId: systemTenantId });
   const allowed = new Set(authorization.datasourceIds);
   return datasources.filter((datasource) => allowed.has(datasource.id));
 }
@@ -258,7 +260,7 @@ export async function listAuthorizedPermissionProfiles(
 ): Promise<PermissionProfileRow[]> {
   const authorization = await getTenantResourceAuthorization(scope.tenantId);
   if (!authorization.datasourceIds.includes(datasourceId)) return [];
-  return listPermissionProfiles({ tenantId: SYSTEM_RESOURCE_TENANT_ID }, datasourceId);
+  return listPermissionProfiles({ tenantId: await getSystemResourceTenantId() }, datasourceId);
 }
 
 export async function updatePermissionProfile(
@@ -610,7 +612,7 @@ export async function acquireCredential(rawToken: string, datasourceId: string, 
   }
   // token 的 allowedDatasourceIds 是 run 接纳时保存的授权副本。数据源本身必须来自
   // 系统资源目录，避免任何租户遗留数据源被当作全局资源访问。
-  if (datasource.tenant_id !== SYSTEM_RESOURCE_TENANT_ID) {
+  if (datasource.tenant_id !== await getSystemResourceTenantId()) {
     throw new DatasourceError(403, '数据源不属于系统资源目录');
   }
   const leaseTtl = poolNumber(profile, datasource, 'leaseTtlSeconds', DEFAULT_LEASE_TTL_SECONDS);

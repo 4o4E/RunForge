@@ -74,6 +74,11 @@ const DEFAULT_AGENT_CONTEXT_SETTINGS = agentContextSettings(
   DEFAULT_LLM_CONTEXT_WINDOW,
   DEFAULT_LLM_COMPACTION_THRESHOLD,
 );
+const CONFIGURED_BUSINESS_PLUGIN_ROOTS = patterns(process.env.RUNFORGE_BUSINESS_PLUGIN_ROOTS)
+  .map((root) => resolve(root));
+const BUSINESS_PLUGIN_ROOTS = CONFIGURED_BUSINESS_PLUGIN_ROOTS.length
+  ? CONFIGURED_BUSINESS_PLUGIN_ROOTS
+  : [resolve(process.cwd(), '../business-plugins')];
 
 function contextStrategy(v: string | undefined): 'current' | 'langchain-trim' {
   return v === 'langchain-trim' ? 'langchain-trim' : 'current';
@@ -114,7 +119,7 @@ export const config = {
   databaseUrl: process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL,
   auth: {
     // 兼容路径:老部署的静态共享 token。多租户改造(docs/multi-tenancy-design.md §4)后
-    // 只在启动 bootstrap 时使用一次,注册成 default tenant 下 owner 账号的一条 API token,
+    // 只在启动 bootstrap 时使用一次，注册成 bootstrap tenant 下 owner 账号的一条 API token，
     // 不再是唯一的鉴权手段。
     accessToken: process.env.RUNFORGE_ACCESS_TOKEN ?? '',
     shareSecret: process.env.RUNFORGE_SHARE_SECRET ?? process.env.RUNFORGE_ACCESS_TOKEN ?? '',
@@ -124,12 +129,12 @@ export const config = {
     accessTokenTtlSeconds: Number(process.env.RUNFORGE_ACCESS_TOKEN_TTL_SECONDS ?? 45 * 60),
     // refresh token 长期有效(默认 30 天),存 hash,前端用它静默换取新的 access token。
     refreshTokenTtlSeconds: Number(process.env.RUNFORGE_REFRESH_TOKEN_TTL_SECONDS ?? 30 * 24 * 60 * 60),
-    // 首次启动引导账号的初始密码;不填则随机生成并只在启动日志打印一次。
+    // 首次启动引导账号的初始密码；不填则使用固定的自托管默认密码。
     bootstrapAdminPassword: process.env.RUNFORGE_BOOTSTRAP_ADMIN_PASSWORD ?? '',
     bootstrapSysadminPassword: process.env.RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD ?? '',
   },
   llm: {
-    // 仅用于首次创建 default tenant 的可编辑模板；生产运行读取 app_settings。
+    // 仅用于首次创建 bootstrap tenant 的可编辑模板；生产运行读取 app_settings。
     protocol: 'openai-responses' as const,
     baseUrl: 'https://api.openai.com/v1',
     apiKey: '',
@@ -199,8 +204,8 @@ export const config = {
     retentionDays: 7,
   },
   businessPlugins: {
-    // 业务插件由调用方/运维以只读目录交付；RunForge 只发现和运行，不维护源码或发布产物。
-    roots: patterns(process.env.RUNFORGE_BUSINESS_PLUGIN_ROOTS),
+    // 第一个根目录同时承载管理页手动导入，其他根目录继续用于部署流水线交付的插件。
+    roots: BUSINESS_PLUGIN_ROOTS,
   },
   preview: {
     officeConverterUrl: process.env.OFFICE_PREVIEW_CONVERTER_URL ?? '',

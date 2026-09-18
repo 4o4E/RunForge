@@ -148,12 +148,40 @@ test('SpaceAccessService: external space 只接受本 tenant 的 active executio
   );
 });
 
-test('SpaceAccessService: default 不可重命名删除，普通空间软删除和恢复保留名单', async () => {
+test('SpaceAccessService: 创建空间时把配置错误映射为 400', async () => {
   const ctx = await fixture();
   await assert.rejects(
-    ctx.service.update(ctx.ownerIdentity, ctx.provisioned.defaultSpace.id, { name: 'Renamed' }),
-    (error: unknown) => error instanceof SpaceAccessError && error.code === 'DEFAULT_SPACE_IMMUTABLE',
+    ctx.service.create(ctx.ownerIdentity, {
+      mode: 'web',
+      name: 'Invalid Config',
+      config: { capabilities: { tools: ['unknown-tool'] } },
+    }),
+    (error: unknown) => error instanceof SpaceAccessError
+      && error.status === 400
+      && error.code === 'SPACE_CONFIG_INVALID',
   );
+});
+
+test('SpaceAccessService: 部分配置更新保留已经保存的能力列表', async () => {
+  const ctx = await fixture();
+  const created = await ctx.service.create(ctx.ownerIdentity, {
+    mode: 'web',
+    name: 'Partial Update',
+    config: {},
+  });
+  const updated = await ctx.service.update(ctx.ownerIdentity, created.id, {
+    config: { systemPrompt: 'updated' },
+  });
+  assert.deepEqual(updated.config.model.allowedModelRefs, created.config.model.allowedModelRefs);
+  assert.deepEqual(updated.config.capabilities.tools, created.config.capabilities.tools);
+  assert.deepEqual(updated.config.capabilities.mcpServers, created.config.capabilities.mcpServers);
+  assert.deepEqual(updated.config.capabilities.runtime, created.config.capabilities.runtime);
+});
+
+test('SpaceAccessService: default 可重命名但不可删除，普通空间软删除和恢复保留名单', async () => {
+  const ctx = await fixture();
+  const renamedDefault = await ctx.service.update(ctx.ownerIdentity, ctx.provisioned.defaultSpace.id, { name: 'Renamed' });
+  assert.equal(renamedDefault.name, 'Renamed');
   await assert.rejects(
     ctx.service.delete(ctx.ownerIdentity, ctx.provisioned.defaultSpace.id),
     (error: unknown) => error instanceof SpaceAccessError && error.code === 'DEFAULT_SPACE_IMMUTABLE',

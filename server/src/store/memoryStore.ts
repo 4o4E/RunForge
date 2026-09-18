@@ -50,6 +50,18 @@ import {
   newThreadId,
   newUserId,
 } from '../id.js';
+import { config as instanceConfig } from '../config.js';
+
+function defaultMemorySpaceConfig(): Record<string, unknown> {
+  const modelRef = `default:${instanceConfig.llm.model}`;
+  return {
+    schemaVersion: 1,
+    systemPrompt: '',
+    model: { defaultModelRef: modelRef, allowedModelRefs: [modelRef], contextBudget: null },
+    capabilities: { tools: [], mcpServers: [], businessPlugins: [], runtime: [] },
+    external: { allowTrustedPrompt: false, allowNextStep: false },
+  };
+}
 
 function isEphemeralSystemMessage(role: LlmMessage['role'], content: string | null): boolean {
   return role === 'system' && typeof content === 'string' && content.startsWith('已激活 Skill / Activated Skill:');
@@ -147,7 +159,7 @@ export class MemoryStore implements Store {
       mode: 'web',
       name: 'Default',
       execution_user_id: null,
-      config: {},
+      config: defaultMemorySpaceConfig(),
       config_version: 1,
       created_by_user_id: null,
       deleted_at: null,
@@ -159,6 +171,7 @@ export class MemoryStore implements Store {
         id: scope.tenantId,
         name: scope.tenantId,
         status: 'active',
+        is_bootstrap: false,
         default_space_id: space.id,
         created_at: now,
       };
@@ -1149,7 +1162,7 @@ export class MemoryStore implements Store {
       mode: 'web',
       name: 'Default',
       execution_user_id: null,
-      config: {},
+      config: structuredClone(input.defaultSpaceConfig ?? defaultMemorySpaceConfig()),
       config_version: 1,
       created_by_user_id: owner.id,
       deleted_at: null,
@@ -1160,6 +1173,7 @@ export class MemoryStore implements Store {
       id: input.id,
       name: input.name,
       status: 'active',
+      is_bootstrap: input.isBootstrap ?? false,
       default_space_id: defaultSpace.id,
       created_at: createdAt,
     };
@@ -1172,6 +1186,30 @@ export class MemoryStore implements Store {
 
   async findTenant(id: string): Promise<TenantRow | null> {
     return this.tenants.get(id) ?? null;
+  }
+
+  async findBootstrapTenant(): Promise<TenantRow | null> {
+    const rows = [...this.tenants.values()].filter((tenant) => tenant.is_bootstrap);
+    if (rows.length > 1) throw new Error('内存存储中存在多个 bootstrap tenant');
+    return rows[0] ?? null;
+  }
+
+  async migrateBootstrapTenantId(currentId: string, nextId: string): Promise<TenantRow> {
+    const tenant = this.tenants.get(currentId);
+    if (!tenant) throw new Error(`tenant ${currentId} 不存在`);
+    if (this.tenants.has(nextId)) throw new Error(`tenant ${nextId} 已存在`);
+    this.tenants.delete(currentId);
+    tenant.id = nextId;
+    tenant.is_bootstrap = true;
+    this.tenants.set(nextId, tenant);
+    for (const row of this.users.values()) if (row.tenant_id === currentId) row.tenant_id = nextId;
+    for (const row of this.spaces.values()) if (row.tenant_id === currentId) row.tenant_id = nextId;
+    for (const row of this.threads.values()) if (row.tenant_id === currentId) row.tenant_id = nextId;
+    for (const row of this.shellSessions.values()) if (row.tenant_id === currentId) row.tenant_id = nextId;
+    for (const row of this.subagentRuns.values()) if (row.tenant_id === currentId) row.tenant_id = nextId;
+    for (const row of this.pushSubscriptions.values()) if (row.tenant_id === currentId) row.tenant_id = nextId;
+    for (const row of this.authTokens.values()) if (row.tenant_id === currentId) row.tenant_id = nextId;
+    return tenant;
   }
 
   async listTenants(): Promise<TenantRow[]> {
@@ -1226,10 +1264,6 @@ export class MemoryStore implements Store {
   async updateSpace(tenantId: string, id: string, fields: UpdateSpaceRecordInput): Promise<SpaceWithVisibilityRow | null> {
     const space = this.spaces.get(id);
     if (!space || space.tenant_id !== tenantId) return null;
-    const tenant = this.tenants.get(tenantId);
-    if (tenant?.default_space_id === id && fields.name !== undefined && fields.name !== space.name) {
-      throw new DefaultSpaceImmutableError('default 空间不能重命名');
-    }
     if (fields.name !== undefined) space.name = fields.name;
     if (fields.executionUserId !== undefined) {
       space.execution_user_id = fields.executionUserId ?? null;

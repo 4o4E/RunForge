@@ -2,6 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   newArtifactId,
+  newAuthTokenId,
+  newDatasourceAccountId,
+  newDatasourceId,
+  newDatasourceLeaseId,
+  newDatasourceProfileId,
   newExternalCallerId,
   newExternalRequestId,
   newExternalTokenId,
@@ -11,9 +16,18 @@ import {
   newProviderInvocationId,
   newRunId,
   newRunInputId,
+  newRuntimeCapabilityCallId,
+  newShellCommandId,
+  newShellSessionId,
   newSpaceId,
   newStepId,
+  newSubagentRunId,
+  newSystemAdminId,
+  newSystemAdminTokenId,
+  newTenantId,
   newThreadId,
+  newUserId,
+  newWorkloadTokenId,
 } from './id.js';
 
 test('newId: returns compact base62 snowflake ids', () => {
@@ -30,6 +44,20 @@ test('entity ids: include stable two-letter prefixes', () => {
   assert.match(newThreadId(), /^th_[0-9A-Za-z]+$/);
   assert.match(newStepId(), /^st_[0-9A-Za-z]+$/);
   assert.match(newSpaceId(), /^sp_[0-9A-Za-z]+$/);
+  assert.match(newTenantId(), /^tn_[0-9A-Za-z]+$/);
+  assert.match(newUserId(), /^us_[0-9A-Za-z]+$/);
+  assert.match(newAuthTokenId(), /^at_[0-9A-Za-z]+$/);
+  assert.match(newSystemAdminId(), /^sa_[0-9A-Za-z]+$/);
+  assert.match(newSystemAdminTokenId(), /^rt_[0-9A-Za-z]+$/);
+  assert.match(newDatasourceId(), /^ds_[0-9A-Za-z]+$/);
+  assert.match(newDatasourceProfileId(), /^dp_[0-9A-Za-z]+$/);
+  assert.match(newDatasourceAccountId(), /^da_[0-9A-Za-z]+$/);
+  assert.match(newDatasourceLeaseId(), /^dl_[0-9A-Za-z]+$/);
+  assert.match(newWorkloadTokenId(), /^wt_[0-9A-Za-z]+$/);
+  assert.match(newRuntimeCapabilityCallId(), /^rc_[0-9A-Za-z]+$/);
+  assert.match(newShellSessionId(), /^ss_[0-9A-Za-z]+$/);
+  assert.match(newShellCommandId(), /^sc_[0-9A-Za-z]+$/);
+  assert.match(newSubagentRunId(), /^sr_[0-9A-Za-z]+$/);
   assert.match(newExternalCallerId(), /^ec_[0-9A-Za-z]+$/);
   assert.match(newExternalTokenId(), /^et_[0-9A-Za-z]+$/);
   assert.match(newExternalRequestId(), /^er_[0-9A-Za-z]+$/);

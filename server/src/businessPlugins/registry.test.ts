@@ -1,10 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, rename, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rename, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
+import { create as createTar } from 'tar';
+import { ZipFile } from 'yazl';
 import { CordisRuntimeManager } from '../plugins/runtime.js';
+import { extractBusinessPluginArchive, normalizedArchivePath } from './archive.js';
 import { BusinessPluginError } from './errors.js';
 import { createBusinessPluginCordisDefinition, createBusinessPluginSelection } from './cordis.js';
 import { BusinessPluginRegistry, loadBusinessPlugin, loadBusinessPluginIndex } from './registry.js';
@@ -57,6 +60,37 @@ async function createPlugin(
   return root;
 }
 
+async function zipDirectory(root: string): Promise<Buffer> {
+  const zip = new ZipFile();
+  const add = async (directory: string): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      const archivePath = relative(root, path).split('\\').join('/');
+      if (entry.isDirectory()) await add(path);
+      else if (entry.isFile()) zip.addFile(path, archivePath);
+    }
+  };
+  await add(root);
+  return finishZip(zip);
+}
+
+function finishZip(zip: ZipFile): Promise<Buffer> {
+  return new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    zip.outputStream.on('data', (chunk: Buffer) => chunks.push(chunk));
+    zip.outputStream.on('error', reject);
+    zip.outputStream.on('end', () => resolve(Buffer.concat(chunks)));
+    zip.end();
+  });
+}
+
+async function tgzDirectory(root: string): Promise<Buffer> {
+  const outputRoot = await mkdtemp(join(tmpdir(), 'runforge-business-tgz-'));
+  const archivePath = join(outputRoot, 'plugin.tgz');
+  await createTar({ cwd: dirname(root), file: archivePath, gzip: true }, [basename(root)]);
+  return readFile(archivePath);
+}
+
 test('业务插件协议：发现多文件 Skill、MCP、Secret 和运行资源并生成稳定 hash', async () => {
   const sourceRoot = await mkdtemp(join(tmpdir(), 'runforge-business-plugins-'));
   const root = await createPlugin(sourceRoot, 'crm');
@@ -71,6 +105,81 @@ test('业务插件协议：发现多文件 Skill、MCP、Secret 和运行资源�
   await writeFile(join(root, 'skills', 'customer-query', 'references', 'schema.md'), '# Changed schema');
   const second = await loadBusinessPlugin(root);
   assert.notEqual(second.contentHash, first.contentHash);
+});
+
+test('业务插件导入：支持 ZIP 新增和 TGZ 原子覆盖', async () => {
+  const sourceRoot = await mkdtemp(join(tmpdir(), 'runforge-business-import-source-'));
+  const importRoot = await mkdtemp(join(tmpdir(), 'runforge-business-import-target-'));
+  const pluginRoot = await createPlugin(sourceRoot, 'crm');
+  const registry = new BusinessPluginRegistry([importRoot]);
+
+  const created = await registry.importArchive('tn_import', await zipDirectory(pluginRoot), 'zip');
+  assert.equal(created.replaced, false);
+  assert.equal(created.definition.manifest.id, 'crm');
+  assert.equal(created.definition.root, join(importRoot, 'tn_import', 'crm'));
+  assert.equal((await registry.list('tn_import')).length, 1);
+
+  await writeFile(join(pluginRoot, 'skills', 'customer-query', 'references', 'schema.md'), '# Imported v2');
+  const updated = await registry.importArchive('tn_import', await tgzDirectory(pluginRoot), 'tgz');
+  assert.equal(updated.replaced, true);
+  assert.notEqual(updated.definition.contentHash, created.definition.contentHash);
+  assert.equal(
+    await readFile(join(updated.definition.root, 'skills', 'customer-query', 'references', 'schema.md'), 'utf8'),
+    '# Imported v2',
+  );
+  assert.deepEqual((await registry.list('tn_import')).map((definition) => definition.manifest.id), ['crm']);
+});
+
+test('业务插件导入：无效更新保持当前版本，链接和路径穿越被拒绝', async () => {
+  const sourceRoot = await mkdtemp(join(tmpdir(), 'runforge-business-import-invalid-source-'));
+  const importRoot = await mkdtemp(join(tmpdir(), 'runforge-business-import-invalid-target-'));
+  const pluginRoot = await createPlugin(sourceRoot, 'crm');
+  const registry = new BusinessPluginRegistry([importRoot]);
+  const current = await registry.importArchive('tn_import_invalid', await zipDirectory(pluginRoot), 'zip');
+
+  await writeFile(join(pluginRoot, 'skills', 'customer-query', 'SKILL.md'), [
+    '---',
+    'name: wrong-name',
+    'description: Invalid update.',
+    '---',
+    '# Invalid',
+  ].join('\n'));
+  await assert.rejects(registry.importArchive('tn_import_invalid', await zipDirectory(pluginRoot), 'zip'), /不一致/);
+  assert.equal((await registry.list('tn_import_invalid'))[0]?.contentHash, current.definition.contentHash);
+
+  const symlinkRoot = await createPlugin(sourceRoot, 'linked');
+  await symlink('/tmp', join(symlinkRoot, 'outside'));
+  await assert.rejects(
+    registry.importArchive('tn_import_invalid', await tgzDirectory(symlinkRoot), 'tgz'),
+    /只允许普通文件和目录/,
+  );
+
+  const symlinkZip = new ZipFile();
+  symlinkZip.addBuffer(Buffer.from('/tmp'), 'outside', { mode: 0o120777 });
+  await assert.rejects(
+    extractBusinessPluginArchive(await finishZip(symlinkZip), 'zip', tmpdir()),
+    /ZIP 不允许符号链接/,
+  );
+  assert.throws(() => normalizedArchivePath('../outside'), /非法路径/);
+  assert.throws(() => normalizedArchivePath('C:\\outside'), /非法路径/);
+
+  const traversalZip = new ZipFile();
+  traversalZip.addBuffer(Buffer.from('outside'), 'aa/file');
+  const malicious = await finishZip(traversalZip);
+  const safeName = Buffer.from('aa/file');
+  const unsafeName = Buffer.from('../file');
+  let cursor = 0;
+  let replacements = 0;
+  while ((cursor = malicious.indexOf(safeName, cursor)) >= 0) {
+    unsafeName.copy(malicious, cursor);
+    cursor += unsafeName.length;
+    replacements += 1;
+  }
+  assert.equal(replacements, 2);
+  await assert.rejects(
+    extractBusinessPluginArchive(malicious, 'zip', tmpdir()),
+    (error: unknown) => error instanceof BusinessPluginError && error.code === 'BUSINESS_PLUGIN_ARCHIVE_INVALID',
+  );
 });
 
 test('业务插件协议：拒绝未声明 Secret、symlink、服务端入口和重复 ID', async () => {

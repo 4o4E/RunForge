@@ -54,11 +54,13 @@ space 归属于 tenant，是一套可动态更新的运行配置和权限边界�
 2. 从系统模板复制该 tenant 的独立配置。
 3. 创建 Web 空间，并把它写入 tenant 的 `default_space_id`。
 
-default 空间不可删除、不可重命名，但可以更新配置。非默认 tenant 缺少配置时不再运行时
-回退到 `default` tenant；模板变化也不自动影响已经创建的 tenant。
+default 空间不可删除，空间 ID 不可修改；名称和其他配置均可更新。创建时会把当时可用的模型、
+工具、MCP 和运行时能力复制成完整配置，之后与创建模板保持独立。业务插件初始为空，由管理员
+明确选择。
 
-旧 thread 只回填到所属 tenant 的 default 空间。thread、run、step、message、event 和现有
-用户级 workspace 均不搬迁、不复制。
+旧 thread 只回填到所属 tenant 的 default 空间。thread、run、step、message 和 event 内容均
+不搬迁、不复制；旧 `default` 租户改为 `tn_` ID 时，仅将原有用户级 workspace 目录移动到
+新租户目录，文件内容保持不变。
 
 ### 2.3 Execution User
 
@@ -79,16 +81,17 @@ default 空间不可删除、不可重命名，但可以更新配置。非默认
 
 ### 3.1 Web
 
-tenant 由登录身份确定，不出现在 URL。`spaceId` 和 `threadId` 延续雪花 ID + Base62，分别
-使用 `sp_`、`th_` 前缀。
+tenant 由登录身份确定，不出现在 URL。`tenantId`、`spaceId` 和 `threadId` 都由服务端使用
+雪花 ID + Base62 生成，分别使用 `tn_`、`sp_`、`th_` 前缀。`default` 是初始名称，不承担
+ID 语义。
 
 - `/`：统一用户入口和会话列表。
 - `/{spaceId}`：空间入口和新建对话。
-- `/{spaceId}/{threadId}`：具体对话。
+- `/{threadId}`：具体对话；前端读取会话后选择其所属空间。
 
-不增加 `/s` 或 `/chat`。后端必须校验 space 属于当前 tenant、thread 属于 URL 中的
-space；不匹配统一按不存在处理。`/api`、`/settings`、`/admin`、`/sys-admin` 等保留路径
-优先于动态 ID 路由。
+不增加 `/s` 或 `/chat`。后端必须按登录身份校验 space 属于当前 tenant，并校验 thread 的
+用户归属与空间可见权限；不匹配统一按不存在处理。`/api`、`/settings`、`/admin`、
+`/sys-admin` 等保留路径优先于动态 ID 路由。
 
 ### 3.2 外部入口
 
@@ -501,7 +504,7 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
 ### 阶段 7：Web 页面
 
 - 统一入口下增加空间选择和来源展示。
-- 使用 `/{spaceId}`、`/{spaceId}/{threadId}`。
+- 空间使用 `/{spaceId}`，具体对话使用 `/{threadId}`。
 - 外部空间只读；增加空间配置、用户可见名单、execution user、软删除和 Token 管理。
 
 ### 阶段 8：Provider 观测和本地 trace
@@ -542,8 +545,8 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
 ## 16. 改动点与对应决策索引
 
 1. 新增 space：使用 `sp_` 雪花 ID，tenant 隐含在登录身份中。
-2. Web 路由：使用 `/{spaceId}` 和 `/{spaceId}/{threadId}`，不增加资源名单路径。
-3. default space：tenant 创建时复制模板并创建；不可删除、不可重命名。
+2. Web 路由：空间使用 `/{spaceId}`，具体对话使用 `/{threadId}`，依靠 `sp_`、`th_` 前缀识别实体。
+3. default space：tenant 创建时复制完整配置并创建；不可删除，名称和配置可以修改，ID 不可修改。
 4. 旧 thread：只回填 default space，不迁移对话内容、ID 或用户级 workspace。
 5. 空间配置更新：直接更新；run 创建时保存副本，thread 不固定旧版本。
 6. 外部执行身份：空间选择 execution user，thread 创建后固化，调用方不能冒充。

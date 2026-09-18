@@ -588,6 +588,8 @@ export function App() {
 
   useEffect(() => {
     if (!spacesLoaded) return;
+    // 会话 URL 只携带 th_ ID；详情接口通过登录身份校验后返回所属空间。
+    if (route.threadId && route.spaceId === null) return;
     const selected = spaces.find((space) => space.id === route.spaceId) ?? null;
     if (selected && !(selected.mode === 'external' && activeView === 'search')) return;
     const fallback = selected ?? spaces.find((space) => space.isDefault) ?? spaces[0] ?? null;
@@ -886,7 +888,7 @@ export function App() {
       return;
     }
     if (currentBrowserPath() !== path) window.history.replaceState(null, '', path);
-    // 仅首屏规范化旧地址或根路径，后续导航由 navigateChatRoute 负责。
+    // 仅首屏规范化根路径，后续导航由 navigateChatRoute 负责。
   }, []);
 
   useEffect(() => {
@@ -929,6 +931,11 @@ export function App() {
     getThread(activeThreadId, { debug: debugMode, spaceId: route.spaceId })
       .then(({ thread, runs, notices, context_messages }) => {
         if (!canceled) {
+          setRoute((current) => (
+            current.threadId === thread.id && current.spaceId !== thread.space_id
+              ? { ...current, spaceId: thread.space_id }
+              : current
+          ));
           setThreads((current) => [thread, ...current.filter((item) => item.id !== thread.id)]);
           const branchRuns = activeBranchRuns(runs, thread.active_run_id);
           setMessages(runsToUiMessages(runs, thread.active_run_id, notices, context_messages, thread.space_id));
@@ -948,13 +955,24 @@ export function App() {
           setReattachedRunId(null);
           setActiveRunId(null);
           setContinuableRunId(null);
+          if (route.spaceId === null && spacesLoaded) {
+            const fallback = spaces.find((space) => space.isDefault) ?? spaces[0] ?? null;
+            const nextRoute: ChatRoute = {
+              draft: route.draft,
+              spaceId: fallback?.id ?? null,
+              threadId: null,
+            };
+            setRoute(nextRoute);
+            const path = buildChatPath(nextRoute);
+            if (currentBrowserPath() !== path) window.history.replaceState(null, '', path);
+          }
         }
       });
 
     return () => {
       canceled = true;
     };
-  }, [activeThreadId, debugMode, historyRevision, readOnly, route.spaceId, setMessages]);
+  }, [activeThreadId, debugMode, historyRevision, readOnly, route.draft, route.spaceId, setMessages, spaces, spacesLoaded]);
 
   useEffect(() => {
     if (!activeThreadId || !reattachedRunId) return;

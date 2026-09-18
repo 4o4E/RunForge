@@ -6,26 +6,29 @@ import { promisify } from 'node:util';
 import { config } from '../config.js';
 import { executeRun } from '../agent/executor.js';
 import { pool, query } from '../db/pool.js';
+import { prisma } from '../db/prisma.js';
 import { PgStore } from '../store/pgStore.js';
 import type { AgentEvent } from '../agent/types.js';
 import type { LlmMessage } from '../llm/types.js';
 import type { Scope, Store, ThreadRow } from '../store/types.js';
 import {
   getSystemLlmSettings,
-  getTenantResourceAuthorization,
   getToolSettings,
   saveTenantResourceAuthorization,
+  tenantSettingsTemplateEntries,
   type ToolSettings,
 } from '../settings.js';
 import { hashPassword } from '../auth/passwords.js';
+import { newTenantId } from '../id.js';
+import { SpaceConfigService } from '../spaces/config.js';
 
 const execFileAsync = promisify(execFile);
 
 const VERIFY_ROOT = resolve(process.cwd(), '../workspace/agent-core-verification');
-const VERIFY_SCOPE: Scope = { tenantId: 'default', userId: 'us_agent_core_verification' };
 
 interface VerifyContext {
   store: Store;
+  scope: Scope;
   thread: ThreadRow;
   workspaceRoot: string;
   paths: Record<string, string>;
@@ -148,15 +151,15 @@ async function rawMessagesForThread(threadId: string): Promise<RawMessage[]> {
   return rows;
 }
 
-async function loadRunResult(store: Store, threadId: string, runId: string): Promise<ScenarioRunResult> {
-  const run = await store.getRun(VERIFY_SCOPE, runId);
+async function loadRunResult(store: Store, scope: Scope, threadId: string, runId: string): Promise<ScenarioRunResult> {
+  const run = await store.getRun(scope, runId);
   if (!run) throw new Error(`run 不存在：${runId}`);
   return {
     runId,
     status: run.status,
     error: run.error,
     output: run.output,
-    events: await store.getEvents(VERIFY_SCOPE, runId),
+    events: await store.getEvents(scope, runId),
     rawMessages: await rawMessagesForThread(threadId),
   };
 }
@@ -175,22 +178,22 @@ function verificationToolSettings(base: ToolSettings, workspaceRoot: string): To
 }
 
 async function createPriorCompactionHistory(ctx: VerifyContext): Promise<void> {
-  const prior = await ctx.store.createRun(VERIFY_SCOPE, ctx.thread.id, '最早用户消息：锚点短语是 RFG-COMPACTION-ANCHOR。请在后续任务中保留它。');
-  await ctx.store.addMessage(VERIFY_SCOPE, ctx.thread.id, prior.id, null, {
+  const prior = await ctx.store.createRun(ctx.scope, ctx.thread.id, '最早用户消息：锚点短语是 RFG-COMPACTION-ANCHOR。请在后续任务中保留它。');
+  await ctx.store.addMessage(ctx.scope, ctx.thread.id, prior.id, null, {
     role: 'user',
     content: '最早用户消息：锚点短语是 RFG-COMPACTION-ANCHOR。请在后续任务中保留它。',
   });
-  await ctx.store.addMessage(VERIFY_SCOPE, ctx.thread.id, prior.id, null, {
+  await ctx.store.addMessage(ctx.scope, ctx.thread.id, prior.id, null, {
     role: 'assistant',
     content: null,
     toolCalls: [{ id: 'verify_big_tool_1', name: 'file_read', arguments: JSON.stringify({ path: ctx.paths.big }) }],
   });
-  await ctx.store.addMessage(VERIFY_SCOPE, ctx.thread.id, prior.id, null, {
+  await ctx.store.addMessage(ctx.scope, ctx.thread.id, prior.id, null, {
     role: 'tool',
     content: `历史大工具输出\n${'x'.repeat(18_000)}`,
     toolCallId: 'verify_big_tool_1',
   });
-  await ctx.store.setRunStatus(VERIFY_SCOPE, prior.id, 'done', { output: '预置历史完成。' });
+  await ctx.store.setRunStatus(ctx.scope, prior.id, 'done', { output: '预置历史完成。' });
 }
 
 const scenarios: Scenario[] = [
@@ -240,7 +243,7 @@ const scenarios: Scenario[] = [
       ].join('\n');
     },
     async assert(ctx, result) {
-      const run = await ctx.store.getRun(VERIFY_SCOPE, result.runId);
+      const run = await ctx.store.getRun(ctx.scope, result.runId);
       const content = existsSync(ctx.paths.done) ? (await readText(ctx.paths.done)).trim() : '';
       return [
         assertRunDone(result),
@@ -374,39 +377,24 @@ function applyContextOverride(override: Partial<typeof config.agent> | undefined
   return () => Object.assign(config.agent, original);
 }
 
-async function ensureVerificationScope(): Promise<void> {
-  // 验证器直接使用 PgStore，不走登录引导；为自己的固定 scope 幂等补齐外键身份。
-  await query(
-    `INSERT INTO tenants (id, name, status)
-     VALUES ($1, $2, 'active')
-     ON CONFLICT (id) DO NOTHING`,
-    [VERIFY_SCOPE.tenantId, 'Default'],
-  );
-  await query(
-    `INSERT INTO users (id, tenant_id, email, password_hash, role, status)
-     VALUES ($1, $2, $3, $4, 'member', 'active')
-     ON CONFLICT (id) DO UPDATE
-     SET tenant_id = EXCLUDED.tenant_id,
-         email = EXCLUDED.email,
-         password_hash = EXCLUDED.password_hash,
-         role = EXCLUDED.role,
-         status = EXCLUDED.status`,
-    [VERIFY_SCOPE.userId, VERIFY_SCOPE.tenantId, 'agent-core-verification@runforge.local', hashPassword('agent-core-verification-no-login')],
-  );
-}
-
-async function runScenario(store: Store, baseToolSettings: ToolSettings, root: string, scenario: Scenario): Promise<ScenarioReport> {
+async function runScenario(
+  store: Store,
+  scope: Scope,
+  baseToolSettings: ToolSettings,
+  root: string,
+  scenario: Scenario,
+): Promise<ScenarioReport> {
   const workspaceRoot = resolve(root, scenario.id);
   await mkdir(workspaceRoot, { recursive: true });
-  const thread = await store.createThread(VERIFY_SCOPE, `[verify] ${scenario.id}`);
-  const ctx: VerifyContext = { store, thread, workspaceRoot, paths: {} };
+  const thread = await store.createThread(scope, `[verify] ${scenario.id}`);
+  const ctx: VerifyContext = { store, scope, thread, workspaceRoot, paths: {} };
   const restoreContext = applyContextOverride(scenario.context);
   try {
     await scenario.prepare(ctx);
-    const run = await store.createRun(VERIFY_SCOPE, thread.id, scenario.input(ctx));
+    const run = await store.createRun(scope, thread.id, scenario.input(ctx));
     await executeRun(run.id, {
       store,
-      scope: VERIFY_SCOPE,
+      scope,
       hardStepCap: scenario.hardStepCap ?? 16,
       generateThreadTitle: false,
       toolSettings: verificationToolSettings(baseToolSettings, workspaceRoot),
@@ -417,7 +405,7 @@ async function runScenario(store: Store, baseToolSettings: ToolSettings, root: s
       }),
       publish: () => {},
     });
-    const result = await loadRunResult(store, thread.id, run.id);
+    const result = await loadRunResult(store, scope, thread.id, run.id);
     const assertions = await scenario.assert(ctx, result);
     return {
       id: scenario.id,
@@ -489,19 +477,29 @@ async function main(): Promise<void> {
   await mkdir(runRoot, { recursive: true });
 
   const store = new PgStore();
-  await ensureVerificationScope();
-  const originalAuthorization = await getTenantResourceAuthorization(VERIFY_SCOPE.tenantId);
-  const systemLlm = await getSystemLlmSettings();
-  await saveTenantResourceAuthorization(VERIFY_SCOPE.tenantId, {
-    ...originalAuthorization,
-    llmProviderIds: systemLlm.providers.map((provider) => provider.id),
-  });
+  const tenantId = newTenantId();
   try {
-    const baseToolSettings = await getToolSettings(VERIFY_SCOPE);
+    const provisioned = await store.createTenantWithOwner({
+      id: tenantId,
+      name: 'Agent Core 验收租户',
+      ownerEmail: `agent-core-verification-${tenantId}@runforge.local`,
+      ownerPasswordHash: hashPassword('agent-core-verification-no-login'),
+      settingsTemplate: tenantSettingsTemplateEntries(),
+    });
+    const scope: Scope = { tenantId, userId: provisioned.owner.id };
+    const systemLlm = await getSystemLlmSettings();
+    await saveTenantResourceAuthorization(tenantId, {
+      llmProviderIds: systemLlm.providers.map((provider) => provider.id),
+      datasourceIds: [],
+    });
+    const completeDefaultConfig = await new SpaceConfigService().snapshotForCreate(tenantId, 'web');
+    await store.updateSpace(tenantId, provisioned.defaultSpace.id, { config: completeDefaultConfig });
+
+    const baseToolSettings = await getToolSettings(scope);
     const reports: ScenarioReport[] = [];
     for (const scenario of targets) {
       console.log(`▶ ${scenario.id}`);
-      const report = await runScenario(store, baseToolSettings, runRoot, scenario);
+      const report = await runScenario(store, scope, baseToolSettings, runRoot, scenario);
       reports.push(report);
       console.log(`${report.status === 'pass' ? '✓' : '✗'} ${scenario.id}`);
     }
@@ -515,7 +513,12 @@ async function main(): Promise<void> {
     console.log(`Report: ${resolve(runRoot, 'report.md')}`);
     if (passed !== reports.length) process.exitCode = 1;
   } finally {
-    await saveTenantResourceAuthorization(VERIFY_SCOPE.tenantId, originalAuthorization);
+    await prisma.app_settings.deleteMany({ where: { tenant_id: tenantId } });
+    await prisma.threads.deleteMany({ where: { tenant_id: tenantId } });
+    await prisma.tenants.updateMany({ where: { id: tenantId }, data: { default_space_id: null } });
+    await prisma.spaces.deleteMany({ where: { tenant_id: tenantId } });
+    await prisma.users.deleteMany({ where: { tenant_id: tenantId } });
+    await prisma.tenants.deleteMany({ where: { id: tenantId } });
   }
 }
 

@@ -7,7 +7,7 @@ import { formatHexRows, parseByteRange, previewTextLines } from './files.js';
 import { signFileShare, verifyFileShare } from './auth.js';
 import { config } from '../config.js';
 import { isOfficeConvertiblePath, officePdfCacheKey } from '../files/officePreview.js';
-import { resolveThreadWorkspaceRoot, resolveWorkspaceRoot } from '../files/workspaceRoot.js';
+import { migrateLegacyBootstrapWorkspace, resolveThreadWorkspaceRoot, resolveWorkspaceRoot } from '../files/workspaceRoot.js';
 import { signTenantAccessToken } from '../auth/jwt.js';
 import { buildApp, listen, seedOwner } from './testHelpers.js';
 import { spaceAccess } from '../spaces/access.js';
@@ -69,11 +69,29 @@ test('file share signature binds path and expiry', () => {
 
 test('workspace root is isolated by tenant and user', () => {
   const base = '/srv/runforge/workspace';
-  assert.equal(resolveWorkspaceRoot({ tenantId: 'default', userId: 'us_a' }, base), '/srv/runforge/workspace/users/us_a/workspace');
-  assert.equal(resolveWorkspaceRoot({ tenantId: 'default', userId: 'us_b' }, base), '/srv/runforge/workspace/users/us_b/workspace');
+  assert.equal(resolveWorkspaceRoot({ tenantId: 'default', userId: 'us_a' }, base), '/srv/runforge/workspace/tenants/default/users/us_a/workspace');
+  assert.equal(resolveWorkspaceRoot({ tenantId: 'default', userId: 'us_b' }, base), '/srv/runforge/workspace/tenants/default/users/us_b/workspace');
   assert.equal(resolveWorkspaceRoot({ tenantId: 'tn_a', userId: 'us_a' }, base), '/srv/runforge/workspace/tenants/tn_a/users/us_a/workspace');
   assert.notEqual(resolveWorkspaceRoot({ tenantId: 'tn_a', userId: 'us_a' }, base), resolveWorkspaceRoot({ tenantId: 'tn_a', userId: 'us_b' }, base));
   assert.equal(resolveThreadWorkspaceRoot('th_abc123', base), '/srv/runforge/workspace/th_abc123');
+});
+
+test('旧默认租户 workspace 会移动到新租户目录且可以重复执行', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'runforge-workspace-migration-'));
+  try {
+    const source = join(base, 'users', 'us_legacy', 'workspace');
+    await mkdir(source, { recursive: true });
+    await writeFile(join(source, 'note.txt'), 'legacy workspace');
+
+    await migrateLegacyBootstrapWorkspace('tn_migrated', base);
+    assert.equal(
+      await readFile(join(base, 'tenants', 'tn_migrated', 'users', 'us_legacy', 'workspace', 'note.txt'), 'utf8'),
+      'legacy workspace',
+    );
+    await migrateLegacyBootstrapWorkspace('tn_migrated', base);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
 });
 
 test('office pdf preview only accepts office documents', () => {

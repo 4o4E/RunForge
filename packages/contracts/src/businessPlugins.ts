@@ -40,6 +40,12 @@ export interface BusinessPluginAdminView {
   plugins: BusinessPluginAdminItem[];
 }
 
+export interface BusinessPluginImportResponse {
+  pluginId: string;
+  replaced: boolean;
+  view: BusinessPluginAdminView;
+}
+
 /** secrets 只提交变更：字符串设置当前值，null 删除，未出现的 key 保持不变。 */
 export interface UpdateBusinessPluginSettingsInput {
   plugins?: Record<string, { config: Record<string, unknown> }>;

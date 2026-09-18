@@ -72,6 +72,7 @@ export function Sidebar({
   onDelete,
 }: Props) {
   const [pendingDeleteThreadId, setPendingDeleteThreadId] = useState<string | null>(null);
+  const activeSpace = spaces.find((space) => space.id === activeSpaceId) ?? null;
 
   if (collapsed) {
     return (
@@ -166,12 +167,24 @@ export function Sidebar({
         {spaces.length > 0 ? (
           <Select value={activeSpaceId ?? undefined} onValueChange={onSelectSpace}>
             <SelectTrigger className="h-9 w-full">
-              <SelectValue placeholder="选择空间" />
+              <SelectValue placeholder="选择空间">
+                {activeSpace && (
+                  <span className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left">
+                    <span className="min-w-0 truncate">
+                      {activeSpace.name}{activeSpace.mode === 'external' ? ' · 外部只读' : ''}
+                    </span>
+                    <span className="shrink-0 text-[11px] text-muted-foreground">{activeSpace.id}</span>
+                  </span>
+                )}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               {spaces.map((space) => (
                 <SelectItem key={space.id} value={space.id}>
-                  {space.name}{space.mode === 'external' ? ' · 外部只读' : ''}
+                  <span className="flex min-w-0 items-center justify-between gap-3">
+                    <span className="min-w-0 truncate">{space.name}{space.mode === 'external' ? ' · 外部只读' : ''}</span>
+                    <span className="shrink-0 text-[11px] text-muted-foreground">{space.id}</span>
+                  </span>
                 </SelectItem>
               ))}
             </SelectContent>

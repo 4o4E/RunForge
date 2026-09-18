@@ -21,6 +21,7 @@ import { shellManager } from './shell/manager.js';
 import { externalArtifactStorage } from './external/artifactStorage.js';
 import { listArtifactStorageKeys } from './external/repository.js';
 import { mountWebApp } from './web/static.js';
+import { materializeLegacySpaceConfigs } from './spaces/materialize.js';
 
 const app = express();
 assertJwtSecretConfigured();
@@ -38,6 +39,8 @@ attachWebSocket(server);
 // (docs/multi-tenancy-design.md §4)。不同于下面 listen 回调里那些 fire-and-forget
 // 的恢复逻辑，这一步会阻塞启动。
 await runBootstrap();
+const materializedSpaces = await materializeLegacySpaceConfigs();
+if (materializedSpaces > 0) console.log(`   Materialized legacy space configs: ${materializedSpaces}`);
 try {
   const removed = await externalArtifactStorage.reconcile(await listArtifactStorageKeys());
   if (removed > 0) console.log(`   Removed orphaned external artifacts: ${removed}`);
@@ -56,7 +59,7 @@ server.listen(config.port, config.host, () => {
     console.log(
       `   Tool sandbox: ${settings.sandbox}` +
         (settings.sandbox === 'enforce'
-          ? ` (默认租户 workspace 基础目录: ${settings.workspaceRoot}; default 空间按用户隔离，其他空间按 thread 隔离, shell: ${describeShellSandbox({
+          ? ` (workspace 基础目录: ${settings.workspaceRoot}; 默认空间按用户隔离，其他空间按 thread 隔离, shell: ${describeShellSandbox({
               policyMode: settings.sandbox,
               backend: settings.sandboxBackend,
               workspaceRoot: settings.workspaceRoot,
