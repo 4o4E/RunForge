@@ -11,6 +11,7 @@ import {
 } from '../id.js';
 import { store } from '../store/index.js';
 import type { Scope, TenantScope } from '../store/types.js';
+import { getTenantResourceAuthorization, SYSTEM_RESOURCE_TENANT_ID } from '../settings.js';
 import { disablePostgresAccount, ensurePostgresAccount, ensurePostgresReadonlyTemplateRole } from './postgresAdapter.js';
 import { generateWorkloadToken, hashWorkloadToken, iso, randomPassword, secondsFromNow } from './token.js';
 import type { RuntimeCapabilityName } from '@runforge/contracts';
@@ -170,6 +171,15 @@ export async function listDatasources(scope: TenantScope): Promise<DatasourceRow
   return rows;
 }
 
+export async function listAuthorizedDatasources(scope: TenantScope): Promise<DatasourceRow[]> {
+  const [datasources, authorization] = await Promise.all([
+    listDatasources({ tenantId: SYSTEM_RESOURCE_TENANT_ID }),
+    getTenantResourceAuthorization(scope.tenantId),
+  ]);
+  const allowed = new Set(authorization.datasourceIds);
+  return datasources.filter((datasource) => allowed.has(datasource.id));
+}
+
 export async function getDatasource(scope: TenantScope, id: string): Promise<DatasourceRow | null> {
   const { rows } = await query<DatasourceRow>(`SELECT * FROM datasources WHERE id = $1 AND tenant_id = $2`, [id, scope.tenantId]);
   return rows[0] ?? null;
@@ -240,6 +250,15 @@ export async function listPermissionProfiles(scope: TenantScope, datasourceId: s
     [datasourceId],
   );
   return rows;
+}
+
+export async function listAuthorizedPermissionProfiles(
+  scope: TenantScope,
+  datasourceId: string,
+): Promise<PermissionProfileRow[]> {
+  const authorization = await getTenantResourceAuthorization(scope.tenantId);
+  if (!authorization.datasourceIds.includes(datasourceId)) return [];
+  return listPermissionProfiles({ tenantId: SYSTEM_RESOURCE_TENANT_ID }, datasourceId);
 }
 
 export async function updatePermissionProfile(
@@ -340,14 +359,6 @@ export async function listDatasourceLeases(scope: TenantScope, datasourceId: str
     [datasourceId, limit],
   );
   return rows;
-}
-
-async function tenantIdForRun(runId: string): Promise<string> {
-  const run = await store.getRunUnscoped(runId);
-  if (!run) throw new DatasourceError(404, 'run 不存在');
-  const thread = await store.getThreadUnscoped(run.thread_id);
-  if (!thread) throw new DatasourceError(404, 'thread 不存在');
-  return thread.tenant_id;
 }
 
 interface WorkloadTokenGrant {
@@ -597,11 +608,11 @@ export async function acquireCredential(rawToken: string, datasourceId: string, 
   if (profile.mode !== 'readonly') {
     throw new DatasourceError(403, 'WORKLOAD_TOKEN 当前只允许申请只读数据库账号');
   }
-  // workload token 本身没有请求身份，这里是唯一的强制边界:反查 token 对应 run 所在的
-  // 租户，和数据源的 tenant_id 必须一致，否则即便 token 的 allowedDatasourceIds
-  // 意外带了别的租户的数据源 id，也不能真的换到凭证(docs/multi-tenancy-design.md §9)。
-  const runTenantId = await tenantIdForRun(validated.token.run_id);
-  if (runTenantId !== datasource.tenant_id) throw new DatasourceError(403, '数据源不属于该 run 所在租户');
+  // token 的 allowedDatasourceIds 是 run 接纳时保存的授权副本。数据源本身必须来自
+  // 系统资源目录，避免任何租户遗留数据源被当作全局资源访问。
+  if (datasource.tenant_id !== SYSTEM_RESOURCE_TENANT_ID) {
+    throw new DatasourceError(403, '数据源不属于系统资源目录');
+  }
   const leaseTtl = poolNumber(profile, datasource, 'leaseTtlSeconds', DEFAULT_LEASE_TTL_SECONDS);
   const expiresAt = secondsFromNow(leaseTtl);
   const password = randomPassword();

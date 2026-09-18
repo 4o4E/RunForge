@@ -1,13 +1,9 @@
-import type { LlmProtocol } from '@runforge/contracts';
 import type { LlmConfig, Provider } from './types.js';
 import { createAiSdkProvider } from './providers/aiSdk.js';
 import { getLlmSettings, type LlmProviderSettings } from '../settings.js';
 import type { TenantScope } from '../store/types.js';
 import type { ProviderDescriptor } from './providerRunner.js';
-
-export function createProvider(protocol: LlmProtocol, cfg: LlmConfig): Provider {
-  return createAiSdkProvider(cfg, { protocol });
-}
+import { catalogMaxOutputTokens } from './modelCatalog.js';
 
 function parseModelRef(ref: string): { providerId: string; model: string } | null {
   const idx = ref.indexOf(':');
@@ -20,23 +16,22 @@ function configFromProvider(provider: LlmProviderSettings, model: string): LlmCo
     baseUrl: provider.baseUrl,
     apiKey: provider.apiKey,
     model,
-    maxTokens: provider.maxTokens,
+    maxOutputTokens: catalogMaxOutputTokens(model),
     timeoutMs: provider.timeoutMs,
     retries: provider.retries,
-    stream: provider.stream,
   };
 }
 
 export function createProviderFromSettings(provider: LlmProviderSettings, model: string): Provider {
-  return createProvider(provider.protocol, configFromProvider(provider, model));
+  return createAiSdkProvider(configFromProvider(provider, model), { protocol: provider.protocol });
 }
 
 export async function getConfiguredProvider(scope: TenantScope, modelRef?: string): Promise<{
   provider: Provider;
   descriptor: ProviderDescriptor;
   modelRef: string;
-  stream: boolean;
   contextWindow: number;
+  compactionThreshold: number;
 }> {
   const settings = await getLlmSettings(scope);
   const ref = modelRef?.trim() || settings.defaultModelRef;
@@ -48,8 +43,8 @@ export async function getConfiguredProvider(scope: TenantScope, modelRef?: strin
     throw new Error(`供应商 ${providerSettings.id} 未配置模型：${parsed.model}`);
   }
   const capability = providerSettings.modelCapabilities.find((item) => item.model === parsed.model);
-  if (!capability?.contextWindow || !capability.inputModalities.length) {
-    throw new Error(`模型 ${ref} 的上下文长度或输入类型尚未配置`);
+  if (!capability?.contextWindow || !capability.compactionThreshold || !capability.inputModalities.length) {
+    throw new Error(`模型 ${ref} 的上下文长度、压缩阈值或输入类型尚未配置`);
   }
   const provider = createProviderFromSettings(providerSettings, parsed.model);
   return {
@@ -60,8 +55,8 @@ export async function getConfiguredProvider(scope: TenantScope, modelRef?: strin
       retries: Math.max(0, providerSettings.retries),
     },
     modelRef: ref,
-    stream: providerSettings.stream,
     contextWindow: capability.contextWindow,
+    compactionThreshold: capability.compactionThreshold,
   };
 }
 

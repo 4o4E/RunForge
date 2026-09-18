@@ -115,7 +115,7 @@ export async function maybeGenerateThreadTitleAfterFirstRun(scope: Scope, runId:
   const target = await titleTarget(scope, runId, deps.store);
   if (!target) return null;
 
-  const result = await deps.provider.complete(
+  const result = await deps.provider.completeStream(
     [
       {
         role: 'system',
@@ -141,6 +141,7 @@ export async function maybeGenerateThreadTitleAfterFirstRun(scope: Scope, runId:
       },
     ],
     [],
+    () => {},
   );
 
   const title = cleanGeneratedTitle(result.content) || fallbackTitle(target.run.input);

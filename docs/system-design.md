@@ -19,7 +19,7 @@
 - 通过 Agent 执行循环完成多步任务：计划、调用工具、观察结果、继续推进。
 - 通过 AI SDK 支持 `openai-responses`、`openai-chat`、`anthropic-messages` 三种 LLM 协议。
 - 内置通用工具：shell、托管 shell、文件读写/编辑、glob、grep、web fetch、web search、ask user、update plan、skill、workflow、subagent 和数据源访问。
-- LLM 请求支持超时、流式输出和由 RunForge `ProviderRunner` 统一控制的瞬态错误重试。
+- LLM 请求固定使用流式传输，并支持超时和由 RunForge `ProviderRunner` 统一控制的瞬态错误重试。
 - 暴露 REST API 和 WebSocket 事件流。
 - 对话按 `thread -> run -> step` 组织并持久化到 PostgreSQL。
 - 前端提供 React 聊天控制台，可查看 reasoning、工具调用、工具结果和最终输出。
@@ -132,13 +132,14 @@ Web 创建 thread
 `server/src/llm/`
 
 - `types.ts`：中立消息、工具、usage、Provider 接口。
-- `index.ts`：按租户 LLM 配置解析 provider、model 和统一重试参数。
+- `index.ts`：从系统 LLM 配置中解析租户已获授权的 provider、model 和统一重试参数。
 - `providerRunner.ts`：创建逻辑 invocation，按统一策略执行 attempt，并聚合 wire body、
   原始响应、标准化结果和错误分类。
 - `observability/repository.ts`：Provider 观测的 Prisma/内存持久化边界。
 - `observability/trace.ts`：按日追加本地 JSONL attempt trace，并保留最近 7 个自然日。
 - `providers/aiSdk.ts`：通过 AI SDK 创建三种受支持协议的模型，并统一转换中立消息、工具调用和响应。
-- `model-catalog.json`、`modelCatalog.ts`：开发人员维护的模型能力目录、精确名称匹配和资料来源校验。
+- `updateModelCatalog.ts`、`model-catalog.json`、`modelCatalog.ts`：从 models.dev 自动生成的全量
+  模型能力目录、最长名称前缀匹配、每模型压缩阈值和资料来源校验。
 
 `server/src/tools/`
 
@@ -194,26 +195,25 @@ Web 创建 thread
 
 - `Sidebar`：会话列表和入口导航。
 - `ChatView`、`Conversation`、`Composer`：聊天主界面。
-- `SettingsView`：当前用户的外观、个人用量和归档会话；Shell/沙箱、MCP 连接、供应商和运行时能力由 `/sys-admin` 系统设置按租户管理。
+- `SettingsView`：当前用户的外观、个人用量和归档会话；Shell/沙箱、MCP 连接、供应商和运行时能力由 `/sys-admin/settings/*` 统一管理。
+- `AdminApp`：租户 owner/admin 管理本租户用户、空间和业务插件。
+- `SysAdminApp`：系统设置维护全局资源,租户授权选择每个租户可用的 LLM 供应商和数据源；租户详情只管理用户、空间和业务插件。
 - `RemoteFilesPanel`：工作区文件浏览和预览。
 
 ## Provider 设计
 
-执行循环只依赖统一接口：
-
-```typescript
-Provider.complete(messages, tools) -> { content, reasoning, toolCalls, usage }
-```
-
-如果 provider 支持流式输出，还可以实现：
+执行循环只依赖统一的流式接口：
 
 ```typescript
 Provider.completeStream(messages, tools, onDelta)
+  -> { content, reasoning, toolCalls, usage }
 ```
 
-AI SDK 负责把中立消息、工具定义和工具结果翻译成目标协议，并通过调用参数接收当前
-attempt 的 observing fetch。AI SDK 的 `maxRetries` 固定为 `0`，重试只由 `ProviderRunner`
-决定，确保每次 HTTP 请求都有独立 attempt 记录。
+主 Agent 通过 `onDelta` 实时发布正文、reasoning 和工具参数。标题生成、上下文摘要、subagent
+和连通性测试同样调用该接口，并用空的增量处理函数聚合完整结果。AI SDK 负责把中立消息、
+工具定义和工具结果翻译成目标协议，并通过调用参数接收当前 attempt 的 observing fetch。
+AI SDK 的 `maxRetries` 固定为 `0`，重试只由 `ProviderRunner` 决定，确保每次 HTTP 请求都有
+独立 attempt 记录。
 
 当前支持：
 
@@ -221,10 +221,14 @@ attempt 的 observing fetch。AI SDK 的 `maxRetries` 固定为 `0`，重试只�
 - `openai-chat`：使用 `@ai-sdk/openai-compatible` 的 Chat Completions API。
 - `anthropic-messages`：使用 `@ai-sdk/anthropic` 的 Messages API。
 
-LLM 配置保存在 tenant 的 `app_settings` 中，管理界面直接选择协议。模型列表接口只发现模型
-名称。上下文窗口和输入类型由本地目录按规范化后的完整名称或明确别名匹配；未匹配的模型
-必须由管理员填写。目录中的每项能力都保存官方资料链接、检查日期和资料覆盖字段。运行时
-遇到缺失能力会立即拒绝创建 Provider。
+三种协议的请求都固定使用流式传输。OpenAI Responses 和 OpenAI Chat 不发送输出 token 上限。
+Anthropic Messages 使用模型目录记录的最大输出长度填写协议必填的 `max_tokens`；缺少该目录
+数据时立即拒绝创建 Provider。管理员配置中不提供输出 token 上限或流式开关。
+
+LLM 配置保存在系统 `app_settings` 中,租户授权保存可用 provider ID,空间再保存可用模型子集。管理界面直接选择协议。模型列表接口只发现模型
+名称。上下文窗口、压缩阈值和输入类型由本地目录按规范化后的完整名称或明确别名匹配；未
+匹配的模型必须由管理员填写。目录中的每项能力都保存资料链接、检查日期和资料覆盖字段。
+运行时遇到缺失能力会立即拒绝创建 Provider。
 
 模型 reasoning 只读取协议返回的独立字段。正文中的 `<think>` 标签按普通正文处理。
 
@@ -252,7 +256,7 @@ PostgreSQL 以执行过程为核心建模：
   逻辑请求和最终标准化结果。
 - `provider_attempts`：一次真实上游 HTTP 请求，保存 wire body、原始响应、状态、用量、
   Provider ID 和错误分类；同一 invocation 内 attempt 序号唯一。
-- `app_settings`：运行时工具配置，env 只作为初始默认值或兜底。
+- `app_settings`：系统资源配置、租户资源授权和租户内业务插件配置；env 只作为系统工具配置的初始默认值或兜底。
 - `subagent_runs`：主 agent 派发的异步只读子任务，保存 task assignment、stage、skill、输出和 usage。
 - `shell_sessions`、`shell_commands`、`shell_command_logs`、`shell_session_events`：托管 shell 会话、命令、增量日志和审计事件。
 - `datasources`、`datasource_permission_profiles`、`datasource_accounts`、`workload_tokens`、`datasource_account_leases`：统一 run 级系统资源 token、数据源账号池和短期凭证租约。
@@ -287,10 +291,12 @@ Run API：
 辅助 API：
 
 - `/api/files`：工作区文件信息、文件读取和上传。
-- `/api/settings`：读取和保存 Shell/沙箱与 MCP 连接配置。
+- `/api/settings`：向租户身份提供经过授权过滤的 LLM 选项和租户自己的页面状态。
+- `/api/system/settings`、`/api/system/datasources`：系统管理员统一维护系统资源。
+- `/api/system/tenant-access/:tenantId`：系统管理员读取和保存租户资源授权。
 - `/api/shell-sessions`、`/api/shell-commands`：托管 shell session、命令、日志、终止和用户标记。
 - `/api/threads/:id/subagents`：列出当前 thread 下可恢复查看的 subagent 子任务。
-- `/api/datasources`、`/api/runtime/datasources`：数据源管理、连通性测试和运行时短期凭证租赁。
+- `/api/datasources`、`/api/runtime/datasources`：读取租户获准的数据源目录和租赁运行时短期凭证。
 
 ## 事件模型
 

@@ -10,6 +10,8 @@
     "dev:server": "pnpm --filter server dev",
     "dev:web": "pnpm --filter web dev",
     "build": "pnpm --filter @runforge/contracts build && pnpm --filter server build && pnpm --filter web build",
+    "model-catalog:update": "pnpm --filter server model-catalog:update",
+    "model-catalog:check": "pnpm --filter server model-catalog:check",
     "db:migrate": "pnpm --filter server db:migrate",
     "start": "bash scripts/start.sh",
     "stop": "bash scripts/stop.sh",

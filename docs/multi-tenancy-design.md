@@ -4,9 +4,8 @@
 > 服务多个互相隔离的租户,而不是给每个租户单独起一套部署。
 > 目标:描述**改造完成后**的目标架构,作为 [系统设计](system-design.md) 中"多租户鉴权、用户隔离、
 > 项目隔离和审计权限"这条待办的具体化。
-> 状态:Phase 1(§4 认证/用户/JWT 骨架)已实施;§5-§9 的数据层改造(业务表加
-> tenant_id/user_id、RLS、workspace 按租户拆分、管理员审计)仍未开始。日期:2026-07-14,
-> Phase 1 实施于 2026-07-17。
+> 状态:认证、用户隔离、空间、系统管理入口和系统资源授权已经实施；管理员审计和资源配额
+> 仍在规划中。文档按当前实现持续更新。
 
 ---
 
@@ -36,9 +35,10 @@
 一个 **tenant** 对应一个独立的使用方(一个团队、一个客户),拥有:
 
 - 一组 **用户(user)**,每个用户有独立的登录身份,归属这一个 tenant。
-- 独立的一组 thread / run / subagent / shell session / datasource 数据。
+- 独立的一组 thread / run / subagent / shell session 数据。
 - 每个用户独立的 workspace 文件树；租户只作为上层目录边界,同租户用户默认不共享文件。
-- 独立的运行时配置(LLM provider、工具沙箱策略、MCP servers)。
+- 系统管理员授予的一组系统资源,当前包括 LLM provider 和数据源。
+- 租户内独立管理的用户、空间和业务插件。
 
 `tenant_id` 是贯穿改造的主键,取值为短字符串(如 `tnt_xxx`),不对外暴露内部自增 id。单租户部署使用一个固定的 `default` tenant,行为与今天完全一致(不管是迁移还是全新部署,启动时都会自动确保这个 tenant 和一个默认管理员账号存在,见 §4 的 bootstrap 逻辑)。
 
@@ -73,7 +73,7 @@
 
 - **防止租户被锁死**:如果只有一种管理员角色,"最后一个管理员被禁用或误操作降级"会导致整个租户没有人能再管理它。`owner` 是一个不能被 `admin` 触碰(创建/禁用/降级)的身份,任何时候至少保留一个活跃 `owner`(见 §4 的引导逻辑),给租户留一条"总能找到人负责"的退路。
 - **收敛最高风险操作的颁发范围**:API token 是长期有效、拿到就能持续以某个用户身份调用的凭证——泄露的影响面和"一次性密码"完全不是一个量级。把"谁能签发/吊销它"限制在人数最少的 `owner`,是在"这类操作需要经常做"和"做错代价很高"之间选择后者优先,而不是图方便让所有管理员都能发。同理,暂停/删除 tenant 这种不可逆或影响全体成员的操作也只留给 `owner`。
-- **`admin` 承担的是租户成员日常运营,不是系统能力配置**:邀请新成员、启停 member 这类租户内部操作交给 `admin`;LLM、数据源、MCP、沙箱和生图/视频供应商包含平台凭证与运行边界,统一由 system admin 在系统设置中按租户维护。
+- **`admin` 承担租户内部管理**:邀请新成员、启停 member,以及管理本租户空间和业务插件。LLM、数据源、MCP、沙箱和生图/视频供应商由 system admin 在系统设置中统一维护。
 
 ### 数据可见性
 
@@ -81,7 +81,7 @@ thread(以及挂在 thread 下的 run/message/subagent_run/shell_session)**默�
 
 **管理员审计是这条默认规则之外唯一的例外**,用于合规/support/观测排障,权限范围和实现见 §4"管理员审计"——但它是一条独立、显式声明、全程留痕的旁路,不是"因为你是 admin 所以顺便能看",两者的区别很关键:default 路径(聊天界面、`/api/threads`)永远不会因为调用者是 owner/admin/system admin 就返回别人的数据;只有专门的审计 API 才会,且每次调用都写审计日志。把这两条路径分开、而不是在同一个接口里加一个 `if role === 'admin'` 分支,是为了不让"管理员能看审计"退化成"管理员的所有请求都能看"。
 
-`datasource`(数据源连接)、LLM/沙箱/MCP 和生图/视频供应商配置是**租户级共享资源**,不挂在具体用户下——任何 member 都能使用当前租户已启用的能力,但只有 system admin 能通过 `/api/system/tenants/:tenantId/...` 新增或修改。资源作用域仍是 tenant,管理身份则是 system,两者不能混为一谈。
+`datasource`(数据源连接)、LLM/沙箱/MCP 和生图/视频供应商配置是**系统资源**。system admin 统一创建和修改资源,再通过租户授权选择每个租户可用的 LLM provider 和数据源。空间从租户获准的资源中继续选择可用子集。
 
 ---
 
@@ -353,7 +353,7 @@ CREATE INDEX idx_audit_access_log_target ON audit_access_log(tenant_id, target_u
 
 这张表只允许 `INSERT`,应用层不暴露任何 `DELETE`/`UPDATE` 路径——包括对 `tenant_admin` 自己产生的记录,防止"审计者销毁自己审计行为的证据"。
 
-`app_settings` 是当前的全局 key-value 配置表(LLM provider、工具沙箱策略、MCP servers),多租户下必须变成按租户可覆盖:
+`app_settings` 使用 `(tenant_id, key)` 保存 JSON 配置:
 
 ```sql
 ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default' REFERENCES tenants(id);
@@ -361,7 +361,7 @@ ALTER TABLE app_settings DROP CONSTRAINT app_settings_pkey;
 ALTER TABLE app_settings ADD PRIMARY KEY (tenant_id, key);
 ```
 
-`getToolSettings`/`getMcpSettings`/`getLlmSettings` 读取时只查询当前 `(tenant_id, key)`。创建 tenant 时在同一事务中复制系统模板，之后各 tenant 独立更新；缺项只回退 `config.ts` 的 env 默认值，不再动态读取 `default` tenant，避免模板后续变化悄悄影响已有 tenant。
+系统资源配置使用内部 `tenant_id = 'default'` 保存,包括 LLM provider、工具沙箱策略、MCP servers 和运行时能力。租户自己的 `tenant.resourceAuthorization` 保存 LLM provider ID 与数据源 ID 授权列表。创建 tenant 时只写入空授权记录和 default 空间,不会复制系统凭证。`getLlmSettings(scope)` 和数据源目录先读取系统资源,再按目标租户的授权列表过滤。
 
 Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, userId}` 参数(`role` 只用于 API 层的操作权限判断,不参与数据查询过滤,见 §2),SQL 里对应加 `AND tenant_id = $n AND user_id = $m`,或者对间接表加等价的 `thread_id IN (...)` 子查询。RLS 作为兜底防线,不作为唯一防线——应用层显式过滤仍然要做,因为 RLS 依赖每个数据库连接正确 `SET app.tenant_id / app.user_id`,一旦连接池复用时忘记重置就会失效,不能单独依赖它。
 
@@ -369,15 +369,17 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 
 ## 6. 文件系统与 workspace 隔离
 
-`workspaceRoot` 从 `config.tools.workspaceRoot` 这个全局单值,变成按租户 + 用户派生:
+系统管理员通过 `/api/system/settings/tools` 维护 `workspaceRoot` 基础目录。运行时再按空间类型派生实际目录:
 
 ```text
-default tenant: ${TOOL_WORKSPACE_ROOT_BASE}/users/<user_id>/workspace
-other tenants: ${TOOL_WORKSPACE_ROOT_BASE}/tenants/<tenant_id>/users/<user_id>/workspace
+default 空间 + default tenant: <workspaceRoot>/users/<user_id>/workspace
+default 空间 + 其他 tenant: <workspaceRoot>/tenants/<tenant_id>/users/<user_id>/workspace
+非 default 空间: <workspaceRoot>/<thread_id>
 ```
 
-- `getToolSettings(scope)` 返回值里的 `workspaceRoot` 字段改为函数调用 `resolveWorkspaceRoot({ tenantId, userId })`,而不是读一个全局常量;**且始终用计算值覆盖 `app_settings` 里存的字符串,不信任存储值**——`PUT /api/settings/tools` 允许调用方写入任意 `workspaceRoot`,如果只按 `(tenant_id, key)` 隔离行但原样返回存储值,租户管理员就能把自己的 `workspaceRoot` 设成指向另一个租户或用户目录的路径,变成一个真实的越权读写洞。这是 Phase 2 落地时发现的、设计文档最初没写到的缺口,已在 `settings.ts` 的 `getToolSettings`/`saveToolSettings` 里修复。
-- 没有 `userId` 的 `resolveWorkspaceRoot({ tenantId })` 只返回租户基础目录,用于启动日志等不代表具体用户的场景;工具执行、文件 API、shell session 都必须传入完整 `{ tenantId, userId }`。
+- `getSystemToolSettings()` 读取系统工具策略和 `workspaceRoot` 基础目录；租户身份无法读取或修改这组配置。
+- `getToolSettings(scope)` 使用系统基础目录派生 default 空间的用户目录。Agent、文件 API 和 shell session 在处理具体 thread 时共同调用 `resolveWorkspaceRootForThread(...)`,保证同一个 thread 使用同一路径。
+- 没有 `userId` 的 `resolveWorkspaceRoot({ tenantId }, base)` 只返回租户基础目录,用于启动日志等不代表具体用户的场景,不能作为工具执行目录。
 - `normalizeRemotePath`/`isWithin`(`server/src/files/workspace.ts`)的围栏逻辑不需要改——它们已经是"给定一个 root,判断路径是否在 root 内",只要传入的 root 换成用户专属路径即可。
 - Office 预览缓存(`server/src/files/officePreview.ts`)的 `officeCacheDir` 同理按租户 + 用户分目录,`officePdfCacheKey` 的哈希输入也带 `tenantId`/`userId`(目录隔离和哈希隔离是两个独立的加固点,防止未来目录结构变化时退化成只靠哈希去重)。
 - 签名文件分享链接(`/api/files/{raw,preview,hex,pdf-preview}` 的免身份分支)本身不带身份,匿名访问时的 `tenantId`/`userId` 只能来自请求方自己在 query 里声明的 `tenant`/`user` 参数——`signFileShare`/`verifyFileShare` 把二者一起签进 HMAC；非 default 空间还会签入 `threadId`，防止篡改 query 让同一个签名在另一个用户或 thread workspace 下"重放"。
@@ -391,7 +393,7 @@ other tenants: ${TOOL_WORKSPACE_ROOT_BASE}/tenants/<tenant_id>/users/<user_id>/w
 
 **应用层路径策略**:围栏 root 从全局 `workspaceRoot` 换成按租户 + 用户派生的 root(见 §6),不需要新增机制,直接复用现有的 `none`/`workspace`/`allowlist` 三档策略。
 
-**bwrap 沙箱层**:`--bind <workspaceRoot> <workspaceRoot>` 的 `workspaceRoot` 同样换成租户专属路径,天然做到"租户 A 的 shell 子进程即使命令被绕过,也 bind mount 不到租户 B 的文件"。命令白名单(`shellAllowCommands`)、网络开关(`network`)从全局 `config.tools.*` 改为按租户读取(存在 `app_settings` 里,见 §5),允许不同租户有不同的工具权限策略——例如某些租户禁用网络访问,某些租户允许更大的命令白名单。
+**bwrap 沙箱层**:`--bind <workspaceRoot> <workspaceRoot>` 的 `workspaceRoot` 同样换成租户专属路径,天然做到"租户 A 的 shell 子进程即使命令被绕过,也 bind mount 不到租户 B 的文件"。命令白名单(`shellAllowCommands`)和网络开关(`network`)由系统设置统一维护,执行时仍使用当前用户派生的 `workspaceRoot`。
 
 **全局单例改造**:现有代码里几个 module-level 的全局状态,都要从"单例"变成"按 tenant_id 分片":
 
@@ -413,12 +415,15 @@ other tenants: ${TOOL_WORKSPACE_ROOT_BASE}/tenants/<tenant_id>/users/<user_id>/w
 
 ---
 
-## 9. 配置模型:全局 vs 租户级
+## 9. 配置模型
 
-改造后配置分两层:
+配置分为三层:
 
-- **实例级配置**(`config.ts`,继续来自 env,进程启动时冻结):监听端口、数据库连接串、`RUNFORGE_ACCESS_TOKEN`/`RUNFORGE_SHARE_SECRET` 的兜底值、OTEL 开关、Web Push VAPID key——这些描述的是"这个部署长什么样",不因租户而变,继续保持全局单值。
-- **租户级配置**(`app_settings` 表,`(tenant_id, key)` 为主键,见 §5):LLM provider/model/key、工具沙箱策略(`sandbox`/`workspaceRoot` 派生规则/`shellAllowCommands`/`network`)、MCP servers——这些描述的是"这个租户希望 agent 怎么表现",允许每个租户不同。
+- **系统设置**:LLM provider/model/key、工具沙箱策略、MCP servers、运行时能力和数据源。system admin 在 `/sys-admin/settings/*` 统一维护。
+- **租户授权**:system admin 在 `/sys-admin/tenant-access?tenant=<tenantId>` 选择租户可使用的 LLM provider 和数据源。授权保存在租户自己的 `tenant.resourceAuthorization` JSON 设置中。
+- **租户内设置**:用户、空间和业务插件。owner/admin 通过 `/admin` 管理本租户,system admin 通过 `/sys-admin/tenants/:tenantId/{users|spaces|business-plugins}` 管理指定租户。
+
+监听端口、数据库连接串和启动引导密钥继续由 `config.ts` 从 env 读取。系统工具策略存入 `app_settings`；其中 `workspaceRoot` 保存基础目录，执行时根据空间类型派生用户目录或 thread 目录。
 
 `preview.officeConverterUrl`(office 预览转换服务地址)保持实例级——它是一个外部服务的地址,不需要每个租户配一份,但 `officeCacheDir` 的实际写入路径按 §6 分租户子目录。
 
@@ -440,8 +445,8 @@ other tenants: ${TOOL_WORKSPACE_ROOT_BASE}/tenants/<tenant_id>/users/<user_id>/w
 | 入口 | URL | 身份体系 | 面向 | 主要能力 |
 |---|---|---|---|---|
 | 普通用户 | `/`、`/settings` | `scope:'tenant'` JWT(共享) | 任意角色 | 聊天，以及外观、个人用量、归档会话 |
-| 租户设置 | `/admin` | 与 `/` **同一套** `scope:'tenant'` JWT | owner/admin | 本租户用户管理、API Token 管理 |
-| 系统设置 | `/sys-admin` | 独立的 `scope:'system'` JWT + `system_admin_tokens` 表 | system admin | 租户、系统管理员，以及按租户管理的数据源、供应商和运行策略 |
+| 租户设置 | `/admin` | 与 `/` **同一套** `scope:'tenant'` JWT | owner/admin | 本租户用户、空间和业务插件管理 |
+| 系统管理 | `/sys-admin/tenants`、`/sys-admin/tenant-access`、`/sys-admin/settings/:section` | 独立的 `scope:'system'` JWT + `system_admin_tokens` 表 | system admin | 管理租户、系统资源和租户资源授权 |
 
 关键设计点:
 
@@ -451,8 +456,12 @@ other tenants: ${TOOL_WORKSPACE_ROOT_BASE}/tenants/<tenant_id>/users/<user_id>/w
 - **新建租户必须同时建一个 owner**(`POST /api/system/tenants` 接收 `{id, name, ownerEmail, ownerPassword}`),否则新租户没人能登录管理——参照 `bootstrap.ts` "tenant + owner 一起建"的既有模式。
 - **禁用租户(`PATCH /api/system/tenants/:id`)在登录路径同步生效**:`POST /api/auth/login`、`POST /api/auth/refresh` 都新增了 `tenant.status !== 'active'` 检查,不是只改一个没人看的字段。
 - **`/admin` 的用户编辑(`PATCH /api/tenants/:id/users/:userId`)有三条边界规则**:本人只能改邮箱/密码,不能改自己的角色或状态;admin 只能管理 member、也不能把任何人提到 admin/owner;不能把租户唯一的 active owner 降级或禁用。重置密码会吊销该用户已有的 refresh token,避免旧登录态继续续期。
-- **设置分为三个独立页面**:`/settings` 只放当前用户的外观、个人用量和归档会话;`/admin` 只放租户成员与 API Token;`/sys-admin` 放系统能力,并由 system admin 显式选择目标租户后管理数据源、LLM、生图/视频、MCP 和工具运行策略。原设置弹窗不再作为控制面入口。
-- **系统设置不冒充租户用户**:system JWT 通过 `/api/system/tenants/:tenantId/settings/*` 和 `/api/system/tenants/:tenantId/datasources/*` 访问目标租户配置,每次先校验 tenant 存在,底层仍以 `tenant_id` 读写;系统 JWT 依旧不能调用普通租户 API。
+- **系统管理员通过租户详情管理用户**:`POST /api/system/tenants/:tenantId/users` 和 `PATCH /api/system/tenants/:tenantId/users/:userId` 允许创建、编辑、禁用租户用户。系统管理员可以设置三种租户角色；唯一 active owner、邮箱唯一性和密码重置凭证吊销规则与租户管理接口共用同一份业务逻辑。
+- **租户详情只包含租户内设置**:`/sys-admin/tenants` 展示租户列表,选择租户后进入 `/sys-admin/tenants/:tenantId/{users|spaces|business-plugins}`。详情页支持切换租户,浏览器刷新、前进和后退会恢复同一页面。
+- **系统设置使用独立路由**:LLM、运行时能力、MCP、工具和数据源位于 `/sys-admin/settings/:section`,统一修改全系统资源。
+- **租户授权使用独立路由**:`/sys-admin/tenant-access?tenant=<tenantId>` 选择目标租户和授权资源,租户 owner/admin 无法访问该页面或对应 API。
+- **管理入口职责**:`/settings` 放当前用户的外观、个人用量和归档会话;`/admin` 放本租户用户、空间和业务插件;`/sys-admin` 放系统身份、系统资源、租户授权以及跨租户管理入口。
+- **系统设置使用独立身份**:system JWT 通过 `/api/system/settings/*`、`/api/system/datasources/*` 和 `/api/system/tenant-access/:tenantId` 管理资源与授权;system JWT 不能调用普通租户 API。
 
 ---
 
@@ -461,7 +470,7 @@ other tenants: ${TOOL_WORKSPACE_ROOT_BASE}/tenants/<tenant_id>/users/<user_id>/w
 改造完成后(即 §5-§9 都实施完)的隔离强度:
 
 - ⚠️ 数据库层:**只有应用层查询过滤,没有 Postgres RLS 兜底**。Phase 2 已经给 `threads`/`subagent_runs`/`shell_sessions`/`datasources`/`push_subscriptions` 等业务表加了 `tenant_id`/`user_id` 列,Store 层(`pgStore.ts`/`memoryStore.ts`)每个方法按 scope 过滤,是当前唯一的强制边界。**明确跳过 RLS 的原因**:Prisma 和过渡期原生 SQL 共用 `server/src/db/pool.ts` 的 `pg.Pool`,当前没有“一个请求固定同一连接和事务”的执行上下文；RLS 所需的 `SET LOCAL app.tenant_id` 因此不能稳定覆盖整个请求。**这意味着**:任何绕过 Store/repository、直接用 `query()`/`pool` 手写 SQL 的新代码,如果忘记租户过滤,就是完整的跨租户数据泄露,且没有数据库层兜底会拦住它——`accountPool.ts` 里 `datasources`/`workload_tokens`/`datasource_account_leases` 等尚未迁移查询仍需逐条核对 scope。空间阶段不再新增散落原生 SQL，后续需要更高保证级别时再单独设计 RLS 请求事务边界。
-- ✅ 文件系统层:不同租户 workspace 是磁盘上完全不同的目录树(`resolveWorkspaceRoot`),应用层路径围栏 + bwrap bind mount 双保险;`workspaceRoot` 无论是从 `app_settings` 读出来还是调用方在请求体里塞进来的,`getToolSettings`/`saveToolSettings` 都强制用计算值覆盖,不信任存储值(见 §6)。
+- ✅ 文件系统层:default 空间按租户和用户分目录，其他空间按全局唯一 thread ID 分目录；应用层路径围栏与 bwrap bind mount 使用同一个派生目录。基础目录只允许 system admin 通过系统设置修改，租户接口不提供工具设置读写能力(见 §6)。
 - ✅ 事件流:WebSocket 订阅前按 `{tenantId, userId}` 查一次归属(`store.getRun`/`store.getThread`),查不到直接 1008 拒绝,不会走到 `subscribe`——实现方式和最初设想的"事件打 tenant_id 标签"不同,记录在 §7,但达到的隔离粒度更细(连 user_id 都校验了,不只是 tenant 边界)。
 - ✅ 用户可见性:所有 Tier 1 查询按 `(tenant_id, user_id)` 双重过滤,同租户内的普通用户看不到彼此的 thread;Tier 2 表(`runs`/`messages`/`events`/`shell_commands` 等)通过 JOIN 父表间接过滤(见 §5)。唯一的例外(管理员审计)目前还没实现,仍是设计态,不是已落地的旁路。
 - ⚠️ 管理员审计本身是一个需要被信任的高权限能力:tenant owner/admin 能看到本租户任意成员的对话,system admin 能看到任意租户任意成员的对话——这不是"漏洞",而是设计如此(见 §1/§4),但意味着这两类身份的账号安全(密码强度、是否启用后续可能加的 2FA)比普通 member 更值得重视,一旦这两类账号被盗,影响面是"审计范围内的所有对话",需要在运营上对这两类账号的登录/密码策略从紧要求,这一版设计不包含强制 2FA,留作后续加固项。
@@ -471,7 +480,7 @@ other tenants: ${TOOL_WORKSPACE_ROOT_BASE}/tenants/<tenant_id>/users/<user_id>/w
 - ⚠️ 资源配额:CPU/内存/磁盘配额目前仍未实现(与单租户现状一致),多租户下"一个租户跑满资源影响其他租户"(noisy neighbor)问题需要额外的 cgroup/rlimit 工作,不在本次范围。
 - ⚠️ 引导账号默认密码是固定值(`1234.RunForge.5678`),不是随运行环境随机生成的秘密——只要读过这份文档或代码就知道默认密码,生产/公网环境**必须**通过 `RUNFORGE_BOOTSTRAP_ADMIN_PASSWORD`/`RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD` 覆盖,或登录后立刻改密,否则默认密码本身就是一个公开的后门。
 - ✅ `mcp/client.ts` 的 `listMcpTools`/`callMcpTool` 强制调用方传入当前 scope 的 `mcpSettings`，不存在隐式查询 `default` tenant 的分支。
-- ⚠️ 数据源账号池(`server/src/datasources/accountPool.ts`)的 workload-token 鉴权路径(`acquireCredential`)本身没有请求身份,唯一的租户边界校验是"反查 token 对应 run 所在的 tenant_id,和数据源的 tenant_id 必须一致"——这个校验依赖 `runs`/`threads` 表已经有 `tenant_id`(Phase 2 完成),如果以后有代码绕开 `createWorkloadToken`/`acquireCredential` 直接操作 `workload_tokens`/`datasource_account_leases` 表,不会自动获得这层保护。
+- ✅ 数据源账号池的 `acquireCredential` 只接受 run 级 `WORKLOAD_TOKEN` 中保存的数据源 ID,并确认目标数据源属于系统资源目录。token 在 run 接纳时根据租户授权生成,租户用户无法自行扩展 `allowed_datasources`。
 
 ---
 

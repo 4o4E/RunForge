@@ -12,6 +12,7 @@ import { mediaTypeFromPath, normalizeRemotePath, streamWorkspaceFile, toRemotePa
 import { clampShareTtlSeconds, signFileShare, verifyFileShare } from './auth.js';
 import { resolveIdentityFromAuthorizationHeader } from '../auth/resolve.js';
 import { requireTenantScope } from '../auth/guards.js';
+import { getSystemToolSettings } from '../settings.js';
 
 const SMALL_FILE_BYTES = 200 * 1024;
 const MAX_RENDER_FILE_BYTES = 2 * 1024 * 1024;
@@ -130,9 +131,10 @@ async function resolveFileAccess(
     res.status(403).json({ error: '文件分享缺少用户身份' });
     return null;
   }
+  const { workspaceRoot: baseRoot } = await getSystemToolSettings();
   const root = threadId
-    ? resolveThreadWorkspaceRoot(threadId)
-    : resolveWorkspaceRoot({ tenantId, userId });
+    ? resolveThreadWorkspaceRoot(threadId, baseRoot)
+    : resolveWorkspaceRoot({ tenantId, userId }, baseRoot);
   const file = normalizeRemotePath(requestedPath, root);
   const path = canonicalRemotePath(file, root);
   if (verifyFileShare(path, tenantId, userId, req.query.expires, req.query.sig, undefined, threadId)) {

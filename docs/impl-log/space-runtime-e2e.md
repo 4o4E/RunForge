@@ -19,7 +19,7 @@ Prisma invocation/attempt 和本地 JSONL trace。这样协议与隔离验收可
 
 ## 同链路验收矩阵
 
-- tenant 创建时同时产生独立配置副本和 default Web 空间；default Web thread/run 正常执行。
+- tenant 创建时同时产生空的系统资源授权记录和 default Web 空间；授权模型后 default Web thread/run 正常执行。
 - 建立两个 external 空间和两个可信调用方，分别使用独立 UUID Token；两个外部 run 并发执行。
 - 调用方 A/B 不能读取对方 run 或 Artifact；普通 member 只看到明确加入名单的 external
   空间和 thread，看不到 owner 的 default Web thread；owner 始终看到全部空间。

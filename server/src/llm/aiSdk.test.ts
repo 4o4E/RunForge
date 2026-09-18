@@ -106,42 +106,67 @@ test('toModelMessages: malformed tool-call args stay visible to the model', () =
   assert.deepEqual((parts[0].input as Record<string, unknown>)._invalidToolArguments, true);
 });
 
-test('AI SDK provider: configured streaming also applies to complete()', async () => {
+test('AI SDK provider: Anthropic 缺少目录最大输出长度时立即拒绝创建', () => {
+  assert.throws(() => createAiSdkProvider({
+    baseUrl: 'https://example.invalid/v1',
+    apiKey: 'test-key',
+    model: 'private-claude-model',
+    maxOutputTokens: null,
+    timeoutMs: 1_000,
+    retries: 0,
+  }, { protocol: 'anthropic-messages' }), /缺少最大输出长度/);
+});
+
+test('AI SDK provider: 三种协议固定发送流式请求且只填写协议必填的输出长度', async (t) => {
   const originalFetch = globalThis.fetch;
-  let requestBody = '';
-  let calls = 0;
-  const observingFetch: typeof fetch = async (input, init) => {
-    calls += 1;
-    const request = input instanceof Request ? input : new Request(input, init);
-    requestBody = await request.text();
-    return new Response(JSON.stringify({ error: { message: 'expected test failure' } }), {
-      status: 400,
-      headers: { 'content-type': 'application/json' },
-    });
-  };
   globalThis.fetch = async () => assert.fail('显式注入 fetch 时不应使用全局 fetch');
 
   try {
-    const provider = createAiSdkProvider({
-      baseUrl: 'https://example.invalid/v1',
-      apiKey: 'test-key',
-      model: 'test-model',
-      maxTokens: null,
-      timeoutMs: 1_000,
-      retries: 0,
-      stream: true,
-    }, { protocol: 'openai-responses' });
+    const cases = [
+      { protocol: 'openai-responses', maxOutputTokens: null },
+      { protocol: 'openai-chat', maxOutputTokens: null },
+      { protocol: 'anthropic-messages', maxOutputTokens: 64_000 },
+    ] as const;
+    for (const testCase of cases) {
+      await t.test(testCase.protocol, async () => {
+        let requestBody = '';
+        let calls = 0;
+        const observingFetch: typeof fetch = async (input, init) => {
+          calls += 1;
+          const request = input instanceof Request ? input : new Request(input, init);
+          requestBody = await request.text();
+          return new Response(JSON.stringify({ error: { message: 'expected test failure' } }), {
+            status: 400,
+            headers: { 'content-type': 'application/json' },
+          });
+        };
+        const provider = createAiSdkProvider({
+          baseUrl: 'https://example.invalid/v1',
+          apiKey: 'test-key',
+          model: testCase.protocol === 'anthropic-messages' ? 'claude-sonnet-4-6' : 'test-model',
+          maxOutputTokens: testCase.maxOutputTokens,
+          timeoutMs: 1_000,
+          retries: 0,
+        }, { protocol: testCase.protocol });
 
-    await assert.rejects(provider.complete(
-      [{ role: 'user', content: '你好' }],
-      [],
-      { fetch: observingFetch },
-    ));
-    assert.equal(calls, 1);
-    const body = JSON.parse(requestBody);
-    assert.equal(body.stream, true);
-    assert.equal(body.store, false);
-    assert.equal('max_output_tokens' in body, false);
+        await assert.rejects(provider.completeStream(
+          [{ role: 'user', content: '你好' }],
+          [],
+          () => {},
+          { fetch: observingFetch },
+        ));
+        assert.equal(calls, 1);
+        const body = JSON.parse(requestBody) as Record<string, unknown>;
+        assert.equal(body.stream, true);
+        if (testCase.protocol === 'anthropic-messages') {
+          assert.equal(body.max_tokens, 64_000);
+        } else {
+          assert.equal('max_tokens' in body, false);
+          assert.equal('max_output_tokens' in body, false);
+        }
+        if (testCase.protocol === 'openai-responses') assert.equal(body.store, false);
+      });
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }

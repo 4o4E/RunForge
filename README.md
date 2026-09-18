@@ -44,15 +44,15 @@ docker compose --env-file .env.docker -f deploy/compose.external-postgres.yml up
 
 两套 Compose 都在 `http://localhost:8080` 提供 Web 控制台、REST API 和 WebSocket。
 `.env.docker` 只保存当前 Compose 实际使用的数据库密钥、签名密钥和初始账号密码。LLM
-Provider 在服务启动后由管理员写入租户配置。镜像版本、端口、工具参数及外部服务地址直接在
+Provider 在服务启动后由系统管理员写入系统设置,再授权给租户使用。镜像版本、端口、工具参数及外部服务地址直接在
 对应 Compose 文件中修改。`runforge-data` 卷保存用户 workspace、Provider 记录和业务插件目录；
 自带 PostgreSQL 的版本额外使用 `runforge-postgres` 卷保存数据库。
 
 业务插件可以直接写入 `runforge-data` 卷内的 `/var/lib/runforge/business-plugins`，也可以在
 Compose 中为该目录增加只读 bind mount。Office 转换服务地址也直接写入 Compose。
 
-发布流程接受 `v*.*.*` tag。它会构建 `linux/amd64` 和 `linux/arm64` 镜像，推送版本标签与
-`latest`，验证匿名拉取，并创建带两套 Compose 和环境变量模板的 GitHub Release。
+发布流程接受 `v*.*.*` tag。它会构建 `linux/amd64` 镜像，推送版本标签与 `latest`，验证匿名
+拉取，并创建带两套 Compose 和环境变量模板的 GitHub Release。
 
 ## 源代码部署
 
@@ -95,7 +95,7 @@ DATABASE_URL=postgres://<user>:<password>@localhost:5432/runforge
 createdb runforge
 ```
 
-Prisma 7 migration 会创建核心执行表：`threads`、`runs`、`steps`、`messages`、`events`、`app_settings`，以及 `subagent_runs`、`shell_sessions`、`shell_commands`、`shell_command_logs`、`shell_session_events` 和数据源账号池相关表。其中 `app_settings` 保存按租户隔离的工具、MCP、LLM 和运行时能力配置。
+Prisma 7 migration 会创建核心执行表：`threads`、`runs`、`steps`、`messages`、`events`、`app_settings`，以及 `subagent_runs`、`shell_sessions`、`shell_commands`、`shell_command_logs`、`shell_session_events` 和数据源账号池相关表。`app_settings` 保存系统资源配置、租户资源授权和租户内业务插件配置。
 
 ### 3. 配置 `.env`
 
@@ -129,10 +129,10 @@ OFFICE_PREVIEW_CONVERTER_URL=http://127.0.0.1:3002
 
 Office 预览走后端转换：`doc/docx/ppt/pptx/xls/xlsx` 等文件先通过 `OFFICE_PREVIEW_CONVERTER_URL` 指向的 LibreOffice 转换服务生成 PDF，前端再用 PDF.js 只读渲染。RunForge 后端和转换服务在同一个 Docker 网络时，建议填服务名地址；如果转换服务单独绑定在宿主机端口，再填宿主机可访问地址。转换容器需要按部署环境挂载常用中英文字体，否则 LibreOffice 可能因字体替换产生版式偏移；字体目录或转换服务镜像变更后，递增 `OFFICE_PREVIEW_CACHE_VERSION` 可让旧 PDF 预览缓存自动失效。
 
-服务启动后，由系统管理员在 `/sys-admin` 选择 tenant 并配置 LLM 供应商。每个供应商直接选择
+服务启动后,系统管理员在 `/sys-admin/settings/*` 统一配置 LLM 供应商、运行时能力、MCP、Shell/沙箱和数据源,再到 `/sys-admin/tenant-access` 为租户授权可用的 LLM 供应商和数据源。`/sys-admin/tenants/:tenantId/*` 只管理该租户的用户、空间和业务插件。每个 LLM 供应商直接选择
 `OpenAI Responses`、`OpenAI Chat Completions` 或 `Anthropic Messages` 协议。模型名称匹配本地
 能力目录时会自动填写上下文窗口、输入类型和资料来源；未匹配时必须由管理员填写后才能保存。
-LLM API Key 只保存在 tenant 的数据库配置中。
+LLM API Key 保存在系统资源配置中,租户授权和空间配置只保存资源 ID。
 
 注意：旧配置 `AGENT_MAX_STEPS` 已不是当前代码读取项，请使用 `AGENT_HARD_STEP_CAP`。`TOOL_MAX_OUTPUT` 当前建议为 `40000`；即使数据库里旧值是 `100000`，运行时也会被代码限制到 40000。
 
@@ -160,7 +160,7 @@ pnpm db:migrate
 psql "$DATABASE_URL" -c "\dt"
 ```
 
-首次启动后，服务会把 env 中的工具默认配置补进 `app_settings`。当前开发库里这些 key 已存在：`tools.sandbox`、`tools.sandboxBackend`、`tools.workspaceRoot`、`tools.network`、`tools.maxOutput` 等；保存过设置后，数据库值会覆盖 env 默认值。如果要复现当前开发机的强沙箱配置，可在前端设置页保存 `sandbox=enforce`、`sandboxBackend=bwrap`、`workspaceRoot=<repo>/workspace`，并按任务需要决定是否开启网络。
+首次启动后,服务会把 env 中的工具默认配置补进系统 `app_settings`。当前开发库里这些 key 已存在：`tools.sandbox`、`tools.sandboxBackend`、`tools.workspaceRoot`、`tools.network`、`tools.maxOutput` 等；保存过系统设置后,数据库值会覆盖 env 默认值。`workspaceRoot` 保存基础目录，default 空间按租户和用户派生目录，其他空间按 thread ID 派生目录。如果要复现当前开发机的强沙箱配置,可在系统设置页保存 `sandbox=enforce`、`sandboxBackend=bwrap`、`workspaceRoot=<repo>/workspace`,并按任务需要决定是否开启网络。
 
 ```bash
 psql "$DATABASE_URL" -c "select key, value from app_settings order by key;"

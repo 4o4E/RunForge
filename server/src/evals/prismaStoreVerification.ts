@@ -7,7 +7,13 @@ import { pool } from '../db/pool.js';
 import { prisma } from '../db/prisma.js';
 import { PgStore } from '../store/pgStore.js';
 import { findSetting, updateSettingAtomically, upsertSettings } from '../store/settingsRepository.js';
-import { getToolSettings, tenantSettingsTemplateEntries } from '../settings.js';
+import {
+  getSystemLlmSettings,
+  getToolSettings,
+  saveTenantResourceAuthorization,
+  SYSTEM_RESOURCE_TENANT_ID,
+  tenantSettingsTemplateEntries,
+} from '../settings.js';
 import { DefaultSpaceImmutableError, RunActiveError } from '../store/types.js';
 import { newArtifactId, newSpaceId } from '../id.js';
 import { SpaceAccessService } from '../spaces/access.js';
@@ -49,6 +55,7 @@ const runAdmission = new RunAdmissionService(store, spaceConfig);
 const externalRepository = new PrismaExternalRepository();
 const artifactVerificationRoot = await mkdtemp(join(tmpdir(), 'runforge-prisma-artifact-'));
 let runtimeServer: Server | null = null;
+let systemDatasourceId: string | null = null;
 
 try {
   const provisioned = await store.createTenantWithOwner({
@@ -64,8 +71,17 @@ try {
   assert.equal((await store.findTenant(tenantId))?.id, tenant.id);
   assert.equal(tenant.default_space_id, defaultSpace.id);
   assert.equal((await store.getDefaultSpace(tenantId))?.id, defaultSpace.id);
-  assert.notEqual(await findSetting(tenantId, 'llm.settings'), undefined);
+  assert.deepEqual(await findSetting(tenantId, 'tenant.resourceAuthorization'), {
+    llmProviderIds: [],
+    datasourceIds: [],
+  });
+  assert.equal(await findSetting(tenantId, 'llm.settings'), undefined);
   assert.equal((await store.listTenants()).some((item) => item.id === tenant.id), true);
+  const systemLlmProviderIds = (await getSystemLlmSettings()).providers.map((provider) => provider.id);
+  await saveTenantResourceAuthorization(tenantId, {
+    llmProviderIds: systemLlmProviderIds,
+    datasourceIds: [],
+  });
 
   const otherTenant = await store.createTenantWithOwner({
     id: otherTenantId,
@@ -454,13 +470,18 @@ try {
       },
     },
   }]);
-  const guardedDatasource = await createDatasource(scope, {
+  const guardedDatasource = await createDatasource({ tenantId: SYSTEM_RESOURCE_TENANT_ID }, {
     name: 'workload-readonly-verification',
     type: 'postgres',
     connection: { host: '127.0.0.1', port: 5432, database: 'unused' },
     adminConfig: {},
   });
-  await createPermissionProfile(scope, guardedDatasource.id, {
+  systemDatasourceId = guardedDatasource.id;
+  await saveTenantResourceAuthorization(tenantId, {
+    llmProviderIds: systemLlmProviderIds,
+    datasourceIds: [guardedDatasource.id],
+  });
+  await createPermissionProfile({ tenantId: SYSTEM_RESOURCE_TENANT_ID }, guardedDatasource.id, {
     name: 'writer',
     mode: 'limited_write',
   });
@@ -559,11 +580,10 @@ try {
   await executeRun(cleanupRun.id, {
     provider: {
       name: 'resource-cleanup-verification',
-      async complete() {
+      async completeStream() {
         return { content: 'cleanup done', toolCalls: [] };
       },
     },
-    stream: false,
     publish: () => {},
     hardStepCap: 2,
     generateThreadTitle: false,
@@ -580,7 +600,7 @@ try {
 
   const verificationProvider: Provider = {
     name: 'prisma-verification',
-    async complete(_messages, _tools, options) {
+    async completeStream(_messages, _tools, _onDelta, options) {
       const response = await options!.fetch!('https://provider.verify/v1/chat?api_key=verification-query-secret', {
         method: 'POST',
         headers: { Authorization: 'Bearer verification-secret', 'Content-Type': 'application/json' },
@@ -725,6 +745,7 @@ try {
 } finally {
   if (runtimeServer) await new Promise<void>((resolve) => runtimeServer!.close(() => resolve()));
   await rm(artifactVerificationRoot, { recursive: true, force: true });
+  if (systemDatasourceId) await prisma.datasources.deleteMany({ where: { id: systemDatasourceId } });
   await prisma.app_settings.deleteMany({ where: { tenant_id: tenantId } });
   await prisma.threads.deleteMany({ where: { tenant_id: tenantId } });
   await prisma.auth_tokens.deleteMany({ where: { tenant_id: tenantId } });

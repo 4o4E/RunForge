@@ -1,19 +1,19 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, KeyRound, Layers3, LogOut, Package, Users } from 'lucide-react';
+import { ArrowLeft, Layers3, LogOut, Package, Users } from 'lucide-react';
 import { getCurrentUser, logout } from '../api';
 import type { TenantUserSummary } from '@runforge/contracts';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { NavGroup, SectionButton } from '@/components/ui/settings-nav';
-import { AdminUsersPanel } from './panels/AdminUsersPanel';
-import { AdminTokensPanel } from './panels/AdminTokensPanel';
+import { TenantUsersPanel } from '@/components/tenants/TenantUsersPanel';
 import { SpaceManagementPanel } from '@/components/spaces/SpaceManagementPanel';
 import { createTenantSpaceControlApi } from '@/spaceControlApi';
 import { BusinessPluginManagementPanel } from '@/components/businessPlugins/BusinessPluginManagementPanel';
 import { createTenantBusinessPluginControlApi } from '@/businessPluginControlApi';
+import { createTenantUsersControlApi } from '@/tenantUsersControlApi';
 
-type AdminPanel = 'users' | 'tokens' | 'spaces' | 'business-plugins';
+type AdminPanel = 'users' | 'spaces' | 'business-plugins';
 
 export function AdminApp() {
   const [user, setUser] = useState<TenantUserSummary | null>(null);
@@ -25,6 +25,10 @@ export function AdminApp() {
   );
   const businessPluginControlApi = useMemo(
     () => user ? createTenantBusinessPluginControlApi(user.tenantId) : null,
+    [user?.tenantId],
+  );
+  const tenantUsersControlApi = useMemo(
+    () => user ? createTenantUsersControlApi(user.tenantId) : null,
     [user?.tenantId],
   );
 
@@ -79,17 +83,10 @@ export function AdminApp() {
       <div className="grid min-h-0 flex-1 items-start gap-4 p-6 lg:grid-cols-[14rem_minmax(0,1fr)]">
         <Card className="h-full min-h-0 overflow-hidden rounded-lg shadow-sm">
           <CardContent className="grid max-h-full gap-2 overflow-y-auto p-3">
-            <NavGroup label="成员与访问">
+            <NavGroup label="租户管理">
               <SectionButton active={panel === 'users'} icon={<Users className="h-4 w-4" />} onClick={() => setPanel('users')}>
                 用户管理
               </SectionButton>
-              {user.role === 'owner' && (
-                <SectionButton active={panel === 'tokens'} icon={<KeyRound className="h-4 w-4" />} onClick={() => setPanel('tokens')}>
-                  API Token
-                </SectionButton>
-              )}
-            </NavGroup>
-            <NavGroup label="运行空间">
               <SectionButton active={panel === 'spaces'} icon={<Layers3 className="h-4 w-4" />} onClick={() => setPanel('spaces')}>
                 空间管理
               </SectionButton>
@@ -101,8 +98,12 @@ export function AdminApp() {
         </Card>
 
         <div className="h-full min-h-0 overflow-hidden">
-          {panel === 'users' && <AdminUsersPanel tenantId={user.tenantId} currentUserId={user.id} currentRole={user.role} />}
-          {panel === 'tokens' && user.role === 'owner' && <AdminTokensPanel tenantId={user.tenantId} />}
+          {panel === 'users' && tenantUsersControlApi && (
+            <TenantUsersPanel
+              api={tenantUsersControlApi}
+              actor={{ kind: 'tenant', userId: user.id, role: user.role }}
+            />
+          )}
           {panel === 'spaces' && spaceControlApi && <SpaceManagementPanel api={spaceControlApi} />}
           {panel === 'business-plugins' && businessPluginControlApi && <BusinessPluginManagementPanel api={businessPluginControlApi} />}
         </div>

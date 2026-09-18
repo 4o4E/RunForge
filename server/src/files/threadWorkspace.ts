@@ -6,6 +6,8 @@ import {
 } from '../spaces/access.js';
 import { store as defaultStore } from '../store/index.js';
 import type { Store, ThreadRow } from '../store/types.js';
+import { getSystemToolSettings as readSystemToolSettings } from '../settings.js';
+import type { ToolSettings } from '@runforge/contracts';
 import { resolveWorkspaceRoot, resolveWorkspaceRootForThread } from './workspaceRoot.js';
 
 type TenantIdentity = Extract<IdentityContext, { scope: 'tenant' }>;
@@ -31,6 +33,7 @@ export class ThreadWorkspaceAccessService {
   constructor(
     private readonly store: Store = defaultStore,
     private readonly spaces: SpaceAccessService = defaultSpaceAccess,
+    private readonly getSystemToolSettings: () => Promise<Pick<ToolSettings, 'workspaceRoot'>> = readSystemToolSettings,
   ) {}
 
   /** Web 文件入口的授权规则：
@@ -43,9 +46,10 @@ export class ThreadWorkspaceAccessService {
     access: 'read' | 'write',
   ): Promise<ThreadWorkspaceResolution> {
     if (!threadId) {
+      const { workspaceRoot } = await this.getSystemToolSettings();
       return {
         kind: 'user',
-        root: resolveWorkspaceRoot(identity),
+        root: resolveWorkspaceRoot(identity, workspaceRoot),
         threadId: null,
       };
     }
@@ -87,7 +91,8 @@ export class ThreadWorkspaceAccessService {
   private async resolveThread(thread: ThreadRow): Promise<ThreadWorkspaceResolution> {
     const tenant = await this.store.findTenant(thread.tenant_id);
     if (!tenant) throw new ThreadWorkspaceAccessError(404, 'TENANT_NOT_FOUND', 'tenant 不存在');
-    const resolved = resolveWorkspaceRootForThread(thread, tenant);
+    const { workspaceRoot } = await this.getSystemToolSettings();
+    const resolved = resolveWorkspaceRootForThread(thread, tenant, workspaceRoot);
     return {
       ...resolved,
       threadId: resolved.kind === 'thread' ? thread.id : null,

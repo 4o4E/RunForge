@@ -8,10 +8,10 @@ import {
   type SpaceOptions,
 } from '@runforge/contracts';
 import { agentContextSettings, config as instanceConfig } from '../config.js';
-import { listDatasources } from '../datasources/accountPool.js';
+import { listAuthorizedDatasources } from '../datasources/accountPool.js';
 import {
   getLlmSettings,
-  getMcpSettings,
+  getSystemMcpSettings,
   getRuntimeCapabilitiesSettings,
   llmModelOptions,
 } from '../settings.js';
@@ -38,7 +38,7 @@ export class SpaceConfigError extends Error {
 
 export interface TenantSpaceCapabilityCatalog {
   defaultModelRef: string;
-  modelContextWindows: Record<string, number>;
+  modelContexts: Record<string, { contextWindow: number; compactionThreshold: number }>;
   modelRefs: string[];
   modelOptions: LlmModelOption[];
   toolNames: string[];
@@ -150,10 +150,15 @@ function enabledRuntimeCapabilities(
   return capabilities;
 }
 
-function contextWindows(settings: Awaited<ReturnType<typeof getLlmSettings>>): Record<string, number> {
+function modelContexts(settings: Awaited<ReturnType<typeof getLlmSettings>>): TenantSpaceCapabilityCatalog['modelContexts'] {
   return Object.fromEntries(settings.providers.flatMap((provider) => provider.models.flatMap((model) => {
-    const contextWindow = provider.modelCapabilities.find((capability) => capability.model === model)?.contextWindow;
-    return contextWindow ? [[`${provider.id}:${model}`, contextWindow] as const] : [];
+    const capability = provider.modelCapabilities.find((item) => item.model === model);
+    return capability?.contextWindow && capability.compactionThreshold
+      ? [[`${provider.id}:${model}`, {
+          contextWindow: capability.contextWindow,
+          compactionThreshold: capability.compactionThreshold,
+        }] as const]
+      : [];
   })));
 }
 
@@ -164,7 +169,12 @@ async function loadCatalogFromTenant(tenantId: string): Promise<TenantSpaceCapab
     const modelRef = `default:${instanceConfig.llm.model}`;
     return {
       defaultModelRef: modelRef,
-      modelContextWindows: { [modelRef]: instanceConfig.agent.modelContextWindow },
+      modelContexts: {
+        [modelRef]: {
+          contextWindow: instanceConfig.agent.modelContextWindow,
+          compactionThreshold: instanceConfig.agent.contextBudget,
+        },
+      },
       modelRefs: [modelRef],
       modelOptions: [{
         ref: modelRef,
@@ -192,9 +202,9 @@ async function loadCatalogFromTenant(tenantId: string): Promise<TenantSpaceCapab
 
   const [llm, mcp, runtime, datasources, pluginDefinitions, pluginSettings] = await Promise.all([
     getLlmSettings({ tenantId }),
-    getMcpSettings({ tenantId }),
+    getSystemMcpSettings(),
     getRuntimeCapabilitiesSettings({ tenantId }),
-    listDatasources({ tenantId }),
+    listAuthorizedDatasources({ tenantId }),
     businessPluginRegistry.list(tenantId),
     getBusinessPluginTenantSettings(tenantId),
   ]);
@@ -205,7 +215,7 @@ async function loadCatalogFromTenant(tenantId: string): Promise<TenantSpaceCapab
     .map((item) => item.definition);
   return {
     defaultModelRef: llm.defaultModelRef,
-    modelContextWindows: contextWindows(llm),
+    modelContexts: modelContexts(llm),
     modelRefs: models.map((model) => model.ref),
     modelOptions: models,
     toolNames: builtinToolNames(),
@@ -352,13 +362,14 @@ export class SpaceConfigService {
     if (!allowedModelRefs.includes(modelRef)) {
       throw new SpaceConfigError(`模型未被当前空间允许：${modelRef}`);
     }
-    const contextWindow = catalog.modelContextWindows[modelRef];
-    if (!contextWindow) throw new SpaceConfigError(`模型缺少上下文窗口配置：${modelRef}`);
-    const defaultContext = agentContextSettings(contextWindow);
-    // instance 预算是所有空间的安全上限；即使环境变量误设得比模型窗口大，
-    // run 快照也不能记录一个超过模型窗口的预算。
+    const modelContext = catalog.modelContexts[modelRef];
+    if (!modelContext) throw new SpaceConfigError(`模型缺少上下文窗口或压缩阈值配置：${modelRef}`);
+    const { contextWindow } = modelContext;
+    const defaultContext = agentContextSettings(contextWindow, modelContext.compactionThreshold);
+    // 模型阈值和 instance 预算都是空间预算的上限；run 副本始终记录真正生效的最小值。
+    const configuredContextBudget = config.model.contextBudget;
     const contextBudget = Math.min(
-      config.model.contextBudget ?? defaultContext.contextBudget,
+      configuredContextBudget ?? defaultContext.contextBudget,
       defaultContext.contextBudget,
       contextWindow,
     );
@@ -399,9 +410,9 @@ export class SpaceConfigService {
         allowedModelRefs,
         contextWindow,
         contextBudget,
-        contextBudgetSource: config.model.contextBudget === null
-          ? defaultContext.contextBudgetSource
-          : 'space-config',
+        contextBudgetSource: configuredContextBudget !== null && configuredContextBudget < defaultContext.contextBudget
+          ? 'space-config'
+          : defaultContext.contextBudgetSource,
       },
       capabilities: { tools, mcpServers, businessPlugins, runtime },
       external: { ...config.external },

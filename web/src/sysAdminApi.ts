@@ -1,10 +1,14 @@
 import type {
+  CreateUserInput,
   CreateSystemAdminInput,
   CreateTenantInput,
   CreateTenantResponse,
   SystemAdminSummary,
   TenantSummary,
+  TenantResourceAuthorization,
+  TenantResourceAuthorizationView,
   TenantUserSummary,
+  UpdateUserInput,
 } from '@runforge/contracts';
 import { createAuthSession } from './lib/authSession.js';
 
@@ -78,6 +82,33 @@ export const updateSystemTenantStatus = (id: string, status: 'active' | 'suspend
 export const listSystemTenantUsers = (tenantId: string) =>
   sysAdminAuthFetch(`/api/system/tenants/${encodeURIComponent(tenantId)}/users`)
     .then(json<{ users: TenantUserSummary[] }>);
+
+export const createSystemTenantUser = (tenantId: string, input: CreateUserInput) =>
+  sysAdminAuthFetch(`/api/system/tenants/${encodeURIComponent(tenantId)}/users`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  }).then(json<TenantUserSummary>);
+
+export const updateSystemTenantUser = (tenantId: string, userId: string, input: UpdateUserInput) =>
+  sysAdminAuthFetch(`/api/system/tenants/${encodeURIComponent(tenantId)}/users/${encodeURIComponent(userId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  }).then(json<TenantUserSummary>);
+
+export const getTenantResourceAuthorization = (tenantId: string) =>
+  sysAdminAuthFetch(`/api/system/tenant-access/${encodeURIComponent(tenantId)}`)
+    .then(json<TenantResourceAuthorizationView>);
+
+export const updateTenantResourceAuthorization = (
+  tenantId: string,
+  input: TenantResourceAuthorization,
+) => sysAdminAuthFetch(`/api/system/tenant-access/${encodeURIComponent(tenantId)}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(input),
+}).then(json<TenantResourceAuthorizationView>);
 
 export const listSystemAdminAccounts = () =>
   sysAdminAuthFetch('/api/system/admins').then(json<{ admins: SystemAdminSummary[] }>);

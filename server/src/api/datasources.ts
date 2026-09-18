@@ -4,7 +4,7 @@ import {
   createPermissionProfile,
   DatasourceError,
   ensureReadonlyPermissionProfile,
-  listDatasources,
+  listAuthorizedDatasources,
   poolDefaults,
   updateDatasource,
   updatePermissionProfile,
@@ -54,7 +54,7 @@ datasourcesApi.get('/', async (_req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
   try {
-    res.json({ datasources: (await listDatasources(scope)).map(publicDatasource) });
+    res.json({ datasources: (await listAuthorizedDatasources(scope)).map(publicDatasource) });
   } catch (err) {
     handleError(res, err);
   }

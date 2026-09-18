@@ -12,6 +12,7 @@ import { signTenantAccessToken } from '../auth/jwt.js';
 import { buildApp, listen, seedOwner } from './testHelpers.js';
 import { spaceAccess } from '../spaces/access.js';
 import { store } from '../store/index.js';
+import { getSystemToolSettings, saveToolSettings } from '../settings.js';
 
 test('render preview keeps long lines intact', () => {
   const longLine = `const DATA = ${'x'.repeat(13_000)};`;
@@ -92,9 +93,9 @@ test('office pdf cache key changes when source metadata changes', () => {
 });
 
 test('file content API saves text with version conflict protection', async () => {
-  const previousWorkspaceRoot = config.tools.workspaceRoot;
+  const previousToolSettings = await getSystemToolSettings();
   const base = await mkdtemp(join(tmpdir(), 'runforge-file-content-'));
-  config.tools.workspaceRoot = base;
+  await saveToolSettings({ tenantId: 'default' }, { ...previousToolSettings, workspaceRoot: base });
   try {
     const owner = await seedOwner('tn_file_content', 'owner@file-content.test', 'pw');
     const token = signTenantAccessToken({ id: owner.id, tenantId: 'tn_file_content', role: 'owner' });
@@ -130,16 +131,16 @@ test('file content API saves text with version conflict protection', async () =>
       close();
     }
   } finally {
-    config.tools.workspaceRoot = previousWorkspaceRoot;
+    await saveToolSettings({ tenantId: 'default' }, previousToolSettings);
     await rm(base, { recursive: true, force: true });
   }
 });
 
 test('file API resolves non-default thread workspace and binds signed links to the thread', async () => {
-  const previousWorkspaceRoot = config.tools.workspaceRoot;
+  const previousToolSettings = await getSystemToolSettings();
   const previousShareSecret = config.auth.shareSecret;
   const base = await mkdtemp(join(tmpdir(), 'runforge-thread-files-'));
-  config.tools.workspaceRoot = base;
+  await saveToolSettings({ tenantId: 'default' }, { ...previousToolSettings, workspaceRoot: base });
   config.auth.shareSecret = 'thread-file-share-secret';
   try {
     const tenantId = 'tn_thread_files';
@@ -227,7 +228,7 @@ test('file API resolves non-default thread workspace and binds signed links to t
       close();
     }
   } finally {
-    config.tools.workspaceRoot = previousWorkspaceRoot;
+    await saveToolSettings({ tenantId: 'default' }, previousToolSettings);
     config.auth.shareSecret = previousShareSecret;
     await rm(base, { recursive: true, force: true });
   }

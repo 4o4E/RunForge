@@ -26,7 +26,11 @@ import { PrismaProviderObservationRepository } from '../llm/observability/reposi
 import { ProviderTraceWriter } from '../llm/observability/trace.js';
 import { ProviderRunner } from '../llm/providerRunner.js';
 import type { Provider } from '../llm/types.js';
-import { tenantSettingsTemplateEntries } from '../settings.js';
+import {
+  getSystemLlmSettings,
+  saveTenantResourceAuthorization,
+  tenantSettingsTemplateEntries,
+} from '../settings.js';
 import { SpaceAccessService } from '../spaces/access.js';
 import { SpaceConfigService } from '../spaces/config.js';
 import { PgStore } from '../store/pgStore.js';
@@ -65,7 +69,7 @@ let activeUpstreamRequests = 0;
 let maxConcurrentUpstreamRequests = 0;
 const provider: Provider = {
   name: 'space-runtime-verification',
-  async complete(messages, tools, options) {
+  async completeStream(messages, tools, _onDelta, options) {
     const response = await options!.fetch!('https://provider.verify/v1/chat?key=space-runtime-query-secret', {
       method: 'POST',
       headers: {
@@ -144,7 +148,6 @@ async function executeObservedRun(runId: string, scope: Scope): Promise<string> 
       retries: 0,
     },
     providerRunner,
-    stream: false,
     publish: () => {},
     hardStepCap: 3,
     toolSettings: toolSettings(workspaceRoot),
@@ -155,7 +158,7 @@ async function executeObservedRun(runId: string, scope: Scope): Promise<string> 
     ),
   });
   const run = await store.getRun(scope, runId);
-  assert.equal(run?.status, 'done');
+  assert.equal(run?.status, 'done', run?.error ?? `run ${runId} 不存在`);
   return workspaceRoot;
 }
 
@@ -180,6 +183,11 @@ try {
     ownerEmail: `owner-${suffix}@space-e2e.test`,
     ownerPasswordHash: 'verification-only',
     settingsTemplate: tenantSettingsTemplateEntries(),
+  });
+  const systemLlm = await getSystemLlmSettings();
+  await saveTenantResourceAuthorization(tenantId, {
+    llmProviderIds: systemLlm.providers.map((provider) => provider.id),
+    datasourceIds: [],
   });
   const viewer = await store.createUser({
     tenantId,
@@ -264,6 +272,11 @@ try {
     source: source('app-a', 'artifact'),
   }) as ExternalArtifactUploadReceipt;
   assert.equal(artifactReplay.artifact.id, artifactA.artifact.id);
+  const artifactBeforeRun = await externalCommands.execute(tokenA, {
+    operation: 'artifact.get',
+    artifactId: artifactA.artifact.id,
+  }) as ExternalArtifactGetResponse;
+  assert.equal(Buffer.from(artifactBeforeRun.contentBase64, 'base64').toString('utf8'), artifactContent.toString('utf8'));
   await expectExternalError(
     externalCommands.execute(tokenB, { operation: 'artifact.get', artifactId: artifactA.artifact.id }),
     'ARTIFACT_NOT_FOUND',
@@ -322,10 +335,13 @@ try {
   const webThread = await store.createThread(ownerScope, 'default Web 验收');
   const webRun = await store.createRun(ownerScope, webThread.id, 'DEFAULT_WEB_INPUT');
   await executeObservedRun(webRun.id, ownerScope);
-  const [workspaceA] = await Promise.all([
+  const concurrentRuns = await Promise.allSettled([
     executeObservedRun(runA.runId, scheduledRuns.get(runA.runId)!),
     executeObservedRun(runB.runId, scheduledRuns.get(runB.runId)!),
   ]);
+  const failedConcurrentRun = concurrentRuns.find((result) => result.status === 'rejected');
+  if (failedConcurrentRun?.status === 'rejected') throw failedConcurrentRun.reason;
+  const workspaceA = (concurrentRuns[0] as PromiseFulfilledResult<string>).value;
   assert.ok(maxConcurrentUpstreamRequests >= 2, '两个外部 run 应实际并发进入上游请求');
 
   const runAView = await externalCommands.execute(tokenA, { operation: 'run.get', runId: runA.runId }) as ExternalRunView;

@@ -30,9 +30,9 @@ const businessPlugin: BusinessPluginDefinition = {
 
 const catalog: TenantSpaceCapabilityCatalog = {
   defaultModelRef: 'main:model-a',
-  modelContextWindows: {
-    'main:model-a': 100_000,
-    'main:model-b': 20_000,
+  modelContexts: {
+    'main:model-a': { contextWindow: 100_000, compactionThreshold: 50_000 },
+    'main:model-b': { contextWindow: 20_000, compactionThreshold: 10_000 },
   },
   modelRefs: ['main:model-a', 'main:model-b'],
   modelOptions: [
@@ -124,7 +124,7 @@ test('space config: run 接纳解析显式能力并从 external 空间双重移�
 
   assert.equal(resolved.modelRef, 'main:model-b');
   assert.equal(resolved.snapshot.model.contextBudget, 10_000);
-  assert.equal(resolved.snapshot.model.contextBudgetSource, 'space-config');
+  assert.equal(resolved.snapshot.model.contextBudgetSource, 'model-compaction-threshold');
   assert.deepEqual(resolved.snapshot.capabilities.tools, ['file_read']);
   assert.deepEqual(resolved.snapshot.capabilities.mcpServers, ['docs']);
   assert.deepEqual(resolved.snapshot.capabilities.businessPlugins, ['crm']);
@@ -134,6 +134,28 @@ test('space config: run 接纳解析显式能力并从 external 空间双重移�
   assert.equal(resolved.snapshot.systemPrompt, '只输出审计结果');
   assert.equal(JSON.stringify(resolved.runtimeCapabilitiesSnapshot).includes('must-not-enter-run-snapshot'), false);
   assert.deepEqual(resolved.runtimeCapabilitiesSnapshot.image.models, [{ id: 'image-main', label: 'Image Main' }]);
+});
+
+test('space config: 空间预算只有进一步收紧模型阈值时才成为有效来源', async () => {
+  const service = configService();
+  const space = {
+    id: 'sp_tighter_budget',
+    tenant_id: 'tn_config',
+    mode: 'web' as const,
+    name: 'Tighter Budget',
+    execution_user_id: null,
+    config: normalizeSpaceConfig({ model: { contextBudget: 40_000 } }),
+    config_version: 1,
+    created_by_user_id: null,
+    visible_user_ids: [],
+    deleted_at: null,
+    created_at: new Date(0).toISOString(),
+    updated_at: new Date(0).toISOString(),
+  };
+
+  const resolved = await service.resolveForRun('tn_config', space);
+  assert.equal(resolved.snapshot.model.contextBudget, 40_000);
+  assert.equal(resolved.snapshot.model.contextBudgetSource, 'space-config');
 });
 
 test('space config: 业务插件声明的系统资源必须由空间统一 WORKLOAD_TOKEN 授权', async () => {
@@ -170,7 +192,7 @@ test('space config: 继承的 instance 预算也不能超过模型窗口', async
     ...structuredClone(catalog),
     defaultModelRef: 'main:model-small',
     modelRefs: ['main:model-small'],
-    modelContextWindows: { 'main:model-small': 8_000 },
+    modelContexts: { 'main:model-small': { contextWindow: 8_000, compactionThreshold: 8_000 } },
   }));
   const previous = process.env.LLM_CONTEXT_BUDGET;
   process.env.LLM_CONTEXT_BUDGET = '100000';

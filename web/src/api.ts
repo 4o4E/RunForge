@@ -1,9 +1,6 @@
 import type {
   AgentEvent,
-  ApiTokenSummary,
   AskUserAnswer,
-  CreateApiTokenInput,
-  CreateApiTokenResponse,
   CreateUserInput,
   Datasource,
   DatasourceDetailResponse,
@@ -13,28 +10,16 @@ import type {
   FilePreview,
   FileTextContent,
   FileTextSaveResponse,
-  LlmProviderChatTestResult,
-  LlmProviderPingResult,
-  LlmProviderProbeResult,
-  LlmProviderSettings,
-  LlmSettings,
   LlmSettingsOptions,
-  McpServerProbeResult,
-  McpServerSettings,
-  McpSettings,
-  McpSettingsOptions,
   PageState,
   PermissionProfile,
   PermissionProfileInput,
   RemoteFileInfo,
   RemoteFileList,
-  RuntimeCapabilitiesSettings,
   TenantUserRole,
   ShellCommand,
   ShellCommandAttachment,
   ShellCommandLog,
-  ShellCommandScanInput,
-  ShellCommandScanResult,
   ShellSession,
   SpaceSummary,
   SubagentRun,
@@ -44,8 +29,6 @@ import type {
   ThreadForkResponse,
   ThreadSearchResponse,
   ThreadUpdateInput,
-  ToolSettings,
-  ToolSettingsOptions,
   UpdateUserInput,
   WebPushPublicKeyResponse,
   WebPushSubscriptionInput,
@@ -421,82 +404,7 @@ export const uploadLocalFile = (path: string, contentBase64: string, threadId?: 
     body: JSON.stringify({ path, contentBase64, threadId: threadId ?? undefined }),
   }).then(json<{ path: string; size: number }>);
 
-export const getToolSettings = () => authFetch('/api/settings/tools').then(json<ToolSettings>);
-
-export const getToolSettingsOptions = () => authFetch('/api/settings/tools/options').then(json<ToolSettingsOptions>);
-
-export const scanShellCommandOptions = (input: ShellCommandScanInput) =>
-  authFetch('/api/settings/tools/shell-commands/scan', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
-  }).then(json<ShellCommandScanResult>);
-
-export const updateToolSettings = (settings: ToolSettings) =>
-  authFetch('/api/settings/tools', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(settings),
-  }).then(json<ToolSettings>);
-
-export const getMcpSettings = () => authFetch('/api/settings/mcp').then(json<McpSettings>);
-
-export const getMcpSettingsOptions = () => authFetch('/api/settings/mcp/options').then(json<McpSettingsOptions>);
-
-export const updateMcpSettings = (settings: McpSettings) =>
-  authFetch('/api/settings/mcp', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(settings),
-  }).then(json<McpSettings>);
-
-export const probeMcpServer = (server: McpServerSettings) =>
-  authFetch('/api/settings/mcp/server/probe', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ server }),
-  }).then(json<McpServerProbeResult>);
-
-export const getLlmSettings = () => authFetch('/api/settings/llm').then(json<LlmSettings>);
-
 export const getLlmSettingsOptions = () => authFetch('/api/settings/llm/options').then(json<LlmSettingsOptions>);
-
-export const updateLlmSettings = (settings: LlmSettings) =>
-  authFetch('/api/settings/llm', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(settings),
-  }).then(json<LlmSettings>);
-
-export const getRuntimeCapabilitiesSettings = () => authFetch('/api/settings/runtime-capabilities').then(json<RuntimeCapabilitiesSettings>);
-
-export const updateRuntimeCapabilitiesSettings = (settings: RuntimeCapabilitiesSettings) =>
-  authFetch('/api/settings/runtime-capabilities', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(settings),
-  }).then(json<RuntimeCapabilitiesSettings>);
-
-export const probeLlmProviderModels = (provider: LlmProviderSettings) =>
-  authFetch('/api/settings/llm/provider/models', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ provider }),
-  }).then(json<LlmProviderProbeResult>);
-
-export const pingLlmProvider = (provider: LlmProviderSettings) =>
-  authFetch('/api/settings/llm/provider/ping', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ provider }),
-  }).then(json<LlmProviderPingResult>);
-
-export const testLlmProviderChat = (provider: LlmProviderSettings, model: string, input: string) =>
-  authFetch('/api/settings/llm/provider/chat-test', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ provider, model, input }),
-  }).then(json<LlmProviderChatTestResult>);
 
 export const getPageState = () => authFetch('/api/settings/page-state').then(json<PageState>);
 
@@ -507,7 +415,7 @@ export const updatePageState = (state: PageState) =>
     body: JSON.stringify(state),
   }).then(json<PageState>);
 
-// --- Tenant admin (/admin 页面用：本租户用户管理 + API token 管理) ---
+// --- Tenant admin (/admin 页面用：本租户用户管理) ---
 
 export const getCurrentUser = () => authFetch('/api/tenants/me').then(json<TenantUserSummary>);
 
@@ -527,21 +435,6 @@ export const updateTenantUser = (tenantId: string, userId: string, input: Update
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   }).then(json<TenantUserSummary>);
-
-export const listApiTokens = (tenantId: string) =>
-  authFetch(`/api/tenants/${tenantId}/tokens`).then(json<{ tokens: ApiTokenSummary[] }>);
-
-export const createApiToken = (tenantId: string, input: CreateApiTokenInput) =>
-  authFetch(`/api/tenants/${tenantId}/tokens`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
-  }).then(json<CreateApiTokenResponse>);
-
-export const revokeApiToken = (tenantId: string, tokenId: string) =>
-  authFetch(`/api/tenants/${tenantId}/tokens/${tokenId}`, { method: 'DELETE' }).then((res) => {
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  });
 
 export const listDatasources = () =>
   authFetch('/api/datasources').then(json<{ datasources: Datasource[] }>);

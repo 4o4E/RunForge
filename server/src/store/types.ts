@@ -608,7 +608,7 @@ export interface Store {
   disablePushSubscription(endpoint: string, error?: string | null): Promise<void>;
 
   // 多租户改造 Phase 1(docs/multi-tenancy-design.md §4)。
-  /** tenant、首个 owner、独立配置副本和 default space 必须在同一事务内创建。 */
+  /** tenant、首个 owner、初始租户设置和 default space 必须在同一事务内创建。 */
   createTenantWithOwner(input: CreateTenantWithOwnerInput): Promise<TenantProvisioningResult>;
   findTenant(id: string): Promise<TenantRow | null>;
   listTenants(): Promise<TenantRow[]>;

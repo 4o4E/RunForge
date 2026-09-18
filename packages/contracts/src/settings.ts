@@ -81,6 +81,8 @@ export interface LlmModelCapabilitySettings {
   model: string;
   contextWindow: number | null;
   contextWindowSource: LlmModelCapabilitySource;
+  compactionThreshold: number | null;
+  compactionThresholdSource: LlmModelCapabilitySource;
   inputModalities: LlmInputModality[];
   inputModalitiesSource: LlmModelCapabilitySource;
   references: LlmModelCapabilityReference[];
@@ -96,10 +98,8 @@ export interface LlmProviderSettings {
   models: string[];
   modelCapabilities: LlmModelCapabilitySettings[];
   defaultModel: string;
-  maxTokens: number | null;
   timeoutMs: number;
   retries: number;
-  stream: boolean;
 }
 
 export interface LlmModelOption {
@@ -119,6 +119,31 @@ export interface LlmSettings {
 export interface LlmSettingsOptions {
   defaultModelRef: string;
   models: LlmModelOption[];
+}
+
+export interface TenantResourceAuthorization {
+  llmProviderIds: string[];
+  datasourceIds: string[];
+}
+
+export interface TenantResourceAuthorizationCatalog {
+  llmProviders: Array<{
+    id: string;
+    label: string;
+    models: string[];
+  }>;
+  datasources: Array<{
+    id: string;
+    name: string;
+    type: string;
+    status: string;
+    enabled: boolean;
+  }>;
+}
+
+export interface TenantResourceAuthorizationView {
+  authorization: TenantResourceAuthorization;
+  catalog: TenantResourceAuthorizationCatalog;
 }
 
 export type RuntimeCapabilityName = 'datasource.credentials' | 'llm' | 'image' | 'video';

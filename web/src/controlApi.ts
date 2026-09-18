@@ -77,8 +77,8 @@ function jsonBody(method: 'POST' | 'PUT' | 'PATCH', body: unknown): RequestInit 
   return { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
 }
 
-export function createSystemSettingsControlApi(tenantId: string): SettingsControlApi {
-  const base = `/api/system/tenants/${encodeURIComponent(tenantId)}/settings`;
+export function createSystemSettingsControlApi(): SettingsControlApi {
+  const base = '/api/system/settings';
   return {
     getToolSettings: () => systemJson(`${base}/tools`),
     getToolSettingsOptions: () => systemJson(`${base}/tools/options`),
@@ -100,8 +100,8 @@ export function createSystemSettingsControlApi(tenantId: string): SettingsContro
   };
 }
 
-export function createSystemDatasourceControlApi(tenantId: string): DatasourceControlApi {
-  const base = `/api/system/tenants/${encodeURIComponent(tenantId)}/datasources`;
+export function createSystemDatasourceControlApi(): DatasourceControlApi {
+  const base = '/api/system/datasources';
   return {
     listDatasources: () => systemJson(base),
     getDatasourceDetail: (id) => systemJson(`${base}/${encodeURIComponent(id)}`),

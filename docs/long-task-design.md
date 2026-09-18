@@ -27,12 +27,14 @@
 
 收敛到**分层级联**，而非一上来就 LLM 摘要：
 
-1. **context rot 是真问题**：输入越长质量越差，即使没到窗口上限 → **保守设预算**（如 1M 窗口只用 ~50%）。成功指标是任务完成率/决策一致性，不是省了多少 token。
-2. **压缩级联，从便宜到贵**：① 压工具输出 → ② 滑动窗口裁旧消息 → ③ 实在不行才 LLM 摘要。
+1. **context rot 是真问题**：输入越长质量越差，即使没到窗口上限 → 每个模型配置明确的
+   压缩阈值。目录默认值为上下文长度的 75%；管理员可以把高成本的长上下文 GPT 模型改为
+   200K tokens。成功指标是任务完成率和决策一致性。
+2. **压缩级联，优先保留信息**：① 压工具输出 → ② 对更早区间生成 LLM 摘要 → ③ 仍超阈值时滑动窗口裁剪旧消息。
 3. **Observation masking 性价比最高**：旧工具结果替换为占位符（保留 reasoning 轨迹），SWE-bench 上成本减半、完成率持平 LLM 摘要。
 4. **锚定式增量摘要**（Factory AI）：不重新生成整段，而是扩展结构化锚点 `intent / changes / decisions / next`，对保留文件路径、错误信息等技术细节准确率最高。
 5. **Goal 靠「结构化外部笔记 + 每轮重注入」**：目标写在上下文之外，压缩后读回。Anthropic 结论：模型够强时，光靠 compaction 即可维持长程连续性。
-6. **触发用 token 预算阈值**：常见 75% 预警、90% 触发。
+6. **触发使用每模型 token 阈值**：达到阈值后执行压缩级联，空间和实例只能进一步收紧阈值。
 
 参考来源：
 - [Anthropic — Context engineering: memory, compaction, tool clearing](https://platform.claude.com/cookbook/tool-use-context-engineering-context-engineering-tools)
@@ -83,14 +85,15 @@ interface PlanItem { id: number; text: string; status: 'todo' | 'doing' | 'done'
 
 ```
 估算 tokens（用上一轮 usage.inputTokens 校准 + 字符/4 兜底）
-  < 75% 预算 → 原样
-  ≥ 75%     → L1: 对较老的 tool_result 做 observation masking
-                  content → "[tool output elided · N chars · <tool>]"，保留 toolCallId 配对
-  仍 ≥ 90%  → L2: 滑动窗口——最近 K 轮逐字保留
-                  L3: 更早区间送一次 LLM，按锚点四字段生成一条 summary 系统消息替换整段
+  < 当前模型压缩阈值 → 原样
+  ≥ 当前模型压缩阈值 → L1: 对较老的 tool_result 做 observation masking
+                         content → "[tool output elided · N chars · <tool>]"，保留 toolCallId 配对
+  遮蔽后仍达到阈值 → L3: 更早区间送一次 LLM，按锚点四字段生成一条 summary 系统消息替换整段
+  摘要后仍达到阈值 → L2: 滑动窗口，最近 K 轮逐字保留
 ```
 
-- **保守预算**：`min(模型窗口 × 0.5, LLM_CONTEXT_BUDGET)`。
+- **有效阈值**：`min(模型压缩阈值, 空间上下文预算, LLM_CONTEXT_BUDGET)`；未配置的空间或实例
+  限制不参与计算。
 - **压缩结果持久化**：`masked`/`summarized` 写回 `messages` 表，下个 run 的 `loadThreadMessages` 直接拿压缩视图，不重复压。原始内容不删（`events` 表仍可回放）。
 - **利用已有 `usage`**：executor 接住 `usage.inputTokens` 精确驱动阈值，先用「字符/4」估算兜底。
 
@@ -116,15 +119,15 @@ ALTER TABLE messages ADD COLUMN summary_of INT[];      -- 若本行是摘要，�
 ## 5. 走查：一段会触发压缩的长任务
 
 任务：「把 server/src 下所有 `console.log` 换成 `logger.info`，然后跑测试确认通过」。
-演示用预算 `LLM_CONTEXT_BUDGET=16000`，阈值 12000 / 14400。
+演示用模型压缩阈值 `12000`。
 
 **Step 0** — 启动，`goal_state` 初始化（intent=用户输入，plan 待填）；messages = `[system, system(goal), user]`，≈400 tok。
 
-**Step 1–2** — grep 出 23 处命中（~3KB 结果）；调 `update_plan` 写 plan/decisions。≈2800 tok，<75% 原样。
+**Step 1–2** — grep 出 23 处命中（~3KB 结果）；调 `update_plan` 写 plan/decisions。≈2800 tok，低于阈值，原样保留。
 
-**Step 3–10** — 逐文件 read→edit→ok。到 Step 11，≈12600（>75%）→ **L1 masking**：最老的已完成 tool_result content 替换为 `[tool output elided · 3,021 chars · grep]`，保留 toolCallId。回落到 ≈8200，masked 写回库。
+**Step 3–10** — 逐文件 read→edit→ok。到 Step 11，≈12600（达到阈值）→ **L1 masking**：最老的已完成 tool_result content 替换为 `[tool output elided · 3,021 chars · grep]`，保留 toolCallId。回落到 ≈8200，masked 写回库。
 
-**Step 15** — 又涨到 ≈14600（>90%）→ **L2+L3**：最近 4 轮逐字保留；step1–10 区间送 LLM 生成一条 summary（锚点四字段，强制保留 decisions），替换整段。回到 ≈4500。被折叠原始行标 `collapsed='summarized'`。
+**Step 15** — 又涨到 ≈14600（达到阈值），L1 后仍超阈值 → **L3+L2**：step1–10 区间送 LLM 生成一条 summary（锚点四字段，强制保留 decisions），必要时再裁剪窗口，回到 ≈4500。被折叠原始行标 `collapsed='summarized'`。
 
 **Step 16–18** — 完成剩余文件 → `npm test` → 47 passed → 无 toolCalls → final，run done。
 
@@ -180,7 +183,7 @@ ALTER TABLE messages ADD COLUMN summary_of INT[];      -- 若本行是摘要，�
 
 已落地文件：
 
-- [config.ts](../server/src/config.ts) — `agent.hardStepCap / contextBudget / compactWarnRatio / compactHardRatio / keepRecentMessages`
+- [config.ts](../server/src/config.ts) — `agent.hardStepCap / contextBudget / keepRecentMessages`
 - [agent/compaction.ts](../server/src/agent/compaction.ts) — `estimateTokens / maskOldToolResults / slidingWindow / maskPlaceholder`（纯函数，有单测）
 - [agent/context.ts](../server/src/agent/context.ts) — `Context` → `ContextManager`：`items` 跟踪 `dbId`；`maybeCompact()` 返回 `collapsedIds`；`recordUsage()` 校准
 - [agent/executor.ts](../server/src/agent/executor.ts) — 循环改 `hardStepCap`；每步顶部检查取消；每步前 `maybeCompact()` 并 `markMessagesCollapsed(collapsedIds)`；捕获 `addMessage` 返回的 id 回填 `setLastDbId`；`recordUsage(result.usage)`

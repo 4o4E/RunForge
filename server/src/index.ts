@@ -14,7 +14,7 @@ import { attachWebSocket } from './api/ws.js';
 import { assertJwtSecretConfigured } from './auth/jwt.js';
 import { runBootstrap } from './auth/bootstrap.js';
 import { describeShellSandbox } from './tools/sandbox.js';
-import { getToolSettings } from './settings.js';
+import { getSystemToolSettings } from './settings.js';
 import { recoverInterruptedRuns } from './agent/recovery.js';
 import { startDatasourceLeaseReconciler } from './datasources/reconciler.js';
 import { shellManager } from './shell/manager.js';
@@ -52,7 +52,7 @@ server.listen(config.port, config.host, () => {
   console.log(`🚀 RunForge server listening on http://${displayHost}:${config.port}`);
   if (webDist) console.log(`   Web: ${webDist}`);
   console.log(`   WebSocket: ws://${displayHost}:${config.port}/ws?runId=<id>`);
-  void getToolSettings({ tenantId: 'default' }).then((settings) => {
+  void getSystemToolSettings().then((settings) => {
     console.log(
       `   Tool sandbox: ${settings.sandbox}` +
         (settings.sandbox === 'enforce'

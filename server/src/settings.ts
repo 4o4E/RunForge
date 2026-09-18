@@ -16,6 +16,7 @@ import type {
   RuntimeVideoCapabilityModel,
   RuntimeCapabilitiesSettings,
   SandboxBackendName,
+  TenantResourceAuthorization,
   ToolSettings,
 } from '@runforge/contracts';
 export type { LlmModelOption, LlmProviderSettings, LlmSettings, McpServerSettings, McpSettings, RuntimeCapabilitiesSettings, ToolSettings } from '@runforge/contracts';
@@ -25,13 +26,14 @@ import { findSetting, findSettings, insertMissingSettings, upsertSettings } from
 import { resolveWorkspaceRoot } from './files/workspaceRoot.js';
 import { catalogCapability } from './llm/modelCatalog.js';
 
-const DEFAULT_TENANT_ID = 'default';
+export const SYSTEM_RESOURCE_TENANT_ID = 'default';
 
 type SettingRow = { key: string; value: unknown };
 const PAGE_STATE_KEY = 'ui.pageState';
 const LLM_SETTINGS_KEY = 'llm.settings';
 const MCP_SETTINGS_KEY = 'mcp.settings';
 const RUNTIME_CAPABILITIES_SETTINGS_KEY = 'runtimeCapabilities.settings';
+const TENANT_RESOURCE_AUTHORIZATION_KEY = 'tenant.resourceAuthorization';
 const MAX_PAGE_STATE_BYTES = 200_000;
 
 const TOOL_SETTING_KEYS = [
@@ -160,14 +162,19 @@ function normalizeLlmModelCapabilities(
     const inherited = fallbackByModel.get(model);
     const row = rowByModel.get(model);
     const contextSource = llmCapabilitySource(row?.contextWindowSource ?? inherited?.contextWindowSource);
+    const compactionSource = llmCapabilitySource(row?.compactionThresholdSource ?? inherited?.compactionThresholdSource);
     const modalitiesSource = llmCapabilitySource(row?.inputModalitiesSource ?? inherited?.inputModalitiesSource);
     const manualContext = contextSource === 'manual'
       ? optionalPositiveIntValue(row?.contextWindow ?? inherited?.contextWindow, null, 1, 10_000_000)
+      : null;
+    const manualCompactionThreshold = compactionSource === 'manual'
+      ? optionalPositiveIntValue(row?.compactionThreshold ?? inherited?.compactionThreshold, null, 1, 10_000_000)
       : null;
     const manualModalities = modalitiesSource === 'manual'
       ? llmModalities(row?.inputModalities ?? inherited?.inputModalities, [])
       : [];
     const contextWindowSource = manualContext !== null ? 'manual' : catalog.contextWindowSource;
+    const compactionThresholdSource = manualCompactionThreshold !== null ? 'manual' : catalog.compactionThresholdSource;
     const inputModalitiesSource = manualModalities.length ? 'manual' : catalog.inputModalitiesSource;
     const catalogFields = new Set([
       ...(contextWindowSource === 'catalog' ? ['contextWindow' as const] : []),
@@ -177,6 +184,8 @@ function normalizeLlmModelCapabilities(
       model,
       contextWindow: manualContext ?? catalog.contextWindow,
       contextWindowSource,
+      compactionThreshold: manualCompactionThreshold ?? catalog.compactionThreshold,
+      compactionThresholdSource,
       inputModalities: manualModalities.length ? manualModalities : catalog.inputModalities,
       inputModalitiesSource,
       references: catalog.references.flatMap((reference) => {
@@ -250,10 +259,8 @@ function defaultLlmProviderSettings(): LlmProviderSettings {
     models: [defaultModel],
     modelCapabilities: [catalogCapability(defaultModel)],
     defaultModel,
-    maxTokens: positiveIntValue(config.llm.maxTokens, 4096, 1, 200_000),
     timeoutMs: positiveIntValue(config.llm.timeoutMs, 120_000, 1000, 600_000),
     retries: positiveIntValue(config.llm.retries, 2, 0, 10),
-    stream: config.llm.stream,
   };
 }
 
@@ -281,14 +288,13 @@ function defaultRuntimeCapabilitiesSettings(): RuntimeCapabilitiesSettings {
   };
 }
 
-/** 新 tenant 创建事务使用的静态模板。PgStore 会再用 default tenant 当前已保存的
- * 运行配置覆盖同名键，从而得到“当前系统模板”的独立副本；纯 UI 状态不在模板内。 */
+/** 新 tenant 只创建自己的授权记录。系统资源统一由系统设置维护，不复制进 tenant。 */
 export function tenantSettingsTemplateEntries(): Array<{ key: string; value: unknown }> {
   return [
-    ...toolSettingsToEntries(defaultToolSettings()).map(([key, value]) => ({ key, value })),
-    { key: MCP_SETTINGS_KEY, value: defaultMcpSettings() },
-    { key: LLM_SETTINGS_KEY, value: defaultLlmSettings() },
-    { key: RUNTIME_CAPABILITIES_SETTINGS_KEY, value: defaultRuntimeCapabilitiesSettings() },
+    {
+      key: TENANT_RESOURCE_AUTHORIZATION_KEY,
+      value: { llmProviderIds: [], datasourceIds: [] } satisfies TenantResourceAuthorization,
+    },
   ];
 }
 
@@ -315,45 +321,40 @@ function mergeToolSettings(values: Map<string, unknown>): ToolSettings {
 
 async function bindWorkspaceRoot(settings: ToolSettings, scope: TenantScope | Scope): Promise<ToolSettings> {
   // 工具、文件列表和 shell 都依赖 workspaceRoot 已存在；在统一入口创建可避免各工具重复兜底。
-  settings.workspaceRoot = resolveWorkspaceRoot(scope);
-  await mkdir(settings.workspaceRoot, { recursive: true });
-  return settings;
+  const workspaceRoot = resolveWorkspaceRoot(scope, settings.workspaceRoot);
+  await mkdir(workspaceRoot, { recursive: true });
+  return { ...settings, workspaceRoot };
 }
 
 async function readSettingRows(tenantId: string, keys: readonly string[]): Promise<SettingRow[]> {
   return findSettings(tenantId, keys);
 }
 
-/** 只给 default 租户播种基础层默认值;其它租户没有覆盖就一路 fallback 到
- *  default 租户的值再到 env 默认值(见 getToolSettings),不自动写入具体值。 */
+/** 系统工具设置缺项时,用启动配置补齐系统资源记录。 */
 async function insertMissingDefaults(rows: SettingRow[]): Promise<void> {
   const existing = new Set(rows.map((row) => row.key));
   const missing = toolSettingsToEntries(defaultToolSettings())
     .filter(([key]) => !existing.has(key))
     .map(([key, value]) => ({ key, value }));
-  await insertMissingSettings(DEFAULT_TENANT_ID, missing);
+  await insertMissingSettings(SYSTEM_RESOURCE_TENANT_ID, missing);
 }
 
-/** 读取当前租户自己的工具配置。新 tenant 在创建事务中复制完整模板；若旧数据被
- *  人工删成不完整，只回退 env 默认值，不再动态读取 default tenant，避免配置串租户。 */
-export async function getToolSettings(scope: TenantScope | Scope): Promise<ToolSettings> {
+/** 读取系统统一维护的工具策略和 workspace 基础目录。 */
+export async function getSystemToolSettings(): Promise<ToolSettings> {
   try {
-    const ownRows = await readSettingRows(scope.tenantId, TOOL_SETTING_KEYS);
-    let mergedMap = rowsToMap(ownRows);
-    if (scope.tenantId === DEFAULT_TENANT_ID) {
-      if (ownRows.length < TOOL_SETTING_KEYS.length) await insertMissingDefaults(ownRows);
-      mergedMap = rowsToMap(await readSettingRows(DEFAULT_TENANT_ID, TOOL_SETTING_KEYS));
-    }
-    const settings = mergeToolSettings(mergedMap);
-    // workspaceRoot 永远按当前身份计算,不信任 app_settings 里存的字符串。
-    // 否则租户管理员能把自己的 workspaceRoot 设到别人的目录,变成真实的越权读写洞。
-    // 这里必须包含 userId:同租户多用户的数据已按 userId 隔离,文件工作区也要一致。
-    return await bindWorkspaceRoot(settings, scope);
+    const systemRows = await readSettingRows(SYSTEM_RESOURCE_TENANT_ID, TOOL_SETTING_KEYS);
+    if (systemRows.length < TOOL_SETTING_KEYS.length) await insertMissingDefaults(systemRows);
+    const mergedMap = rowsToMap(await readSettingRows(SYSTEM_RESOURCE_TENANT_ID, TOOL_SETTING_KEYS));
+    return mergeToolSettings(mergedMap);
   } catch (err) {
     warnOnce('settings-fallback', `Tool settings fallback to env defaults: ${(err as Error).message}`);
-    const fallback = defaultToolSettings();
-    return await bindWorkspaceRoot(fallback, scope);
+    return defaultToolSettings();
   }
+}
+
+/** 工具执行策略由系统统一维护；workspaceRoot 根据当前 tenant/user 从系统基础目录派生。 */
+export async function getToolSettings(scope: TenantScope | Scope): Promise<ToolSettings> {
+  return bindWorkspaceRoot(await getSystemToolSettings(), scope);
 }
 
 function toolSettingsToEntries(settings: ToolSettings): Array<[string, unknown]> {
@@ -386,11 +387,11 @@ export function shellPathForSettings(settings: ToolSettings): string {
 }
 
 export async function saveToolSettings(scope: TenantScope, input: unknown): Promise<ToolSettings> {
+  if (scope.tenantId !== SYSTEM_RESOURCE_TENANT_ID) throw new Error('工具设置只能由系统管理员修改');
   const settings = normalizeToolSettings(input);
   await upsertSettings(scope.tenantId, toolSettingsToEntries(settings).map(([key, value]) => ({ key, value })));
-  // 存进去的值可能被调用方 normalize 出一个不受信任的 workspaceRoot,但返回值必须是
-  // 计算出来的那个——同一个理由见 getToolSettings。
-  return await bindWorkspaceRoot(settings, scope);
+  await mkdir(settings.workspaceRoot, { recursive: true });
+  return settings;
 }
 
 function normalizeMcpServer(input: unknown, fallback: McpServerSettings, usedIds: Set<string>): McpServerSettings {
@@ -443,14 +444,37 @@ async function upsertTenantJsonSetting(tenantId: string, key: string, value: unk
   await upsertSettings(tenantId, [{ key, value }]);
 }
 
-export async function getMcpSettings(scope: TenantScope): Promise<McpSettings> {
+export function normalizeTenantResourceAuthorization(input: unknown): TenantResourceAuthorization {
+  const body = input && typeof input === 'object' && !Array.isArray(input)
+    ? input as Record<string, unknown>
+    : {};
+  return {
+    llmProviderIds: uniqStrings(stringList(body.llmProviderIds, [])),
+    datasourceIds: uniqStrings(stringList(body.datasourceIds, [])),
+  };
+}
+
+export async function getTenantResourceAuthorization(tenantId: string): Promise<TenantResourceAuthorization> {
+  return normalizeTenantResourceAuthorization(
+    await readTenantJsonSetting(tenantId, TENANT_RESOURCE_AUTHORIZATION_KEY),
+  );
+}
+
+export async function saveTenantResourceAuthorization(
+  tenantId: string,
+  input: unknown,
+): Promise<TenantResourceAuthorization> {
+  const authorization = normalizeTenantResourceAuthorization(input);
+  await upsertTenantJsonSetting(tenantId, TENANT_RESOURCE_AUTHORIZATION_KEY, authorization);
+  return authorization;
+}
+
+export async function getSystemMcpSettings(): Promise<McpSettings> {
   try {
-    const value = await readTenantJsonSetting(scope.tenantId, MCP_SETTINGS_KEY);
+    const value = await readTenantJsonSetting(SYSTEM_RESOURCE_TENANT_ID, MCP_SETTINGS_KEY);
     if (value === undefined) {
       const defaults = defaultMcpSettings();
-      if (scope.tenantId === DEFAULT_TENANT_ID) {
-        await insertMissingSettings(DEFAULT_TENANT_ID, [{ key: MCP_SETTINGS_KEY, value: defaults }]);
-      }
+      await insertMissingSettings(SYSTEM_RESOURCE_TENANT_ID, [{ key: MCP_SETTINGS_KEY, value: defaults }]);
       return defaults;
     }
     return normalizeMcpSettings(value);
@@ -461,6 +485,7 @@ export async function getMcpSettings(scope: TenantScope): Promise<McpSettings> {
 }
 
 export async function saveMcpSettings(scope: TenantScope, input: unknown): Promise<McpSettings> {
+  if (scope.tenantId !== SYSTEM_RESOURCE_TENANT_ID) throw new Error('MCP 设置只能由系统管理员修改');
   const settings = normalizeMcpSettings(input);
   await upsertTenantJsonSetting(scope.tenantId, MCP_SETTINGS_KEY, settings);
   return settings;
@@ -495,10 +520,8 @@ function normalizeLlmProvider(input: unknown, fallback: LlmProviderSettings, use
     models,
     modelCapabilities,
     defaultModel,
-    maxTokens: optionalPositiveIntValue(body.maxTokens, fallback.maxTokens, 1, 200_000),
     timeoutMs: positiveIntValue(body.timeoutMs, fallback.timeoutMs, 1000, 600_000),
     retries: positiveIntValue(body.retries, fallback.retries, 0, 10),
-    stream: boolValue(body.stream, fallback.stream),
   };
 }
 
@@ -506,7 +529,7 @@ export function llmModelOptions(settings: LlmSettings): LlmModelOption[] {
   return settings.providers.flatMap((provider) =>
     provider.models.filter((model) => {
       const capability = provider.modelCapabilities.find((item) => item.model === model);
-      return Boolean(capability?.contextWindow && capability.inputModalities.length);
+      return Boolean(capability?.contextWindow && capability.compactionThreshold && capability.inputModalities.length);
     }).map((model) => ({
       ref: modelRef(provider.id, model),
       providerId: provider.id,
@@ -533,24 +556,44 @@ export function normalizeLlmSettings(input: unknown): LlmSettings {
   return { defaultModelRef, providers: safeProviders };
 }
 
-export async function getLlmSettings(scope: TenantScope): Promise<LlmSettings> {
-  const value = await readTenantJsonSetting(scope.tenantId, LLM_SETTINGS_KEY);
+export async function getSystemLlmSettings(): Promise<LlmSettings> {
+  const value = await readTenantJsonSetting(SYSTEM_RESOURCE_TENANT_ID, LLM_SETTINGS_KEY);
   if (value === undefined) {
     const defaults = defaultLlmSettings();
-    if (scope.tenantId === DEFAULT_TENANT_ID) {
-      await insertMissingSettings(DEFAULT_TENANT_ID, [{ key: LLM_SETTINGS_KEY, value: defaults }]);
-    }
+    await insertMissingSettings(SYSTEM_RESOURCE_TENANT_ID, [{ key: LLM_SETTINGS_KEY, value: defaults }]);
     return defaults;
   }
   return normalizeLlmSettings(value);
 }
 
+export async function getLlmSettings(scope: TenantScope): Promise<LlmSettings> {
+  const [settings, authorization] = await Promise.all([
+    getSystemLlmSettings(),
+    getTenantResourceAuthorization(scope.tenantId),
+  ]);
+  const allowed = new Set(authorization.llmProviderIds);
+  const providers = settings.providers.filter((provider) => allowed.has(provider.id));
+  const options = llmModelOptions({ providers, defaultModelRef: settings.defaultModelRef });
+  const defaultModelRef = options.some((option) => option.ref === settings.defaultModelRef)
+    ? settings.defaultModelRef
+    : options[0]?.ref ?? '';
+  return { providers, defaultModelRef };
+}
+
 export async function saveLlmSettings(scope: TenantScope, input: unknown): Promise<LlmSettings> {
+  if (scope.tenantId !== SYSTEM_RESOURCE_TENANT_ID) throw new Error('LLM 设置只能由系统管理员修改');
   const settings = normalizeLlmSettings(input);
   for (const provider of settings.providers) {
     for (const capability of provider.modelCapabilities) {
       if (capability.contextWindow === null || capability.contextWindow <= 0) {
         throw new Error(`模型 ${provider.id}:${capability.model} 未填写有效的上下文长度`);
+      }
+      if (
+        capability.compactionThreshold === null
+        || capability.compactionThreshold <= 0
+        || capability.compactionThreshold > capability.contextWindow
+      ) {
+        throw new Error(`模型 ${provider.id}:${capability.model} 未填写有效的压缩阈值，且阈值不能超过上下文长度`);
       }
       if (!capability.inputModalities.length) {
         throw new Error(`模型 ${provider.id}:${capability.model} 未选择输入类型`);
@@ -650,14 +693,12 @@ export function normalizeRuntimeCapabilitiesSettings(input: unknown): RuntimeCap
   };
 }
 
-export async function getRuntimeCapabilitiesSettings(scope: TenantScope): Promise<RuntimeCapabilitiesSettings> {
+export async function getSystemRuntimeCapabilitiesSettings(): Promise<RuntimeCapabilitiesSettings> {
   try {
-    const value = await readTenantJsonSetting(scope.tenantId, RUNTIME_CAPABILITIES_SETTINGS_KEY);
+    const value = await readTenantJsonSetting(SYSTEM_RESOURCE_TENANT_ID, RUNTIME_CAPABILITIES_SETTINGS_KEY);
     if (value === undefined) {
       const defaults = defaultRuntimeCapabilitiesSettings();
-      if (scope.tenantId === DEFAULT_TENANT_ID) {
-        await insertMissingSettings(DEFAULT_TENANT_ID, [{ key: RUNTIME_CAPABILITIES_SETTINGS_KEY, value: defaults }]);
-      }
+      await insertMissingSettings(SYSTEM_RESOURCE_TENANT_ID, [{ key: RUNTIME_CAPABILITIES_SETTINGS_KEY, value: defaults }]);
       return defaults;
     }
     return normalizeRuntimeCapabilitiesSettings(value);
@@ -667,7 +708,28 @@ export async function getRuntimeCapabilitiesSettings(scope: TenantScope): Promis
   }
 }
 
+export async function getRuntimeCapabilitiesSettings(scope: TenantScope): Promise<RuntimeCapabilitiesSettings> {
+  const [settings, authorization] = await Promise.all([
+    getSystemRuntimeCapabilitiesSettings(),
+    getTenantResourceAuthorization(scope.tenantId),
+  ]);
+  const allowedProviders = new Set(authorization.llmProviderIds);
+  const llmModels = settings.llm.models.filter((model) => allowedProviders.has(model.modelRef.split(':', 1)[0]));
+  return {
+    ...settings,
+    llm: {
+      ...settings.llm,
+      enabled: settings.llm.enabled && llmModels.length > 0,
+      defaultModelId: llmModels.some((model) => model.id === settings.llm.defaultModelId)
+        ? settings.llm.defaultModelId
+        : llmModels[0]?.id ?? '',
+      models: llmModels,
+    },
+  };
+}
+
 export async function saveRuntimeCapabilitiesSettings(scope: TenantScope, input: unknown): Promise<RuntimeCapabilitiesSettings> {
+  if (scope.tenantId !== SYSTEM_RESOURCE_TENANT_ID) throw new Error('运行时能力设置只能由系统管理员修改');
   const settings = normalizeRuntimeCapabilitiesSettings(input);
   await upsertTenantJsonSetting(scope.tenantId, RUNTIME_CAPABILITIES_SETTINGS_KEY, settings);
   return settings;

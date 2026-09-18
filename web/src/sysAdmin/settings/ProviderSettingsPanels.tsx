@@ -336,10 +336,8 @@ function defaultProvider(index: number, defaultCapability: LlmModelCapabilitySet
     models: ['gpt-4o-mini'],
     modelCapabilities: [defaultCapability],
     defaultModel: 'gpt-4o-mini',
-    maxTokens: 4096,
     timeoutMs: 120_000,
     retries: 2,
-    stream: true,
   };
 }
 
@@ -368,6 +366,8 @@ function fallbackCapability(model: string): LlmModelCapabilitySettings {
     model,
     contextWindow: null,
     contextWindowSource: 'manual',
+    compactionThreshold: null,
+    compactionThresholdSource: 'manual',
     inputModalities: [],
     inputModalitiesSource: 'manual',
     references: [],
@@ -637,6 +637,7 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
         ...patch,
         model,
         contextWindowSource: patch.contextWindow !== undefined ? 'manual' : current.contextWindowSource,
+        compactionThresholdSource: patch.compactionThreshold !== undefined ? 'manual' : current.compactionThresholdSource,
         inputModalitiesSource: patch.inputModalities !== undefined ? 'manual' : current.inputModalitiesSource,
         references: current.references.flatMap((reference) => {
           const fields = reference.fields.filter((field) => (
@@ -741,10 +742,8 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
                   <Field label="Base URL"><Input value={draft.baseUrl} onChange={(event) => setProviderDraft({ baseUrl: event.target.value })} /></Field>
                   <Field label="API Key"><Input type="text" name="llm-provider-api-key" autoComplete="off" spellCheck={false} data-1p-ignore data-lpignore="true" data-bwignore="true" className="[-webkit-text-security:disc]" value={draft.apiKey} onChange={(event) => setProviderDraft({ apiKey: event.target.value })} /></Field>
                   <Field label="默认模型"><Select value={draft.defaultModel || 'none'} onValueChange={(value) => setProviderDraft({ defaultModel: value === 'none' ? '' : value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">未设置</SelectItem>{draft.models.map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}</SelectContent></Select></Field>
-                  <Field label="输出 token 上限（可选）"><Input type="number" min={1} value={draft.maxTokens ?? ''} placeholder="不设置本地上限" onChange={(event) => setProviderDraft({ maxTokens: event.target.value === '' ? null : Number(event.target.value) })} /></Field>
                   <Field label="超时毫秒"><Input type="number" min={1000} value={draft.timeoutMs} onChange={(event) => setProviderDraft({ timeoutMs: Number(event.target.value) })} /></Field>
                   <Field label="重试次数"><Input type="number" min={0} value={draft.retries} onChange={(event) => setProviderDraft({ retries: Number(event.target.value) })} /></Field>
-                  <div className="flex items-center justify-between rounded-md border p-3"><div><div className="text-sm font-medium">流式输出</div><div className="text-xs text-muted-foreground">后端向前端推送增量内容</div></div><Switch checked={draft.stream} onCheckedChange={(stream) => setProviderDraft({ stream })} /></div>
                 </div>
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div><div className="text-sm font-medium">候选模型</div><div className="text-xs text-muted-foreground">供应商接口只发现名称；选择模型时使用本地能力目录自动填写</div></div>
@@ -780,17 +779,19 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
                 </ScrollArea>
                 <Field label="添加自定义模型"><div className="flex gap-2"><Input value={customModel} onChange={(event) => setCustomModel(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void addCustomModel(); } }} /><Button variant="outline" onClick={() => void addCustomModel()} disabled={Boolean(busyAction)}>{busyAction === 'catalog' ? <Spinner className="h-4 w-4" /> : <Plus className="h-4 w-4" />}添加并选择</Button></div></Field>
                 <div className="grid gap-3">
-                  <div><div className="text-sm font-medium">已选择模型</div><div className="text-xs text-muted-foreground">匹配本地目录时自动填写；未匹配时必须人工填写上下文长度并选择输入类型</div></div>
+                  <div><div className="text-sm font-medium">已选择模型</div><div className="text-xs text-muted-foreground">匹配本地目录时自动填写；未匹配时必须人工填写上下文长度、压缩阈值并选择输入类型</div></div>
                   {!draft.models.length && <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">尚未选择模型</div>}
                   {draft.models.map((model) => {
                     const capability = draft.modelCapabilities.find((item) => item.model === model)
                       ?? fallbackCapability(model);
-                    const incomplete = capability.contextWindow === null || capability.inputModalities.length === 0;
+                    const incomplete = capability.contextWindow === null
+                      || capability.compactionThreshold === null
+                      || capability.inputModalities.length === 0;
                     return (
                       <Card key={model} className="rounded-md shadow-none">
                         <CardContent className="grid gap-3 p-4">
                           <div className="flex flex-wrap items-center justify-between gap-2"><div className="break-all text-sm font-medium">{model}</div>{model === draft.defaultModel && <Badge>默认模型</Badge>}</div>
-                          <div className="grid gap-3 lg:grid-cols-[minmax(12rem,0.8fr)_minmax(18rem,1.2fr)]">
+                          <div className="grid gap-3 xl:grid-cols-3">
                             <Field label="上下文长度（tokens）">
                               <div className="flex gap-2">
                                 <Input className="min-w-0 flex-1" type="number" min={1} max={10000000} value={capability.contextWindow ?? ''} placeholder="必须填写" onChange={(event) => updateModelCapability(model, { contextWindow: event.target.value === '' ? null : Number(event.target.value) })} />
@@ -803,17 +804,19 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
                                 </Select>
                               </div>
                             </Field>
+                            <Field label="压缩阈值（tokens）">
+                              <Input type="number" min={1} max={capability.contextWindow ?? 10000000} value={capability.compactionThreshold ?? ''} placeholder="必须填写" onChange={(event) => updateModelCapability(model, { compactionThreshold: event.target.value === '' ? null : Number(event.target.value) })} />
+                            </Field>
                             <Field label="多模态输入">
                               <div className="flex min-h-10 flex-wrap items-center gap-4 rounded-md border px-3 py-2">
                                 {INPUT_MODALITY_OPTIONS.map((option) => <label key={option.value} className="flex items-center gap-2 text-sm"><Checkbox checked={capability.inputModalities.includes(option.value)} onCheckedChange={(checked) => toggleModality(model, option.value, checked === true)} />{option.label}</label>)}
                               </div>
                             </Field>
                           </div>
-                          <div className="grid gap-2 rounded-md bg-muted/30 p-3 text-xs text-muted-foreground">
-                            <div>模型声明能力：上下文 {capability.contextWindowSource === 'catalog' ? '本地目录' : '人工配置'}；输入类型 {capability.inputModalitiesSource === 'catalog' ? '本地目录' : '人工配置'}。RunForge 当前可直接发送文本和图片。</div>
+                          {(incomplete || capability.references.length > 0) && <div className="grid gap-2 rounded-md bg-muted/30 p-3 text-xs text-muted-foreground">
                             {incomplete && <div className="text-destructive">该模型的能力配置尚未完成，保存会被拒绝。</div>}
                             {capability.references.map((reference) => <a key={`${reference.url}:${reference.fields.join(',')}`} className="w-fit underline underline-offset-4" href={reference.url} target="_blank" rel="noreferrer">{reference.title} · 检查于 {reference.checkedAt}</a>)}
-                          </div>
+                          </div>}
                         </CardContent>
                       </Card>
                     );
@@ -840,7 +843,6 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
                   <SummaryRow label="Base URL" value={selected.baseUrl} />
                   <SummaryRow label="API Key" value={selected.apiKey ? '已配置' : '未配置'} />
                   <SummaryRow label="默认模型" value={selected.defaultModel || '未设置'} />
-                  <SummaryRow label="输出上限" value={selected.maxTokens == null ? '不设置本地上限' : `${selected.maxTokens.toLocaleString()} tokens`} />
                   <SummaryRow label="超时 / 重试" value={`${selected.timeoutMs} ms / ${selected.retries} 次`} />
                 </div>
                 <div className="grid gap-2">
@@ -848,7 +850,7 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
                   {!selected.models.length && <span className="text-sm text-muted-foreground">未启用模型</span>}
                   {selected.models.map((model) => {
                     const capability = selected.modelCapabilities.find((item) => item.model === model) ?? fallbackCapability(model);
-                    return <div key={model} className="flex flex-wrap items-center gap-2 rounded-md border p-3"><span className="mr-auto break-all text-sm font-medium">{model}</span><Badge variant="outline">{capability.contextWindow === null ? '待填写上下文' : `${capability.contextWindow.toLocaleString()} tokens`}</Badge>{capability.inputModalities.map((modality) => <Badge key={modality} variant="secondary">{modality}</Badge>)}</div>;
+                    return <div key={model} className="flex flex-wrap items-center gap-2 rounded-md border p-3"><span className="mr-auto break-all text-sm font-medium">{model}</span><Badge variant="outline">{capability.contextWindow === null ? '待填写上下文' : `${capability.contextWindow.toLocaleString()} tokens`}</Badge><Badge variant="outline">{capability.compactionThreshold === null ? '待填写压缩阈值' : `压缩 ${capability.compactionThreshold.toLocaleString()}`}</Badge>{capability.inputModalities.map((modality) => <Badge key={modality} variant="secondary">{modality}</Badge>)}</div>;
                   })}
                 </div>
               </CardContent>

@@ -4,7 +4,6 @@
 
 import {
   streamText,
-  generateText,
   jsonSchema,
   tool,
   type ModelMessage,
@@ -150,11 +149,15 @@ function toToolSet(tools: LlmTool[]) {
 }
 
 export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provider {
+  if (opts.protocol === 'anthropic-messages' && cfg.maxOutputTokens === null) {
+    throw new Error(`Anthropic 模型 ${cfg.model} 缺少最大输出长度，无法生成协议必填的 max_tokens`);
+  }
   const common = (messages: LlmMessage[], tools: LlmTool[], functionId: string, callOptions?: ProviderCallOptions) => ({
     model: buildModel(cfg, opts, callOptions?.fetch),
     messages: toModelMessages(messages),
     tools: toToolSet(tools),
-    maxOutputTokens: cfg.maxTokens ?? undefined,
+    // Anthropic 协议要求 max_tokens；使用模型目录声明的最大输出长度，不提供管理员可调的本地上限。
+    maxOutputTokens: opts.protocol === 'anthropic-messages' ? cfg.maxOutputTokens! : undefined,
     // 重试由 RunForge ProviderRunner 统一管理，确保每次 HTTP attempt 都可观测。
     maxRetries: 0,
     abortSignal: AbortSignal.timeout(cfg.timeoutMs),
@@ -218,32 +221,6 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
 
   return {
     name: `ai-sdk:${opts.protocol}`,
-
-    async complete(messages, tools, callOptions): Promise<LlmResult> {
-      // 标题和压缩摘要同样必须遵守供应商的流式传输约束。
-      if (cfg.stream) return completeByStream(messages, tools, () => {}, callOptions);
-      const r = await generateText(common(messages, tools, 'chat', callOptions));
-      return {
-        content: r.text || null,
-        reasoning: r.reasoningText ?? null,
-        providerState: providerStateFromResponseMessages(r.response.messages),
-        toolCalls: r.toolCalls.map((c) => ({
-          id: c.toolCallId,
-          name: c.toolName,
-          arguments: JSON.stringify(c.input ?? {}),
-        })),
-        usage: {
-          inputTokens: r.usage?.inputTokens,
-          outputTokens: r.usage?.outputTokens,
-          cachedInputTokens: (r.usage as { cachedInputTokens?: number } | undefined)?.cachedInputTokens,
-        },
-        finishReason: r.finishReason,
-        rawFinishReason: r.rawFinishReason,
-      };
-    },
-
-    async completeStream(messages, tools, onDelta: (d: LlmDelta) => void, callOptions): Promise<LlmResult> {
-      return completeByStream(messages, tools, onDelta, callOptions);
-    },
+    completeStream: completeByStream,
   };
 }

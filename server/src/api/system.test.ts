@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { config } from '../config.js';
 import { buildApp, listen, seedOwner, seedSystemAdmin } from './testHelpers.js';
 import { signTenantAccessToken } from '../auth/jwt.js';
+import { hashPassword } from '../auth/passwords.js';
+import { store } from '../store/index.js';
+import { saveTenantResourceAuthorization } from '../settings.js';
 
 test.before(() => {
   config.auth.jwtSecret = config.auth.jwtSecret || 'test-jwt-secret';
@@ -132,6 +135,73 @@ test('PATCH /api/system/tenants/:id: 禁用租户后该租户的用户登录/ref
   }
 });
 
+test('系统管理员可以在租户范围内创建和编辑用户，并保留唯一 active owner', async () => {
+  await seedSystemAdmin('sysadmin@tenant-users.test', 'sys-pw');
+  const owner = await seedOwner('tn_system_users', 'owner@system-users.test', 'pw');
+  const member = await store.createUser({
+    tenantId: 'tn_system_users',
+    email: 'member@system-users.test',
+    passwordHash: hashPassword('old-pw'),
+    role: 'member',
+  });
+  const otherTenantUser = await seedOwner('tn_other_system_users', 'owner@other-system-users.test', 'pw');
+  const { port, close } = await listen(buildApp());
+  try {
+    const base = `http://127.0.0.1:${port}/api`;
+    const { accessToken } = await systemLogin(base, 'sysadmin@tenant-users.test', 'sys-pw');
+    const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` };
+
+    const created = await fetch(`${base}/system/tenants/tn_system_users/users`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ email: 'admin@system-users.test', password: 'pw', role: 'admin' }),
+    });
+    assert.equal(created.status, 201);
+    assert.equal(((await created.json()) as { role: string }).role, 'admin');
+
+    const oldLogin = await fetch(`${base}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'member@system-users.test', password: 'old-pw', tenantId: 'tn_system_users' }),
+    });
+    assert.equal(oldLogin.status, 200);
+    const { refreshToken } = (await oldLogin.json()) as { refreshToken: string };
+
+    const updated = await fetch(`${base}/system/tenants/tn_system_users/users/${member.id}`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ email: 'member-new@system-users.test', password: 'new-pw', role: 'admin' }),
+    });
+    assert.equal(updated.status, 200);
+    const updatedBody = (await updated.json()) as { email: string; role: string };
+    assert.equal(updatedBody.email, 'member-new@system-users.test');
+    assert.equal(updatedBody.role, 'admin');
+
+    const oldRefresh = await fetch(`${base}/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken }),
+    });
+    assert.equal(oldRefresh.status, 401);
+
+    const crossTenant = await fetch(`${base}/system/tenants/tn_system_users/users/${otherTenantUser.id}`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ status: 'disabled' }),
+    });
+    assert.equal(crossTenant.status, 404);
+
+    const removeOnlyOwner = await fetch(`${base}/system/tenants/tn_system_users/users/${owner.id}`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ status: 'disabled' }),
+    });
+    assert.equal(removeOnlyOwner.status, 409);
+  } finally {
+    close();
+  }
+});
+
 test('GET/POST /api/system/admins: 列出并创建系统管理员账号', async () => {
   await seedSystemAdmin('sysadmin@admins.test', 'sys-pw');
   const { port, close } = await listen(buildApp());
@@ -170,7 +240,7 @@ test('GET/POST /api/system/admins: 列出并创建系统管理员账号', async 
   }
 });
 
-test('系统设置接口: system admin 可按租户读取，租户身份不能越权，未知租户返回 404', async () => {
+test('系统设置与租户授权接口: system admin 可管理，租户身份不能越权，未知租户返回 404', async () => {
   await seedSystemAdmin('sysadmin@settings.test', 'sys-pw');
   const owner = await seedOwner('tn_system_settings', 'owner@settings.test', 'pw');
   const ownerJwt = signTenantAccessToken({ id: owner.id, tenantId: 'tn_system_settings', role: 'owner' });
@@ -179,10 +249,16 @@ test('系统设置接口: system admin 可按租户读取，租户身份不能�
     const base = `http://127.0.0.1:${port}/api`;
     const { accessToken } = await systemLogin(base, 'sysadmin@settings.test', 'sys-pw');
 
-    const systemRead = await fetch(`${base}/system/tenants/tn_system_settings/settings/llm`, {
+    const systemRead = await fetch(`${base}/system/settings/llm`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
     assert.equal(systemRead.status, 200);
+
+    const systemToolsRead = await fetch(`${base}/system/settings/tools`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    assert.equal(systemToolsRead.status, 200);
+    assert.equal(typeof ((await systemToolsRead.json()) as { workspaceRoot?: unknown }).workspaceRoot, 'string');
 
     const systemUsers = await fetch(`${base}/system/tenants/tn_system_settings/users`, {
       headers: { Authorization: `Bearer ${accessToken}` },
@@ -195,15 +271,15 @@ test('系统设置接口: system admin 可按租户读取，租户身份不能�
       [owner.id],
     );
 
-    const resolvedCapability = await fetch(`${base}/system/tenants/tn_system_settings/settings/llm/model-capability`, {
+    const resolvedCapability = await fetch(`${base}/system/settings/llm/model-capability`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-      body: JSON.stringify({ model: 'zhipu-ai/glm-5-2-260617' }),
+      body: JSON.stringify({ model: 'glm-5-2-260617' }),
     });
     assert.equal(resolvedCapability.status, 200);
-    assert.equal(((await resolvedCapability.json()) as { contextWindow: number }).contextWindow, 1_048_576);
+    assert.equal(((await resolvedCapability.json()) as { contextWindow: number }).contextWindow, 1_000_000);
 
-    const tenantEscalation = await fetch(`${base}/system/tenants/tn_system_settings/settings/llm`, {
+    const tenantEscalation = await fetch(`${base}/system/settings/llm`, {
       headers: { Authorization: `Bearer ${ownerJwt}` },
     });
     assert.equal(tenantEscalation.status, 403);
@@ -225,6 +301,11 @@ test('系统设置接口: system admin 可按租户读取，租户身份不能�
     });
     assert.equal(tenantFullRead.status, 403);
 
+    const tenantToolsRead = await fetch(`${base}/settings/tools`, {
+      headers: { Authorization: `Bearer ${ownerJwt}` },
+    });
+    assert.equal(tenantToolsRead.status, 403);
+
     const tenantDatasourceDetail = await fetch(`${base}/datasources/ds_not_exposed`, {
       headers: { Authorization: `Bearer ${ownerJwt}` },
     });
@@ -238,7 +319,36 @@ test('系统设置接口: system admin 可按租户读取，租户身份不能�
     assert.equal(modelOptionsText.includes('apiKey'), false);
     assert.equal(modelOptionsText.includes('baseUrl'), false);
 
-    const missingTenant = await fetch(`${base}/system/tenants/not_found/settings/llm`, {
+    const tenantAccess = await fetch(`${base}/system/tenant-access/tn_system_settings`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    assert.equal(tenantAccess.status, 200);
+    assert.deepEqual(
+      (await tenantAccess.json() as { authorization: { llmProviderIds: string[]; datasourceIds: string[] } }).authorization,
+      { llmProviderIds: [], datasourceIds: [] },
+    );
+
+    await saveTenantResourceAuthorization('tn_system_settings', {
+      llmProviderIds: ['deleted-provider'],
+      datasourceIds: ['deleted-datasource'],
+    });
+    const staleAuthorization = await fetch(`${base}/system/tenant-access/tn_system_settings`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    assert.equal(staleAuthorization.status, 200);
+    assert.deepEqual(
+      (await staleAuthorization.json() as { authorization: { llmProviderIds: string[]; datasourceIds: string[] } }).authorization,
+      { llmProviderIds: [], datasourceIds: [] },
+    );
+
+    const invalidAuthorization = await fetch(`${base}/system/tenant-access/tn_system_settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify({ llmProviderIds: ['missing-provider'], datasourceIds: [] }),
+    });
+    assert.equal(invalidAuthorization.status, 400);
+
+    const missingTenant = await fetch(`${base}/system/tenant-access/not_found`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
     assert.equal(missingTenant.status, 404);

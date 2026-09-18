@@ -35,13 +35,11 @@ function networkMode(v: string | undefined): 'enabled' | 'disabled' {
 }
 
 const DEFAULT_LLM_MODEL = 'gpt-4o-mini';
-const DEFAULT_LLM_CONTEXT_WINDOW = catalogCapability(DEFAULT_LLM_MODEL).contextWindow;
-if (DEFAULT_LLM_CONTEXT_WINDOW === null) throw new Error(`默认模型 ${DEFAULT_LLM_MODEL} 缺少能力目录`);
-
-function contextBudget(modelContextWindow: number): number {
-  const configured = Number(process.env.LLM_CONTEXT_BUDGET);
-  if (Number.isFinite(configured) && configured > 0) return Math.floor(configured);
-  return Math.floor(modelContextWindow * 0.5);
+const DEFAULT_LLM_CAPABILITY = catalogCapability(DEFAULT_LLM_MODEL);
+const DEFAULT_LLM_CONTEXT_WINDOW = DEFAULT_LLM_CAPABILITY.contextWindow;
+const DEFAULT_LLM_COMPACTION_THRESHOLD = DEFAULT_LLM_CAPABILITY.compactionThreshold;
+if (DEFAULT_LLM_CONTEXT_WINDOW === null || DEFAULT_LLM_COMPACTION_THRESHOLD === null) {
+  throw new Error(`默认模型 ${DEFAULT_LLM_MODEL} 缺少能力目录`);
 }
 
 export interface AgentContextSettings {
@@ -50,17 +48,32 @@ export interface AgentContextSettings {
   contextBudgetSource: string;
 }
 
-/** 每个模型按自身窗口计算预算；显式环境变量仍保留系统级最高优先级。 */
-export function agentContextSettings(modelWindow: number): AgentContextSettings {
-  const safeWindow = Number.isFinite(modelWindow) && modelWindow > 0 ? Math.floor(modelWindow) : 128_000;
+/** 每个模型使用目录中的压缩阈值；环境变量只能进一步收紧实例上限。 */
+export function agentContextSettings(modelWindow: number, modelCompactionThreshold: number): AgentContextSettings {
+  if (!Number.isFinite(modelWindow) || modelWindow <= 0) throw new Error('模型上下文长度无效');
+  const safeWindow = Math.floor(modelWindow);
+  if (
+    !Number.isFinite(modelCompactionThreshold)
+    || modelCompactionThreshold <= 0
+    || modelCompactionThreshold > safeWindow
+  ) {
+    throw new Error('模型压缩阈值无效或超过上下文长度');
+  }
+  const safeThreshold = Math.floor(modelCompactionThreshold);
   const configuredBudget = Number(process.env.LLM_CONTEXT_BUDGET);
   const hasConfiguredBudget = Number.isFinite(configuredBudget) && configuredBudget > 0;
+  const budget = hasConfiguredBudget ? Math.min(safeThreshold, Math.floor(configuredBudget)) : safeThreshold;
   return {
     modelContextWindow: safeWindow,
-    contextBudget: hasConfiguredBudget ? Math.floor(configuredBudget) : Math.floor(safeWindow * 0.5),
-    contextBudgetSource: hasConfiguredBudget ? 'env' : 'model-settings',
+    contextBudget: budget,
+    contextBudgetSource: hasConfiguredBudget && budget < safeThreshold ? 'env' : 'model-compaction-threshold',
   };
 }
+
+const DEFAULT_AGENT_CONTEXT_SETTINGS = agentContextSettings(
+  DEFAULT_LLM_CONTEXT_WINDOW,
+  DEFAULT_LLM_COMPACTION_THRESHOLD,
+);
 
 function contextStrategy(v: string | undefined): 'current' | 'langchain-trim' {
   return v === 'langchain-trim' ? 'langchain-trim' : 'current';
@@ -121,10 +134,8 @@ export const config = {
     baseUrl: 'https://api.openai.com/v1',
     apiKey: '',
     model: DEFAULT_LLM_MODEL,
-    maxTokens: 4096,
     timeoutMs: 120_000,
     retries: 2,
-    stream: true,
   },
   agent: {
     // Safety backstop only — NOT the primary control. Long tasks terminate when the
@@ -133,13 +144,9 @@ export const config = {
     hardStepCap: Number(process.env.AGENT_HARD_STEP_CAP ?? 1000),
     // Context budget in estimated tokens. Kept conservatively below the model window
     // to avoid context rot. Compaction (mask → window) keeps the working set under it.
-    modelContextWindow: DEFAULT_LLM_CONTEXT_WINDOW,
-    contextBudget: contextBudget(DEFAULT_LLM_CONTEXT_WINDOW),
-    contextBudgetSource: Number.isFinite(Number(process.env.LLM_CONTEXT_BUDGET)) && Number(process.env.LLM_CONTEXT_BUDGET) > 0 ? 'env' : 'model-default',
-    // Fraction of budget that triggers L1 observation masking of old tool results.
-    compactWarnRatio: Number(process.env.AGENT_COMPACT_WARN_RATIO ?? 0.75),
-    // Fraction of budget that additionally triggers L2 sliding-window truncation.
-    compactHardRatio: Number(process.env.AGENT_COMPACT_HARD_RATIO ?? 0.9),
+    modelContextWindow: DEFAULT_AGENT_CONTEXT_SETTINGS.modelContextWindow,
+    contextBudget: DEFAULT_AGENT_CONTEXT_SETTINGS.contextBudget,
+    contextBudgetSource: DEFAULT_AGENT_CONTEXT_SETTINGS.contextBudgetSource,
     // Most-recent messages always kept verbatim (never masked or windowed out).
     keepRecentMessages: Number(process.env.AGENT_KEEP_RECENT_MESSAGES ?? 12),
     // 上下文裁剪策略。默认 current 保持现有行为；langchain-trim 只接管普通历史裁剪适配层。

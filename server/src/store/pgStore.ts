@@ -1704,16 +1704,9 @@ export class PgStore implements Store {
         },
       });
 
-      // 静态模板保证全新 default tenant 可创建；创建其它 tenant 时，再用 default
-      // tenant 当前保存的运行配置覆盖同名键。复制后各 tenant 独立更新，不再动态回退。
+      // tenant 只写入自己的静态初始配置。LLM、MCP、运行时、工具和数据源由系统统一维护，
+      // 不能复制 default tenant 中的系统凭证或资源配置。
       const settings = new Map(input.settingsTemplate.map((entry) => [entry.key, entry.value]));
-      if (input.id !== 'default') {
-        const savedTemplate = await tx.app_settings.findMany({
-          where: { tenant_id: 'default', NOT: { key: { startsWith: 'ui.' } } },
-          select: { key: true, value: true },
-        });
-        for (const entry of savedTemplate) settings.set(entry.key, entry.value);
-      }
       if (settings.size) {
         await tx.app_settings.createMany({
           data: [...settings].map(([key, value]) => ({

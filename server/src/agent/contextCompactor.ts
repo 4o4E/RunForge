@@ -114,11 +114,11 @@ class CurrentContextCompactor implements ContextCompactor {
 
   async compact(input: ContextCompactionInput): Promise<ContextCompactionOutput | null> {
     const { contextBudget, contextBudgetSource, modelContextWindow } = input.contextSettings;
-    const { compactWarnRatio, compactHardRatio, keepRecentMessages } = config.agent;
+    const { keepRecentMessages } = config.agent;
     const items = [...input.items];
     const estBefore = estimateTokens(messagesOf(items), input.tokensPerChar);
 
-    if (estBefore < contextBudget * compactWarnRatio) {
+    if (estBefore < contextBudget) {
       const forced = maskForcedToolCallPayloads(items, input.forceMaskedToolNames);
       const sentChars = totalChars(messagesOf(items));
       if (forced.masked) {
@@ -141,12 +141,16 @@ class CurrentContextCompactor implements ContextCompactor {
     const { collapsedIds, masked } = maskPayloads(items, keepRecentMessages, input.forceMaskedToolNames);
 
     let l3Summary: LlmMessage | undefined;
-    if (input.provider && estimateTokens(messagesOf(items), input.tokensPerChar) >= contextBudget * compactHardRatio) {
+    if (input.provider && estimateTokens(messagesOf(items), input.tokensPerChar) >= contextBudget) {
       const candidate = summaryCandidate(messagesOf(items), { keepRecent: keepRecentMessages });
       if (candidate) {
         const ids = dbIds(items.slice(candidate.start, candidate.end));
         if (ids.length) {
-          const summary = await input.provider.complete(renderSummaryPrompt(candidate.messages, input.goalContent), []);
+          const summary = await input.provider.completeStream(
+            renderSummaryPrompt(candidate.messages, input.goalContent),
+            [],
+            () => {},
+          );
           l3Summary = summaryMessage(summary.content || 'Earlier context was summarized, but the model returned an empty summary.\n较早上下文已被摘要，但模型返回了空摘要。');
           items.splice(candidate.start, candidate.end - candidate.start, { msg: l3Summary, dbId: null });
           summarizedIds.push(...ids);
@@ -155,7 +159,7 @@ class CurrentContextCompactor implements ContextCompactor {
       }
     }
 
-    if (estimateTokens(messagesOf(items), input.tokensPerChar) >= contextBudget * compactHardRatio) {
+    if (estimateTokens(messagesOf(items), input.tokensPerChar) >= contextBudget) {
       const m2 = slidingWindow(messagesOf(items), { keepRecent: keepRecentMessages });
       if (m2.dropped > 0) {
         const kept = new Set(m2.messages);
@@ -260,11 +264,11 @@ class LangChainTrimContextCompactor extends CurrentContextCompactor {
 
   override async compact(input: ContextCompactionInput): Promise<ContextCompactionOutput | null> {
     const { contextBudget, contextBudgetSource, modelContextWindow } = input.contextSettings;
-    const { compactWarnRatio, compactHardRatio, keepRecentMessages } = config.agent;
+    const { keepRecentMessages } = config.agent;
     const items = [...input.items];
     const estBefore = estimateTokens(messagesOf(items), input.tokensPerChar);
 
-    if (estBefore < contextBudget * compactWarnRatio) {
+    if (estBefore < contextBudget) {
       const forced = maskForcedToolCallPayloads(items, input.forceMaskedToolNames);
       const sentChars = totalChars(messagesOf(items));
       if (forced.masked) {
@@ -283,12 +287,16 @@ class LangChainTrimContextCompactor extends CurrentContextCompactor {
     const summarizedIds: number[] = [];
     let summarized = 0;
     let l3Summary: LlmMessage | undefined;
-    if (input.provider && estimateTokens(messagesOf(items), input.tokensPerChar) >= contextBudget * compactHardRatio) {
+    if (input.provider && estimateTokens(messagesOf(items), input.tokensPerChar) >= contextBudget) {
       const candidate = summaryCandidate(messagesOf(items), { keepRecent: keepRecentMessages });
       if (candidate) {
         const ids = dbIds(items.slice(candidate.start, candidate.end));
         if (ids.length) {
-          const summary = await input.provider.complete(renderSummaryPrompt(candidate.messages, input.goalContent), []);
+          const summary = await input.provider.completeStream(
+            renderSummaryPrompt(candidate.messages, input.goalContent),
+            [],
+            () => {},
+          );
           l3Summary = summaryMessage(summary.content || 'Earlier context was summarized, but the model returned an empty summary.\n较早上下文已被摘要，但模型返回了空摘要。');
           items.splice(candidate.start, candidate.end - candidate.start, { msg: l3Summary, dbId: null });
           summarizedIds.push(...ids);
@@ -297,7 +305,7 @@ class LangChainTrimContextCompactor extends CurrentContextCompactor {
       }
     }
 
-    if (estimateTokens(messagesOf(items), input.tokensPerChar) < contextBudget * compactHardRatio) {
+    if (estimateTokens(messagesOf(items), input.tokensPerChar) < contextBudget) {
       return {
         items,
         sentChars: totalChars(messagesOf(items)),
@@ -332,7 +340,7 @@ class LangChainTrimContextCompactor extends CurrentContextCompactor {
     try {
       const langMessages = body.map((item, index) => toLangChainMessage(item.msg, String(item.dbId ?? `volatile-${index}`)));
       const trimmed = await trimMessages(langMessages, {
-        maxTokens: Math.max(1, Math.floor(contextBudget * compactHardRatio) - estimateTokens(messagesOf(prefix), input.tokensPerChar)),
+        maxTokens: Math.max(1, contextBudget - estimateTokens(messagesOf(prefix), input.tokensPerChar)),
         tokenCounter: langChainTokenCounter(input.tokensPerChar),
         strategy: 'last',
         allowPartial: false,

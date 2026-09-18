@@ -117,7 +117,7 @@ function scriptedProvider(): Provider {
   let turn = 0;
   return {
     name: 'scripted',
-    async complete() {
+    async completeStream() {
       turn += 1;
       if (turn === 1) {
         return { content: null, toolCalls: [{ id: 'call_1', name: 'glob', arguments: '{"pattern":"**/*.json"}' }] };
@@ -131,9 +131,6 @@ function truncatedStreamProvider(state: { retryMessages: string[] }): Provider {
   let turn = 0;
   return {
     name: 'fake-truncated-stream',
-    async complete() {
-      throw new Error('流式 provider 不应回退到非流式 complete');
-    },
     async completeStream(messages, _tools, onDelta) {
       turn += 1;
       if (turn === 1) {
@@ -201,7 +198,7 @@ test('executeRun: 使用 run 的空间配置副本装配提示词、工具和上
   const observed: { systemPrompt: string; tools: string[] } = { systemPrompt: '', tools: [] };
   const provider: Provider = {
     name: 'space-snapshot',
-    async complete(messages, tools) {
+    async completeStream(messages, tools) {
       observed.systemPrompt = messages.find((message) => message.role === 'system')?.content ?? '';
       observed.tools = tools.map((tool) => tool.name);
       return { content: 'snapshot applied', toolCalls: [], finishReason: 'stop' };
@@ -307,7 +304,7 @@ test('executeRun: 按 plugin_lock 装配并激活 tenant 业务 Skill', async ()
       store,
       provider: {
         name: 'business-skill',
-        async complete(messages) {
+        async completeStream(messages) {
           turn += 1;
           if (turn === 1) {
             sawCatalog = messages.some((message) => message.content?.includes('business:crm/customer-query'));
@@ -351,7 +348,7 @@ test('executeRun: external 空间即使模型伪造 ask_user 调用也不会进�
   let observedSystemPrompt = '';
   const provider: Provider = {
     name: 'external-ask-user-guard',
-    async complete(messages) {
+    async completeStream(messages) {
       observedSystemPrompt = messages.find((message) => message.role === 'system')?.content ?? '';
       turn += 1;
       if (turn === 1) {
@@ -417,7 +414,7 @@ test('executeRun: 正常结束前原子吸收 next_step 输入并继续下一轮
   let materializations = 0;
   const provider: Provider = {
     name: 'external-next-step',
-    async complete(messages) {
+    async completeStream(messages) {
       turn += 1;
       assert.equal(materializations, turn, 'provider 调用前应完成当前输入的 artifact materialize');
       if (turn === 1) {
@@ -495,7 +492,7 @@ test('thread title: uses first input as fallback and generates for an empty-titl
     store,
     provider: {
       name: 'title-provider',
-      async complete() {
+      async completeStream() {
         return { content: '登录提交无响应修复', toolCalls: [] };
       },
     },
@@ -509,7 +506,7 @@ test('thread title: uses first input as fallback and generates for an empty-titl
     store,
     provider: {
       name: 'unused-title-provider',
-      async complete() {
+      async completeStream() {
         throw new Error('第二轮不应该生成标题');
       },
     },
@@ -527,7 +524,7 @@ test('thread title: uses first input as fallback and generates for an empty-titl
     store,
     provider: {
       name: 'branch-title-provider',
-      async complete(messages) {
+      async completeStream(messages) {
         assert.match(messages[1]?.content ?? '', /我的意思是这一块找一个地方玩/);
         return { content: '余姚玩水地点选择', toolCalls: [] };
       },
@@ -546,7 +543,7 @@ test('thread title: keeps generated title and fallback concise for the sidebar',
     store,
     provider: {
       name: 'verbose-title-provider',
-      async complete() {
+      async completeStream() {
         return { content: '请帮我分析跨平台对话模型优化方案，以及后续落地建议', toolCalls: [] };
       },
     },
@@ -562,7 +559,7 @@ test('thread title: keeps generated title and fallback concise for the sidebar',
     store,
     provider: {
       name: 'empty-title-provider',
-      async complete() {
+      async completeStream() {
         return { content: '', toolCalls: [] };
       },
     },
@@ -581,7 +578,7 @@ test('thread title: extracts concise title from json-like provider output', asyn
     store,
     provider: {
       name: 'json-title-provider',
-      async complete() {
+      async completeStream() {
         return { content: '```json\n{"title":"Ubuntu 24 安装驱动"}\n```', toolCalls: [] };
       },
     },
@@ -601,7 +598,7 @@ test('executeRun: generates a thread title after completion when enabled', async
     store,
     provider: {
       name: 'final-and-title',
-      async complete(messages) {
+      async completeStream(messages) {
         calls += 1;
         const titlePrompt = messages.some((message) => message.content?.includes('thread 标题生成器'));
         return titlePrompt
@@ -635,9 +632,6 @@ test('executeRun: persists streamed text and terminal stream status for replay',
     store,
     provider: {
       name: 'streaming-final',
-      async complete() {
-        assert.fail('流式 provider 不应回退到非流式 complete');
-      },
       async completeStream(_messages, _tools, onDelta) {
         onDelta({ reasoning: '想' });
         onDelta({ content: 'he' });
@@ -647,7 +641,6 @@ test('executeRun: persists streamed text and terminal stream status for replay',
     },
     publish: (_id, e) => published.push(e),
     hardStepCap: 3,
-    stream: true,
     toolSettings: testToolSettings(),
   });
 
@@ -674,9 +667,6 @@ test('executeRun: retries a pre-delta stream failure without switching to non-st
       store,
       provider: {
         name: 'stream-only',
-        async complete() {
-          assert.fail('流式重试不应改走非流式 complete');
-        },
         async completeStream(_messages, _tools, onDelta) {
           streamCalls += 1;
           if (streamCalls === 1) throw new Error('first stream request failed');
@@ -686,7 +676,6 @@ test('executeRun: retries a pre-delta stream failure without switching to non-st
       },
       publish: (_id, event) => published.push(event),
       hardStepCap: 3,
-      stream: true,
       toolSettings: testToolSettings(),
     });
   });
@@ -710,7 +699,7 @@ test('executeRun: injects the current workspace root into the LLM context', asyn
     store,
     provider: {
       name: 'capture-context',
-      async complete(messages) {
+      async completeStream(messages) {
         systemText = messages.filter((m) => m.role === 'system').map((m) => m.content ?? '').join('\n');
         return { content: 'done', toolCalls: [] };
       },
@@ -746,7 +735,7 @@ test('executeRun: injects the unified workload token at run startup', async () =
     store,
     provider: {
       name: 'database-runtime-env',
-      async complete(messages) {
+      async completeStream(messages) {
         turn += 1;
         if (turn === 1) {
           sawRuntimeContext = messages.some((message) => (
@@ -825,7 +814,7 @@ test('executeRun: activates a skill while native tools remain loaded', async () 
     store,
     provider: {
       name: 'skill-aware',
-      async complete(messages, tools) {
+      async completeStream(messages, tools) {
         turn += 1;
         toolNamesByTurn.push(tools.map((tool) => tool.name).sort());
         const systemText = messages.filter((m) => m.role === 'system').map((m) => m.content ?? '').join('\n');
@@ -905,7 +894,7 @@ test('executeRun: skill catalog uses folded YAML descriptions in user prompt wit
     store,
     provider: {
       name: 'capture-skill-catalog',
-      async complete(messages) {
+      async completeStream(messages) {
         userText = messages.filter((m) => m.role === 'user').at(-1)?.content ?? '';
         return { content: 'done', toolCalls: [] };
       },
@@ -942,7 +931,7 @@ test('executeRun: resumed runs still expose the skill catalog before the persist
     store,
     provider: {
       name: 'capture-resumed-skill-catalog',
-      async complete(messages) {
+      async completeStream(messages) {
         userText = messages.filter((m) => m.role === 'user').at(-1)?.content ?? '';
         return { content: 'done', toolCalls: [] };
       },
@@ -975,7 +964,7 @@ test('executeRun: skill activation instructions do not leak into the next run hi
     store,
     provider: {
       name: 'activate-then-finish',
-      async complete() {
+      async completeStream() {
         turn += 1;
         if (turn === 1) return { content: null, toolCalls: [{ id: 'skill_1', name: 'skill_activate', arguments: '{"id":"user:leaky-skill"}' }] };
         return { content: 'done', toolCalls: [] };
@@ -993,7 +982,7 @@ test('executeRun: skill activation instructions do not leak into the next run hi
     store,
     provider: {
       name: 'capture-next-run',
-      async complete(messages) {
+      async completeStream(messages) {
         secondRunSystemText = messages.filter((m) => m.role === 'system').map((m) => m.content ?? '').join('\n');
         secondRunContext = messages.map((m) => m.content ?? '').join('\n');
         return { content: 'done', toolCalls: [] };
@@ -1055,7 +1044,7 @@ test('executeRun: MCP tools load only after current-run activation and unload in
     store,
     provider: {
       name: 'mcp-activation',
-      async complete(messages, tools) {
+      async completeStream(messages, tools) {
         turn += 1;
         run1Tools.push(tools.map((tool) => tool.name));
         if (turn === 1) {
@@ -1090,7 +1079,7 @@ test('executeRun: MCP tools load only after current-run activation and unload in
     store,
     provider: {
       name: 'mcp-unloaded',
-      async complete(messages, tools) {
+      async completeStream(messages, tools) {
         run2Tools = tools.map((tool) => tool.name);
         run2SystemText = messages.filter((message) => message.role === 'system').map((message) => message.content ?? '').join('\n');
         return { content: 'done', toolCalls: [] };
@@ -1128,7 +1117,7 @@ test('executeRun: starts async subagents and allows cross-run polling', async ()
     store,
     provider: {
       name: 'subagent-aware',
-      async complete(messages) {
+      async completeStream(messages) {
         const prompt = messages.map((m) => m.content ?? '').join('\n');
         if (prompt.includes('异步只读推理型 subagent')) {
           subagentPrompts.push(prompt);
@@ -1203,7 +1192,7 @@ test('executeRun: starts async subagents and allows cross-run polling', async ()
     store,
     provider: {
       name: 'subagent-poller',
-      async complete(messages) {
+      async completeStream(messages) {
         pollTurn += 1;
         if (pollTurn === 1) {
           const history = messages.map((m) => m.content ?? '').join('\n');
@@ -1240,7 +1229,7 @@ test('executeRun: writer subagent can use scheduled write tools and poll waits f
     store,
     provider: {
       name: 'writer-subagent',
-      async complete(messages) {
+      async completeStream(messages) {
         const prompt = messages.map((m) => m.content ?? '').join('\n');
         if (prompt.includes('异步 writer subagent')) {
           writerTurn += 1;
@@ -1317,7 +1306,7 @@ test('executeRun: repeated running subagent polls do not trigger loop guard', as
     store,
     provider: {
       name: 'slow-subagent',
-      async complete(messages) {
+      async completeStream(messages) {
         const prompt = messages.map((m) => m.content ?? '').join('\n');
         if (prompt.includes('异步只读推理型 subagent')) {
           await new Promise((resolve) => setTimeout(resolve, 50));
@@ -1366,9 +1355,6 @@ test('executeRun: streams tool input stats without double counting final tool ar
     store,
     provider: {
       name: 'stream-tool-input',
-      async complete() {
-        return { content: 'done', toolCalls: [] };
-      },
       async completeStream(_messages, _tools, onDelta) {
         turn += 1;
         if (turn > 1) return { content: 'done', toolCalls: [] };
@@ -1401,7 +1387,7 @@ test('executeRun: update_plan turn does not finalize until a no-tool final answe
     store,
     provider: {
       name: 'answer-then-plan',
-      async complete() {
+      async completeStream() {
         turns += 1;
         if (turns > 1) return { content: finalText, toolCalls: [] };
         return {
@@ -1452,7 +1438,7 @@ test('executeRun: auto-completes the final report plan item without a second sum
     store,
     provider: {
       name: 'auto-report-step',
-      async complete() {
+      async completeStream() {
         turns += 1;
         if (turns === 1) {
           return {
@@ -1501,7 +1487,7 @@ test('executeRun: final text closes the run even when plan is still open', async
     store,
     provider: {
       name: 'deferred-final',
-      async complete() {
+      async completeStream() {
         turns += 1;
         if (turns === 1) {
           return {
@@ -1548,7 +1534,7 @@ test('executeRun: keeps multi-turn memory within a thread', async () => {
   const run1 = await store.createRun(scope, thread.id, 'first');
   await executeRun(run1.id, {
     store,
-    provider: { name: 's', async complete() { return { content: 'ok1', toolCalls: [] }; } },
+    provider: { name: 's', async completeStream() { return { content: 'ok1', toolCalls: [] }; } },
     publish: () => {},
     hardStepCap: 3,
     toolSettings: testToolSettings(),
@@ -1561,7 +1547,7 @@ test('executeRun: keeps multi-turn memory within a thread', async () => {
     store,
     provider: {
       name: 's',
-      async complete(messages) {
+      async completeStream(messages) {
         seenPriorCount = messages.filter((m) => m.role !== 'system').length;
         return { content: 'ok2', toolCalls: [] };
       },
@@ -1573,6 +1559,54 @@ test('executeRun: keeps multi-turn memory within a thread', async () => {
 
   // prior: user(first) + assistant(final) + new user(second) = 3
   assert.equal(seenPriorCount, 3);
+});
+
+test('executeRun: 新 run 切换模型后在首次请求前按新模型阈值压缩历史', async () => {
+  const previousKeepRecent = config.agent.keepRecentMessages;
+  config.agent.keepRecentMessages = 1;
+  try {
+    const store = new MemoryStore();
+    const thread = await store.createThread(scope);
+    const oldRun = await store.createRun(scope, thread.id, 'old model request', { modelRef: 'main:model-a' });
+    await store.addMessage(scope, thread.id, oldRun.id, null, {
+      role: 'assistant',
+      content: null,
+      toolCalls: [{ id: 'old-tool-call', name: 'file_read', arguments: '{"path":"old.txt"}' }],
+    });
+    await store.addMessage(scope, thread.id, oldRun.id, null, {
+      role: 'tool',
+      content: 'x'.repeat(4_000),
+      toolCallId: 'old-tool-call',
+    });
+    await store.setRunStatus(scope, oldRun.id, 'done');
+
+    let firstRequestToolContent = '';
+    const run = await store.createRun(scope, thread.id, 'new model request', { modelRef: 'main:model-b' });
+    const published: AgentEvent[] = [];
+    await executeRun(run.id, {
+      store,
+      provider: {
+        name: 'capture-new-model-context',
+        async completeStream(messages) {
+          firstRequestToolContent = messages.find((message) => message.toolCallId === 'old-tool-call')?.content ?? '';
+          return { content: 'done with new model', toolCalls: [] };
+        },
+      },
+      publish: (_id, event) => published.push(event),
+      hardStepCap: 3,
+      toolSettings: testToolSettings(),
+      contextSettings: {
+        modelContextWindow: 1_000_000,
+        contextBudget: 200,
+        contextBudgetSource: 'model-compaction-threshold',
+      },
+    });
+
+    assert.equal(firstRequestToolContent, maskPlaceholder('x'.repeat(4_000)));
+    assert.ok(published.some((event) => event.type === 'compaction' && event.reason?.includes('model-compaction-threshold')));
+  } finally {
+    config.agent.keepRecentMessages = previousKeepRecent;
+  }
 });
 
 test('executeRun: compacts bulky old history when finishing a run', async () => {
@@ -1595,7 +1629,7 @@ test('executeRun: compacts bulky old history when finishing a run', async () => 
     const published: AgentEvent[] = [];
     await executeRun(run.id, {
       store,
-      provider: { name: 's', async complete() { return { content: 'ok', toolCalls: [] }; } },
+      provider: { name: 's', async completeStream() { return { content: 'ok', toolCalls: [] }; } },
       publish: (_id, e) => published.push(e),
       hardStepCap: 3,
       toolSettings: testToolSettings(),
@@ -1637,7 +1671,7 @@ test('executeRun: records L3 summary and main model calls as separate provider p
       store,
       provider: {
         name: 'summary-aware',
-        async complete(messages) {
+        async completeStream(messages) {
           const summaryPrompt = messages.some((message) => message.content?.includes('需要摘要的旧上下文'));
           return summaryPrompt
             ? { content: '压缩后的历史摘要', toolCalls: [] }
@@ -1673,7 +1707,7 @@ test('executeRun: text without tools completes when no plan is open', async () =
     store,
     provider: {
       name: 'direct-final',
-      async complete() {
+      async completeStream() {
         return { content: 'premature final answer', toolCalls: [] };
       },
     },
@@ -1698,7 +1732,7 @@ test('executeRun: non-stop finish reason is surfaced as run error instead of fin
       store,
       provider: {
         name: 'length-finish',
-        async complete() {
+        async completeStream() {
           return {
             content: '这是一段被截断的输出',
             toolCalls: [],
@@ -1736,7 +1770,7 @@ test('executeRun: truncated tool-call turn does not execute tools', async () => 
       store,
       provider: {
         name: 'truncated-tool-call',
-        async complete() {
+        async completeStream() {
           return {
             content: null,
             toolCalls: [{ id: 'write_1', name: 'file_write', arguments: '{"path":"x.txt","content":"半截' }],
@@ -1773,7 +1807,6 @@ test('executeRun: streaming length finish is persisted as resumable error', asyn
       provider,
       publish: (_id, event) => published.push(event),
       hardStepCap: 3,
-      stream: true,
       toolSettings: testToolSettings(),
     });
   });
@@ -1793,7 +1826,6 @@ test('executeRun: streaming length finish is persisted as resumable error', asyn
     provider,
     publish: (_id, event) => published.push(event),
     hardStepCap: 3,
-    stream: true,
     resume: true,
     toolSettings: testToolSettings(),
   });
@@ -1815,7 +1847,7 @@ test('executeRun: stops and errors at the hard step cap', async () => {
     // Always asks for a tool, never finalizes.
     provider: {
       name: 'looper',
-      async complete() {
+      async completeStream() {
         return { content: null, toolCalls: [{ id: 'c', name: 'glob', arguments: '{"pattern":"*"}' }] };
       },
     },
@@ -1842,7 +1874,7 @@ test('executeRun: cancels cooperatively at a step boundary', async () => {
     store,
     provider: {
       name: 'looper',
-      async complete() {
+      async completeStream() {
         turn += 1;
         if (turn === 1) await store.setRunStatus(scope, run.id, 'canceling');
         return { content: null, toolCalls: [{ id: 'c', name: 'glob', arguments: '{"pattern":"*"}' }] };
@@ -1870,7 +1902,7 @@ test('executeRun: ask_user pauses the run and keeps tool pairing intact', async 
     store,
     provider: {
       name: 'asker',
-      async complete() {
+      async completeStream() {
         return {
           content: null,
           toolCalls: [
@@ -1917,7 +1949,7 @@ test('executeRun: rejects malformed string-wrapped tool args without running the
     store,
     provider: {
       name: 'bad-tool-args',
-      async complete() {
+      async completeStream() {
         turn += 1;
         if (turn === 1) {
           return {
@@ -1952,7 +1984,7 @@ test('executeRun: resumes the same run after a user answer without duplicating i
   let turn = 0;
   const provider: Provider = {
     name: 'resume',
-    async complete() {
+    async completeStream() {
       turn += 1;
       if (turn === 1) {
         return {
@@ -1986,9 +2018,6 @@ test('executeRun: retries after interrupted streaming output from durable messag
 
   const provider: Provider = {
     name: 'interrupted-stream',
-    async complete() {
-      throw new Error('不应该回退到非流式 complete');
-    },
     async completeStream(messages, _tools, onDelta) {
       calls += 1;
       if (calls === 1) {
@@ -2001,7 +2030,7 @@ test('executeRun: retries after interrupted streaming output from durable messag
   };
 
   const warnings = await captureWarnings(async () => {
-    await executeRun(run.id, { store, provider, publish: () => {}, hardStepCap: 3, stream: true, toolSettings: testToolSettings() });
+    await executeRun(run.id, { store, provider, publish: () => {}, hardStepCap: 3, toolSettings: testToolSettings() });
   });
 
   const failed = await store.getRun(scope, run.id);
@@ -2011,7 +2040,7 @@ test('executeRun: retries after interrupted streaming output from durable messag
   assert.equal(warnings.some((line) => line.includes('interrupted-stream') && line.includes('network disconnected')), true);
 
   await store.setRunStatus(scope, run.id, 'pending', { error: null });
-  await executeRun(run.id, { store, provider, publish: () => {}, hardStepCap: 3, stream: true, resume: true, toolSettings: testToolSettings() });
+  await executeRun(run.id, { store, provider, publish: () => {}, hardStepCap: 3, resume: true, toolSettings: testToolSettings() });
 
   const finished = await store.getRun(scope, run.id);
   assert.equal(finished?.status, 'done');

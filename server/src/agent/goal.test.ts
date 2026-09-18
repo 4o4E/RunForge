@@ -124,7 +124,7 @@ test('executeRun: update_plan persists the goal anchor on the run', async () => 
   let turn = 0;
   const provider: Provider = {
     name: 'scripted',
-    async complete() {
+    async completeStream() {
       turn += 1;
       if (turn === 1) {
         return {
@@ -181,7 +181,7 @@ test('executeRun: final report wins over an unsettled plan', async () => {
   let turn = 0;
   const provider: Provider = {
     name: 'scripted',
-    async complete() {
+    async completeStream() {
       turn += 1;
       if (turn === 1) {
         return {

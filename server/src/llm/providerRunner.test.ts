@@ -51,7 +51,7 @@ test('ProviderRunner: 由 RunForge 重试并保存每个真实 HTTP attempt', as
   };
   const provider: Provider = {
     name: 'fake',
-    async complete(_messages, _tools, options) {
+    async completeStream(_messages, _tools, _onDelta, options) {
       const response = await options!.fetch!(
         'https://provider.test/v1/chat?api_key=must-not-persist&key=also-must-not-persist&model=fake-model',
         {
@@ -122,9 +122,6 @@ test('ProviderRunner: 已向 runtime 发布流式增量后不重试', async () =
   let calls = 0;
   const provider: Provider = {
     name: 'fake-stream',
-    async complete() {
-      return result('unused');
-    },
     async completeStream(_messages, _tools, onDelta, options) {
       calls += 1;
       const response = await options!.fetch!('https://provider.test/v1/chat', {
@@ -165,7 +162,7 @@ test('ProviderRunner: 保存响应解析错误且不把它当成可重试传输�
   let calls = 0;
   const provider: Provider = {
     name: 'fake-json',
-    async complete(_messages, _tools, options) {
+    async completeStream(_messages, _tools, _onDelta, options) {
       calls += 1;
       const response = await options!.fetch!('https://provider.test/v1/chat', {
         method: 'POST',

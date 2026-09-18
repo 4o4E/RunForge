@@ -10,20 +10,24 @@ import type {
   UpdateTenantStatusInput,
 } from '@runforge/contracts';
 import {
-  getLlmSettings,
-  getMcpSettings,
-  getRuntimeCapabilitiesSettings,
-  getToolSettings,
+  getSystemLlmSettings,
+  getSystemMcpSettings,
+  getSystemRuntimeCapabilitiesSettings,
+  getSystemToolSettings,
+  getTenantResourceAuthorization,
+  llmModelOptions,
   normalizeLlmSettings,
   normalizeMcpSettings,
+  saveTenantResourceAuthorization,
   saveLlmSettings,
   saveMcpSettings,
   saveRuntimeCapabilitiesSettings,
   saveToolSettings,
   shellPathForSettings,
+  SYSTEM_RESOURCE_TENANT_ID,
   tenantSettingsTemplateEntries,
 } from '../settings.js';
-import { getLlmSettingsOptions, getMcpSettingsOptions, getToolSettingsOptions, shellCommandOptions } from './settings.js';
+import { getMcpSettingsOptions, getToolSettingsOptions, shellCommandOptions } from './settings.js';
 import { pingLlmProvider, probeLlmProviderModels, testLlmProviderChat } from '../llm/probe.js';
 import { catalogCapability } from '../llm/modelCatalog.js';
 import { probeMcpServer } from '../mcp/client.js';
@@ -49,12 +53,18 @@ import type { DatasourceRow } from '../datasources/types.js';
 import { systemSpacesApi } from './spaces.js';
 import { loadBusinessPluginAdminView, updateBusinessPluginAdminView } from '../businessPlugins/settings.js';
 import { BusinessPluginError } from '../businessPlugins/errors.js';
+import {
+  createTenantUser,
+  TenantUserError,
+  updateTenantUser,
+} from '../tenants/users.js';
 
 export const systemApi = Router();
 
 systemApi.use('/tenants/:tenantId/spaces', systemSpacesApi);
 
 const TENANT_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
+const systemResourceScope: TenantScope = { tenantId: SYSTEM_RESOURCE_TENANT_ID };
 
 async function systemTenantScope(req: Request, res: Response): Promise<TenantScope | null> {
   const tenantId = req.params.tenantId;
@@ -88,6 +98,11 @@ function handleBusinessPluginError(res: Response, error: unknown) {
   return res.status(500).json({ error: (error as Error).message });
 }
 
+function handleTenantUserError(res: Response, error: unknown) {
+  if (error instanceof TenantUserError) return res.status(error.status).json({ error: error.message });
+  throw error;
+}
+
 systemApi.get('/tenants', async (_req, res) => {
   const rows = await store.listTenants();
   res.json({ tenants: rows.map(toTenantSummary) });
@@ -98,6 +113,28 @@ systemApi.get('/tenants/:tenantId/users', async (req, res) => {
   if (!scope) return;
   const rows = await store.listUsersByTenant(scope.tenantId);
   res.json({ users: rows.map(toUserSummary) });
+});
+
+systemApi.post('/tenants/:tenantId/users', async (req, res) => {
+  const scope = await systemTenantScope(req, res);
+  if (!scope) return;
+  try {
+    const user = await createTenantUser(scope.tenantId, { scope: 'system' }, req.body);
+    res.status(201).json(toUserSummary(user));
+  } catch (error) {
+    handleTenantUserError(res, error);
+  }
+});
+
+systemApi.patch('/tenants/:tenantId/users/:userId', async (req, res) => {
+  const scope = await systemTenantScope(req, res);
+  if (!scope) return;
+  try {
+    const user = await updateTenantUser(scope.tenantId, req.params.userId, { scope: 'system' }, req.body);
+    res.json(toUserSummary(user));
+  } catch (error) {
+    handleTenantUserError(res, error);
+  }
 });
 
 systemApi.get('/tenants/:tenantId/business-plugins', async (req, res) => {
@@ -133,7 +170,7 @@ systemApi.post('/tenants/:tenantId/business-plugins/reload', async (req, res) =>
   }
 });
 
-// tenant、首个 owner、配置副本和 default space 由 Store 在同一事务中创建；任何一步
+// tenant、首个 owner、初始租户设置和 default space 由 Store 在同一事务中创建；任何一步
 // 失败都不留下无法登录或缺少运行配置的半成品 tenant。
 systemApi.post('/tenants', async (req, res) => {
   const body = req.body as Partial<CreateTenantInput> | undefined;
@@ -210,29 +247,25 @@ systemApi.post('/admins', async (req, res) => {
   res.status(201).json(toSystemAdminSummary(admin));
 });
 
-// 系统配置由系统管理员修改，但值仍按 tenant_id 落库；系统管理员必须先明确选择目标租户。
-systemApi.get('/tenants/:tenantId/settings/llm', async (req, res) => {
-  const scope = await systemTenantScope(req, res);
-  if (scope) res.json(await getLlmSettings(scope));
+// 系统资源在全系统统一维护；default tenant_id 只是复用现有存储结构的内部资源归属。
+systemApi.get('/settings/llm', async (_req, res) => {
+  res.json(await getSystemLlmSettings());
 });
 
-systemApi.get('/tenants/:tenantId/settings/llm/options', async (req, res) => {
-  const scope = await systemTenantScope(req, res);
-  if (scope) res.json(await getLlmSettingsOptions(scope));
+systemApi.get('/settings/llm/options', async (_req, res) => {
+  const settings = await getSystemLlmSettings();
+  res.json({ defaultModelRef: settings.defaultModelRef, models: llmModelOptions(settings) });
 });
 
-systemApi.put('/tenants/:tenantId/settings/llm', async (req, res) => {
-  const scope = await systemTenantScope(req, res);
-  if (!scope) return;
+systemApi.put('/settings/llm', async (req, res) => {
   try {
-    res.json(await saveLlmSettings(scope, req.body));
+    res.json(await saveLlmSettings(systemResourceScope, req.body));
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }
 });
 
-systemApi.post('/tenants/:tenantId/settings/llm/provider/models', async (req, res) => {
-  if (!(await systemTenantScope(req, res))) return;
+systemApi.post('/settings/llm/provider/models', async (req, res) => {
   try {
     res.json(await probeLlmProviderModels(llmProviderFromBody(req.body)));
   } catch (err) {
@@ -240,20 +273,17 @@ systemApi.post('/tenants/:tenantId/settings/llm/provider/models', async (req, re
   }
 });
 
-systemApi.post('/tenants/:tenantId/settings/llm/model-capability', async (req, res) => {
-  if (!(await systemTenantScope(req, res))) return;
+systemApi.post('/settings/llm/model-capability', async (req, res) => {
   const model = typeof req.body?.model === 'string' ? req.body.model.trim() : '';
   if (!model) return res.status(400).json({ error: '缺少模型名称' });
   res.json(catalogCapability(model));
 });
 
-systemApi.post('/tenants/:tenantId/settings/llm/provider/ping', async (req, res) => {
-  if (!(await systemTenantScope(req, res))) return;
+systemApi.post('/settings/llm/provider/ping', async (req, res) => {
   res.json(await pingLlmProvider(llmProviderFromBody(req.body)));
 });
 
-systemApi.post('/tenants/:tenantId/settings/llm/provider/chat-test', async (req, res) => {
-  if (!(await systemTenantScope(req, res))) return;
+systemApi.post('/settings/llm/provider/chat-test', async (req, res) => {
   try {
     const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {};
     res.json(await testLlmProviderChat(
@@ -266,43 +296,35 @@ systemApi.post('/tenants/:tenantId/settings/llm/provider/chat-test', async (req,
   }
 });
 
-systemApi.get('/tenants/:tenantId/settings/runtime-capabilities', async (req, res) => {
-  const scope = await systemTenantScope(req, res);
-  if (scope) res.json(await getRuntimeCapabilitiesSettings(scope));
+systemApi.get('/settings/runtime-capabilities', async (_req, res) => {
+  res.json(await getSystemRuntimeCapabilitiesSettings());
 });
 
-systemApi.put('/tenants/:tenantId/settings/runtime-capabilities', async (req, res) => {
-  const scope = await systemTenantScope(req, res);
-  if (!scope) return;
+systemApi.put('/settings/runtime-capabilities', async (req, res) => {
   try {
-    res.json(await saveRuntimeCapabilitiesSettings(scope, req.body));
+    res.json(await saveRuntimeCapabilitiesSettings(systemResourceScope, req.body));
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }
 });
 
-systemApi.get('/tenants/:tenantId/settings/mcp', async (req, res) => {
-  const scope = await systemTenantScope(req, res);
-  if (scope) res.json(await getMcpSettings(scope));
+systemApi.get('/settings/mcp', async (_req, res) => {
+  res.json(await getSystemMcpSettings());
 });
 
-systemApi.get('/tenants/:tenantId/settings/mcp/options', async (req, res) => {
-  const scope = await systemTenantScope(req, res);
-  if (scope) res.json(await getMcpSettingsOptions(scope));
+systemApi.get('/settings/mcp/options', async (_req, res) => {
+  res.json(await getMcpSettingsOptions());
 });
 
-systemApi.put('/tenants/:tenantId/settings/mcp', async (req, res) => {
-  const scope = await systemTenantScope(req, res);
-  if (!scope) return;
+systemApi.put('/settings/mcp', async (req, res) => {
   try {
-    res.json(await saveMcpSettings(scope, req.body));
+    res.json(await saveMcpSettings(systemResourceScope, req.body));
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }
 });
 
-systemApi.post('/tenants/:tenantId/settings/mcp/server/probe', async (req, res) => {
-  if (!(await systemTenantScope(req, res))) return;
+systemApi.post('/settings/mcp/server/probe', async (req, res) => {
   try {
     const settings = normalizeMcpSettings({ servers: [req.body?.server ?? req.body] });
     const server = settings.servers[0];
@@ -326,30 +348,24 @@ systemApi.post('/tenants/:tenantId/settings/mcp/server/probe', async (req, res) 
   }
 });
 
-systemApi.get('/tenants/:tenantId/settings/tools', async (req, res) => {
-  const scope = await systemTenantScope(req, res);
-  if (scope) res.json(await getToolSettings(scope));
+systemApi.get('/settings/tools', async (_req, res) => {
+  res.json(await getSystemToolSettings());
 });
 
-systemApi.get('/tenants/:tenantId/settings/tools/options', async (req, res) => {
-  const scope = await systemTenantScope(req, res);
-  if (scope) res.json(await getToolSettingsOptions(scope));
+systemApi.get('/settings/tools/options', async (_req, res) => {
+  res.json(await getToolSettingsOptions());
 });
 
-systemApi.put('/tenants/:tenantId/settings/tools', async (req, res) => {
-  const scope = await systemTenantScope(req, res);
-  if (!scope) return;
+systemApi.put('/settings/tools', async (req, res) => {
   try {
-    res.json(await saveToolSettings(scope, req.body));
+    res.json(await saveToolSettings(systemResourceScope, req.body));
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }
 });
 
-systemApi.post('/tenants/:tenantId/settings/tools/shell-commands/scan', async (req, res) => {
-  const scope = await systemTenantScope(req, res);
-  if (!scope) return;
-  const current = await getToolSettings(scope);
+systemApi.post('/settings/tools/shell-commands/scan', async (req, res) => {
+  const current = await getSystemToolSettings();
   const body = (req.body ?? {}) as Partial<ShellCommandScanInput>;
   const shellPathMode = body.shellPathMode === 'custom' ? 'custom' : 'system';
   const shellPath = typeof body.shellPath === 'string' ? body.shellPath : current.shellPath;
@@ -358,30 +374,24 @@ systemApi.post('/tenants/:tenantId/settings/tools/shell-commands/scan', async (r
   res.json({ path: envPath, shellCommands: shellCommandOptions([...include, ...scanExecutableNames(envPath)], envPath) });
 });
 
-// 数据源包含供应商管理凭证，只通过系统设置写入；所有查询仍由 tenant_id 强制隔离。
-systemApi.get('/tenants/:tenantId/datasources', async (req, res) => {
-  const scope = await systemTenantScope(req, res);
-  if (!scope) return;
+systemApi.get('/datasources', async (_req, res) => {
   try {
-    res.json({ datasources: (await listDatasources(scope)).map(publicDatasource) });
+    res.json({ datasources: (await listDatasources(systemResourceScope)).map(publicDatasource) });
   } catch (err) {
     handleDatasourceError(res, err);
   }
 });
 
-systemApi.post('/tenants/:tenantId/datasources', async (req, res) => {
-  const scope = await systemTenantScope(req, res);
-  if (!scope) return;
+systemApi.post('/datasources', async (req, res) => {
   try {
-    const datasource = await createDatasource(scope, req.body);
+    const datasource = await createDatasource(systemResourceScope, req.body);
     res.status(201).json({ datasource: publicDatasource(datasource), poolDefaults: poolDefaults() });
   } catch (err) {
     handleDatasourceError(res, err);
   }
 });
 
-systemApi.post('/tenants/:tenantId/datasources/test', async (req, res) => {
-  if (!(await systemTenantScope(req, res))) return;
+systemApi.post('/datasources/test', async (req, res) => {
   try {
     res.json(await testDatasourceDraft(req.body));
   } catch (err) {
@@ -389,67 +399,118 @@ systemApi.post('/tenants/:tenantId/datasources/test', async (req, res) => {
   }
 });
 
-systemApi.get('/tenants/:tenantId/datasources/:datasourceId', async (req, res) => {
-  const scope = await systemTenantScope(req, res);
-  if (!scope) return;
+systemApi.get('/datasources/:datasourceId', async (req, res) => {
   try {
-    const datasource = await getDatasource(scope, req.params.datasourceId);
+    const datasource = await getDatasource(systemResourceScope, req.params.datasourceId);
     if (!datasource) return res.status(404).json({ error: '数据源不存在' });
-    const profiles = await listPermissionProfiles(scope, datasource.id);
-    const accounts = await listDatasourceAccounts(scope, datasource.id);
-    const leases = await listDatasourceLeases(scope, datasource.id);
+    const profiles = await listPermissionProfiles(systemResourceScope, datasource.id);
+    const accounts = await listDatasourceAccounts(systemResourceScope, datasource.id);
+    const leases = await listDatasourceLeases(systemResourceScope, datasource.id);
     res.json({ datasource: publicDatasource(datasource), profiles, accounts, leases });
   } catch (err) {
     handleDatasourceError(res, err);
   }
 });
 
-systemApi.patch('/tenants/:tenantId/datasources/:datasourceId', async (req, res) => {
-  const scope = await systemTenantScope(req, res);
-  if (!scope) return;
+systemApi.patch('/datasources/:datasourceId', async (req, res) => {
   try {
-    res.json({ datasource: publicDatasource(await updateDatasource(scope, req.params.datasourceId, req.body)) });
+    res.json({ datasource: publicDatasource(await updateDatasource(systemResourceScope, req.params.datasourceId, req.body)) });
   } catch (err) {
     handleDatasourceError(res, err);
   }
 });
 
-systemApi.post('/tenants/:tenantId/datasources/:datasourceId/test', async (req, res) => {
-  const scope = await systemTenantScope(req, res);
-  if (!scope) return;
+systemApi.post('/datasources/:datasourceId/test', async (req, res) => {
   try {
-    res.json(await testDatasourceById(scope, req.params.datasourceId, req.body));
+    res.json(await testDatasourceById(systemResourceScope, req.params.datasourceId, req.body));
   } catch (err) {
     handleDatasourceError(res, err);
   }
 });
 
-systemApi.post('/tenants/:tenantId/datasources/:datasourceId/profiles', async (req, res) => {
-  const scope = await systemTenantScope(req, res);
-  if (!scope) return;
+systemApi.post('/datasources/:datasourceId/profiles', async (req, res) => {
   try {
-    res.status(201).json({ profile: await createPermissionProfile(scope, req.params.datasourceId, req.body) });
+    res.status(201).json({ profile: await createPermissionProfile(systemResourceScope, req.params.datasourceId, req.body) });
   } catch (err) {
     handleDatasourceError(res, err);
   }
 });
 
-systemApi.post('/tenants/:tenantId/datasources/:datasourceId/profiles/readonly-default', async (req, res) => {
-  const scope = await systemTenantScope(req, res);
-  if (!scope) return;
+systemApi.post('/datasources/:datasourceId/profiles/readonly-default', async (req, res) => {
   try {
-    res.status(201).json({ profile: await ensureReadonlyPermissionProfile(scope, req.params.datasourceId) });
+    res.status(201).json({ profile: await ensureReadonlyPermissionProfile(systemResourceScope, req.params.datasourceId) });
   } catch (err) {
     handleDatasourceError(res, err);
   }
 });
 
-systemApi.patch('/tenants/:tenantId/datasources/:datasourceId/profiles/:profileId', async (req, res) => {
-  const scope = await systemTenantScope(req, res);
-  if (!scope) return;
+systemApi.patch('/datasources/:datasourceId/profiles/:profileId', async (req, res) => {
   try {
-    res.json({ profile: await updatePermissionProfile(scope, req.params.datasourceId, req.params.profileId, req.body) });
+    res.json({ profile: await updatePermissionProfile(systemResourceScope, req.params.datasourceId, req.params.profileId, req.body) });
   } catch (err) {
     handleDatasourceError(res, err);
   }
+});
+
+async function tenantResourceAuthorizationView(tenantId: string) {
+  const [storedAuthorization, llm, datasources] = await Promise.all([
+    getTenantResourceAuthorization(tenantId),
+    getSystemLlmSettings(),
+    listDatasources(systemResourceScope),
+  ]);
+  const knownProviderIds = new Set(llm.providers.map((provider) => provider.id));
+  const knownDatasourceIds = new Set(datasources.map((datasource) => datasource.id));
+  return {
+    authorization: {
+      llmProviderIds: storedAuthorization.llmProviderIds.filter((id) => knownProviderIds.has(id)),
+      datasourceIds: storedAuthorization.datasourceIds.filter((id) => knownDatasourceIds.has(id)),
+    },
+    catalog: {
+      llmProviders: llm.providers.map((provider) => ({
+        id: provider.id,
+        label: provider.label || provider.id,
+        models: provider.models,
+      })),
+      datasources: datasources.map((datasource) => ({
+        id: datasource.id,
+        name: datasource.name,
+        type: datasource.type,
+        status: datasource.status,
+        enabled: datasource.enabled,
+      })),
+    },
+  };
+}
+
+systemApi.get('/tenant-access/:tenantId', async (req, res) => {
+  const scope = await systemTenantScope(req, res);
+  if (!scope) return;
+  res.json(await tenantResourceAuthorizationView(scope.tenantId));
+});
+
+systemApi.put('/tenant-access/:tenantId', async (req, res) => {
+  const scope = await systemTenantScope(req, res);
+  if (!scope) return;
+  const [llm, datasources] = await Promise.all([getSystemLlmSettings(), listDatasources(systemResourceScope)]);
+  const requested = req.body && typeof req.body === 'object'
+    ? req.body as { llmProviderIds?: unknown; datasourceIds?: unknown }
+    : {};
+  const llmProviderIds = Array.isArray(requested.llmProviderIds)
+    ? requested.llmProviderIds.map(String)
+    : [];
+  const datasourceIds = Array.isArray(requested.datasourceIds)
+    ? requested.datasourceIds.map(String)
+    : [];
+  const knownProviders = new Set(llm.providers.map((provider) => provider.id));
+  const knownDatasources = new Set(datasources.map((datasource) => datasource.id));
+  const unknownProviders = llmProviderIds.filter((id) => !knownProviders.has(id));
+  const unknownDatasources = datasourceIds.filter((id) => !knownDatasources.has(id));
+  if (unknownProviders.length || unknownDatasources.length) {
+    res.status(400).json({
+      error: `授权包含不存在的系统资源：${[...unknownProviders, ...unknownDatasources].join(', ')}`,
+    });
+    return;
+  }
+  await saveTenantResourceAuthorization(scope.tenantId, { llmProviderIds, datasourceIds });
+  res.json(await tenantResourceAuthorizationView(scope.tenantId));
 });

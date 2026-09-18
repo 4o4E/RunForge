@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, RefreshCw } from 'lucide-react';
+import { ArrowRight, Plus, RefreshCw } from 'lucide-react';
 import { createSystemTenant, listSystemTenants, updateSystemTenantStatus } from '../../sysAdminApi';
 import type { TenantSummary } from '@runforge/contracts';
 import { Badge } from '@/components/ui/badge';
@@ -10,7 +10,13 @@ import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 
-export function SysAdminTenantsPanel({ onTenantsChanged }: { onTenantsChanged?: (tenants: TenantSummary[]) => void }) {
+export function SysAdminTenantsPanel({
+  onTenantsChanged,
+  onSelectTenant,
+}: {
+  onTenantsChanged?: (tenants: TenantSummary[]) => void;
+  onSelectTenant: (tenantId: string) => void;
+}) {
   const [tenants, setTenants] = useState<TenantSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
@@ -100,6 +106,7 @@ export function SysAdminTenantsPanel({ onTenantsChanged }: { onTenantsChanged?: 
               <TableHead>名称</TableHead>
               <TableHead>状态</TableHead>
               <TableHead>创建时间</TableHead>
+              <TableHead className="w-24 text-right">操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -114,6 +121,12 @@ export function SysAdminTenantsPanel({ onTenantsChanged }: { onTenantsChanged?: 
                   </div>
                 </TableCell>
                 <TableCell className="text-xs text-muted-foreground">{new Date(tenant.createdAt).toLocaleString()}</TableCell>
+                <TableCell className="text-right">
+                  <Button variant="ghost" size="sm" onClick={() => onSelectTenant(tenant.id)}>
+                    管理
+                    <ArrowRight className="h-4 w-4" />
+                  </Button>
+                </TableCell>
               </TableRow>
             ))}
           </TableBody>

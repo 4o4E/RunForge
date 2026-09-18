@@ -18,8 +18,8 @@ import type { SkillIndexItem, SkillActivation } from '../skills/registry.js';
 import {
   DATASOURCE_CREDENTIAL_CAPABILITY,
   createWorkloadToken,
-  listDatasources,
-  listPermissionProfiles,
+  listAuthorizedDatasources,
+  listAuthorizedPermissionProfiles,
   releaseRunLeases,
 } from '../datasources/accountPool.js';
 import { finishGoal, initGoal, mergeGoal, parseGoalPatch, renderGoal } from './goal.js';
@@ -27,7 +27,7 @@ import { runBus } from './bus.js';
 import type { AgentEvent, FinishReason } from './types.js';
 import { store as defaultStore } from '../store/index.js';
 import { scopeForThread, type AppliedRunInput, type Scope, type Store } from '../store/types.js';
-import { getMcpSettings, getToolSettings } from '../settings.js';
+import { getSystemMcpSettings, getSystemToolSettings } from '../settings.js';
 import type { McpSettings, ToolSettings } from '../settings.js';
 import {
   McpClientSession,
@@ -125,7 +125,6 @@ export interface ExecutorDeps {
   publish: (runId: string, event: AgentEvent) => void;
   /** 防失控兜底，不是主要流程控制；配置见 config.agent.hardStepCap。 */
   hardStepCap: number;
-  stream: boolean;
   resume: boolean;
   toolSettings?: ToolSettings;
   mcpSettings?: McpSettings;
@@ -269,20 +268,18 @@ async function defaultDeps(
 ): Promise<ExecutorDeps> {
   const configured = overrides.provider ? null : await getConfiguredProvider(scope, modelRef ?? undefined);
   const provider = overrides.provider ?? configured!.provider;
-  const stream = overrides.stream ?? configured?.stream ?? config.llm.stream;
   return {
     provider,
     providerDescriptor: overrides.providerDescriptor ?? configured?.descriptor ?? {
       provider: provider.name,
       model: modelRef?.trim() || config.llm.model,
-      // 注入 Provider 的测试/评估路径沿用旧行为：流式首个增量前最多补一次请求。
-      retries: stream && provider.completeStream ? 1 : 0,
+      // 注入 Provider 的测试/评估路径在首个可见增量前最多补一次请求。
+      retries: 1,
     },
     providerRunner: overrides.providerRunner ?? defaultProviderRunner,
     store: overrides.store ?? defaultStore,
     publish: overrides.publish ?? ((runId, event) => runBus.publish(runId, event)),
     hardStepCap: overrides.hardStepCap ?? config.agent.hardStepCap,
-    stream,
     resume: overrides.resume ?? false,
     toolSettings: overrides.toolSettings,
     mcpSettings: overrides.mcpSettings,
@@ -293,7 +290,7 @@ async function defaultDeps(
       modelContextWindow: spaceConfig.model.contextWindow,
       contextBudget: spaceConfig.model.contextBudget,
       contextBudgetSource: spaceConfig.model.contextBudgetSource,
-    } : configured ? agentContextSettings(configured.contextWindow) : {
+    } : configured ? agentContextSettings(configured.contextWindow, configured.compactionThreshold) : {
       modelContextWindow: config.agent.modelContextWindow,
       contextBudget: config.agent.contextBudget,
       contextBudgetSource: config.agent.contextBudgetSource,
@@ -490,7 +487,7 @@ function businessPluginConfigFromLock(lock: SpaceRuntimeLock): Record<string, Re
 async function createDefaultWorkloadRuntimeEnv(scope: Scope, runId: string, allowedCapabilities: RuntimeCapabilityName[]): Promise<WorkloadRuntimeEnv> {
   const datasourceAllowed = allowedCapabilities.includes(DATASOURCE_CREDENTIAL_CAPABILITY);
   const activeDatasources = datasourceAllowed
-    ? (await listDatasources(scope)).filter((datasource) => datasource.enabled && datasource.status === 'active')
+    ? (await listAuthorizedDatasources(scope)).filter((datasource) => datasource.enabled && datasource.status === 'active')
     : [];
   const allowedDatasourceIds = activeDatasources.map((datasource) => datasource.id);
   const created = await createWorkloadToken(scope, {
@@ -509,7 +506,7 @@ async function createDefaultWorkloadRuntimeEnv(scope: Scope, runId: string, allo
   if (activeDatasources.length === 1) {
     const datasource = activeDatasources[0];
     env.DATASOURCE_ID = datasource.id;
-    const profiles = await listPermissionProfiles(scope, datasource.id);
+    const profiles = await listAuthorizedPermissionProfiles(scope, datasource.id);
     const readonly = profiles.find((profile) => profile.mode === 'readonly');
     env.DATASOURCE_PROFILE = readonly?.name ?? 'readonly';
   }
@@ -664,7 +661,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     if (usesDefaultStore) await releaseRunLeases(runId).catch(() => {});
     return;
   }
-  const { provider, publish, hardStepCap, stream, resume } = deps;
+  const { provider, publish, hardStepCap, resume } = deps;
   const initialRun = run;
   const threadId = initialRun.thread_id;
   const userInput = initialRun.input;
@@ -687,23 +684,14 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     };
     return {
       name: targetProvider.name,
-      complete: (messages, tools) => deps.providerRunner.run({
+      completeStream: (messages, tools, onDelta) => deps.providerRunner.run({
         provider: targetProvider,
         context,
         messages,
         tools,
+        onDelta,
         onRetry,
       }),
-      ...(targetProvider.completeStream ? {
-        completeStream: (messages, tools, onDelta) => deps.providerRunner.run({
-          provider: targetProvider,
-          context,
-          messages,
-          tools,
-          onDelta,
-          onRetry,
-        }),
-      } : {}),
     };
   };
 
@@ -820,15 +808,13 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     // Goal 锚点每步重新注入；恢复时优先使用已落库状态，避免目标回退。
     let goal = initialRun.goal_state ?? initGoal(userInput);
     if (!initialRun.goal_state) await store.setGoalState(scope, runId, goal);
-    let toolSettings = deps.toolSettings ?? (await getToolSettings(scope));
+    let toolSettings = deps.toolSettings ?? (await getSystemToolSettings());
     if (!deps.toolSettings) {
       const tenant = await store.findTenant(scope.tenantId);
       if (!tenant?.default_space_id) throw new Error(`tenant 缺少 default space：${scope.tenantId}`);
-      const workspace = resolveWorkspaceRootForThread(initialThread, tenant);
-      if (workspace.root !== toolSettings.workspaceRoot) {
-        toolSettings = { ...toolSettings, workspaceRoot: workspace.root };
-        await mkdir(toolSettings.workspaceRoot, { recursive: true });
-      }
+      const workspace = resolveWorkspaceRootForThread(initialThread, tenant, toolSettings.workspaceRoot);
+      toolSettings = { ...toolSettings, workspaceRoot: workspace.root };
+      await mkdir(toolSettings.workspaceRoot, { recursive: true });
     }
     const materializeRunArtifacts = deps.materializeRunArtifacts
       ?? (store === defaultStore
@@ -866,7 +852,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         }),
       });
     }
-    const tenantMcpSettings = deps.mcpSettings ?? (deps.store === defaultStore ? await getMcpSettings(scope) : { servers: [] });
+    const tenantMcpSettings = deps.mcpSettings ?? (deps.store === defaultStore ? await getSystemMcpSettings() : { servers: [] });
     const allowedMcpServerIds = spaceConfig ? new Set(spaceConfig.capabilities.mcpServers) : null;
     const selectedTenantMcpSettings = allowedMcpServerIds
       ? { servers: tenantMcpSettings.servers.filter((server) => allowedMcpServerIds.has(server.id)) }
@@ -1158,7 +1144,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         let output = '';
         let usage: LlmUsage | undefined;
         for (let turn = 0; turn < SUBAGENT_MAX_TOOL_TURNS; turn += 1) {
-          const result = await subagentProvider.complete(messages, tools);
+          const result = await subagentProvider.completeStream(messages, tools, () => {});
           usage = addUsage(usage, result.usage);
           output = result.content?.trim() || output;
           const assistantMsg = {
@@ -1378,9 +1364,8 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       const requestActiveSkillNames = new Set(activeSkills.map((skill) => skill.name));
       let requestAllowedToolNames = new Set<string>();
 
-      // 支持流式时实时发布增量；完整文本只在末尾落库，历史回放更紧凑。
+      // 实时发布流式增量；完整文本只在末尾落库，历史回放更紧凑。
       let result;
-      let liveStreamed = false;
       let persistedLiveContent = false;
       let persistedLiveReasoning = false;
       const llmStartedAt = new Date().toISOString();
@@ -1445,24 +1430,18 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           }
         };
         const stepProvider = observedProvider('agent', step.id, provider, deps.providerDescriptor, async ({ message }) => {
-          if (stream && provider.completeStream) {
-            console.warn(
-              `[agent] run ${runId} step ${stepIdx} provider ${provider.name} 流式请求在首个增量前失败，将保持流式协议重试：${message}`,
-            );
-            // 诊断事件只落库，不推给前端，避免一次可恢复重试被显示成失败。
-            await store.addEvent(scope, runId, step.id, {
-              type: 'stream_retry',
-              step: stepIdx,
-              provider: provider.name,
-              message,
-            });
-          }
+          console.warn(
+            `[agent] run ${runId} step ${stepIdx} provider ${provider.name} 流式请求在首个增量前失败，将保持流式协议重试：${message}`,
+          );
+          // 诊断事件只落库，不推给前端，避免一次可恢复重试被显示成失败。
+          await store.addEvent(scope, runId, step.id, {
+            type: 'stream_retry',
+            step: stepIdx,
+            provider: provider.name,
+            message,
+          });
         });
-        if (stream && stepProvider.completeStream) {
-          result = await stepProvider.completeStream(modelMessages, tools, onStreamDelta);
-          liveStreamed = true;
-        }
-        if (!result) result = await stepProvider.complete(modelMessages, tools);
+        result = await stepProvider.completeStream(modelMessages, tools, onStreamDelta);
       } finally {
         stopLlmHeartbeat();
       }
@@ -1474,9 +1453,11 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       if (result.usage) await emitUsageUpdate(step.id, stepIdx, result.usage);
 
       const { content, reasoning, toolCalls } = result;
-      if (!liveStreamed) {
-        if (reasoning) streamStats.add(stepIdx, 'reasoning', 'reasoningChars', charCount(reasoning), undefined);
-        if (content) streamStats.add(stepIdx, 'output', 'outputChars', charCount(content), undefined);
+      if (reasoning && !persistedLiveReasoning) {
+        streamStats.add(stepIdx, 'reasoning', 'reasoningChars', charCount(reasoning), undefined);
+      }
+      if (content && !persistedLiveContent) {
+        streamStats.add(stepIdx, 'output', 'outputChars', charCount(content), undefined);
       }
 
       // reasoning 只给前端展示，不回填到模型上下文。
@@ -1484,13 +1465,11 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         const startedAt = reasoningStartedAt ?? llmStartedAt;
         const timing = { startedAt, endedAt: llmEndedAt, durationMs: durationMs(startedAt, llmEndedAt) };
         const ev = { type: 'reasoning' as const, step: stepIdx, text: reasoning, ...timing };
-        if (liveStreamed && persistedLiveReasoning) {
-          await emit(step.id, { type: 'reasoning_timing', step: stepIdx, ...timing });
-        } else if (liveStreamed) {
-          await store.addEvent(scope, runId, step.id, ev);
+        if (persistedLiveReasoning) {
           await emit(step.id, { type: 'reasoning_timing', step: stepIdx, ...timing });
         } else {
-          await emit(step.id, ev);
+          await store.addEvent(scope, runId, step.id, ev);
+          await emit(step.id, { type: 'reasoning_timing', step: stepIdx, ...timing });
         }
       }
 
@@ -1526,10 +1505,9 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         return;
       }
 
-      if (content && (toolCalls.length || liveStreamed) && !persistedLiveContent) {
+      if (content && !persistedLiveContent) {
         const ev = { type: 'llm_delta' as const, step: stepIdx, text: content };
-        if (liveStreamed) await store.addEvent(scope, runId, step.id, ev);
-        else await emit(step.id, ev);
+        await store.addEvent(scope, runId, step.id, ev);
       }
 
       if (!toolCalls.length) {

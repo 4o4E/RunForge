@@ -209,18 +209,18 @@ export class ProviderRunner {
       logicalRequest: {
         messages: input.messages,
         tools: input.tools,
-        stream: Boolean(input.onDelta),
+        stream: true,
       },
       startedAt: invocationStartedAt,
     });
 
     let publishedDelta = false;
-    const onDelta = input.onDelta
+    const onDelta: (delta: LlmDelta) => void = input.onDelta
       ? (delta: LlmDelta) => {
           publishedDelta = true;
           input.onDelta!(delta);
         }
-      : undefined;
+      : () => {};
 
     for (let attempt = 1; attempt <= Math.max(0, input.context.retries) + 1; attempt += 1) {
       const snapshot: AttemptSnapshot = {
@@ -254,9 +254,12 @@ export class ProviderRunner {
       };
 
       try {
-        const result = onDelta && input.provider.completeStream
-          ? await input.provider.completeStream(input.messages, input.tools, onDelta, { fetch: observingFetch })
-          : await input.provider.complete(input.messages, input.tools, { fetch: observingFetch });
+        const result = await input.provider.completeStream(
+          input.messages,
+          input.tools,
+          onDelta,
+          { fetch: observingFetch },
+        );
         const endedAt = new Date().toISOString();
         const normalizedResponse = resultForPersistence(result);
         if (snapshot.id) {

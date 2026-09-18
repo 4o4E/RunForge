@@ -22,7 +22,7 @@ import { releaseRunLeases } from '../datasources/accountPool.js';
 import type { AskUserAnswer, AskUserOption, AskUserSpec } from '../agent/types.js';
 import { shellManager } from '../shell/manager.js';
 import { shellBus } from '../shell/bus.js';
-import { getToolSettings, type ToolSettings } from '../settings.js';
+import { getSystemToolSettings, type ToolSettings } from '../settings.js';
 import { createPolicy } from '../tools/policy.js';
 import type { Response } from 'express';
 import type { LlmProviderState } from '../llm/types.js';
@@ -583,7 +583,7 @@ async function webThreadToolSettings(
   try {
     const workspace = await threadWorkspaceAccess.resolveForWeb(identity, threadId, 'write');
     await mkdir(workspace.root, { recursive: true });
-    return { ...(await getToolSettings({ tenantId: identity.tenantId, userId: identity.userId })), workspaceRoot: workspace.root };
+    return { ...(await getSystemToolSettings()), workspaceRoot: workspace.root };
   } catch (error) {
     if (error instanceof ThreadWorkspaceAccessError) {
       res.status(error.status).json({ error: error.message, code: error.code });

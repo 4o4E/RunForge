@@ -1,24 +1,29 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeLlmSettings, normalizeRuntimeCapabilitiesSettings } from './settings.js';
+import {
+  normalizeLlmSettings,
+  normalizeRuntimeCapabilitiesSettings,
+  normalizeTenantResourceAuthorization,
+} from './settings.js';
 import { renderRuntimeCapabilitiesContext } from './agent/context.js';
 import { agentContextSettings } from './config.js';
 
-test('agent context settings: 按模型窗口计算预算，并忽略非法环境变量', () => {
+test('agent context settings: 使用模型压缩阈值，环境变量只能进一步收紧', () => {
   const original = process.env.LLM_CONTEXT_BUDGET;
   try {
     delete process.env.LLM_CONTEXT_BUDGET;
-    assert.deepEqual(agentContextSettings(1_048_576), {
+    assert.deepEqual(agentContextSettings(1_048_576, 200_000), {
       modelContextWindow: 1_048_576,
-      contextBudget: 524_288,
-      contextBudgetSource: 'model-settings',
+      contextBudget: 200_000,
+      contextBudgetSource: 'model-compaction-threshold',
     });
 
     process.env.LLM_CONTEXT_BUDGET = 'not-a-number';
-    assert.equal(agentContextSettings(200_000).contextBudget, 100_000);
+    assert.equal(agentContextSettings(200_000, 150_000).contextBudget, 150_000);
+    assert.throws(() => agentContextSettings(100_000, 120_000), /压缩阈值/);
 
     process.env.LLM_CONTEXT_BUDGET = '90000';
-    assert.deepEqual(agentContextSettings(200_000), {
+    assert.deepEqual(agentContextSettings(200_000, 150_000), {
       modelContextWindow: 200_000,
       contextBudget: 90_000,
       contextBudgetSource: 'env',
@@ -44,14 +49,14 @@ test('llm settings: 目录模型自动补齐能力，人工配置保持原值', 
         model: 'custom-model',
         contextWindow: 32_000,
         contextWindowSource: 'manual',
+        compactionThreshold: 24_000,
+        compactionThresholdSource: 'manual',
         inputModalities: ['text', 'audio'],
         inputModalitiesSource: 'manual',
       }],
       defaultModel: 'gpt-4.1-mini',
-      maxTokens: 4096,
       timeoutMs: 120_000,
       retries: 2,
-      stream: true,
     }],
   });
 
@@ -62,6 +67,8 @@ test('llm settings: 目录模型自动补齐能力，人工配置保持原值', 
     model: 'custom-model',
     contextWindow: 32_000,
     contextWindowSource: 'manual',
+    compactionThreshold: 24_000,
+    compactionThresholdSource: 'manual',
     inputModalities: ['text', 'audio'],
     inputModalitiesSource: 'manual',
     references: [],
@@ -85,8 +92,30 @@ test('llm settings: 已保存的目录值按完整别名刷新', () => {
   });
 
   const capability = settings.providers[0].modelCapabilities[0];
-  assert.equal(capability.contextWindow, 1_048_576);
+  assert.equal(capability.contextWindow, 1_000_000);
   assert.equal(capability.contextWindowSource, 'catalog');
+  assert.equal(capability.compactionThreshold, 750_000);
+  assert.equal(capability.compactionThresholdSource, 'catalog');
+});
+
+test('llm settings: 管理员可以覆盖目录生成的压缩阈值', () => {
+  const settings = normalizeLlmSettings({
+    providers: [{
+      id: 'openai',
+      models: ['gpt-5.5'],
+      modelCapabilities: [{
+        model: 'gpt-5.5',
+        contextWindowSource: 'catalog',
+        compactionThreshold: 200_000,
+        compactionThresholdSource: 'manual',
+        inputModalitiesSource: 'catalog',
+      }],
+    }],
+  });
+  const capability = settings.providers[0].modelCapabilities[0];
+  assert.equal(capability.contextWindow, 1_050_000);
+  assert.equal(capability.compactionThreshold, 200_000);
+  assert.equal(capability.compactionThresholdSource, 'manual');
 });
 
 test('llm settings: 旧 AI SDK 配置转换为明确协议并删除旧字段', () => {
@@ -106,12 +135,13 @@ test('llm settings: 旧 AI SDK 配置转换为明确协议并删除旧字段', (
   assert.equal('reasoningTag' in settings.providers[0], false);
 });
 
-test('llm settings: 输出 token 上限允许显式设为空', () => {
+test('llm settings: 忽略旧输出上限和流式开关', () => {
   const settings = normalizeLlmSettings({
-    providers: [{ id: 'no-local-output-limit', maxTokens: null }],
+    providers: [{ id: 'legacy-transport-options', maxTokens: 4096, stream: false }],
   });
 
-  assert.equal(settings.providers[0].maxTokens, null);
+  assert.equal('maxTokens' in settings.providers[0], false);
+  assert.equal('stream' in settings.providers[0], false);
 });
 
 test('llm settings: 未登记模型不会生成默认能力', () => {
@@ -120,6 +150,8 @@ test('llm settings: 未登记模型不会生成默认能力', () => {
     model: 'private-model',
     contextWindow: null,
     contextWindowSource: 'manual',
+    compactionThreshold: null,
+    compactionThresholdSource: 'manual',
     inputModalities: [],
     inputModalitiesSource: 'manual',
     references: [],
@@ -193,4 +225,18 @@ test('runtime capability prompt: 只注入运行时模型 id，不注入上游�
   assert.doesNotMatch(text, /secret-image-key/);
   assert.doesNotMatch(text, /https:\/\/img\.example\.test/);
   assert.doesNotMatch(text, /openai:gpt-4\.1-mini/);
+});
+
+test('tenant resource authorization: 规范化并去重系统资源 ID', () => {
+  assert.deepEqual(normalizeTenantResourceAuthorization({
+    llmProviderIds: [' openai ', 'openai', 'anthropic'],
+    datasourceIds: ['ds_one', '', 'ds_one', 'ds_two'],
+  }), {
+    llmProviderIds: ['openai', 'anthropic'],
+    datasourceIds: ['ds_one', 'ds_two'],
+  });
+  assert.deepEqual(normalizeTenantResourceAuthorization(null), {
+    llmProviderIds: [],
+    datasourceIds: [],
+  });
 });

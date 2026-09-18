@@ -739,7 +739,7 @@ export function ToolsSettingsPanel({
 
       <div className="grid gap-4">
           <div>
-            <Field label="工作区根目录">
+            <Field label="工作区基础目录">
               <Input value={settings.workspaceRoot} onChange={(event) => setSettings({ ...settings, workspaceRoot: event.target.value })} />
             </Field>
           </div>

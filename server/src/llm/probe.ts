@@ -106,7 +106,7 @@ export async function testLlmProviderChat(provider: LlmProviderSettings, model: 
       content: prompt,
     },
   ];
-  const result = await llm.complete(messages, []);
+  const result = await llm.completeStream(messages, [], () => {});
   return {
     ok: true,
     latencyMs: elapsedSince(started),

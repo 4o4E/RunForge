@@ -1,4 +1,4 @@
-import { listDatasources, listPermissionProfiles } from '../datasources/accountPool.js';
+import { listAuthorizedDatasources, listAuthorizedPermissionProfiles } from '../datasources/accountPool.js';
 import type { DatasourceRow, PermissionProfileRow } from '../datasources/types.js';
 import type { Tool } from './types.js';
 
@@ -49,10 +49,10 @@ export const datasourceListTool: Tool = {
   async run(args, ctx) {
     if (!ctx?.scope) throw new Error('datasource_list 需要当前身份 scope，上下文缺失。');
     const includeDisabled = args.includeDisabled === true;
-    const datasources = (await listDatasources(ctx.scope)).filter((datasource) => datasource.enabled && (includeDisabled || datasource.status === 'active'));
+    const datasources = (await listAuthorizedDatasources(ctx.scope)).filter((datasource) => datasource.enabled && (includeDisabled || datasource.status === 'active'));
     const result = [];
     for (const datasource of datasources) {
-      result.push(publicDatasourceForTool(datasource, await listPermissionProfiles(ctx.scope, datasource.id)));
+      result.push(publicDatasourceForTool(datasource, await listAuthorizedPermissionProfiles(ctx.scope, datasource.id)));
     }
     return JSON.stringify({ datasources: result }, null, 2);
   },

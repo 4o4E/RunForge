@@ -1,11 +1,9 @@
 import { Router } from 'express';
-import type { LlmProviderSettings, LlmSettingsOptions, McpServerProbeResult, McpSettingsOptions, ShellCommandOptionItem, ToolSettingsOptions } from '@runforge/contracts';
-import { getLlmSettings, getMcpSettings, getPageState, getRuntimeCapabilitiesSettings, getToolSettings, llmModelOptions, normalizeLlmSettings, normalizeMcpSettings, saveLlmSettings, saveMcpSettings, savePageState, saveRuntimeCapabilitiesSettings, saveToolSettings, shellPathForSettings } from '../settings.js';
-import { findExecutable, scanExecutableNames } from '../tools/sandbox.js';
+import type { LlmSettingsOptions, McpSettingsOptions, ShellCommandOptionItem, ToolSettingsOptions } from '@runforge/contracts';
+import { getLlmSettings, getPageState, getSystemMcpSettings, getSystemToolSettings, llmModelOptions, savePageState, shellPathForSettings } from '../settings.js';
+import { findExecutable } from '../tools/sandbox.js';
 import { config } from '../config.js';
-import { pingLlmProvider, probeLlmProviderModels, testLlmProviderChat } from '../llm/probe.js';
-import { catalogCapability } from '../llm/modelCatalog.js';
-import { listMcpTools, probeMcpServer } from '../mcp/client.js';
+import { listMcpTools } from '../mcp/client.js';
 import { requireScope } from '../auth/context.js';
 import type { TenantScope } from '../store/types.js';
 import type { Response } from 'express';
@@ -35,15 +33,8 @@ export function shellCommandOptions(names: string[], envPath = process.env.PATH 
     .sort((a, b) => Number(b.available) - Number(a.available) || a.name.localeCompare(b.name));
 }
 
-function llmProviderFromBody(body: unknown): LlmProviderSettings {
-  const row = body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
-  const nestedProvider = row.provider && typeof row.provider === 'object' ? row.provider : row;
-  const settings = normalizeLlmSettings({ providers: [nestedProvider] });
-  return settings.providers[0];
-}
-
-export async function getToolSettingsOptions(scope: TenantScope): Promise<ToolSettingsOptions> {
-  const settings = await getToolSettings(scope);
+export async function getToolSettingsOptions(): Promise<ToolSettingsOptions> {
+  const settings = await getSystemToolSettings();
   const envPath = shellPathForSettings(settings);
   return {
     shellCommands: shellCommandOptions([...config.tools.shellAllowCommands, ...settings.shellAllowCommands], envPath),
@@ -56,8 +47,8 @@ export async function getLlmSettingsOptions(scope: TenantScope): Promise<LlmSett
   return { defaultModelRef: settings.defaultModelRef, models: llmModelOptions(settings) };
 }
 
-export async function getMcpSettingsOptions(scope: TenantScope): Promise<McpSettingsOptions> {
-  const settings = await getMcpSettings(scope);
+export async function getMcpSettingsOptions(): Promise<McpSettingsOptions> {
+  const settings = await getSystemMcpSettings();
   const tools = await listMcpTools(settings);
   return {
     tools: tools.map((tool) => ({
@@ -70,155 +61,35 @@ export async function getMcpSettingsOptions(scope: TenantScope): Promise<McpSett
   };
 }
 
-settingsApi.get('/tools', rejectSystemManagedAccess, async (_req, res) => {
-  const scope = scopeOrReject(res);
-  if (!scope) return;
-  res.json(await getToolSettings(scope));
-});
+settingsApi.get([
+  '/tools',
+  '/tools/options',
+  '/mcp',
+  '/mcp/options',
+  '/llm',
+  '/runtime-capabilities',
+], rejectSystemManagedAccess);
 
-settingsApi.get('/tools/options', rejectSystemManagedAccess, async (_req, res) => {
-  const scope = scopeOrReject(res);
-  if (!scope) return;
-  res.json(await getToolSettingsOptions(scope));
-});
+settingsApi.post([
+  '/tools/shell-commands/scan',
+  '/mcp/server/probe',
+  '/llm/provider/models',
+  '/llm/model-capability',
+  '/llm/provider/ping',
+  '/llm/provider/chat-test',
+], rejectSystemManagedAccess);
 
-settingsApi.post('/tools/shell-commands/scan', rejectSystemManagedAccess, async (req, res) => {
-  const scope = scopeOrReject(res);
-  if (!scope) return;
-  const settings = await getToolSettings(scope);
-  const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {};
-  const shellPathMode = body.shellPathMode === 'custom' ? 'custom' : 'system';
-  const shellPath = typeof body.shellPath === 'string' ? body.shellPath : settings.shellPath;
-  const include = Array.isArray(body.include) ? body.include.map(String) : settings.shellAllowCommands;
-  const envPath = shellPathMode === 'custom' ? shellPath : process.env.PATH ?? '';
-  res.json({
-    path: envPath,
-    shellCommands: shellCommandOptions([...include, ...scanExecutableNames(envPath)], envPath),
-  });
-});
-
-settingsApi.put('/tools', rejectSystemManagedAccess, async (req, res) => {
-  const scope = scopeOrReject(res);
-  if (!scope) return;
-  try {
-    res.json(await saveToolSettings(scope, req.body));
-  } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
-  }
-});
-
-settingsApi.get('/mcp', rejectSystemManagedAccess, async (_req, res) => {
-  const scope = scopeOrReject(res);
-  if (!scope) return;
-  res.json(await getMcpSettings(scope));
-});
-
-settingsApi.get('/mcp/options', rejectSystemManagedAccess, async (_req, res) => {
-  const scope = scopeOrReject(res);
-  if (!scope) return;
-  res.json(await getMcpSettingsOptions(scope));
-});
-
-settingsApi.put('/mcp', rejectSystemManagedAccess, async (req, res) => {
-  const scope = scopeOrReject(res);
-  if (!scope) return;
-  try {
-    res.json(await saveMcpSettings(scope, req.body));
-  } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
-  }
-});
-
-settingsApi.post('/mcp/server/probe', rejectSystemManagedAccess, async (req, res) => {
-  try {
-    const settings = normalizeMcpSettings({ servers: [req.body?.server ?? req.body] });
-    const server = settings.servers[0];
-    const tools = await probeMcpServer(server);
-    const result: McpServerProbeResult = {
-      ok: true,
-      message: `连接成功，发现 ${tools.length} 个工具。`,
-      toolCount: tools.length,
-      tools: tools.map((tool) => ({
-        serverId: tool.serverId,
-        serverLabel: tool.serverLabel,
-        name: tool.originalName,
-        mappedName: tool.mappedName,
-        description: tool.description,
-      })),
-    };
-    res.json(result);
-  } catch (err) {
-    const result: McpServerProbeResult = { ok: false, message: (err as Error).message, toolCount: 0, tools: [] };
-    res.status(400).json(result);
-  }
-});
-
-settingsApi.get('/llm', rejectSystemManagedAccess, async (_req, res) => {
-  const scope = scopeOrReject(res);
-  if (!scope) return;
-  res.json(await getLlmSettings(scope));
-});
+settingsApi.put([
+  '/tools',
+  '/mcp',
+  '/llm',
+  '/runtime-capabilities',
+], rejectSystemManagedAccess);
 
 settingsApi.get('/llm/options', async (_req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
   res.json(await getLlmSettingsOptions(scope));
-});
-
-settingsApi.put('/llm', rejectSystemManagedAccess, async (req, res) => {
-  const scope = scopeOrReject(res);
-  if (!scope) return;
-  try {
-    res.json(await saveLlmSettings(scope, req.body));
-  } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
-  }
-});
-
-settingsApi.post('/llm/provider/models', rejectSystemManagedAccess, async (req, res) => {
-  try {
-    res.json(await probeLlmProviderModels(llmProviderFromBody(req.body)));
-  } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
-  }
-});
-
-settingsApi.post('/llm/model-capability', rejectSystemManagedAccess, async (req, res) => {
-  const model = typeof req.body?.model === 'string' ? req.body.model.trim() : '';
-  if (!model) return res.status(400).json({ error: '缺少模型名称' });
-  res.json(catalogCapability(model));
-});
-
-settingsApi.post('/llm/provider/ping', rejectSystemManagedAccess, async (req, res) => {
-  res.json(await pingLlmProvider(llmProviderFromBody(req.body)));
-});
-
-settingsApi.post('/llm/provider/chat-test', rejectSystemManagedAccess, async (req, res) => {
-  try {
-    const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {};
-    const provider = llmProviderFromBody(body);
-    const model = typeof body.model === 'string' ? body.model : '';
-    const input = typeof body.input === 'string' ? body.input : '';
-    res.json(await testLlmProviderChat(provider, model, input));
-  } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
-  }
-});
-
-settingsApi.get('/runtime-capabilities', rejectSystemManagedAccess, async (_req, res) => {
-  const scope = scopeOrReject(res);
-  if (!scope) return;
-  res.json(await getRuntimeCapabilitiesSettings(scope));
-});
-
-settingsApi.put('/runtime-capabilities', rejectSystemManagedAccess, async (req, res) => {
-  const scope = scopeOrReject(res);
-  if (!scope) return;
-  try {
-    res.json(await saveRuntimeCapabilitiesSettings(scope, req.body));
-  } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
-  }
 });
 
 settingsApi.get('/page-state', async (_req, res) => {

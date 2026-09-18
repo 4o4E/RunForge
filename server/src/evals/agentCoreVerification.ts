@@ -10,7 +10,13 @@ import { PgStore } from '../store/pgStore.js';
 import type { AgentEvent } from '../agent/types.js';
 import type { LlmMessage } from '../llm/types.js';
 import type { Scope, Store, ThreadRow } from '../store/types.js';
-import { getToolSettings, type ToolSettings } from '../settings.js';
+import {
+  getSystemLlmSettings,
+  getTenantResourceAuthorization,
+  getToolSettings,
+  saveTenantResourceAuthorization,
+  type ToolSettings,
+} from '../settings.js';
 import { hashPassword } from '../auth/passwords.js';
 
 const execFileAsync = promisify(execFile);
@@ -281,7 +287,7 @@ const scenarios: Scenario[] = [
     id: 'context-compaction-survival',
     title: '上下文压缩：大历史裁剪后仍完成当前目标',
     hardStepCap: 14,
-    context: { contextBudget: 2_000, compactWarnRatio: 0.2, compactHardRatio: 10, keepRecentMessages: 2 },
+    context: { contextBudget: 400, keepRecentMessages: 2 },
     async prepare(ctx) {
       ctx.paths.big = resolve(ctx.workspaceRoot, 'compaction/big.txt');
       ctx.paths.target = resolve(ctx.workspaceRoot, 'compaction/target.txt');
@@ -402,7 +408,6 @@ async function runScenario(store: Store, baseToolSettings: ToolSettings, root: s
       store,
       scope: VERIFY_SCOPE,
       hardStepCap: scenario.hardStepCap ?? 16,
-      stream: false,
       generateThreadTitle: false,
       toolSettings: verificationToolSettings(baseToolSettings, workspaceRoot),
       mcpSettings: { servers: [] },
@@ -485,23 +490,33 @@ async function main(): Promise<void> {
 
   const store = new PgStore();
   await ensureVerificationScope();
-  const baseToolSettings = await getToolSettings(VERIFY_SCOPE);
-  const reports: ScenarioReport[] = [];
-  for (const scenario of targets) {
-    console.log(`▶ ${scenario.id}`);
-    const report = await runScenario(store, baseToolSettings, runRoot, scenario);
-    reports.push(report);
-    console.log(`${report.status === 'pass' ? '✓' : '✗'} ${scenario.id}`);
+  const originalAuthorization = await getTenantResourceAuthorization(VERIFY_SCOPE.tenantId);
+  const systemLlm = await getSystemLlmSettings();
+  await saveTenantResourceAuthorization(VERIFY_SCOPE.tenantId, {
+    ...originalAuthorization,
+    llmProviderIds: systemLlm.providers.map((provider) => provider.id),
+  });
+  try {
+    const baseToolSettings = await getToolSettings(VERIFY_SCOPE);
+    const reports: ScenarioReport[] = [];
+    for (const scenario of targets) {
+      console.log(`▶ ${scenario.id}`);
+      const report = await runScenario(store, baseToolSettings, runRoot, scenario);
+      reports.push(report);
+      console.log(`${report.status === 'pass' ? '✓' : '✗'} ${scenario.id}`);
+    }
+
+    const payload = { startedAt, finishedAt: new Date().toISOString(), reportRoot: runRoot, reports };
+    await writeText(resolve(runRoot, 'report.json'), JSON.stringify(payload, null, 2));
+    await writeText(resolve(runRoot, 'report.md'), markdownReport(startedAt, reports));
+
+    const passed = reports.filter((report) => report.status === 'pass').length;
+    console.log(`\nAgent core verification: ${passed}/${reports.length} passed`);
+    console.log(`Report: ${resolve(runRoot, 'report.md')}`);
+    if (passed !== reports.length) process.exitCode = 1;
+  } finally {
+    await saveTenantResourceAuthorization(VERIFY_SCOPE.tenantId, originalAuthorization);
   }
-
-  const payload = { startedAt, finishedAt: new Date().toISOString(), reportRoot: runRoot, reports };
-  await writeText(resolve(runRoot, 'report.json'), JSON.stringify(payload, null, 2));
-  await writeText(resolve(runRoot, 'report.md'), markdownReport(startedAt, reports));
-
-  const passed = reports.filter((report) => report.status === 'pass').length;
-  console.log(`\nAgent core verification: ${passed}/${reports.length} passed`);
-  console.log(`Report: ${resolve(runRoot, 'report.md')}`);
-  if (passed !== reports.length) process.exitCode = 1;
 }
 
 main()

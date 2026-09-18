@@ -31,6 +31,18 @@ test('生产 Web 入口提供静态文件和前端路由，同时保留服务端
     assert.equal(route.status, 200);
     assert.match(await route.text(), /id="root"/);
 
+    const systemTenantRoute = await fetch(`${base}/sys-admin/tenants/default/users`, {
+      headers: { Accept: 'text/html' },
+    });
+    assert.equal(systemTenantRoute.status, 200);
+    assert.match(await systemTenantRoute.text(), /id="root"/);
+
+    for (const path of ['/sys-admin/tenant-access?tenant=default', '/sys-admin/settings/llm-models']) {
+      const systemRoute = await fetch(`${base}${path}`, { headers: { Accept: 'text/html' } });
+      assert.equal(systemRoute.status, 200);
+      assert.match(await systemRoute.text(), /id="root"/);
+    }
+
     const asset = await fetch(`${base}/assets/app.js`);
     assert.equal(asset.status, 200);
     assert.match(await asset.text(), /RUNFORGE_WEB/);

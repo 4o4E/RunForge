@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Bot, Database, Image, Layers3, LogOut, Package, Shield, ShieldCheck, Users, Wifi, Wrench } from 'lucide-react';
-import { listSystemTenants, sysAdminLogout } from '../sysAdminApi';
+import { Bot, Database, Image, KeyRound, Layers3, LogOut, Package, Shield, ShieldCheck, Users, Wifi, Wrench } from 'lucide-react';
 import type { TenantSummary } from '@runforge/contracts';
+import { listSystemTenants, sysAdminLogout } from '../sysAdminApi';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { NavGroup, SectionButton } from '@/components/ui/settings-nav';
 import { SysAdminTenantsPanel } from './panels/SysAdminTenantsPanel';
 import { SysAdminAccountsPanel } from './panels/SysAdminAccountsPanel';
+import { TenantResourceAuthorizationPanel } from './panels/TenantResourceAuthorizationPanel';
 import { DatasourceSettingsPanel, type DatasourceSettingsPage } from '../components/datasources/DatasourceSettingsPanel';
 import { ToolsSettingsPanel } from '../components/SettingsView';
 import { LlmProviderSettingsPanel, McpServerSettingsPanel } from './settings/ProviderSettingsPanels';
@@ -17,63 +18,185 @@ import { SpaceManagementPanel } from '@/components/spaces/SpaceManagementPanel';
 import { createSystemSpaceControlApi } from '@/spaceControlApi';
 import { BusinessPluginManagementPanel } from '@/components/businessPlugins/BusinessPluginManagementPanel';
 import { createSystemBusinessPluginControlApi } from '@/businessPluginControlApi';
+import { TenantUsersPanel } from '@/components/tenants/TenantUsersPanel';
+import { createSystemTenantUsersControlApi } from '@/tenantUsersControlApi';
 
-type SysAdminPanel =
-  | 'tenants'
-  | 'admins'
-  | 'spaces'
-  | 'business-plugins'
+type TenantSection = 'users' | 'spaces' | 'business-plugins';
+type SystemSection =
   | 'llm-models'
   | 'runtime-capabilities'
   | 'mcp-client'
   | 'tools-sandbox'
   | DatasourceSettingsPage;
 
-function isTenantScopedPanel(panel: SysAdminPanel): boolean {
-  return panel !== 'tenants' && panel !== 'admins';
+type SysAdminRoute =
+  | { page: 'tenants' }
+  | { page: 'admins' }
+  | { page: 'access'; tenantId: string | null }
+  | { page: 'tenant'; tenantId: string; section: TenantSection }
+  | { page: 'settings'; section: SystemSection };
+
+const TENANT_SECTIONS = new Set<TenantSection>(['users', 'spaces', 'business-plugins']);
+const SYSTEM_SECTIONS = new Set<SystemSection>([
+  'llm-models',
+  'runtime-capabilities',
+  'mcp-client',
+  'tools-sandbox',
+  'datasource-connection',
+  'datasource-permissions',
+  'datasource-pool',
+  'datasource-leases',
+]);
+
+const SYSTEM_SECTION_TITLES: Record<SystemSection, string> = {
+  'llm-models': 'LLM 供应商',
+  'runtime-capabilities': '运行时能力',
+  'mcp-client': 'MCP 客户端',
+  'tools-sandbox': 'Shell / 沙箱',
+  'datasource-connection': '数据源连接',
+  'datasource-permissions': '数据源权限',
+  'datasource-pool': '数据源账号池',
+  'datasource-leases': '数据源租约',
+};
+
+function isTenantSection(value: string | undefined): value is TenantSection {
+  return value !== undefined && TENANT_SECTIONS.has(value as TenantSection);
+}
+
+function isSystemSection(value: string | undefined): value is SystemSection {
+  return value !== undefined && SYSTEM_SECTIONS.has(value as SystemSection);
+}
+
+function parseSysAdminRoute(pathname: string, search: string): SysAdminRoute {
+  const segments = pathname.split('/').filter(Boolean);
+  if (segments[0] !== 'sys-admin') return { page: 'tenants' };
+  if (segments[1] === 'admins') return { page: 'admins' };
+  if (segments[1] === 'tenant-access') {
+    return { page: 'access', tenantId: new URLSearchParams(search).get('tenant') };
+  }
+  if (segments[1] === 'tenants' && segments[2]) {
+    return {
+      page: 'tenant',
+      tenantId: segments[2],
+      section: isTenantSection(segments[3]) ? segments[3] : 'users',
+    };
+  }
+  if (segments[1] === 'settings' && isSystemSection(segments[2])) {
+    return { page: 'settings', section: segments[2] };
+  }
+  return { page: 'tenants' };
+}
+
+function sysAdminRoutePath(route: SysAdminRoute): string {
+  if (route.page === 'admins') return '/sys-admin/admins';
+  if (route.page === 'access') {
+    return `/sys-admin/tenant-access${route.tenantId ? `?tenant=${encodeURIComponent(route.tenantId)}` : ''}`;
+  }
+  if (route.page === 'tenant') {
+    return `/sys-admin/tenants/${encodeURIComponent(route.tenantId)}/${route.section}`;
+  }
+  if (route.page === 'settings') return `/sys-admin/settings/${route.section}`;
+  return '/sys-admin/tenants';
 }
 
 export function SysAdminApp() {
-  const [panel, setPanel] = useState<SysAdminPanel>('tenants');
+  const [route, setRoute] = useState<SysAdminRoute>(() => (
+    parseSysAdminRoute(window.location.pathname, window.location.search)
+  ));
   const [tenants, setTenants] = useState<TenantSummary[]>([]);
-  const [tenantId, setTenantId] = useState('');
   const [tenantError, setTenantError] = useState('');
+  const tenantId = route.page === 'tenant' || route.page === 'access' ? route.tenantId ?? '' : '';
+  const selectedTenant = tenants.find((tenant) => tenant.id === tenantId);
+
+  const navigate = useCallback((next: SysAdminRoute, replace = false) => {
+    const path = sysAdminRoutePath(next);
+    if (replace) window.history.replaceState(null, '', path);
+    else if (`${window.location.pathname}${window.location.search}` !== path) window.history.pushState(null, '', path);
+    setRoute(next);
+  }, []);
 
   useEffect(() => {
+    const initial = parseSysAdminRoute(window.location.pathname, window.location.search);
+    const canonicalPath = sysAdminRoutePath(initial);
+    if (`${window.location.pathname}${window.location.search}` !== canonicalPath) {
+      window.history.replaceState(null, '', canonicalPath);
+    }
+    const onPopState = () => setRoute(parseSysAdminRoute(window.location.pathname, window.location.search));
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  useEffect(() => {
+    if ((route.page !== 'tenant' && route.page !== 'access') || tenants.length > 0) return;
     listSystemTenants()
       .then(({ tenants: rows }) => {
         setTenants(rows);
-        setTenantId((current) => current || rows.find((tenant) => tenant.status === 'active')?.id || rows[0]?.id || '');
+        setTenantError('');
+        if (route.page === 'access' && !route.tenantId && rows.length > 0) {
+          navigate({ page: 'access', tenantId: rows.find((tenant) => tenant.status === 'active')?.id ?? rows[0].id }, true);
+        }
       })
-      .catch((err) => setTenantError((err as Error).message));
-  }, []);
+      .catch((error) => setTenantError((error as Error).message));
+  }, [navigate, route, tenants.length]);
 
-  const settingsControlApi = useMemo(() => tenantId ? createSystemSettingsControlApi(tenantId) : null, [tenantId]);
-  const datasourceControlApi = useMemo(() => tenantId ? createSystemDatasourceControlApi(tenantId) : null, [tenantId]);
-  const spaceControlApi = useMemo(() => tenantId ? createSystemSpaceControlApi(tenantId) : null, [tenantId]);
+  const settingsControlApi = useMemo(() => createSystemSettingsControlApi(), []);
+  const datasourceControlApi = useMemo(() => createSystemDatasourceControlApi(), []);
+  const spaceControlApi = useMemo(
+    () => tenantId ? createSystemSpaceControlApi(tenantId) : null,
+    [tenantId],
+  );
   const businessPluginControlApi = useMemo(
     () => tenantId ? createSystemBusinessPluginControlApi(tenantId) : null,
     [tenantId],
   );
-  const tenantScoped = isTenantScopedPanel(panel);
+  const tenantUsersControlApi = useMemo(
+    () => tenantId ? createSystemTenantUsersControlApi(tenantId) : null,
+    [tenantId],
+  );
+
   const syncTenants = useCallback((rows: TenantSummary[]) => {
     setTenants(rows);
-    setTenantId((current) => rows.some((tenant) => tenant.id === current)
-      ? current
-      : rows.find((tenant) => tenant.status === 'active')?.id || rows[0]?.id || '');
+    setTenantError('');
   }, []);
+
+  function openTenant(nextTenantId: string, section: TenantSection = 'users') {
+    navigate({ page: 'tenant', tenantId: nextTenantId, section });
+  }
+
+  function headerTitle(): string {
+    if (route.page === 'tenant') return selectedTenant?.name ?? '租户详情';
+    if (route.page === 'access') return '租户授权';
+    if (route.page === 'admins') return '系统管理员';
+    if (route.page === 'settings') return SYSTEM_SECTION_TITLES[route.section];
+    return '租户管理';
+  }
+
+  function headerDescription(): string {
+    if (route.page === 'tenant') return selectedTenant
+      ? `管理租户 ${selectedTenant.id} 的用户、空间和业务插件`
+      : '读取租户详情';
+    if (route.page === 'access') return '选择租户并授权可使用的系统资源';
+    if (route.page === 'settings') return '全系统统一维护，租户可用范围由租户授权决定';
+    return '管理系统身份和租户';
+  }
 
   return (
     <main className="app-main-surface flex h-full min-h-0 flex-col overflow-hidden">
       <div className="flex shrink-0 items-center justify-between gap-3 border-b px-6 py-4">
         <div>
-          <h1 className="text-xl font-semibold">系统设置</h1>
-          <p className="mt-1 text-sm text-muted-foreground">定义系统能力，并按租户管理供应商与运行策略</p>
+          <h1 className="text-xl font-semibold">{headerTitle()}</h1>
+          <p className="mt-1 text-sm text-muted-foreground">{headerDescription()}</p>
         </div>
         <div className="flex items-center gap-2">
-          {tenantScoped && (
-            <Select value={tenantId} onValueChange={setTenantId}>
-              <SelectTrigger className="w-64"><SelectValue placeholder="选择目标租户" /></SelectTrigger>
+          {(route.page === 'tenant' || route.page === 'access') && tenants.length > 0 && (
+            <Select
+              value={tenantId}
+              onValueChange={(value) => {
+                if (route.page === 'tenant') openTenant(value, route.section);
+                else navigate({ page: 'access', tenantId: value });
+              }}
+            >
+              <SelectTrigger className="w-64"><SelectValue placeholder="选择租户" /></SelectTrigger>
               <SelectContent>
                 {tenants.map((tenant) => (
                   <SelectItem key={tenant.id} value={tenant.id}>{tenant.name} · {tenant.id}</SelectItem>
@@ -95,68 +218,75 @@ export function SysAdminApp() {
       <div className="grid min-h-0 flex-1 items-start gap-4 p-6 lg:grid-cols-[14rem_minmax(0,1fr)]">
         <Card className="h-full min-h-0 overflow-hidden rounded-lg shadow-sm">
           <CardContent className="grid max-h-full gap-2 overflow-y-auto p-3">
-            <NavGroup label="组织">
-              <SectionButton active={panel === 'tenants'} icon={<Users className="h-4 w-4" />} onClick={() => setPanel('tenants')}>
+            <NavGroup label="系统管理">
+              <SectionButton active={route.page === 'tenants'} icon={<Users className="h-4 w-4" />} onClick={() => navigate({ page: 'tenants' })}>
                 租户管理
               </SectionButton>
-              <SectionButton active={panel === 'admins'} icon={<ShieldCheck className="h-4 w-4" />} onClick={() => setPanel('admins')}>
+              <SectionButton
+                active={route.page === 'access'}
+                icon={<KeyRound className="h-4 w-4" />}
+                onClick={() => navigate({
+                  page: 'access',
+                  tenantId: tenantId || tenants.find((tenant) => tenant.status === 'active')?.id || tenants[0]?.id || null,
+                })}
+              >
+                租户授权
+              </SectionButton>
+              <SectionButton active={route.page === 'admins'} icon={<ShieldCheck className="h-4 w-4" />} onClick={() => navigate({ page: 'admins' })}>
                 系统管理员
               </SectionButton>
-              <SectionButton active={panel === 'spaces'} icon={<Layers3 className="h-4 w-4" />} onClick={() => setPanel('spaces')}>
-                空间管理
-              </SectionButton>
-              <SectionButton active={panel === 'business-plugins'} icon={<Package className="h-4 w-4" />} onClick={() => setPanel('business-plugins')}>
-                业务插件
-              </SectionButton>
             </NavGroup>
-            <NavGroup label="供应商">
-              <SectionButton active={panel === 'llm-models'} icon={<Bot className="h-4 w-4" />} onClick={() => setPanel('llm-models')}>
-                LLM 供应商
-              </SectionButton>
-              <SectionButton active={panel === 'runtime-capabilities'} icon={<Image className="h-4 w-4" />} onClick={() => setPanel('runtime-capabilities')}>
-                运行时能力
-              </SectionButton>
+
+            <NavGroup label="系统设置">
+              <SectionButton active={route.page === 'settings' && route.section === 'llm-models'} icon={<Bot className="h-4 w-4" />} onClick={() => navigate({ page: 'settings', section: 'llm-models' })}>LLM 供应商</SectionButton>
+              <SectionButton active={route.page === 'settings' && route.section === 'runtime-capabilities'} icon={<Image className="h-4 w-4" />} onClick={() => navigate({ page: 'settings', section: 'runtime-capabilities' })}>运行时能力</SectionButton>
+              <SectionButton active={route.page === 'settings' && route.section === 'mcp-client'} icon={<Wifi className="h-4 w-4" />} onClick={() => navigate({ page: 'settings', section: 'mcp-client' })}>MCP 客户端</SectionButton>
+              <SectionButton active={route.page === 'settings' && route.section === 'tools-sandbox'} icon={<Wrench className="h-4 w-4" />} onClick={() => navigate({ page: 'settings', section: 'tools-sandbox' })}>Shell / 沙箱</SectionButton>
             </NavGroup>
-            <NavGroup label="数据源">
-              <SectionButton active={panel === 'datasource-connection'} icon={<Database className="h-4 w-4" />} onClick={() => setPanel('datasource-connection')}>
-                连接
-              </SectionButton>
-              <SectionButton active={panel === 'datasource-permissions'} icon={<Shield className="h-4 w-4" />} onClick={() => setPanel('datasource-permissions')}>
-                权限
-              </SectionButton>
-              <SectionButton active={panel === 'datasource-pool'} icon={<Database className="h-4 w-4" />} onClick={() => setPanel('datasource-pool')}>
-                账号池
-              </SectionButton>
-              <SectionButton active={panel === 'datasource-leases'} icon={<Database className="h-4 w-4" />} onClick={() => setPanel('datasource-leases')}>
-                租约
-              </SectionButton>
+
+            <NavGroup label="系统数据源">
+              <SectionButton active={route.page === 'settings' && route.section === 'datasource-connection'} icon={<Database className="h-4 w-4" />} onClick={() => navigate({ page: 'settings', section: 'datasource-connection' })}>连接</SectionButton>
+              <SectionButton active={route.page === 'settings' && route.section === 'datasource-permissions'} icon={<Shield className="h-4 w-4" />} onClick={() => navigate({ page: 'settings', section: 'datasource-permissions' })}>权限</SectionButton>
+              <SectionButton active={route.page === 'settings' && route.section === 'datasource-pool'} icon={<Database className="h-4 w-4" />} onClick={() => navigate({ page: 'settings', section: 'datasource-pool' })}>账号池</SectionButton>
+              <SectionButton active={route.page === 'settings' && route.section === 'datasource-leases'} icon={<Database className="h-4 w-4" />} onClick={() => navigate({ page: 'settings', section: 'datasource-leases' })}>租约</SectionButton>
             </NavGroup>
-            <NavGroup label="运行时">
-              <SectionButton active={panel === 'tools-sandbox'} icon={<Wrench className="h-4 w-4" />} onClick={() => setPanel('tools-sandbox')}>
-                Shell / 沙箱
-              </SectionButton>
-              <SectionButton active={panel === 'mcp-client'} icon={<Wifi className="h-4 w-4" />} onClick={() => setPanel('mcp-client')}>
-                MCP 客户端
-              </SectionButton>
-            </NavGroup>
+
+            {route.page === 'tenant' && selectedTenant && (
+              <NavGroup label={selectedTenant.name}>
+                <SectionButton active={route.section === 'users'} icon={<Users className="h-4 w-4" />} onClick={() => openTenant(tenantId, 'users')}>用户</SectionButton>
+                <SectionButton active={route.section === 'spaces'} icon={<Layers3 className="h-4 w-4" />} onClick={() => openTenant(tenantId, 'spaces')}>空间</SectionButton>
+                <SectionButton active={route.section === 'business-plugins'} icon={<Package className="h-4 w-4" />} onClick={() => openTenant(tenantId, 'business-plugins')}>业务插件</SectionButton>
+              </NavGroup>
+            )}
           </CardContent>
         </Card>
 
         <div className="h-full min-h-0 overflow-hidden">
           {tenantError && <div className="text-sm text-destructive">读取租户失败：{tenantError}</div>}
-          {panel === 'tenants' && <SysAdminTenantsPanel onTenantsChanged={syncTenants} />}
-          {panel === 'admins' && <SysAdminAccountsPanel />}
-          {tenantScoped && !tenantId && !tenantError && (
-            <div className="flex h-full items-center justify-center rounded-lg border border-dashed text-sm text-muted-foreground">请先创建并选择一个租户</div>
+          {route.page === 'tenants' && <SysAdminTenantsPanel onTenantsChanged={syncTenants} onSelectTenant={(id) => openTenant(id)} />}
+          {route.page === 'admins' && <SysAdminAccountsPanel />}
+          {route.page === 'access' && selectedTenant && <TenantResourceAuthorizationPanel tenant={selectedTenant} />}
+          {route.page === 'access' && !tenantError && tenants.length === 0 && (
+            <div className="flex h-full items-center justify-center rounded-lg border border-dashed text-sm text-muted-foreground">请先创建租户</div>
           )}
-          {tenantId && settingsControlApi && panel === 'llm-models' && <LlmProviderSettingsPanel key={`${tenantId}:${panel}`} controlApi={settingsControlApi} />}
-          {tenantId && spaceControlApi && panel === 'spaces' && <SpaceManagementPanel key={`${tenantId}:${panel}`} api={spaceControlApi} />}
-          {tenantId && businessPluginControlApi && panel === 'business-plugins' && <BusinessPluginManagementPanel key={`${tenantId}:${panel}`} api={businessPluginControlApi} />}
-          {tenantId && settingsControlApi && panel === 'runtime-capabilities' && <RuntimeCapabilitySettingsPanel key={`${tenantId}:${panel}`} controlApi={settingsControlApi} />}
-          {tenantId && settingsControlApi && panel === 'mcp-client' && <McpServerSettingsPanel key={`${tenantId}:${panel}`} controlApi={settingsControlApi} />}
-          {tenantId && settingsControlApi && panel === 'tools-sandbox' && <ToolsSettingsPanel key={`${tenantId}:${panel}`} controlApi={settingsControlApi} />}
-          {tenantId && datasourceControlApi && panel.startsWith('datasource-') && (
-            <DatasourceSettingsPanel key={`${tenantId}:${panel}`} controlApi={datasourceControlApi} page={panel as DatasourceSettingsPage} />
+          {route.page === 'settings' && route.section === 'llm-models' && <LlmProviderSettingsPanel controlApi={settingsControlApi} />}
+          {route.page === 'settings' && route.section === 'runtime-capabilities' && <RuntimeCapabilitySettingsPanel controlApi={settingsControlApi} />}
+          {route.page === 'settings' && route.section === 'mcp-client' && <McpServerSettingsPanel controlApi={settingsControlApi} />}
+          {route.page === 'settings' && route.section === 'tools-sandbox' && <ToolsSettingsPanel controlApi={settingsControlApi} />}
+          {route.page === 'settings' && route.section.startsWith('datasource-') && (
+            <DatasourceSettingsPanel controlApi={datasourceControlApi} page={route.section as DatasourceSettingsPage} />
+          )}
+          {route.page === 'tenant' && !tenantError && tenants.length > 0 && !selectedTenant && (
+            <div className="flex h-full items-center justify-center rounded-lg border border-dashed text-sm text-destructive">租户 {tenantId} 不存在</div>
+          )}
+          {route.page === 'tenant' && selectedTenant && route.section === 'users' && tenantUsersControlApi && (
+            <TenantUsersPanel key={`${tenantId}:users`} api={tenantUsersControlApi} actor={{ kind: 'system' }} />
+          )}
+          {route.page === 'tenant' && selectedTenant && route.section === 'spaces' && spaceControlApi && (
+            <SpaceManagementPanel key={`${tenantId}:spaces`} api={spaceControlApi} />
+          )}
+          {route.page === 'tenant' && selectedTenant && route.section === 'business-plugins' && businessPluginControlApi && (
+            <BusinessPluginManagementPanel key={`${tenantId}:business-plugins`} api={businessPluginControlApi} />
           )}
         </div>
       </div>

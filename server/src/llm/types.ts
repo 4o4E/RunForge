@@ -78,12 +78,10 @@ export interface LlmConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
-  /** null 表示不设置 RunForge 本地输出上限，由上游模型决定。 */
-  maxTokens: number | null;
+  /** 仅用于必须显式声明 max_tokens 的协议，值取模型目录声明的最大输出长度。 */
+  maxOutputTokens: number | null;
   timeoutMs: number;
   retries: number;
-  /** 该供应商要求流式传输时，完整结果调用也通过流式协议聚合。 */
-  stream?: boolean;
 }
 
 /** Incremental chunk during streaming. */
@@ -104,12 +102,8 @@ export interface ProviderCallOptions {
 /** A pluggable LLM backend. */
 export interface Provider {
   readonly name: string;
-  complete(messages: LlmMessage[], tools: LlmTool[], options?: ProviderCallOptions): Promise<LlmResult>;
-  /**
-   * Optional streaming variant. Calls onDelta as tokens arrive and resolves with
-   * the fully-aggregated result. Providers without this fall back to complete().
-   */
-  completeStream?(
+  /** 使用上游流式协议，将增量交给调用方，并返回聚合后的完整结果。 */
+  completeStream(
     messages: LlmMessage[],
     tools: LlmTool[],
     onDelta: (delta: LlmDelta) => void,
