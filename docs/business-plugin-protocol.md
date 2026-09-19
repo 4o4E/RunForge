@@ -79,6 +79,8 @@ HTTP/HTTPS，并且 `url` 与 `urlConfigKey` 必须二选一。
 ## 配置和运行语义
 
 - tenant owner/admin 和 system admin 可在管理页配置插件的非敏感 JSON 与 tenant Secret。
+- 管理页根据 `configSchema` 生成字段编辑器，展示字段名称、说明、必填状态和可选值；管理员
+  通过字段控件完成配置。普通配置用于 MCP 地址、项目编号和功能选项等非敏感参数。
 - Secret 只按 `tenant + key` 保存当前值；管理 API 只返回“是否已配置”，不回显明文。
 - `key` 是 Secret 的稳定名称，例如 `crm.api-key`。声明用于管理页生成配置项、必填检查和
   文档说明，不是插件级权限名单。
@@ -91,6 +93,9 @@ HTTP/HTTPS，并且 `url` 与 `urlConfigKey` 必须二选一。
   和服务重启后的同一 run 继续使用原内容；它是 run 工作副本，不是发布仓库。
 - 业务 Skill 加入现有渐进加载目录，使用 `skill_activate` 激活；业务 MCP 随插件整体进入
   当前空间，但仍使用 `mcp_activate` 渐进发现工具。
+- 管理页可以展开查看每个 Skill 的名称、描述和 `SKILL.md` 入口正文。每个 MCP 会显示其
+  Manifest 定义；管理员展开 MCP 时，RunForge 使用当前租户配置建立独立连接，读取真实工具
+  目录和输入 Schema，随后释放连接。MCP 连接失败只影响该项预览。
 - MCP Client 按 run 隔离并在 run 完成、失败、取消或等待用户时释放，不按 server ID 在
   进程全局共享。
 - 每个 run 沿用一个 `WORKLOAD_TOKEN` 作为统一系统资源凭证。Skill 脚本通过

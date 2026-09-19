@@ -18,6 +18,7 @@ const businessPlugin: BusinessPluginDefinition = {
   root: '/plugins/tn_config/crm',
   manifestPath: '/plugins/tn_config/crm/runforge.plugin.yaml',
   contentHash: 'a'.repeat(64),
+  skillEntries: [],
   manifest: {
     schemaVersion: 1,
     id: 'crm',

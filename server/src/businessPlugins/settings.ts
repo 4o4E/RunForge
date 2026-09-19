@@ -1,15 +1,18 @@
 import Ajv, { type ErrorObject } from 'ajv';
 import { z } from 'zod';
 import { findSetting, updateSettingAtomically } from '../store/settingsRepository.js';
+import { probeMcpServer } from '../mcp/client.js';
 import { BusinessPluginError } from './errors.js';
 import type { BusinessPluginDefinition } from './types.js';
 import type {
   BusinessPluginAdminView,
   BusinessPluginImportResponse,
+  BusinessPluginMcpToolsView,
   UpdateBusinessPluginSettingsInput,
 } from '@runforge/contracts';
 import { businessPluginRegistry } from './registry.js';
 import type { BusinessPluginArchiveFormat } from './archive.js';
+import { resolveBusinessPluginMcpServer } from './runtime.js';
 
 const BUSINESS_PLUGIN_SETTINGS_KEY = 'businessPlugins.settings';
 const jsonObjectSchema = z.record(z.string(), z.unknown());
@@ -145,11 +148,22 @@ export function businessPluginAdminView(
         contentHash: definition.contentHash,
         configSchema: definition.manifest.configSchema,
         config: ownValue(settings.plugins, definition.manifest.id)?.config ?? {},
-        skills: definition.manifest.skills.map((skill) => ({ id: skill.id, path: skill.path })),
+        skills: definition.skillEntries,
         mcpServers: definition.manifest.mcpServers.map((server) => ({
           id: server.id,
           label: server.label,
           description: server.description,
+          transport: server.transport,
+          url: server.url ?? null,
+          urlConfigKey: server.urlConfigKey ?? null,
+          bearerSecretKey: server.bearerSecretKey ?? null,
+          headers: server.headers.map((header) => ({
+            name: header.name,
+            value: header.value ?? null,
+            secretKey: header.secretKey ?? null,
+          })),
+          timeoutMs: server.timeoutMs,
+          maxOutput: server.maxOutput,
         })),
         resources: definition.manifest.resources.map((resource) => ({ type: resource.type })),
         secrets: definition.manifest.secrets.map((secret) => ({
@@ -161,6 +175,39 @@ export function businessPluginAdminView(
       };
     }),
   };
+}
+
+export async function loadBusinessPluginMcpTools(
+  tenantId: string,
+  pluginId: string,
+  serverId: string,
+): Promise<BusinessPluginMcpToolsView> {
+  const [definitions, settings] = await Promise.all([
+    businessPluginRegistry.list(tenantId),
+    getBusinessPluginTenantSettings(tenantId),
+  ]);
+  const definition = definitions.find((item) => item.manifest.id === pluginId);
+  if (!definition) {
+    throw new BusinessPluginError('BUSINESS_PLUGIN_NOT_READY', `业务插件不存在：${pluginId}`);
+  }
+  const config = ownValue(settings.plugins, pluginId)?.config ?? {};
+  const server = resolveBusinessPluginMcpServer(definition, serverId, config, settings.secrets);
+  try {
+    const tools = await probeMcpServer(server);
+    return {
+      tools: tools.map((tool) => ({
+        name: tool.originalName,
+        description: tool.description,
+        inputSchema: tool.parameters,
+      })),
+    };
+  } catch (error) {
+    throw new BusinessPluginError(
+      'BUSINESS_PLUGIN_NOT_READY',
+      `无法读取业务插件 ${pluginId} 的 MCP ${serverId} 工具：${(error as Error).message}`,
+      { cause: error },
+    );
+  }
 }
 
 export async function updateBusinessPluginTenantSettings(

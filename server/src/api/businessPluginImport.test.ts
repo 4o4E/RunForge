@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { createMcpExpressApp } from '@modelcontextprotocol/sdk/server/express.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { z } from 'zod';
 import { ZipFile } from 'yazl';
 
 const importRoot = await mkdtemp(join(tmpdir(), 'runforge-business-plugin-api-'));
@@ -14,14 +18,24 @@ const [testHelpers, jwt] = await Promise.all([
   import('../auth/jwt.js'),
 ]);
 
-function pluginZip(description: string): Promise<Buffer> {
+function pluginZip(description: string, options: { id?: string; mcpUrl?: string } = {}): Promise<Buffer> {
   const zip = new ZipFile();
-  zip.addBuffer(Buffer.from([
+  const manifest = [
     'schemaVersion: 1',
-    'id: imported-api',
+    `id: ${options.id ?? 'imported-api'}`,
     'displayName: Imported API',
     `description: ${description}`,
-  ].join('\n')), 'runforge.plugin.yaml');
+  ];
+  if (options.mcpUrl) {
+    manifest.push(
+      'mcpServers:',
+      '  - id: crm',
+      '    label: CRM',
+      '    description: 查询客户资料',
+      `    url: ${options.mcpUrl}`,
+    );
+  }
+  zip.addBuffer(Buffer.from(manifest.join('\n')), 'runforge.plugin.yaml');
   return new Promise<Buffer>((resolve, reject) => {
     const chunks: Buffer[] = [];
     zip.outputStream.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -33,6 +47,59 @@ function pluginZip(description: string): Promise<Buffer> {
 
 test.after(async () => {
   await rm(importRoot, { recursive: true, force: true });
+});
+
+test('业务插件 MCP 预览 API：连接真实 MCP 并返回每个工具的输入 Schema', async () => {
+  const mcpApp = createMcpExpressApp();
+  mcpApp.post('/mcp', async (req, res) => {
+    const mcp = new McpServer({ name: 'business-plugin-preview-test', version: '1.0.0' });
+    mcp.registerTool('customer_lookup', {
+      description: '按客户编号读取资料',
+      inputSchema: { customerId: z.string().describe('客户编号') },
+    }, async () => ({ content: [{ type: 'text', text: 'ok' }] }));
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    await mcp.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+    res.on('close', () => {
+      void transport.close();
+      void mcp.close();
+    });
+  });
+
+  const mcpListener = await testHelpers.listen(mcpApp);
+  const owner = await testHelpers.seedOwner('tn_plugin_mcp_preview', 'owner@plugin-mcp-preview.test', 'pw');
+  const token = jwt.signTenantAccessToken({ id: owner.id, tenantId: owner.tenant_id, role: 'owner' });
+  const runforge = await testHelpers.listen(testHelpers.buildApp());
+  try {
+    const base = `http://127.0.0.1:${runforge.port}/api/tenants/${owner.tenant_id}/business-plugins`;
+    const imported = await fetch(`${base}/import`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/zip' },
+      body: await pluginZip('Plugin with MCP.', {
+        id: 'mcp-preview',
+        mcpUrl: `http://127.0.0.1:${mcpListener.port}/mcp`,
+      }),
+    });
+    assert.equal(imported.status, 201);
+
+    const preview = await fetch(`${base}/mcp-preview/mcp/crm/tools`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    assert.equal(preview.status, 200);
+    const body = (await preview.json()) as {
+      tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>;
+    };
+    assert.equal(body.tools[0]?.name, 'customer_lookup');
+    assert.match(body.tools[0]?.description ?? '', /按客户编号读取资料/);
+    assert.deepEqual(
+      (body.tools[0]?.inputSchema.properties as Record<string, unknown>)?.customerId,
+      { type: 'string', description: '客户编号' },
+    );
+  } finally {
+    runforge.close();
+    mcpListener.close();
+  }
 });
 
 test('业务插件导入 API：租户管理员可以新增和覆盖 ZIP，其他格式被拒绝', async () => {

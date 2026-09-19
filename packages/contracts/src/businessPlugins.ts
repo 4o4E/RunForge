@@ -1,12 +1,38 @@
 export interface BusinessPluginSkillView {
   id: string;
   path: string;
+  name: string;
+  description: string;
+  content: string;
+}
+
+export interface BusinessPluginMcpHeaderView {
+  name: string;
+  value: string | null;
+  secretKey: string | null;
 }
 
 export interface BusinessPluginMcpView {
   id: string;
   label: string;
   description: string;
+  transport: 'streamable-http';
+  url: string | null;
+  urlConfigKey: string | null;
+  bearerSecretKey: string | null;
+  headers: BusinessPluginMcpHeaderView[];
+  timeoutMs: number;
+  maxOutput: number;
+}
+
+export interface BusinessPluginMcpToolView {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+export interface BusinessPluginMcpToolsView {
+  tools: BusinessPluginMcpToolView[];
 }
 
 export interface BusinessPluginResourceView {

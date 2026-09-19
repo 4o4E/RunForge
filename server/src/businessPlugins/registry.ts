@@ -9,7 +9,11 @@ import { parseSkillDocument } from '../skills/registry.js';
 import { extractBusinessPluginArchive, type BusinessPluginArchiveFormat } from './archive.js';
 import { BusinessPluginError } from './errors.js';
 import { parseBusinessPluginManifest } from './manifest.js';
-import type { BusinessPluginDefinition } from './types.js';
+import type {
+  BusinessPluginDefinition,
+  BusinessPluginManifest,
+  BusinessSkillEntrySnapshot,
+} from './types.js';
 
 const MANIFEST_FILE = 'runforge.plugin.yaml';
 
@@ -61,30 +65,42 @@ async function hashTree(root: string): Promise<string> {
   return hash.digest('hex');
 }
 
-async function validateSkills(definition: BusinessPluginDefinition): Promise<void> {
-  for (const skill of definition.manifest.skills) {
-    const root = resolve(definition.root, skill.path);
-    if (!isWithin(definition.root, root)) {
+async function loadSkillEntries(
+  pluginRoot: string,
+  manifest: BusinessPluginManifest,
+): Promise<BusinessSkillEntrySnapshot[]> {
+  const entries: BusinessSkillEntrySnapshot[] = [];
+  for (const skill of manifest.skills) {
+    const root = resolve(pluginRoot, skill.path);
+    if (!isWithin(pluginRoot, root)) {
       throw new BusinessPluginError(
         'BUSINESS_PLUGIN_PATH_INVALID',
-        `业务插件 ${definition.manifest.id} 的 Skill ${skill.id} 路径越界：${skill.path}`,
+        `业务插件 ${manifest.id} 的 Skill ${skill.id} 路径越界：${skill.path}`,
       );
     }
     const entry = join(root, 'SKILL.md');
     if (!existsSync(entry)) {
       throw new BusinessPluginError(
         'BUSINESS_PLUGIN_PATH_INVALID',
-        `业务插件 ${definition.manifest.id} 的 Skill ${skill.id} 缺少 SKILL.md：${skill.path}`,
+        `业务插件 ${manifest.id} 的 Skill ${skill.id} 缺少 SKILL.md：${skill.path}`,
       );
     }
     const parsed = parseSkillDocument(await readFile(entry, 'utf8'), entry);
     if (parsed.frontmatter.name !== skill.id) {
       throw new BusinessPluginError(
         'BUSINESS_PLUGIN_MANIFEST_INVALID',
-        `业务插件 ${definition.manifest.id} 的 Skill ${skill.id} 与 SKILL.md name ${parsed.frontmatter.name} 不一致`,
+        `业务插件 ${manifest.id} 的 Skill ${skill.id} 与 SKILL.md name ${parsed.frontmatter.name} 不一致`,
       );
     }
+    entries.push({
+      id: skill.id,
+      path: skill.path,
+      name: parsed.frontmatter.name,
+      description: parsed.frontmatter.description,
+      content: parsed.body.trim(),
+    });
   }
+  return entries;
 }
 
 export async function loadBusinessPlugin(root: string): Promise<BusinessPluginDefinition> {
@@ -108,14 +124,22 @@ export async function loadBusinessPlugin(root: string): Promise<BusinessPluginDe
       `业务插件不能包含 RunForge/Cordis 运行时入口：${join(canonical, 'dist', 'index.js')}`,
     );
   }
+  const contentHash = await hashTree(canonical);
   const manifest = parseBusinessPluginManifest(await readFile(manifestPath, 'utf8'), manifestPath);
+  const skillEntries = await loadSkillEntries(canonical, manifest);
+  if (await hashTree(canonical) !== contentHash) {
+    throw new BusinessPluginError(
+      'BUSINESS_PLUGIN_PATH_INVALID',
+      `业务插件在读取期间发生变化，请完整替换目录后重新加载：${canonical}`,
+    );
+  }
   const definition = {
     root: canonical,
     manifestPath,
-    contentHash: await hashTree(canonical),
+    contentHash,
     manifest,
+    skillEntries,
   } satisfies BusinessPluginDefinition;
-  await validateSkills(definition);
   return definition;
 }
 

@@ -1,6 +1,7 @@
 import type {
   BusinessPluginAdminView,
   BusinessPluginImportResponse,
+  BusinessPluginMcpToolsView,
   UpdateBusinessPluginSettingsInput,
 } from '@runforge/contracts';
 import { authFetch } from './api';
@@ -11,6 +12,7 @@ export interface BusinessPluginControlApi {
   update(input: UpdateBusinessPluginSettingsInput): Promise<BusinessPluginAdminView>;
   reload(): Promise<BusinessPluginAdminView>;
   importArchive(file: File): Promise<BusinessPluginImportResponse>;
+  loadMcpTools(pluginId: string, serverId: string): Promise<BusinessPluginMcpToolsView>;
 }
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -37,6 +39,10 @@ function createBusinessPluginControlApi(base: string, fetcher: Fetcher): Busines
       body: JSON.stringify(input),
     }).then(json<BusinessPluginAdminView>),
     reload: () => fetcher(`${base}/reload`, { method: 'POST' }).then(json<BusinessPluginAdminView>),
+    loadMcpTools: (pluginId, serverId) => fetcher(
+      `${base}/${encodeURIComponent(pluginId)}/mcp/${encodeURIComponent(serverId)}/tools`,
+      { method: 'POST' },
+    ).then(json<BusinessPluginMcpToolsView>),
     importArchive: (file) => {
       const lowerName = file.name.toLowerCase();
       const format = lowerName.endsWith('.zip')

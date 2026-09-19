@@ -8,6 +8,7 @@ export default {
   content: [
     './index.html',
     './src/**/*.{js,ts,jsx,tsx}',
+    '../node_modules/@rjsf/shadcn/src/**/*.{js,ts,jsx,tsx}',
     // Streamdown 的渲染结果会带 Tailwind 类名，这里扫描包产物确保样式被生成。
     '../node_modules/streamdown/dist/**/*.js',
   ],

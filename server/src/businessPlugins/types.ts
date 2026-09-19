@@ -51,9 +51,18 @@ export interface BusinessPluginManifest {
   configSchema: Record<string, unknown>;
 }
 
+export interface BusinessSkillEntrySnapshot {
+  id: string;
+  path: string;
+  name: string;
+  description: string;
+  content: string;
+}
+
 export interface BusinessPluginDefinition {
   root: string;
   manifestPath: string;
   contentHash: string;
   manifest: BusinessPluginManifest;
+  skillEntries: BusinessSkillEntrySnapshot[];
 }

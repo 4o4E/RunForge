@@ -363,8 +363,19 @@ test('业务插件发现：tenant 目录隔离，只有显式 reload 才切换�
   assert.equal(first.length, 1);
   assert.deepEqual(await registry.list('tn_right'), []);
   await writeFile(join(pluginRoot, 'skills', 'customer-query', 'references', 'schema.md'), '# v2');
-  assert.equal((await registry.list('tn_left'))[0]?.contentHash, first[0]?.contentHash);
-  assert.notEqual((await registry.reload('tn_left'))[0]?.contentHash, first[0]?.contentHash);
+  await writeFile(join(pluginRoot, 'skills', 'customer-query', 'SKILL.md'), [
+    '---',
+    'name: customer-query',
+    'description: Query the reviewed customer business system.',
+    '---',
+    '# Customer query v2',
+  ].join('\n'));
+  const cached = await registry.list('tn_left');
+  assert.equal(cached[0]?.contentHash, first[0]?.contentHash);
+  assert.equal((await businessPluginAdminView(cached, normalizeBusinessPluginTenantSettings({}))).plugins[0]?.skills[0]?.content, '# Customer query');
+  const reloaded = await registry.reload('tn_left');
+  assert.notEqual(reloaded[0]?.contentHash, first[0]?.contentHash);
+  assert.equal((await businessPluginAdminView(reloaded, normalizeBusinessPluginTenantSettings({}))).plugins[0]?.skills[0]?.content, '# Customer query v2');
 });
 
 test('业务插件发现：拒绝 tenant 目录通过 symlink 逃逸配置根目录', async () => {
@@ -387,6 +398,9 @@ test('业务插件配置：JSON Schema、MCP endpoint 和 tenant Secret 共同�
     'schemaVersion: 1',
     'id: crm',
     'description: Reviewed business capability.',
+    'skills:',
+    '  - id: customer-query',
+    '    path: skills/customer-query',
     'configSchema:',
     '  type: object',
     '  required: [endpoint]',
@@ -423,6 +437,12 @@ test('业务插件配置：JSON Schema、MCP endpoint 和 tenant Secret 共同�
     secrets: { 'crm.api-key': 'same-tenant-secret' },
   }));
   assert.equal(view.plugins[0]?.secrets[0]?.configured, true);
+  assert.equal(view.plugins[0]?.skills[0]?.name, 'customer-query');
+  assert.equal(view.plugins[0]?.skills[0]?.description, 'Query the reviewed customer business system.');
+  assert.equal(view.plugins[0]?.skills[0]?.content, '# Customer query');
+  assert.equal(view.plugins[0]?.mcpServers[0]?.transport, 'streamable-http');
+  assert.equal(view.plugins[0]?.mcpServers[0]?.urlConfigKey, 'endpoint');
+  assert.equal(view.plugins[0]?.mcpServers[0]?.bearerSecretKey, 'crm.api-key');
   assert.equal(JSON.stringify(view).includes('same-tenant-secret'), false);
 });
 

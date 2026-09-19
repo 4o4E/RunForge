@@ -12,6 +12,7 @@ import type {
 import {
   importBusinessPluginAdminView,
   loadBusinessPluginAdminView,
+  loadBusinessPluginMcpTools,
   updateBusinessPluginAdminView,
 } from '../businessPlugins/settings.js';
 import { BusinessPluginError } from '../businessPlugins/errors.js';
@@ -62,6 +63,19 @@ tenantsApi.get('/:id/business-plugins', requireMatchingTenantParam('id'), requir
     handleBusinessPluginError(res, error);
   }
 });
+
+tenantsApi.post(
+  '/:id/business-plugins/:pluginId/mcp/:serverId/tools',
+  requireMatchingTenantParam('id'),
+  requireOwnerOrAdmin,
+  async (req, res) => {
+    try {
+      res.json(await loadBusinessPluginMcpTools(req.params.id, req.params.pluginId, req.params.serverId));
+    } catch (error) {
+      handleBusinessPluginError(res, error);
+    }
+  },
+);
 
 tenantsApi.put('/:id/business-plugins', requireMatchingTenantParam('id'), requireOwnerOrAdmin, async (req, res) => {
   try {

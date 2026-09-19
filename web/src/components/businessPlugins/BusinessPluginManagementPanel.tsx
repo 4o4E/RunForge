@@ -1,22 +1,43 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { RefreshCw, Save, Trash2, Upload } from 'lucide-react';
-import type { BusinessPluginAdminItem } from '@runforge/contracts';
+import { ChevronDown, RefreshCw, Save, Trash2, Upload } from 'lucide-react';
+import type { BusinessPluginAdminItem, BusinessPluginMcpToolView } from '@runforge/contracts';
+import Form from '@rjsf/shadcn';
+import type { RJSFSchema } from '@rjsf/utils';
+import validator from '@rjsf/validator-ajv8';
 import type { BusinessPluginControlApi } from '@/businessPluginControlApi';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
 import { useNotifications } from '@/components/GlobalNotifications';
+import { MarkdownContent } from '@/components/MarkdownContent';
 import { cn } from '@/lib/utils';
+
+interface McpToolsState {
+  loading: boolean;
+  tools?: BusinessPluginMcpToolView[];
+  error?: string;
+}
+
+function hasConfigEntries(schema: Record<string, unknown>): boolean {
+  const properties = schema.properties;
+  return Boolean(
+    properties
+    && typeof properties === 'object'
+    && !Array.isArray(properties)
+    && Object.keys(properties).length,
+  );
+}
 
 export function BusinessPluginManagementPanel({ api }: { api: BusinessPluginControlApi }) {
   const { notify } = useNotifications();
   const [plugins, setPlugins] = useState<BusinessPluginAdminItem[] | null>(null);
   const [selectedId, setSelectedId] = useState('');
-  const [configText, setConfigText] = useState('{}');
+  const [config, setConfig] = useState<Record<string, unknown>>({});
   const [secretDrafts, setSecretDrafts] = useState<Record<string, string>>({});
   const [clearSecrets, setClearSecrets] = useState<Set<string>>(new Set());
+  const [mcpTools, setMcpTools] = useState<Record<string, McpToolsState>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const archiveInputRef = useRef<HTMLInputElement>(null);
@@ -39,9 +60,10 @@ export function BusinessPluginManagementPanel({ api }: { api: BusinessPluginCont
   }, [api]);
 
   useEffect(() => {
-    setConfigText(JSON.stringify(selected?.config ?? {}, null, 2));
+    setConfig(structuredClone(selected?.config ?? {}));
     setSecretDrafts({});
     setClearSecrets(new Set());
+    setMcpTools({});
     setError('');
   }, [selected?.id, selected?.contentHash, selected?.config]);
 
@@ -62,15 +84,6 @@ export function BusinessPluginManagementPanel({ api }: { api: BusinessPluginCont
 
   async function save() {
     if (!selected) return;
-    let config: Record<string, unknown>;
-    try {
-      const parsed = JSON.parse(configText) as unknown;
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('配置必须是 JSON 对象');
-      config = parsed as Record<string, unknown>;
-    } catch (reason) {
-      setError(`配置 JSON 无效：${(reason as Error).message}`);
-      return;
-    }
     const secrets: Record<string, string | null> = {};
     for (const [key, value] of Object.entries(secretDrafts)) if (value) secrets[key] = value;
     for (const key of clearSecrets) secrets[key] = null;
@@ -88,6 +101,22 @@ export function BusinessPluginManagementPanel({ api }: { api: BusinessPluginCont
       notify({ variant: 'error', title: '业务插件配置保存失败', description: (reason as Error).message });
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function loadMcpTools(pluginId: string, serverId: string, reload = false) {
+    const key = `${pluginId}\u0000${serverId}`;
+    const current = mcpTools[key];
+    if (!reload && (current?.loading || current?.tools)) return;
+    setMcpTools((states) => ({ ...states, [key]: { loading: true } }));
+    try {
+      const result = await api.loadMcpTools(pluginId, serverId);
+      setMcpTools((states) => ({ ...states, [key]: { loading: false, tools: result.tools } }));
+    } catch (reason) {
+      setMcpTools((states) => ({
+        ...states,
+        [key]: { loading: false, error: (reason as Error).message },
+      }));
     }
   }
 
@@ -118,11 +147,7 @@ export function BusinessPluginManagementPanel({ api }: { api: BusinessPluginCont
   return (
     <div className="flex h-full min-h-0 flex-col gap-4">
       <div className="flex shrink-0 items-start justify-between gap-3">
-        <div>
-          <h2 className="text-lg font-semibold">业务插件</h2>
-          <p className="mt-1 text-sm text-muted-foreground">配置 tenant 级非敏感参数和统一 Secret；空间只负责选择是否启用。</p>
-          <p className="mt-1 text-xs text-muted-foreground">支持 ZIP、TGZ 和 .tar.gz；导入相同插件 ID 会更新现有内容并保留配置。</p>
-        </div>
+        <h2 className="text-lg font-semibold">业务插件</h2>
         <div className="flex shrink-0 gap-2">
           <input
             ref={archiveInputRef}
@@ -181,22 +206,111 @@ export function BusinessPluginManagementPanel({ api }: { api: BusinessPluginCont
               <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
                 <div>版本：{selected.version ?? '未声明'}</div>
                 <div className="truncate" title={selected.contentHash}>内容 hash：{selected.contentHash.slice(0, 16)}…</div>
-                <div>Skills：{selected.skills.map((skill) => skill.id).join(', ') || '无'}</div>
-                <div>MCP：{selected.mcpServers.map((server) => server.id).join(', ') || '无'}</div>
                 <div>运行资源：{selected.resources.map((resource) => resource.type).join(', ') || '无'}</div>
               </div>
 
-              <label className="grid gap-2 text-sm font-medium">
-                <span>tenant 非敏感配置（JSON）</span>
-                <Textarea className="min-h-48 font-mono text-xs" value={configText} onChange={(event) => setConfigText(event.target.value)} />
-                <span className="text-xs font-normal text-muted-foreground">Schema：{JSON.stringify(selected.configSchema)}</span>
-              </label>
+              {!!selected.skills.length && <div className="grid gap-3">
+                <div className="text-sm font-medium">Skill</div>
+                {selected.skills.map((skill) => (
+                  <Collapsible key={skill.id} className="rounded-md border">
+                    <CollapsibleTrigger className="group flex w-full items-start justify-between gap-3 p-3 text-left">
+                      <span className="grid gap-1">
+                        <span className="text-sm font-medium">{skill.name}</span>
+                        <span className="text-xs text-muted-foreground">{skill.description}</span>
+                      </span>
+                      <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
+                    </CollapsibleTrigger>
+                    <CollapsibleContent className="border-t px-4 py-3">
+                      <div className="mb-2 text-xs text-muted-foreground">入口：{skill.path}/SKILL.md</div>
+                      <MarkdownContent text={skill.content || '（入口正文为空）'} />
+                    </CollapsibleContent>
+                  </Collapsible>
+                ))}
+              </div>}
 
-              <div className="grid gap-3">
-                <div>
-                  <div className="text-sm font-medium">Tenant Secret</div>
-                  <div className="text-xs text-muted-foreground">key 是 tenant 级 Secret 名称；同名 key 只有一个当前值。插件声明用于配置提示，不限制运行脚本按 key 读取。输入框不会回显当前值；留空表示不变，清除按钮会删除当前值。</div>
-                </div>
+              {!!selected.mcpServers.length && <div className="grid gap-3">
+                <div className="text-sm font-medium">MCP</div>
+                {selected.mcpServers.map((server) => {
+                  const toolsKey = `${selected.id}\u0000${server.id}`;
+                  const state = mcpTools[toolsKey];
+                  return (
+                    <Collapsible
+                      key={server.id}
+                      className="rounded-md border"
+                      onOpenChange={(open) => { if (open) void loadMcpTools(selected.id, server.id); }}
+                    >
+                      <CollapsibleTrigger className="group flex w-full items-start justify-between gap-3 p-3 text-left">
+                        <span className="grid gap-1">
+                          <span className="text-sm font-medium">{server.label}</span>
+                          <span className="text-xs text-muted-foreground">{server.description}</span>
+                        </span>
+                        <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
+                      </CollapsibleTrigger>
+                      <CollapsibleContent className="grid gap-3 border-t px-4 py-3">
+                        <div className="grid gap-1 rounded bg-muted/40 p-3 text-xs text-muted-foreground sm:grid-cols-2">
+                          <div>协议：Streamable HTTP</div>
+                          <div>地址：{server.url ?? `配置项 ${server.urlConfigKey}`}</div>
+                          <div>Bearer Secret：{server.bearerSecretKey ?? '无'}</div>
+                          <div>超时：{server.timeoutMs} ms</div>
+                          <div>最大工具输出：{server.maxOutput}</div>
+                          <div>Headers：{server.headers.length || '无'}</div>
+                          {server.headers.map((header) => (
+                            <div key={`${header.name}:${header.secretKey ?? header.value}`} className="sm:col-span-2">
+                              {header.name}：{header.secretKey ? `Secret ${header.secretKey}` : header.value}
+                            </div>
+                          ))}
+                        </div>
+
+                        {state?.loading && <div className="text-sm text-muted-foreground">正在读取 MCP 工具目录...</div>}
+                        {state?.error && (
+                          <div className="grid gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+                            <span>{state.error}</span>
+                            <Button className="w-fit" size="sm" variant="outline" onClick={() => void loadMcpTools(selected.id, server.id, true)}>
+                              重新读取
+                            </Button>
+                          </div>
+                        )}
+                        {state?.tools?.map((tool) => (
+                          <Collapsible key={tool.name} className="rounded-md border bg-background">
+                            <CollapsibleTrigger className="group flex w-full items-start justify-between gap-3 p-3 text-left">
+                              <span className="grid gap-1">
+                                <span className="font-mono text-sm font-medium">{tool.name}</span>
+                                <span className="whitespace-pre-wrap text-xs text-muted-foreground">{tool.description || '无描述'}</span>
+                              </span>
+                              <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
+                            </CollapsibleTrigger>
+                            <CollapsibleContent className="border-t px-3 py-2">
+                              <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-foreground">
+                                {JSON.stringify(tool.inputSchema, null, 2)}
+                              </pre>
+                            </CollapsibleContent>
+                          </Collapsible>
+                        ))}
+                        {state?.tools && !state.tools.length && <div className="text-sm text-muted-foreground">该 MCP 没有返回工具。</div>}
+                      </CollapsibleContent>
+                    </Collapsible>
+                  );
+                })}
+              </div>}
+
+              {hasConfigEntries(selected.configSchema) && <div className="grid gap-3">
+                <div className="text-sm font-medium">普通配置</div>
+                  <Form
+                    schema={selected.configSchema as RJSFSchema}
+                    formData={config}
+                    validator={validator}
+                    disabled={busy}
+                    noHtml5Validate
+                    showErrorList={false}
+                    uiSchema={{ 'ui:submitButtonOptions': { norender: true } }}
+                    onChange={(event) => setConfig((event.formData ?? {}) as Record<string, unknown>)}
+                  >
+                    <></>
+                  </Form>
+              </div>}
+
+              {!!selected.secrets.length && <div className="grid gap-3">
+                <div className="text-sm font-medium">Secret</div>
                 {selected.secrets.map((secret) => (
                   <div key={secret.key} className="grid gap-2 rounded-md border p-3">
                     <div className="flex items-start justify-between gap-3">
@@ -238,8 +352,7 @@ export function BusinessPluginManagementPanel({ api }: { api: BusinessPluginCont
                     </div>
                   </div>
                 ))}
-                {!selected.secrets.length && <div className="text-sm text-muted-foreground">该业务插件没有声明长期 Secret。</div>}
-              </div>
+              </div>}
             </CardContent>
           </Card>
         ) : <div className="flex items-center justify-center rounded-lg border border-dashed text-sm text-muted-foreground">选择一个业务插件</div>}

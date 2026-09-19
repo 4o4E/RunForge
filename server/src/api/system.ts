@@ -55,6 +55,7 @@ import { systemSpacesApi } from './spaces.js';
 import {
   importBusinessPluginAdminView,
   loadBusinessPluginAdminView,
+  loadBusinessPluginMcpTools,
   updateBusinessPluginAdminView,
 } from '../businessPlugins/settings.js';
 import { BusinessPluginError } from '../businessPlugins/errors.js';
@@ -153,6 +154,16 @@ systemApi.get('/tenants/:tenantId/business-plugins', async (req, res) => {
   if (!scope) return;
   try {
     res.json(await loadBusinessPluginAdminView(scope.tenantId));
+  } catch (error) {
+    handleBusinessPluginError(res, error);
+  }
+});
+
+systemApi.post('/tenants/:tenantId/business-plugins/:pluginId/mcp/:serverId/tools', async (req, res) => {
+  const scope = await systemTenantScope(req, res);
+  if (!scope) return;
+  try {
+    res.json(await loadBusinessPluginMcpTools(scope.tenantId, req.params.pluginId, req.params.serverId));
   } catch (error) {
     handleBusinessPluginError(res, error);
   }
