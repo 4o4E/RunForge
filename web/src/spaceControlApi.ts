@@ -4,6 +4,7 @@ import type {
   CreateSpaceInput,
   ExternalCallerSummary,
   ExternalTokenSummary,
+  PromptPlaceholdersView,
   SpaceOptions,
   SpaceSummary,
   TenantUserSummary,
@@ -19,7 +20,9 @@ export interface ExternalCallerWithTokens {
 
 export interface SpaceControlApi {
   listSpaces(includeDeleted?: boolean): Promise<{ spaces: SpaceSummary[] }>;
+  getSpace(spaceId: string): Promise<SpaceSummary>;
   getOptions(): Promise<SpaceOptions>;
+  getPromptPlaceholders(spaceId: string): Promise<PromptPlaceholdersView>;
   listUsers(): Promise<{ users: TenantUserSummary[] }>;
   createSpace(input: CreateSpaceInput): Promise<SpaceSummary>;
   updateSpace(spaceId: string, input: UpdateSpaceInput): Promise<SpaceSummary>;
@@ -74,7 +77,10 @@ function createSpaceControlApi(
   return {
     listSpaces: (includeDeleted = true) => fetcher(path(includeDeleted ? '?includeDeleted=1' : ''))
       .then(json<{ spaces: SpaceSummary[] }>),
+    getSpace: (spaceId) => fetcher(path(`/${encodeURIComponent(spaceId)}`)).then(json<SpaceSummary>),
     getOptions: () => fetcher(path('/options')).then(json<SpaceOptions>),
+    getPromptPlaceholders: (spaceId) => fetcher(path(`/${encodeURIComponent(spaceId)}/prompt-placeholders`))
+      .then(json<PromptPlaceholdersView>),
     listUsers,
     createSpace: (input) => fetcher(path(), body('POST', input)).then(json<SpaceSummary>),
     updateSpace: (spaceId, input) => fetcher(path(`/${encodeURIComponent(spaceId)}`), body('PATCH', input)).then(json<SpaceSummary>),

@@ -12,6 +12,7 @@ function needsMaterialization(space: SpaceRow): boolean {
   const config = record(space.config);
   const model = record(config.model);
   const capabilities = record(config.capabilities);
+  if (config.schemaVersion !== 3 || typeof config.promptTemplate !== 'string') return true;
   if (!Array.isArray(model.allowedModelRefs)) return true;
   if (model.allowedModelRefs.length > 0 && !(typeof model.defaultModelRef === 'string' && model.defaultModelRef.trim())) return true;
   return !Array.isArray(capabilities.tools)

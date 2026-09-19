@@ -1,12 +1,12 @@
 import { agentContextSettings, config, type AgentContextSettings } from '../config.js';
 import { mkdir } from 'node:fs/promises';
-import { getConfiguredProvider } from '../llm/index.js';
+import { getConfiguredProvider, getConfiguredSystemTitleProvider } from '../llm/index.js';
 import type { LlmDelta, LlmMessage, LlmUsage, Provider } from '../llm/types.js';
 import { parseToolArguments } from '../llm/toolArgs.js';
 import { hydrateImageAttachments } from '../llm/attachments.js';
 import { runTool, toolSchemas } from '../tools/registry.js';
 import { createPolicy } from '../tools/policy.js';
-import { ContextManager, renderRuntimeCapabilitiesContext, renderSystemPrompt } from './context.js';
+import { ContextManager } from './context.js';
 import {
   activateSkillItem,
   loadSkillIndex,
@@ -39,7 +39,6 @@ import {
 import type { RuntimeCapabilityName } from '@runforge/contracts';
 import { withSpan } from '../telemetry.js';
 import type { AskUserAnswer, AskUserMode, AskUserOption, AskUserSpec, StreamStage, StreamStats } from './types.js';
-import { renderRuntimeContext } from './context.js';
 import { shellManager } from '../shell/manager.js';
 import { requiresDatabaseAccess } from '../tools/databaseAccessGuard.js';
 import type { SubagentRunRow } from '../store/types.js';
@@ -51,6 +50,12 @@ import {
   type RunSpaceConfigSnapshot,
   type RuntimeCapabilitiesSnapshot,
 } from '../spaces/config.js';
+import {
+  defaultPromptTemplate,
+  renderPromptTemplate,
+  runtimeCapabilityPromptValues,
+  validatePromptTemplate,
+} from '../spaces/prompt.js';
 import { resolveWorkspaceRootForThread } from '../files/workspaceRoot.js';
 import { externalArtifactMaterializer } from '../external/artifactMaterializer.js';
 import { attachExternalArtifactTokens, type ExternalArtifactTokenSource } from '../external/artifactProtocol.js';
@@ -120,6 +125,8 @@ const SUBAGENT_WRITER_TOOLS = [
 export interface ExecutorDeps {
   provider: Provider;
   providerDescriptor: ProviderDescriptor;
+  titleProvider: Provider;
+  titleProviderDescriptor: ProviderDescriptor;
   providerRunner: ProviderRunner;
   store: Store;
   publish: (runId: string, event: AgentEvent) => void;
@@ -161,21 +168,6 @@ interface ToolTrace {
 interface LoopGuardHit {
   reason: string;
   question: string;
-}
-
-function renderRunActivationContext(activeSkills: SkillIndexItem[], activeMcp: Map<string, McpActivation>): string {
-  const lines = [
-    '当前 run 已激活能力 / Active capabilities in this run:',
-    activeSkills.length
-      ? `- Skills: ${activeSkills.map((skill) => `${skill.id}, root=${skill.root}`).join('; ')}`
-      : '- Skills: none',
-    activeMcp.size
-      ? `- MCP: ${[...activeMcp.keys()].join(', ')}`
-      : '- MCP: none',
-    '- 这些激活状态只属于当前 run；历史激活记录不代表当前 run 已激活。',
-    '- These activation states belong only to the current run; historical activation records do not mean they are active now.',
-  ];
-  return lines.join('\n');
 }
 
 function durationMs(startedAt: string, endedAt: string): number {
@@ -268,12 +260,23 @@ async function defaultDeps(
 ): Promise<ExecutorDeps> {
   const configured = overrides.provider ? null : await getConfiguredProvider(scope, modelRef ?? undefined);
   const provider = overrides.provider ?? configured!.provider;
+  const generateThreadTitle = overrides.generateThreadTitle ?? overrides.store === undefined;
+  const configuredTitle = generateThreadTitle && !overrides.titleProvider && !overrides.provider
+    ? await getConfiguredSystemTitleProvider()
+    : null;
+  const titleProvider = overrides.titleProvider ?? configuredTitle?.provider ?? provider;
   return {
     provider,
     providerDescriptor: overrides.providerDescriptor ?? configured?.descriptor ?? {
       provider: provider.name,
       model: modelRef?.trim() || config.llm.model,
       // 注入 Provider 的测试/评估路径在首个可见增量前最多补一次请求。
+      retries: 1,
+    },
+    titleProvider,
+    titleProviderDescriptor: overrides.titleProviderDescriptor ?? configuredTitle?.descriptor ?? {
+      provider: titleProvider.name,
+      model: modelRef?.trim() || config.llm.model,
       retries: 1,
     },
     providerRunner: overrides.providerRunner ?? defaultProviderRunner,
@@ -285,7 +288,7 @@ async function defaultDeps(
     mcpSettings: overrides.mcpSettings,
     mcpToolLoader: overrides.mcpToolLoader,
     workloadRuntimeEnv: overrides.workloadRuntimeEnv,
-    generateThreadTitle: overrides.generateThreadTitle ?? overrides.store === undefined,
+    generateThreadTitle,
     contextSettings: overrides.contextSettings ?? (spaceConfig ? {
       modelContextWindow: spaceConfig.model.contextWindow,
       contextBudget: spaceConfig.model.contextBudget,
@@ -432,12 +435,16 @@ async function loadRuntimeCapabilitiesSnapshot(store: Store, scope: Scope, runId
 
 function runSpaceConfigSnapshot(value: unknown): RunSpaceConfigSnapshot | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const raw = value as Partial<RunSpaceConfigSnapshot>;
+  const raw = value as Omit<Partial<RunSpaceConfigSnapshot>, 'schemaVersion'> & {
+    schemaVersion?: number;
+    systemPrompt?: unknown;
+  };
   if (typeof raw.spaceId !== 'string') return null;
   if (
-    raw.schemaVersion !== 1
+    (raw.schemaVersion !== 1 && raw.schemaVersion !== 3)
     || (raw.mode !== 'web' && raw.mode !== 'external')
-    || typeof raw.systemPrompt !== 'string'
+    || (raw.schemaVersion === 3 && typeof raw.promptTemplate !== 'string')
+    || (raw.schemaVersion === 1 && typeof raw.systemPrompt !== 'string')
     || !raw.model
     || typeof raw.model.modelRef !== 'string'
     || !Array.isArray(raw.model.allowedModelRefs)
@@ -457,6 +464,10 @@ function runSpaceConfigSnapshot(value: unknown): RunSpaceConfigSnapshot | null {
   }
   return {
     ...raw,
+    schemaVersion: 3,
+    promptTemplate: raw.schemaVersion === 3
+      ? validatePromptTemplate(raw.promptTemplate ?? '')
+      : defaultPromptTemplate(raw.mode, typeof raw.systemPrompt === 'string' ? raw.systemPrompt : ''),
     capabilities: {
       ...raw.capabilities,
       // 兼容业务插件协议接入前已经接纳、但尚未执行完的 run。
@@ -644,10 +655,12 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     } else if (spaceConfig?.capabilities.businessPlugins.length) {
       throw new Error('run 已选择业务插件但缺少 plugin_lock');
     }
+    const generateThreadTitle = (depOverrides.generateThreadTitle ?? usesDefaultStore)
+      && initialThread.source_type === 'web';
     deps = await defaultDeps(scope, {
       ...depOverrides,
       store,
-      generateThreadTitle: depOverrides.generateThreadTitle ?? usesDefaultStore,
+      generateThreadTitle,
       releaseRuntimeResources: depOverrides.releaseRuntimeResources ?? (usesDefaultStore ? releaseRunLeases : undefined),
     }, run.model_ref ?? spaceConfig?.model.modelRef, spaceConfig);
   } catch (err) {
@@ -805,7 +818,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       if (missing.length) prior = await store.loadThreadMessages(scope, threadId, { runId });
     }
 
-    // Goal 锚点每步重新注入；恢复时优先使用已落库状态，避免目标回退。
+    // Goal 恢复时优先使用已保存状态；普通模型请求通过 update_plan 工具结果读取完整状态。
     let goal = initialRun.goal_state ?? initGoal(userInput);
     if (!initialRun.goal_state) await store.setGoalState(scope, runId, goal);
     let toolSettings = deps.toolSettings ?? (await getSystemToolSettings());
@@ -927,27 +940,24 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       }
     }
 
-    const skillRuntimeContext = renderSkillSystemRules();
-    const capabilityCatalog = [renderSkillCatalog(skillIndex), renderMcpCatalog(mcpSettings)].join('\n\n');
-    const workflowRuntimeContext = [renderWorkflowSystemRules(), renderWorkflowCatalog(workflowIndex)].join('\n\n');
-    const spaceRuntimeRules = spaceConfig?.mode === 'external'
-      ? '当前 run 来自 external 空间：不能向 Web 用户提问或进入 waiting_for_user；信息不足时采用合理假设，或在最终结果中明确说明缺失信息。'
-      : '';
-    const runtimeContext = `${renderRuntimeContext(toolSettings)}\n\n${spaceRuntimeRules}\n\n${workloadRuntimeSummary}\n\n${workflowRuntimeContext}\n\n${skillRuntimeContext}\n\n${renderMcpSystemRules()}`;
+    const runtimeCapabilityValues = runtimeCapabilityPromptValues(capabilitySnapshot);
+    const prompt = renderPromptTemplate(spaceConfig?.promptTemplate ?? defaultPromptTemplate(spaceConfig?.mode ?? 'web'), {
+      'workspace.root': toolSettings.workspaceRoot,
+      'sandbox.mode': toolSettings.sandbox,
+      'sandbox.backend': toolSettings.sandboxBackend,
+      'shell.hostPath': toolSettings.shellUseHostPath ? '是' : '否',
+      'network.mode': toolSettings.network,
+      'workflow.catalog': [renderWorkflowSystemRules(), renderWorkflowCatalog(workflowIndex)].join('\n\n'),
+      'skills.catalog': [renderSkillSystemRules(), renderSkillCatalog(skillIndex)].join('\n\n'),
+      'mcp.catalog': [renderMcpSystemRules(), renderMcpCatalog(mcpSettings)].join('\n\n'),
+      'runtime.environment': workloadRuntimeSummary,
+      'runtime.enabledCapabilities': runtimeCapabilityValues.enabledCapabilities,
+      'runtime.capabilityDetails': runtimeCapabilityValues.capabilityDetails,
+      'external.trustedPrompt': spaceConfig?.external.trustedPrompt ?? '',
+    });
     const ctx = new ContextManager(prior, runtimeUserInput, renderGoal(goal), {
       appendUserInput: !hasPersistedMessages,
-      userInputPrefix: capabilityCatalog,
-      activationContext: renderRunActivationContext(activeSkills, activeMcp),
-      systemPrompt: renderSystemPrompt({
-        spacePrompt: [
-          spaceConfig?.systemPrompt,
-          spaceConfig?.external.trustedPrompt
-            ? `可信外部调用方指令 / Trusted caller instruction:\n${spaceConfig.external.trustedPrompt}`
-            : '',
-        ].filter(Boolean).join('\n\n'),
-        runtimeContext,
-        runtimeCapabilitiesContext: renderRuntimeCapabilitiesContext(capabilitySnapshot),
-      }),
+      systemPrompt: prompt,
       contextSettings: deps.contextSettings,
     });
     currentCtx = ctx;
@@ -1353,7 +1363,6 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       await applyPendingExternalInputs(step.id, stepIdx);
       streamStats.mark(stepIdx, 'llm_waiting', undefined, true);
 
-      ctx.setActivationContext(renderRunActivationContext(activeSkills, activeMcp));
       // 模型调用前先控制工作上下文大小；mask 决策会落库，窗口丢弃只留在内存。
       const compaction = await ctx.maybeCompact(observedProvider('compaction', step.id));
       await persistCompaction(step.id, compaction);
@@ -1383,6 +1392,12 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         const tools = await toolSchemas(selectedToolNames, activeMcpTools, !spaceConfig);
         requestAllowedToolNames = new Set(tools.map((tool) => tool.name));
         const modelMessages = await hydrateImageAttachments(ctx.all(), toolSettings.workspaceRoot);
+        await store.saveStepContext(scope, step.id, {
+          messages: modelMessages,
+          tools,
+          stream: true,
+          capturedAt: new Date().toISOString(),
+        });
         const onStreamDelta = (d: LlmDelta) => {
           if (d.toolInputStart) {
             llmStage = 'tool_call';
@@ -1546,7 +1561,12 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           if (deps.generateThreadTitle) {
             scheduleThreadTitleGeneration(scope, runId, {
               store,
-              provider: observedProvider('title', null),
+              provider: observedProvider(
+                'title',
+                null,
+                deps.titleProvider,
+                deps.titleProviderDescriptor,
+              ),
             });
           }
           return;
@@ -1604,7 +1624,6 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         if (activation.skill.source === 'business' && toolEnv.WORKLOAD_TOKEN) {
           runtimeEnvMessage += '\n\n业务 Skill 可动态 import 环境变量 RUNFORGE_WORKLOAD_SDK 指向的统一 SDK，并使用本 run 的 WORKLOAD_TOKEN 获取 tenant Secret 和空间已授权的运行资源；插件声明用于管理员配置提示，不是 key 级权限边界。不要输出 token、Secret 或短期凭证。';
         }
-        ctx.setActivationContext(renderRunActivationContext(activeSkills, activeMcp));
         // Skill 入口通过工具结果进入上下文，也必须遵守统一单条输出上限。
         return toolPolicy.capOutput(`${activation.systemMessage}${runtimeEnvMessage}`);
       };
@@ -1615,7 +1634,6 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         if (existing) return `MCP ${id} 已在当前 run 激活，共 ${existing.tools.length} 个工具。`;
         const activation = await mcpToolLoader(mcpSettings, id, step.id);
         activeMcp.set(id, activation);
-        ctx.setActivationContext(renderRunActivationContext(activeSkills, activeMcp));
         await emit(step.id, {
           type: 'mcp_activated',
           step: stepIdx,
@@ -1781,6 +1799,14 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
             }
           },
         );
+        if (call.name === 'update_plan') {
+          goal = mergeGoal(goal, parseGoalPatch(args));
+          await store.setGoalState(scope, runId, goal);
+          const completeGoal = renderGoal(goal);
+          ctx.setGoal(completeGoal);
+          result = { ...result, text: completeGoal };
+          if (goal.plan.length) await emit(step.id, { type: 'plan_update', step: stepIdx, goal });
+        }
         const endedAt = new Date().toISOString();
         trace.result = result.text;
         trace.endedAt = endedAt;
@@ -1813,14 +1839,6 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         if (failure) {
           recentFailures.push(failure);
           if (recentFailures.length > 6) recentFailures.shift();
-        }
-
-        // update_plan 会刷新已落库目标锚点，并同步重新注入上下文。
-        if (call.name === 'update_plan') {
-          goal = mergeGoal(goal, parseGoalPatch(args));
-          await store.setGoalState(scope, runId, goal);
-          ctx.setGoal(renderGoal(goal));
-          if (goal.plan.length) await emit(step.id, { type: 'plan_update', step: stepIdx, goal });
         }
 
       }

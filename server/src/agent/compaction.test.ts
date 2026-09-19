@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { estimateTokens, maskOldAssistantToolCalls, maskOldToolResults, slidingWindow, summaryCandidate, totalChars } from './compaction.js';
 import { ContextManager } from './context.js';
 import { config } from '../config.js';
-import type { LlmMessage } from '../llm/types.js';
+import type { LlmMessage, Provider } from '../llm/types.js';
 import type { ThreadMessage } from '../store/types.js';
 
 const big = (n: number) => 'x'.repeat(n);
@@ -154,6 +154,37 @@ test('slidingWindow keeps system + first user anchor and cuts on a safe boundary
   assert.ok(totalChars(messages) < totalChars(msgs));
 });
 
+test('slidingWindow keeps the latest L3 summary instead of an obsolete first user anchor', () => {
+  const olderSummary: LlmMessage = {
+    role: 'system',
+    content: 'L3 锚定摘要：旧状态',
+    collapsed: 'summarized',
+  };
+  const summary: LlmMessage = {
+    role: 'system',
+    content: 'L3 锚定摘要：最新 Goal 状态和当前结果路径',
+    collapsed: 'summarized',
+  };
+  const msgs: LlmMessage[] = [
+    { role: 'system', content: 'sys' },
+    olderSummary,
+    { role: 'user', content: 'obsolete request' },
+    summary,
+    ...round('c1', 100),
+    ...round('c2', 100),
+  ];
+
+  const { messages, dropped } = slidingWindow(msgs, { keepRecent: 2 });
+
+  assert.ok(dropped > 0);
+  assert.ok(messages.includes(summary));
+  assert.equal(messages.includes(olderSummary), false);
+  assert.equal(messages.some((message) => message.content === 'obsolete request'), false);
+  for (const message of messages.filter((item) => item.role === 'tool')) {
+    assert.ok(messages.some((parent) => parent.toolCalls?.some((call) => call.id === message.toolCallId)));
+  }
+});
+
 test('summaryCandidate does not split assistant tool calls from later results', () => {
   const msgs: LlmMessage[] = [
     { role: 'system', content: 'sys' },
@@ -210,6 +241,42 @@ test('context strategy defaults to current compaction behavior', async () => {
   }
 });
 
+test('current compaction keeps the latest Goal summary when L2 follows L3', async () => {
+  const { contextBudget, keepRecentMessages, contextStrategy } = config.agent;
+  config.agent.contextBudget = 100;
+  config.agent.keepRecentMessages = 1;
+  config.agent.contextStrategy = 'current';
+  try {
+    const prior: ThreadMessage[] = [
+      { id: 1, role: 'user', content: 'original request' },
+      { id: 2, role: 'assistant', content: big(2000) },
+      { id: 3, role: 'user', content: 'more work' },
+      { id: 4, role: 'assistant', content: big(2000) },
+    ];
+    let summaryRequest = '';
+    const provider: Provider = {
+      name: 'summary-capture',
+      async completeStream(messages) {
+        summaryRequest = messages.map((message) => message.content ?? '').join('\n');
+        return { content: 'compressed history', toolCalls: [] };
+      },
+    };
+    const context = new ContextManager(prior, 'continue', 'LATEST GOAL STATE', { systemPrompt: big(1000) });
+    assert.equal(context.all().some((message) => message.content === 'LATEST GOAL STATE'), false);
+    await context.maybeCompact(provider);
+    assert.match(summaryRequest, /LATEST GOAL STATE/);
+    assert.ok(context.all().some((message) => (
+      message.collapsed === 'summarized' && (message.content ?? '').includes('LATEST GOAL STATE')
+    )));
+    assert.equal(context.all().some((message) => message.content === 'original request'), false);
+    assert.ok(context.all().some((message) => message.content === 'continue'));
+  } finally {
+    config.agent.contextBudget = contextBudget;
+    config.agent.keepRecentMessages = keepRecentMessages;
+    config.agent.contextStrategy = contextStrategy;
+  }
+});
+
 test('langchain-trim preserves anchors, repairs tool pairs and leaves source messages unchanged', async () => {
   const { contextBudget, keepRecentMessages, contextStrategy } = config.agent;
   config.agent.contextBudget = 80;
@@ -232,7 +299,7 @@ test('langchain-trim preserves anchors, repairs tool pairs and leaves source mes
 
     assert.ok(res);
     assert.match(res.info.reason ?? '', /strategy=langchain-trim/);
-    assert.ok(view.some((m) => m.role === 'system' && m.content === 'GOAL: keep working'));
+    assert.equal(view.some((m) => m.role === 'system' && m.content === 'GOAL: keep working'), false);
     assert.ok(view.some((m) => m.role === 'user' && m.content === 'original request anchor'));
     assert.equal(JSON.stringify(prior), before);
 

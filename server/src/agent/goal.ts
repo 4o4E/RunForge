@@ -1,9 +1,8 @@
 import type { GoalPatch, GoalState, PlanItem } from '@runforge/contracts';
 export type { GoalPatch, GoalState, PlanItem } from '@runforge/contracts';
 
-// 目标锚点（长任务设计 §3.2、§9/G1）：用一段短小、结构化且始终存在的文本描述
-// 当前 run 要完成什么。每一步都会重新渲染为 system message，使其在上下文压缩后仍保留，
-// 避免长任务多步骤执行时目标漂移。
+// Goal 是 run 的持久状态。最新完整状态通过 update_plan 工具结果进入普通上下文；
+// 触发摘要压缩时，压缩器再读取这里保存的最新状态，避免额外的前置消息破坏缓存。
 
 export function initGoal(intent: string): GoalState {
   return { intent, phase: 'working', plan: [], decisions: [], next: '' };
@@ -60,7 +59,7 @@ export function mergeGoal(goal: GoalState, patch: GoalPatch): GoalState {
   };
 }
 
-/** Run 已确认完成时收敛目标锚点，避免后续上下文继续注入过期的 doing/next。 */
+/** Run 已确认完成时收敛持久 Goal，保留真实的未完成或失败状态。 */
 export function finishGoal(goal: GoalState): GoalState {
   const plan = autoCompletePlanItems(goal);
   const hasFailed = plan.some((p) => p.status === 'failed');
@@ -105,7 +104,7 @@ export function reportBlockedMessage(goal: GoalState): string {
   ].join('\n');
 }
 
-/** 把目标渲染成紧凑的 system message，固定放在上下文顶部。 */
+/** 把 Goal 渲染成 update_plan 的完整工具结果，也供上下文压缩摘要使用。 */
 export function renderGoal(goal: GoalState): string {
   const lines = ['## 当前目标：每一步都要保持聚焦', `意图：${goal.intent}`, `阶段：${goal.phase ?? 'working'}`];
   if (goal.plan.length) {

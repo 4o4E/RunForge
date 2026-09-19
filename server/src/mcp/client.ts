@@ -138,7 +138,9 @@ export function mcpToolSchemas(tools: McpMappedTool[]): LlmTool[] {
   }));
 }
 
-export function renderMcpCatalog(settings: McpSettings): string {
+export function renderMcpCatalog(settings: {
+  servers: ReadonlyArray<Pick<McpSettings['servers'][number], 'id' | 'description' | 'enabled'>>;
+}): string {
   const servers = settings.servers.filter((server) => server.enabled);
   if (!servers.length) return '可用 MCP / Available MCP servers: none';
   return [

@@ -74,6 +74,12 @@ function dbIds(items: WorkingMessage[]): number[] {
   return items.map((it) => it.dbId).filter((id): id is number => id != null);
 }
 
+function summaryWithGoal(summary: string, goalContent: string): LlmMessage {
+  const goal = goalContent.trim();
+  const body = summary.trim() || 'Earlier context was summarized, but the model returned an empty summary.\n较早上下文已被摘要，但模型返回了空摘要。';
+  return summaryMessage(goal ? `最新 Goal 状态:\n${goal}\n\n较早上下文摘要:\n${body}` : body);
+}
+
 function maskPayloads(items: WorkingMessage[], keepRecent: number, forceToolNames: string[] = []): { collapsedIds: number[]; masked: number } {
   const collapsedIds: number[] = [];
   let masked = 0;
@@ -151,7 +157,7 @@ class CurrentContextCompactor implements ContextCompactor {
             [],
             () => {},
           );
-          l3Summary = summaryMessage(summary.content || 'Earlier context was summarized, but the model returned an empty summary.\n较早上下文已被摘要，但模型返回了空摘要。');
+          l3Summary = summaryWithGoal(summary.content ?? '', input.goalContent);
           items.splice(candidate.start, candidate.end - candidate.start, { msg: l3Summary, dbId: null });
           summarizedIds.push(...ids);
           summarized = ids.length;
@@ -227,14 +233,30 @@ function langChainTokenCounter(tokensPerChar: number) {
 
 function leadingSystemEnd(items: WorkingMessage[]): number {
   let i = 0;
-  while (i < items.length && items[i].msg.role === 'system') i += 1;
+  while (
+    i < items.length
+    && items[i].msg.role === 'system'
+    && items[i].msg.collapsed !== 'summarized'
+  ) i += 1;
   return i;
 }
 
-function protectedPrefixEnd(items: WorkingMessage[]): number {
+function protectedContext(items: WorkingMessage[]): { prefix: WorkingMessage[]; body: WorkingMessage[] } {
   const sysEnd = leadingSystemEnd(items);
+  let summaryIndex = -1;
+  for (let index = sysEnd; index < items.length; index += 1) {
+    const message = items[index].msg;
+    if (message.role === 'system' && message.collapsed === 'summarized') summaryIndex = index;
+  }
+  if (summaryIndex >= 0) {
+    return {
+      prefix: [...items.slice(0, sysEnd), items[summaryIndex]],
+      body: items.slice(summaryIndex + 1),
+    };
+  }
   const firstUserIdx = items.findIndex((item, i) => i >= sysEnd && item.msg.role === 'user');
-  return firstUserIdx >= 0 ? firstUserIdx + 1 : sysEnd;
+  const prefixEnd = firstUserIdx >= 0 ? firstUserIdx + 1 : sysEnd;
+  return { prefix: items.slice(0, prefixEnd), body: items.slice(prefixEnd) };
 }
 
 function repairToolPairs(items: WorkingMessage[]): WorkingMessage[] {
@@ -297,7 +319,7 @@ class LangChainTrimContextCompactor extends CurrentContextCompactor {
             [],
             () => {},
           );
-          l3Summary = summaryMessage(summary.content || 'Earlier context was summarized, but the model returned an empty summary.\n较早上下文已被摘要，但模型返回了空摘要。');
+          l3Summary = summaryWithGoal(summary.content ?? '', input.goalContent);
           items.splice(candidate.start, candidate.end - candidate.start, { msg: l3Summary, dbId: null });
           summarizedIds.push(...ids);
           summarized = ids.length;
@@ -323,14 +345,13 @@ class LangChainTrimContextCompactor extends CurrentContextCompactor {
       };
     }
 
-    const prefixEnd = protectedPrefixEnd(items);
-    const prefix = items.slice(0, prefixEnd);
-    const body = items.slice(prefixEnd);
+    const { prefix, body } = protectedContext(items);
     if (!body.length) {
+      const dropped = items.length - prefix.length;
       return {
-        items,
-        sentChars: totalChars(messagesOf(items)),
-        info: { estBefore, estAfter: estimateTokens(messagesOf(items), input.tokensPerChar), masked, summarized, dropped: 0, reason: `${contextBudgetSource}: budget=${contextBudget}, modelWindow=${modelContextWindow}, strategy=langchain-trim` },
+        items: prefix,
+        sentChars: totalChars(messagesOf(prefix)),
+        info: { estBefore, estAfter: estimateTokens(messagesOf(prefix), input.tokensPerChar), masked, summarized, dropped, reason: `${contextBudgetSource}: budget=${contextBudget}, modelWindow=${modelContextWindow}, strategy=langchain-trim` },
         collapsedIds,
         summarizedIds,
         summaryMessage: l3Summary,

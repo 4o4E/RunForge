@@ -5,7 +5,7 @@ import {
   normalizeRuntimeCapabilitiesSettings,
   normalizeTenantResourceAuthorization,
 } from './settings.js';
-import { renderRuntimeCapabilitiesContext } from './agent/context.js';
+import { renderPromptTemplate, runtimeCapabilityPromptValues } from './spaces/prompt.js';
 import { agentContextSettings } from './config.js';
 
 test('agent context settings: 使用模型压缩阈值，环境变量只能进一步收紧', () => {
@@ -37,6 +37,7 @@ test('agent context settings: 使用模型压缩阈值，环境变量只能进�
 test('llm settings: 目录模型自动补齐能力，人工配置保持原值', () => {
   const settings = normalizeLlmSettings({
     defaultModelRef: 'openai:gpt-4.1-mini',
+    titleModelRef: 'openai:custom-model',
     providers: [{
       id: 'openai',
       label: 'OpenAI',
@@ -61,6 +62,7 @@ test('llm settings: 目录模型自动补齐能力，人工配置保持原值', 
   });
 
   const provider = settings.providers[0];
+  assert.equal(settings.titleModelRef, 'openai:custom-model');
   assert.equal(provider.modelCapabilities.find((item) => item.model === 'gpt-4.1-mini')?.contextWindow, 1_047_576);
   assert.equal(provider.modelCapabilities.find((item) => item.model === 'gpt-4.1-mini')?.references.length, 1);
   assert.deepEqual(provider.modelCapabilities.find((item) => item.model === 'custom-model'), {
@@ -217,7 +219,17 @@ test('runtime capability prompt: 只注入运行时模型 id，不注入上游�
     },
   });
 
-  const text = renderRuntimeCapabilitiesContext(settings);
+  const values = runtimeCapabilityPromptValues(settings);
+  const text = renderPromptTemplate(
+    `运行时内部能力:
+- 已启用运行资源: {{runtime.enabledCapabilities}}
+{{runtime.capabilityDetails}}
+- 调用能力时使用 modelId。`,
+    {
+      'runtime.enabledCapabilities': values.enabledCapabilities,
+      'runtime.capabilityDetails': values.capabilityDetails,
+    },
+  );
 
   assert.match(text, /可选模型 id: fast/);
   assert.match(text, /可选模型 id: poster/);

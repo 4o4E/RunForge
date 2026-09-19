@@ -12,115 +12,12 @@ import {
 } from './contextCompactor.js';
 import { estimateTokens, maskPlaceholder, totalChars } from './compaction.js';
 
-interface RuntimeCapabilitiesContextSettings {
-  allowedCapabilities?: string[];
-  llm: { enabled: boolean; models: Array<{ id: string }> };
-  image: { enabled: boolean; models: Array<{ id: string }> };
-  video: { enabled: boolean; models: Array<{ id: string }> };
-}
-
-const SYSTEM_PROMPT = `你是 RunForge，一个通用自主助手。
-
-你以循环方式工作：先思考，必要时调用工具，观察结果，然后继续推进，直到任务完成。
-本次 run 以最终汇报自然结束：没有工具调用且输出可见正文时，系统会结束 run 并收敛计划状态。
-
-行为准则：
-- 优先使用工具真实行动，例如运行命令、读写文件、搜索网页。
-- 工具有帮助时就调用一个或多个工具，不要只凭猜测回答。
-- 多步骤任务要尽早调用 update_plan 写出计划，并在推进过程中刷新计划状态、记录关键决策和下一步动作；这样即使旧上下文被压缩，也能保持任务方向。
-- 计划里的最后一步如果是“汇报结果/总结/最终回答”，创建计划时就把该 plan item 设置为 autoComplete=true；输出完整最终正文后，运行时会自动把这一步标记为 done，不要再回头调用 update_plan 只为修改这一步。
-- Auto-complete report step / 自动完成汇报步骤: when the final plan item is final reporting or summary, set autoComplete=true when creating the plan; after the complete final answer is written, the runtime will mark it done automatically, so do not call update_plan afterward only to close that item.
-- 最终汇报必须是没有任何工具调用的可见正文；不要把完整答案放进 reasoning/思考里，也不要在同一轮最终正文后继续调用工具。
-- Final answer rule / 最终回答规则: the complete final answer must be a visible assistant message with no tool calls; do not place the answer in reasoning/thinking, and do not call tools in the same turn as the final answer.
-- update_plan 只更新计划，永远不会结束 run；如果还没输出最终正文，尽量先调用 update_plan 把 phase 设置为 reporting 或 completed，然后在下一轮输出无工具调用的完整最终回答。
-- Plan close-out rule / 计划收口规则: update_plan only updates the plan and never finishes the run; if the final answer has not been written yet, preferably set phase to reporting/completed first, then output the complete final answer with no tool calls in the next assistant turn.
-- 一旦已经输出无工具调用的完整最终正文，不要再调用 update_plan 只为关闭计划；运行时会结束 run，未完成的计划条目会保留为状态记录。
-- No post-final plan turn / 最终回答后不补计划轮次: after writing the complete final answer without tool calls, do not call update_plan only to close the plan; the runtime will finish the run and keep unfinished plan items as state records.
-- 真实执行失败或路径改变时，必须同步调用 update_plan；失败条目标记为 failed 并保留，不要从 plan 里删除。
-- 回复要简洁；能合理假设时说明假设，不要频繁打断用户。
-- 需要用户补充信息时调用 ask_user，并明确表单约束：主回答必填时设置 required=true，必须选择的选项设置 option.required=true，不要要求用户在普通输入框里回答。
-- 默认使用 Markdown 输出；日常报告、表格、代码、Mermaid 图和 LaTeX 公式都直接写在 Markdown 中。
-- 提到 workspace 内的文件时，必须使用 Markdown 链接语法，优先写 workspace 相对路径，例如 [server/src/agent/context.ts](server/src/agent/context.ts)；不要只输出裸文件路径。
-- File link rule / 文件链接规则: when mentioning workspace files, use Markdown links like [web/src/App.tsx](web/src/App.tsx), preferably with workspace-relative paths; do not output bare file paths.
-- Mermaid 使用语言名为 "mermaid" 的 fenced code block；行内 LaTeX 公式使用 $...$，独立公式块使用 $$...$$。
-- Mermaid 节点 ID 只使用英文字母、数字和下划线；节点标签包含中文、空格、符号、HTML 换行、斜杠或 @ 时必须写成 node_id["标签"]，不要写 http-server[...]/annotation[...<br/>...] 这类容易解析失败的形式。
-- 数据分析、对比、趋势、占比、流程和架构图默认优先用 Markdown/Mermaid 直接输出；不要因为“复杂”就默认生成 HTML。
-- 仅在 Mermaid/Markdown 无法表达的图型（如散点图、气泡图、热力图、地图、桑基图）、用户明确要求交互/独立页面，或需要筛选、排序、缩放、钻取等控件时，才生成 HTML artifact。
-- HTML artifact generation / HTML artifact 生成规则: create complete .html/.htm files under the workspace, preferably artifacts/<descriptive-name>.html, by using shell or file-writing tools; do not put the full HTML document into a tool-call argument. 使用 shell 或文件写入工具在 workspace 下创建完整 .html/.htm 文件，优先放在 artifacts/<描述性名称>.html；不要把完整 HTML 文档塞进工具调用参数。
-- Artifact link rule / Artifact 链接规则: after creating an artifact, the final answer must mention it with Markdown link syntax, for example [artifacts/report.html](artifacts/report.html), so the user can open it directly. 创建 artifact 后，最终回答必须用 Markdown 链接语法说明，例如 [artifacts/report.html](artifacts/report.html)，方便用户直接跳转。
-- 除非用户明确要求原始 JSON，否则不要把 UI 写成声明式 JSON 或组件树；优先使用 Markdown/Mermaid/LaTeX 或 HTML artifact。
-- 涉及数据库、数据源、schema、库表、字段或数据统计时，必须先激活 database-access skill；不要使用宿主进程 DATABASE_URL、长期密码或服务端私密 env 作为捷径。
-- 标准流程：
-  1. 先用需要的工具收集数据。
-  2. 用 Markdown/Mermaid 组织结果；只有明确需要交互或独立页面时才通过 shell 或文件写入工具写入 workspace 下的 HTML artifact。
-  3. 任务完成且尚未输出最终正文时，先尽量调用 update_plan 收口计划；随后输出一段没有工具调用的完整最终汇报。`;
-
-export interface RuntimeContextInfo {
-  workspaceRoot: string;
-  sandbox: 'off' | 'enforce';
-  sandboxBackend: string;
-  shellUseHostPath: boolean;
-  network: 'enabled' | 'disabled';
-}
-
-export function renderRuntimeContext(info: RuntimeContextInfo): string {
-  return `运行时文件系统上下文:
-- 持久工作区根目录: ${info.workspaceRoot}
-- 请把这个目录视为本次 run 当前可用目录。clone 仓库、创建报告、写入任何需要保留的文件，都必须放在这个目录下。
-- 不要把需要保留的文件写到 /home/user、/tmp、应用仓库根目录或 workspace 之外的路径，除非用户明确要求且工具策略允许。
-- Python 依赖必须安装在虚拟环境中；优先在工作区创建 .venv 并使用 uv 管理依赖，不要全局安装 pip 包。
-- 工具沙箱: ${info.sandbox}; shell 后端: ${info.sandboxBackend}; shell 使用宿主机 PATH: ${info.shellUseHostPath ? '是' : '否'}; 网络: ${info.network}.
-- shell 是托管资源 / Shell is a managed resource: 优先用 shell_session_reuse/open 获取 session，再用 shell_exec 执行命令；短命令用 wait=foreground，长命令用 wait=background 后用 shell_poll 观察，必要时 shell_kill 终止。
-- shell session 会长期记住当前目录 / The shell session remembers cwd across commands: 需要切目录时直接执行 cd，不要给每次命令单独传 cwd。旧 shell 工具只是兼容入口。`;
-}
-
-export function renderRuntimeCapabilitiesContext(settings: RuntimeCapabilitiesContextSettings): string {
-  const lines = ['运行时内部能力 / Runtime internal capabilities:'];
-  const enabled: string[] = [];
-  if (settings.allowedCapabilities?.includes('datasource.credentials')) enabled.push('datasource.credentials');
-  if (settings.llm.enabled) enabled.push('llm');
-  if (settings.image.enabled) enabled.push('image');
-  if (settings.video.enabled) enabled.push('video');
-  lines.push(
-    '- WORKLOAD_TOKEN 是本次 run 的短期能力令牌；只能在脚本或程序代码里作为 Authorization Bearer 使用，不要输出、日志打印或写入仓库文件。',
-    '- WORKLOAD_TOKEN is a short-lived capability token for this run; use it only in code as an Authorization Bearer token, and never print it, log it, or write it into repo files.',
-    '- RUNFORGE_WORKLOAD_SDK 指向 RunForge 注入的统一 SDK；业务脚本可以动态 import 该入口，不需要在插件目录安装 RunForge 依赖。',
-    '- secrets.get(key) 按 key 读取当前 tenant 配置值；插件声明用于管理员配置和缺失提示，不是插件级 Secret 权限。Secret 只能在脚本内部使用，不能输出到模型上下文、日志或文件。',
-    '- SDK 的 resources.acquire 只负责换取短期数据库凭证和内部代理端点配置，不封装 chat/image/video 调用；调用方代码自行选择 fetch、OpenAI SDK、Packy 兼容 SDK或其它依赖。',
-    '- The SDK/helper only provides temporary credentials and internal proxy endpoint config; it does not wrap chat/image/video calls. Caller code chooses fetch, OpenAI SDK, Packy-compatible SDK, or other dependencies.',
-    '- 先用 SDK 获取能力凭证，SDK 会从 RUNFORGE_RUNTIME_API_BASE 推导 runtime-capabilities 代理端点；不要向模型或最终回复展示凭证内容。',
-    '- 调用 llm/image/video 代理时，使用凭证返回的 models[].id，通过请求体 model 或 modelId 选择模型；不要依赖平台内部 modelRef 或上游真实密钥。',
-    '- When calling llm/image/video proxy endpoints, choose models with models[].id via request body model or modelId; do not depend on internal modelRef or upstream API keys.',
-    `- 已启用运行资源 / Enabled runtime resources: ${enabled.join(', ') || '无'}；tenant Secret 读取仍通过同一个 WORKLOAD_TOKEN。`,
-  );
-  if (settings.llm.enabled) lines.push(`- LLM: 可换取 llm 能力凭证，调用内部 /api/runtime-capabilities/llm/* 代理端点；可选模型 id: ${settings.llm.models.map((model) => model.id).join(', ') || '未配置'}。`);
-  if (settings.image.enabled) lines.push(`- Image: 可换取 image 能力凭证，内部代理会适配 Packy GPT-Image-2；可选模型 id: ${settings.image.models.map((model) => model.id).join(', ') || '未配置'}。`);
-  if (settings.video.enabled) lines.push(`- Video: 可换取 video 能力凭证；v1 可能返回尚未接入 provider 的明确错误；可选模型 id: ${settings.video.models.map((model) => model.id).join(', ') || '未配置'}。`);
-  return lines.join('\n');
-}
-
-export function renderSystemPrompt(parts: { spacePrompt?: string; runtimeContext?: string; runtimeCapabilitiesContext?: string }): string {
-  return [SYSTEM_PROMPT, parts.spacePrompt, parts.runtimeContext, parts.runtimeCapabilitiesContext]
-    .map((part) => part?.trim())
-    .filter(Boolean)
-    .join('\n\n');
-}
-
 export type { CompactionInfo, CompactionResult };
 
 interface ContextOptions {
   appendUserInput?: boolean;
-  runtimeContext?: string;
   systemPrompt?: string;
-  userInputPrefix?: string;
-  activationContext?: string;
   contextSettings?: AgentContextSettings;
-}
-
-function prefixUserInput(prefix: string | undefined, content: string | null): string | null {
-  const trimmed = prefix?.trim();
-  if (!trimmed) return content;
-  return `${trimmed}\n\n用户请求 / User request:\n${content ?? ''}`;
 }
 
 /**
@@ -132,10 +29,8 @@ export class ContextManager {
   private readonly forceMaskedToolNames: string[] = [];
   private readonly compactor: ContextCompactor = createContextCompactor();
   private items: WorkingMessage[] = [];
-  /** 目标锚点 system 消息按引用保存，每步可原地刷新，并放在前置 system 区避免被压缩丢掉。 */
-  private goalItem: WorkingMessage;
-  /** 当前 run 已激活能力的轻量锚点；正文仍通过可折叠的工具结果进入上下文。 */
-  private activationItem: WorkingMessage;
+  /** Goal 只供压缩摘要使用；普通模型请求通过 update_plan 工具结果读取最新状态。 */
+  private goalContent: string;
   /** 每字符 token 估算比例，有真实 provider 用量时会校准。 */
   private tokensPerChar = 0.25;
   private readonly contextSettings: AgentContextSettings;
@@ -148,12 +43,10 @@ export class ContextManager {
       contextBudget: config.agent.contextBudget,
       contextBudgetSource: config.agent.contextBudgetSource,
     };
+    this.goalContent = initialGoal;
     const appendUserInput = opts.appendUserInput ?? true;
-    this.items.push({ msg: { role: 'system', content: opts.systemPrompt ?? renderSystemPrompt({ runtimeContext: opts.runtimeContext }) }, dbId: null });
-    this.goalItem = { msg: { role: 'system', content: initialGoal }, dbId: null };
-    this.items.push(this.goalItem);
-    this.activationItem = { msg: { role: 'system', content: opts.activationContext ?? '' }, dbId: null };
-    this.items.push(this.activationItem);
+    const systemPrompt = opts.systemPrompt?.trim();
+    if (systemPrompt) this.items.push({ msg: { role: 'system', content: systemPrompt }, dbId: null });
     for (const p of priorMessages) {
       this.items.push({
         msg: {
@@ -168,22 +61,14 @@ export class ContextManager {
       });
     }
     if (appendUserInput) {
-      this.items.push({ msg: { role: 'user', content: prefixUserInput(opts.userInputPrefix, userInput) }, dbId: null });
-    } else if (opts.userInputPrefix) {
-      // 恢复 run 时用户消息已经落库，只改模型视图，不回写数据库原文。
-      const latestUser = [...this.items].reverse().find((item) => item.msg.role === 'user');
-      if (latestUser) latestUser.msg = { ...latestUser.msg, content: prefixUserInput(opts.userInputPrefix, latestUser.msg.content) };
+      this.items.push({ msg: { role: 'user', content: userInput }, dbId: null });
     }
+    this.pruneSupersededGoalUpdates();
   }
 
-  /** 刷新目标锚点 system 消息；每步重注入，用来防止目标漂移。 */
+  /** 刷新供压缩摘要使用的 Goal；普通请求不会额外注入 Goal system 消息。 */
   setGoal(rendered: string): void {
-    this.goalItem.msg = { role: 'system', content: rendered };
-  }
-
-  /** 激活状态属于 run，不写进 thread 历史；每轮只保留轻量 id/root 锚点。 */
-  setActivationContext(rendered: string): void {
-    this.activationItem.msg = { role: 'system', content: rendered };
+    this.goalContent = rendered;
   }
 
   /** 返回干净的模型消息列表，不把 DB id 泄露给 provider。 */
@@ -194,6 +79,7 @@ export class ContextManager {
   /** 追加新生成消息，可同时带上已落库的 DB id。 */
   add(message: LlmMessage, dbId: number | null = null): void {
     this.items.push({ msg: message, dbId });
+    this.pruneSupersededGoalUpdates();
   }
 
   /** 给最近追加的消息补上落库后的 DB id。 */
@@ -280,16 +166,10 @@ export class ContextManager {
 
   private compactionInput(provider?: Provider) {
     const items = this.cloneItems(this.items);
-    const goalIndex = this.items.indexOf(this.goalItem);
-    const activationIndex = this.items.indexOf(this.activationItem);
-    // Goal 依赖稳定对象引用逐步刷新；压缩副本中仍复用这一项，确保压缩后 setGoal
-    // 修改的是当前模型上下文，而不是已经脱离列表的旧对象。
-    if (goalIndex >= 0) items[goalIndex] = this.goalItem;
-    if (activationIndex >= 0) items[activationIndex] = this.activationItem;
     return {
       // 压缩策略可替换消息对象；传入副本后才能可靠比较压缩前后内容并生成审计明细。
       items,
-      goalContent: this.goalItem.msg.content ?? '',
+      goalContent: this.goalContent,
       tokensPerChar: this.tokensPerChar,
       provider,
       forceMaskedToolNames: this.forceMaskedToolNames,
@@ -300,7 +180,42 @@ export class ContextManager {
   private cloneItems(items: WorkingMessage[]): WorkingMessage[] {
     // 压缩函数只替换 WorkingMessage.msg，不会修改 LlmMessage 内部字段；复制包装器
     // 即可隔离策略写入，同时避免每轮复制可能很大的 encrypted_content。
-    return items.map((item) => item === this.goalItem || item === this.activationItem ? item : { ...item });
+    return items.map((item) => ({ ...item }));
+  }
+
+  /**
+   * update_plan 的最新工具结果已经包含合并后的完整 Goal。更早的参数和结果只在
+   * provider 派生视图中缩成占位内容，原始 messages 记录保持不变。
+   */
+  private pruneSupersededGoalUpdates(): void {
+    const resultIndexByCallId = new Map<string, number>();
+    for (let index = 0; index < this.items.length; index += 1) {
+      const message = this.items[index].msg;
+      if (message.role === 'tool' && message.toolCallId) resultIndexByCallId.set(message.toolCallId, index);
+    }
+    const pairs: Array<{ assistantIndex: number; callIndex: number; resultIndex: number }> = [];
+    for (let assistantIndex = 0; assistantIndex < this.items.length; assistantIndex += 1) {
+      const calls = this.items[assistantIndex].msg.toolCalls ?? [];
+      for (let callIndex = 0; callIndex < calls.length; callIndex += 1) {
+        const call = calls[callIndex];
+        const resultIndex = call.name === 'update_plan' ? resultIndexByCallId.get(call.id) : undefined;
+        if (resultIndex !== undefined && resultIndex > assistantIndex) pairs.push({ assistantIndex, callIndex, resultIndex });
+      }
+    }
+    if (pairs.length < 2) return;
+    const latest = pairs.reduce((current, pair) => pair.resultIndex > current.resultIndex ? pair : current);
+    for (const pair of pairs) {
+      if (pair === latest) continue;
+      const assistant = this.items[pair.assistantIndex];
+      const calls = [...(assistant.msg.toolCalls ?? [])];
+      calls[pair.callIndex] = { ...calls[pair.callIndex], arguments: '{"superseded":true}' };
+      assistant.msg = { ...assistant.msg, toolCalls: calls };
+      const result = this.items[pair.resultIndex];
+      result.msg = {
+        ...result.msg,
+        content: '这次 Goal 更新已被后续完整 Goal 状态取代。',
+      };
+    }
   }
 
   private affectedMessages(
@@ -391,5 +306,3 @@ export class ContextManager {
     };
   }
 }
-
-export { SYSTEM_PROMPT };

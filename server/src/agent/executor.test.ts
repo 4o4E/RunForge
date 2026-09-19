@@ -207,10 +207,10 @@ test('executeRun: 使用 run 的空间配置副本装配提示词、工具和上
   const run = await store.createRun(scope, thread.id, 'use snapshot', {
     modelRef: 'main:model-a',
     spaceConfigSnapshot: {
-      schemaVersion: 1,
+      schemaVersion: 3,
       spaceId: thread.space_id,
       mode: 'web',
-      systemPrompt: 'SPACE-SNAPSHOT-MARKER',
+      promptTemplate: 'SPACE-SNAPSHOT-SECOND\n\nSPACE-SNAPSHOT-FIRST',
       model: {
         modelRef: 'main:model-a',
         allowedModelRefs: ['main:model-a'],
@@ -237,7 +237,7 @@ test('executeRun: 使用 run 的空间配置副本装配提示词、工具和上
     toolSettings: testToolSettings(),
   });
 
-  assert.match(observed.systemPrompt, /SPACE-SNAPSHOT-MARKER/);
+  assert.equal(observed.systemPrompt, 'SPACE-SNAPSHOT-SECOND\n\nSPACE-SNAPSHOT-FIRST');
   assert.deepEqual(observed.tools, ['file_read']);
   const usage = published.find((event): event is Extract<AgentEvent, { type: 'usage_update' }> => event.type === 'usage_update');
   assert.equal(usage?.contextBudget, 12_345);
@@ -587,25 +587,32 @@ test('thread title: extracts concise title from json-like provider output', asyn
   assert.equal(updated?.title, 'Ubuntu 24 安装驱动');
 });
 
-test('executeRun: generates a thread title after completion when enabled', async () => {
+test('executeRun: 使用独立标题 Provider 生成对话标题并记录观测', async () => {
   const store = new MemoryStore();
   const observations = new MemoryProviderObservationRepository();
   const thread = await store.createThread(scope);
   const run = await store.createRun(scope, thread.id, '规划一次杭州周边漂流');
-  let calls = 0;
+  let agentCalls = 0;
+  let titleCalls = 0;
 
   await executeRun(run.id, {
     store,
     provider: {
-      name: 'final-and-title',
-      async completeStream(messages) {
-        calls += 1;
-        const titlePrompt = messages.some((message) => message.content?.includes('thread 标题生成器'));
-        return titlePrompt
-          ? { content: '杭州周边漂流规划', toolCalls: [] }
-          : { content: '推荐去安吉漂流。', toolCalls: [] };
+      name: 'agent-provider',
+      async completeStream() {
+        agentCalls += 1;
+        return { content: '推荐去安吉漂流。', toolCalls: [] };
       },
     },
+    providerDescriptor: { provider: 'agent-provider', model: 'agent-model', retries: 0 },
+    titleProvider: {
+      name: 'title-provider',
+      async completeStream() {
+        titleCalls += 1;
+        return { content: '杭州周边漂流规划', toolCalls: [] };
+      },
+    },
+    titleProviderDescriptor: { provider: 'title-provider', model: 'title-model', retries: 0 },
     publish: () => {},
     hardStepCap: 3,
     toolSettings: testToolSettings(),
@@ -615,10 +622,14 @@ test('executeRun: generates a thread title after completion when enabled', async
 
   await waitUntil(async () => (await store.getThread(scope, thread.id))?.title === '杭州周边漂流规划');
   assert.equal((await store.getThread(scope, thread.id))?.title, '杭州周边漂流规划');
-  assert.equal(calls, 2);
+  assert.equal(agentCalls, 1);
+  assert.equal(titleCalls, 1);
   assert.deepEqual(
-    [...observations.invocations.values()].map((item) => item.purpose),
-    ['agent', 'title'],
+    [...observations.invocations.values()].map((item) => [item.purpose, item.provider, item.model]),
+    [
+      ['agent', 'agent-provider', 'agent-model'],
+      ['title', 'title-provider', 'title-model'],
+    ],
   );
 });
 
@@ -839,11 +850,10 @@ test('executeRun: activates a skill while native tools remain loaded', async () 
     toolSettings: testToolSettings(),
   });
 
-  assert.doesNotMatch(firstSystemText, /user:sample-skill: Use when a test needs a tiny skill/);
-  assert.match(firstUserText, /user:sample-skill: Use when a test needs a tiny skill/);
-  assert.match(firstUserText, /用户请求 \/ User request:\nuse a skill/);
+  assert.match(firstSystemText, /user:sample-skill: Use when a test needs a tiny skill/);
+  assert.equal(firstUserText, 'use a skill');
   assert.match(secondSystemText, /user:sample-skill/);
-  assert.match(secondSystemText, /root=/);
+  assert.doesNotMatch(secondSystemText, /当前 run 已激活能力|root=/);
   assert.doesNotMatch(secondSystemText, /# Sample Skill/);
   assert.match(secondToolText, /# Sample Skill/);
   assert.ok(toolNamesByTurn[0].includes('shell'));
@@ -866,7 +876,7 @@ test('executeRun: activates a skill while native tools remain loaded', async () 
   assert.equal((await store.getRun(scope, run.id))?.status, 'done');
 });
 
-test('executeRun: skill catalog uses folded YAML descriptions in user prompt without persisting them', async () => {
+test('executeRun: skill catalog uses folded YAML descriptions in system prompt without changing user input', async () => {
   const skillRoot = join(testWorkspace, '.skills', 'ppt-master');
   await mkdir(skillRoot, { recursive: true });
   await writeFile(
@@ -889,6 +899,7 @@ test('executeRun: skill catalog uses folded YAML descriptions in user prompt wit
   const thread = await store.createThread(scope);
   const run = await store.createRun(scope, thread.id, '测试：做一个example ppt');
   let userText = '';
+  let systemText = '';
 
   await executeRun(run.id, {
     store,
@@ -896,6 +907,7 @@ test('executeRun: skill catalog uses folded YAML descriptions in user prompt wit
       name: 'capture-skill-catalog',
       async completeStream(messages) {
         userText = messages.filter((m) => m.role === 'user').at(-1)?.content ?? '';
+        systemText = messages.filter((m) => m.role === 'system').map((m) => m.content ?? '').join('\n');
         return { content: 'done', toolCalls: [] };
       },
     },
@@ -904,15 +916,15 @@ test('executeRun: skill catalog uses folded YAML descriptions in user prompt wit
     toolSettings: testToolSettings(),
   });
 
-  assert.match(userText, /user:ppt-master: AI-driven multi-format SVG content generation system\. Use when user asks/);
-  assert.match(userText, /生成PPT/);
-  assert.doesNotMatch(userText, /ppt-master: >/);
-  assert.match(userText, /用户请求 \/ User request:\n测试：做一个example ppt/);
+  assert.match(systemText, /user:ppt-master: AI-driven multi-format SVG content generation system\. Use when user asks/);
+  assert.match(systemText, /生成PPT/);
+  assert.doesNotMatch(systemText, /ppt-master: >/);
+  assert.equal(userText, '测试：做一个example ppt');
   const msgs = await store.loadThreadMessages(scope, thread.id);
   assert.equal(msgs[0].content, '测试：做一个example ppt');
 });
 
-test('executeRun: resumed runs still expose the skill catalog before the persisted user message', async () => {
+test('executeRun: resumed runs expose the skill catalog in system prompt and preserve persisted user input', async () => {
   const skillRoot = join(testWorkspace, '.skills', 'resume-skill');
   await mkdir(skillRoot, { recursive: true });
   await writeFile(
@@ -926,6 +938,7 @@ test('executeRun: resumed runs still expose the skill catalog before the persist
   const run = await store.createRun(scope, thread.id, 'resume needs skill list');
   await store.addMessage(scope, thread.id, run.id, null, { role: 'user', content: 'resume needs skill list' });
   let userText = '';
+  let systemText = '';
 
   await executeRun(run.id, {
     store,
@@ -933,6 +946,7 @@ test('executeRun: resumed runs still expose the skill catalog before the persist
       name: 'capture-resumed-skill-catalog',
       async completeStream(messages) {
         userText = messages.filter((m) => m.role === 'user').at(-1)?.content ?? '';
+        systemText = messages.filter((m) => m.role === 'system').map((m) => m.content ?? '').join('\n');
         return { content: 'done', toolCalls: [] };
       },
     },
@@ -941,8 +955,8 @@ test('executeRun: resumed runs still expose the skill catalog before the persist
     toolSettings: testToolSettings(),
   });
 
-  assert.match(userText, /user:resume-skill: Use when checking resumed prompt context/);
-  assert.match(userText, /用户请求 \/ User request:\nresume needs skill list/);
+  assert.match(systemText, /user:resume-skill: Use when checking resumed prompt context/);
+  assert.equal(userText, 'resume needs skill list');
   const msgs = await store.loadThreadMessages(scope, thread.id);
   assert.equal(msgs[0].content, 'resume needs skill list');
 });
@@ -993,7 +1007,7 @@ test('executeRun: skill activation instructions do not leak into the next run hi
     toolSettings: testToolSettings(),
   });
 
-  assert.match(secondRunSystemText, /Skills: none/);
+  assert.match(secondRunSystemText, /user:leaky-skill: Use in leakage tests/);
   assert.equal(secondRunSystemText.includes('# Leaky Skill'), false);
   assert.equal(secondRunContext.includes('# Leaky Skill'), false);
 });
@@ -1063,11 +1077,12 @@ test('executeRun: MCP tools load only after current-run activation and unload in
     mcpToolLoader,
   });
 
-  assert.match(run1UserText, /browser: 控制真实浏览器完成页面操作/);
+  assert.equal(run1UserText, '使用浏览器');
   assert.equal(run1Tools[0].includes('mcp__browser__open_page'), false);
   assert.equal(run1Tools[0].includes('mcp_activate'), true);
   assert.equal(run1Tools[1].includes('mcp__browser__open_page'), true);
-  assert.match(run1SystemText, /MCP: browser/);
+  assert.match(run1SystemText, /browser: 控制真实浏览器完成页面操作/);
+  assert.doesNotMatch(run1SystemText, /当前 run 已激活能力/);
   assert.equal(activationResult.length, 1_000);
   assert.match(activationResult, /工具策略已截断/);
   assert.equal((await store.getEvents(scope, run1.id)).some((event) => event.type === 'mcp_activated' && event.serverId === 'browser'), true);
@@ -1093,7 +1108,7 @@ test('executeRun: MCP tools load only after current-run activation and unload in
   });
 
   assert.equal(run2Tools.includes('mcp__browser__open_page'), false);
-  assert.match(run2SystemText, /MCP: none/);
+  assert.match(run2SystemText, /browser: 控制真实浏览器完成页面操作/);
 });
 
 test('executeRun: starts async subagents and allows cross-run polling', async () => {

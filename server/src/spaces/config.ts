@@ -3,6 +3,7 @@ import {
   type RuntimeCapabilitiesSettings,
   type RuntimeCapabilityName,
   type LlmModelOption,
+  type PromptPlaceholdersView,
   type SpaceConfig,
   type SpaceDebugMcpSchema,
   type SpaceDebugView,
@@ -16,6 +17,7 @@ import {
   getLlmSettings,
   getSystemMcpSettings,
   getRuntimeCapabilitiesSettings,
+  getSystemToolSettings,
   llmModelOptions,
 } from '../settings.js';
 import type { SpaceWithVisibilityRow } from '../store/types.js';
@@ -30,8 +32,25 @@ import {
 import type { BusinessPluginDefinition } from '../businessPlugins/types.js';
 import { createSpaceRuntimeLock } from '../plugins/lock.js';
 import type { JsonValue, SpaceRuntimeLock } from '../plugins/types.js';
-import { loadBuiltinSkillDocuments, readSkillEntryDocument } from '../skills/registry.js';
+import {
+  loadBuiltinSkillDocuments,
+  readSkillEntryDocument,
+  renderSkillCatalog,
+  renderSkillSystemRules,
+} from '../skills/registry.js';
 import { probeMcpServer } from '../mcp/client.js';
+import { renderMcpCatalog, renderMcpSystemRules } from '../mcp/client.js';
+import {
+  loadBuiltinWorkflowIndex,
+  renderWorkflowCatalog,
+  renderWorkflowSystemRules,
+} from '../workflows/registry.js';
+import {
+  defaultPromptTemplate,
+  promptPlaceholders as buildPromptPlaceholders,
+  runtimeCapabilityPromptValues,
+  validatePromptTemplate,
+} from './prompt.js';
 
 export class SpaceConfigError extends Error {
   readonly code = 'SPACE_CONFIG_INVALID';
@@ -59,10 +78,10 @@ export interface TenantSpaceCapabilityCatalog {
 }
 
 export interface RunSpaceConfigSnapshot {
-  schemaVersion: 1;
+  schemaVersion: 3;
   spaceId: string;
   mode: SpaceMode;
-  systemPrompt: string;
+  promptTemplate: string;
   model: {
     modelRef: string;
     allowedModelRefs: string[];
@@ -114,7 +133,7 @@ function unique(values: readonly string[]): string[] {
 function normalizeParsedConfig(config: SpaceConfig): SpaceConfig {
   return {
     ...config,
-    systemPrompt: config.systemPrompt.trim(),
+    promptTemplate: validatePromptTemplate(config.promptTemplate),
     model: {
       ...config.model,
       allowedModelRefs: unique(config.model.allowedModelRefs),
@@ -128,14 +147,45 @@ function normalizeParsedConfig(config: SpaceConfig): SpaceConfig {
   };
 }
 
-export function normalizeSpaceConfig(value: unknown): SpaceConfig {
-  const parsed = spaceConfigSchema.safeParse(value ?? {});
+export function normalizeSpaceConfig(value: unknown, mode: SpaceMode = 'web'): SpaceConfig {
+  const raw = value && typeof value === 'object' && !Array.isArray(value)
+    ? { ...(value as Record<string, unknown>) }
+    : value;
+  let candidate = raw;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const object = raw as Record<string, unknown>;
+    if (
+      Object.prototype.hasOwnProperty.call(object, 'schemaVersion')
+      && object.schemaVersion !== 1
+      && object.schemaVersion !== 3
+    ) {
+      throw new SpaceConfigError('schemaVersion: 只支持 1 或 3');
+    }
+    if (Object.prototype.hasOwnProperty.call(object, 'systemPrompt') && typeof object.systemPrompt !== 'string') {
+      throw new SpaceConfigError('systemPrompt: 必须是字符串');
+    }
+    const promptTemplate = Object.prototype.hasOwnProperty.call(object, 'promptTemplate')
+      ? object.promptTemplate
+      : defaultPromptTemplate(mode, typeof object.systemPrompt === 'string' ? object.systemPrompt : '');
+    const {
+      systemPrompt: _legacySystemPrompt,
+      ...rest
+    } = object;
+    candidate = { ...rest, schemaVersion: 3, promptTemplate };
+  } else if (raw == null) {
+    candidate = { schemaVersion: 3, promptTemplate: defaultPromptTemplate(mode) };
+  }
+  const parsed = spaceConfigSchema.safeParse(candidate);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     const path = issue?.path.length ? `${issue.path.join('.')}: ` : '';
     throw new SpaceConfigError(`${path}${issue?.message ?? '空间配置格式无效'}`);
   }
-  return normalizeParsedConfig(parsed.data);
+  try {
+    return normalizeParsedConfig(parsed.data);
+  } catch (error) {
+    throw new SpaceConfigError((error as Error).message);
+  }
 }
 
 function missingValues(selected: readonly string[], available: ReadonlySet<string>): string[] {
@@ -305,7 +355,7 @@ export class SpaceConfigService {
   constructor(private readonly loadCatalog: CatalogLoader = loadCatalogFromTenant) {}
 
   async normalizeForSave(tenantId: string, mode: SpaceMode, value: unknown): Promise<SpaceConfig> {
-    const config = normalizeSpaceConfig(value);
+    const config = normalizeSpaceConfig(value, mode);
     this.resolve(mode, config, await this.loadCatalog(tenantId));
     return config;
   }
@@ -343,7 +393,7 @@ export class SpaceConfigService {
         businessPlugins: Array.isArray(capabilities.businessPlugins) ? capabilities.businessPlugins : [],
         runtime: Array.isArray(capabilities.runtime) ? capabilities.runtime : catalog.runtimeCapabilities,
       },
-    });
+    }, mode);
     if (requireRunnable) this.resolve(mode, config, catalog);
     return config;
   }
@@ -360,12 +410,120 @@ export class SpaceConfigService {
     };
   }
 
+  async promptPlaceholders(
+    tenantId: string,
+    mode: SpaceMode,
+    value: unknown,
+  ): Promise<PromptPlaceholdersView> {
+    const config = normalizeSpaceConfig(value, mode);
+    const [catalog, toolSettings, workflows, builtinSkills] = await Promise.all([
+      this.loadCatalog(tenantId),
+      getSystemToolSettings(),
+      loadBuiltinWorkflowIndex(),
+      loadBuiltinSkillDocuments(),
+    ]);
+    const selectedMcpServerIds = selectValues(
+      config.capabilities.mcpServers,
+      catalog.mcpServerIds,
+      'MCP Server',
+    );
+    const selectedBusinessPluginIds = selectValues(
+      config.capabilities.businessPlugins,
+      catalog.businessPluginIds,
+      '业务插件',
+    );
+    const selectedRuntimeCapabilities = selectValues(
+      config.capabilities.runtime,
+      catalog.runtimeCapabilities,
+      '运行时能力',
+    ) as RuntimeCapabilityName[];
+    const selectedDefinitions = new Map(
+      catalog.businessPluginDefinitions.map((definition) => [definition.manifest.id, definition]),
+    );
+    const businessSkills = await Promise.all(selectedBusinessPluginIds.flatMap((pluginId) => {
+      const definition = selectedDefinitions.get(pluginId);
+      if (!definition) throw new SpaceConfigError(`业务插件不属于当前 tenant 可用目录：${pluginId}`);
+      return definition.manifest.skills.map(async (skill) => {
+        const entry = await readSkillEntryDocument(resolve(definition.root, skill.path));
+        if (entry.name !== skill.id) {
+          throw new Error(`${resolve(definition.root, skill.path, 'SKILL.md')} 的 name 必须是 ${skill.id}`);
+        }
+        return {
+          id: `business:${pluginId}/${skill.id}`,
+          name: entry.name,
+          description: entry.description,
+          source: 'business' as const,
+        };
+      });
+    }));
+    const skills = [
+      ...builtinSkills.map((skill) => ({
+        id: skill.id,
+        name: skill.name,
+        description: skill.description,
+        source: 'builtin' as const,
+      })),
+      ...businessSkills,
+    ].sort((left, right) => left.name.localeCompare(right.name) || left.source.localeCompare(right.source));
+    const systemMcp = new Map(catalog.mcpServers.map((server) => [server.id, server]));
+    const mcpServers = selectedMcpServerIds.map((id) => {
+      const server = systemMcp.get(id);
+      if (!server) throw new SpaceConfigError(`空间配置引用了不可用的 MCP Server：${id}`);
+      return { id, description: server.description ?? '', enabled: true };
+    });
+    for (const pluginId of selectedBusinessPluginIds) {
+      const definition = selectedDefinitions.get(pluginId)!;
+      mcpServers.push(...definition.manifest.mcpServers.map((server) => ({
+        id: `business-${pluginId}-${server.id}`,
+        description: server.description,
+        enabled: true,
+      })));
+    }
+    const capabilitySnapshot = runtimeSnapshot(catalog, selectedRuntimeCapabilities);
+    const runtimeValues = runtimeCapabilityPromptValues(capabilitySnapshot);
+    const allowedCapabilities = capabilitySnapshot.allowedCapabilities.join(', ') || '无';
+
+    return {
+      placeholders: buildPromptPlaceholders({
+        'workspace.root': '[运行时分配的持久工作区路径]',
+        'sandbox.mode': toolSettings.sandbox,
+        'sandbox.backend': toolSettings.sandboxBackend,
+        'shell.hostPath': toolSettings.shellUseHostPath ? '是' : '否',
+        'network.mode': toolSettings.network,
+        'workflow.catalog': [
+          renderWorkflowSystemRules(),
+          renderWorkflowCatalog(workflows),
+        ].join('\n\n'),
+        'skills.catalog': [
+          renderSkillSystemRules(),
+          renderSkillCatalog(skills),
+        ].join('\n\n'),
+        'mcp.catalog': [renderMcpSystemRules(), renderMcpCatalog({ servers: mcpServers })].join('\n\n'),
+        'runtime.environment': [
+          '统一运行资源环境（run 级）:',
+          '- WORKLOAD_TOKEN=[运行时生成的短期能力令牌]',
+          '- RUNFORGE_RUNTIME_API_BASE=[运行时资源接口地址]',
+          '- DATASOURCE_ID=[运行时根据已授权数据源决定]',
+          '- DATASOURCE_PROFILE=[运行时只读权限配置]',
+          '- allowedDatasourceIds=[运行时根据租户授权和空间能力决定]',
+          `- allowedCapabilities=${allowedCapabilities}`,
+          '- WORKLOAD_TOKEN 只用于换取本次运行的短期凭证和内部能力代理配置。',
+          '- 数据库命令通过 database-access helper 换取本次运行的短期凭证。',
+        ].join('\n'),
+        'runtime.enabledCapabilities': runtimeValues.enabledCapabilities,
+        'runtime.capabilityDetails': runtimeValues.capabilityDetails,
+        'external.trustedPrompt': '[外部调用方在本次请求中传入的可信提示词]',
+      }),
+    };
+  }
+
   async debugView(
     tenantId: string,
     configVersion: number,
+    mode: SpaceMode,
     value: unknown,
   ): Promise<SpaceDebugView> {
-    const config = normalizeSpaceConfig(value);
+    const config = normalizeSpaceConfig(value, mode);
     const catalog = await this.loadCatalog(tenantId);
     const tools = config.capabilities.tools.map((name) => {
       const tool = getTool(name);
@@ -415,7 +573,7 @@ export class SpaceConfigService {
 
     return {
       configVersion,
-      systemPrompt: config.systemPrompt,
+      promptTemplate: config.promptTemplate,
       tools,
       skills,
       mcpServers,
@@ -471,7 +629,7 @@ export class SpaceConfigService {
     requestedModelRef?: string | null,
   ): Promise<ResolvedRunSpaceConfig> {
     if (space.tenant_id !== tenantId) throw new SpaceConfigError('空间不属于当前 tenant');
-    const config = normalizeSpaceConfig(space.config);
+    const config = normalizeSpaceConfig(space.config, space.mode);
     const catalog = await this.loadCatalog(tenantId);
     const resolved = this.resolve(space.mode, config, catalog, requestedModelRef);
     const selectedDefinitions = new Map(
@@ -558,9 +716,9 @@ export class SpaceConfigService {
     }
 
     return {
-      schemaVersion: 1,
+      schemaVersion: 3,
       mode,
-      systemPrompt: config.systemPrompt,
+      promptTemplate: config.promptTemplate,
       model: {
         modelRef,
         allowedModelRefs,

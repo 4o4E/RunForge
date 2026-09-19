@@ -78,7 +78,7 @@ MCP SDK 解决协议和传输问题，但工具命名空间、run 级激活、�
 RunForge 仍然自己负责：
 
 - 默认策略仍是 `current`，保持原有 L1 mask、L3 摘要、L2 内存窗口行为。
-- LangChain 策略只接管普通历史裁剪，不接管 tool result masking、摘要落库、Goal 锚点和 DB collapsed 标记。
+- LangChain 策略只接管普通历史裁剪；tool result masking、摘要落库、Goal 状态和 DB collapsed 标记继续由 RunForge 管理。
 - LangChain 裁剪后必须回到 RunForge 的 `repairToolPairs` 安全边界，确保不会留下孤儿 tool result，也不会留下缺少 tool result 的 assistant tool call。
 - 社区库不能直接接触 store；它只处理 `ContextCompactor` 输入里的工作消息视图。
 
@@ -160,7 +160,8 @@ OpenTelemetry 面向工程观测，RunForge 的 `events` 面向用户可见执�
 - `messages.content` 保存原始内容，压缩只派生模型视图。
 - masking 决策可以落库，滑动窗口 drop 只在内存发生。
 - summary message 可落库，并回填到工作上下文。
-- Goal system message 永远在前置 system 区，不被裁剪策略丢掉。
+- 最新 Goal 通过完整 `update_plan` 工具结果进入普通上下文；更早 Goal 更新只在派生视图中缩短。
+- 生成 L3 摘要时，摘要内容必须固定包含最新 Goal 状态。
 - 社区策略不能直接写 DB，也不能决定 run 状态。
 
 相关文件：
@@ -306,7 +307,7 @@ LangGraph、Mastra、Temporal、Inngest、Trigger.dev 等方案可以在未来�
 - 新增社区库前，先说明它替代的是哪一层，不要泛泛说“改用框架”。
 - 社区库只能接入明确 adapter，不能从 executor 里散落调用。
 - 默认行为必须尽量保持 `current` 可回滚。
-- 所有策略必须有测试覆盖 tool pair、Goal 锚点、原文不变和 collapsed id。
+- 所有策略必须有测试覆盖 tool pair、最新 Goal 摘要、旧 Goal 派生裁剪、原文不变和 collapsed id。
 - 修改 `server/src/agent/`、context 或 store 后，按 [AGENTS.md](../AGENTS.md) 要求跑长任务验证链路；至少要跑 server typecheck 和相关单测。
 
 ## 当前验证入口

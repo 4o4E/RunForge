@@ -12,6 +12,7 @@ import {
 } from './config.js';
 import { RunAdmissionService } from './runAdmission.js';
 import type { BusinessPluginDefinition } from '../businessPlugins/types.js';
+import { defaultPromptTemplate, renderPromptTemplate } from './prompt.js';
 
 const businessPlugin: BusinessPluginDefinition = {
   root: '/plugins/tn_config/crm',
@@ -73,6 +74,50 @@ function configService() {
   return new SpaceConfigService(async () => structuredClone(catalog));
 }
 
+test('prompt template: 默认配置是单一模板，运行时替换占位符', () => {
+  const defaults = defaultPromptTemplate('web');
+  assert.match(defaults, /你是 RunForge/);
+  assert.doesNotMatch(defaults, /agent_loop|tool_behavior|standard_process/);
+  const rendered = renderPromptTemplate('B {{workspace.root}}\n\nA', { 'workspace.root': '/workspace' });
+  assert.equal(rendered, 'B /workspace\n\nA');
+});
+
+test('prompt template: 已发布旧配置转换为单一模板，无效占位符在保存时被拒绝', () => {
+  const migrated = normalizeSpaceConfig({ schemaVersion: 1, systemPrompt: '旧空间指令' }, 'external');
+  assert.match(migrated.promptTemplate, /旧空间指令/);
+  assert.doesNotMatch(migrated.promptTemplate, /你是 RunForge/);
+  assert.throws(() => normalizeSpaceConfig({
+    schemaVersion: 3,
+    promptTemplate: '{{unknown.value}}',
+  }), /未知占位符/);
+  assert.throws(() => normalizeSpaceConfig({
+    schemaVersion: 3,
+    promptTemplate: '{{workspace.root',
+  }), /格式错误的占位符/);
+  assert.throws(() => normalizeSpaceConfig({ schemaVersion: 2 }), /schemaVersion/);
+  assert.throws(() => normalizeSpaceConfig({ schemaVersion: 4 }), /schemaVersion/);
+});
+
+test('prompt placeholders: 服务端返回完整目录并按空间能力生成预览内容', async () => {
+  const service = configService();
+  const config = await service.snapshotForCreate('tn_config', 'web');
+  config.model = { ...config.model, defaultModelRef: 'removed:model', allowedModelRefs: ['removed:model'] };
+  const view = await service.promptPlaceholders('tn_config', 'web', config);
+  const placeholders = new Map(view.placeholders.map((item) => [item.key, item]));
+
+  assert.equal(view.placeholders.length, 12);
+  assert.equal(placeholders.get('workspace.root')?.token, '{{workspace.root}}');
+  assert.equal(placeholders.get('workspace.root')?.runtime, true);
+  assert.match(placeholders.get('workflow.catalog')?.content ?? '', /Available workflows/);
+  assert.match(placeholders.get('skills.catalog')?.content ?? '', /Available skills/);
+  assert.doesNotMatch(placeholders.get('workflow.catalog')?.content ?? '', /当前工作区/);
+  assert.doesNotMatch(placeholders.get('skills.catalog')?.content ?? '', /当前工作区/);
+  assert.match(placeholders.get('mcp.catalog')?.content ?? '', /browser/);
+  assert.equal(placeholders.get('runtime.enabledCapabilities')?.content, 'datasource.credentials, image');
+  assert.match(placeholders.get('runtime.capabilityDetails')?.content ?? '', /Image/);
+  assert.equal(placeholders.get('external.trustedPrompt')?.runtime, true);
+});
+
 test('space config: 调试视图按当前配置列出工具 Schema、业务 Skill 和 MCP', async () => {
   const pluginRoot = await mkdtemp(join(tmpdir(), 'runforge-space-debug-'));
   try {
@@ -110,7 +155,7 @@ test('space config: 调试视图按当前配置列出工具 Schema、业务 Skil
       mcpServers: [{ id: 'docs', label: 'Docs', description: '文档服务。' }],
       businessPluginDefinitions: [definition],
     }));
-    const view = await service.debugView('tn_config', 7, {
+    const view = await service.debugView('tn_config', 7, 'web', {
       systemPrompt: '只输出审查结论。',
       capabilities: {
         tools: ['file_read'],
@@ -120,7 +165,7 @@ test('space config: 调试视图按当前配置列出工具 Schema、业务 Skil
       },
     });
 
-    assert.equal(view.systemPrompt, '只输出审查结论。');
+    assert.match(view.promptTemplate, /只输出审查结论。/);
     assert.equal(view.tools[0]?.name, 'file_read');
     assert.equal((view.tools[0]?.parameters.properties as Record<string, unknown>).path !== undefined, true);
     assert.deepEqual(view.skills.find((skill) => skill.id === 'business:crm/customer-query'), {
@@ -131,6 +176,19 @@ test('space config: 调试视图按当前配置列出工具 Schema、业务 Skil
     });
     assert.ok(view.skills.some((skill) => skill.id.startsWith('builtin:')));
     assert.deepEqual(view.mcpServers.map((server) => server.id), ['docs', 'business-crm-crm-records']);
+
+    const promptConfig = await service.snapshotForCreate('tn_config', 'web', {
+      capabilities: {
+        tools: ['file_read'],
+        mcpServers: ['docs'],
+        businessPlugins: ['crm'],
+        runtime: [],
+      },
+    });
+    const promptView = await service.promptPlaceholders('tn_config', 'web', promptConfig);
+    const promptValues = new Map(promptView.placeholders.map((item) => [item.key, item.content]));
+    assert.match(promptValues.get('skills.catalog') ?? '', /business:crm\/customer-query/);
+    assert.match(promptValues.get('mcp.catalog') ?? '', /business-crm-crm-records/);
   } finally {
     await rm(pluginRoot, { recursive: true, force: true });
   }
@@ -138,28 +196,22 @@ test('space config: 调试视图按当前配置列出工具 Schema、业务 Skil
 
 test('space config: 创建时复制能力目录，未知字段和越权能力被拒绝', async () => {
   const service = configService();
-  assert.deepEqual(normalizeSpaceConfig({}), {
-    schemaVersion: 1,
-    systemPrompt: '',
-    model: { defaultModelRef: null, allowedModelRefs: [], contextBudget: null },
-    capabilities: { tools: [], mcpServers: [], businessPlugins: [], runtime: [] },
-    external: { allowTrustedPrompt: false, allowNextStep: false },
+  const normalizedDefault = normalizeSpaceConfig({});
+  assert.equal(normalizedDefault.schemaVersion, 3);
+  assert.deepEqual(normalizedDefault.model, { defaultModelRef: null, allowedModelRefs: [], contextBudget: null });
+  assert.ok(normalizedDefault.promptTemplate.length > 0);
+  const created = await service.snapshotForCreate('tn_config', 'web');
+  assert.equal(created.schemaVersion, 3);
+  assert.deepEqual(created.model, {
+    defaultModelRef: 'main:model-a',
+    allowedModelRefs: ['main:model-a', 'main:model-b'],
+    contextBudget: null,
   });
-  assert.deepEqual(await service.snapshotForCreate('tn_config', 'web'), {
-    schemaVersion: 1,
-    systemPrompt: '',
-    model: {
-      defaultModelRef: 'main:model-a',
-      allowedModelRefs: ['main:model-a', 'main:model-b'],
-      contextBudget: null,
-    },
-    capabilities: {
-      tools: ['file_read', 'file_write', 'ask_user'],
-      mcpServers: ['browser', 'docs'],
-      businessPlugins: [],
-      runtime: ['datasource.credentials', 'image'],
-    },
-    external: { allowTrustedPrompt: false, allowNextStep: false },
+  assert.deepEqual(created.capabilities, {
+    tools: ['file_read', 'file_write', 'ask_user'],
+    mcpServers: ['browser', 'docs'],
+    businessPlugins: [],
+    runtime: ['datasource.credentials', 'image'],
   });
   assert.deepEqual(
     (await service.snapshotForCreate('tn_config', 'external')).capabilities.tools,
@@ -217,7 +269,7 @@ test('space config: run 接纳解析显式能力并从 external 空间双重移�
   assert.deepEqual(resolved.snapshot.capabilities.runtime, ['image']);
   assert.equal(resolved.pluginLock.plugins[0]?.id, 'business.crm');
   assert.deepEqual(resolved.pluginLock.plugins[0]?.config, { region: 'cn' });
-  assert.equal(resolved.snapshot.systemPrompt, '只输出审计结果');
+  assert.match(resolved.snapshot.promptTemplate, /只输出审计结果/);
   assert.equal(JSON.stringify(resolved.runtimeCapabilitiesSnapshot).includes('must-not-enter-run-snapshot'), false);
   assert.deepEqual(resolved.runtimeCapabilitiesSnapshot.image.models, [{ id: 'image-main', label: 'Image Main' }]);
 });
@@ -333,7 +385,7 @@ test('run admission: 固化配置副本，后续空间更新只影响新 run', a
   assert.equal(first.model_ref, 'main:model-a');
   assert.equal(first.space_config_version, 1);
   assert.equal(typeof first.plugin_lock?.hash, 'string');
-  assert.equal((first.space_config_snapshot as unknown as { systemPrompt: string }).systemPrompt, 'version one');
+  assert.match((first.space_config_snapshot as unknown as { promptTemplate: string }).promptTemplate, /version one/);
   await store.setRunStatus(scope, first.id, 'done');
 
   const updatedConfig = await configService().normalizeForSave(scope.tenantId, 'web', {
@@ -348,6 +400,6 @@ test('run admission: 固化配置副本，后续空间更新只影响新 run', a
   const second = await admission.createWebRun(scope, thread, { input: 'second' });
   assert.equal(second.model_ref, 'main:model-b');
   assert.equal(second.space_config_version, 2);
-  assert.equal((second.space_config_snapshot as unknown as { systemPrompt: string }).systemPrompt, 'version two');
-  assert.equal((first.space_config_snapshot as unknown as { systemPrompt: string }).systemPrompt, 'version one');
+  assert.match((second.space_config_snapshot as unknown as { promptTemplate: string }).promptTemplate, /version two/);
+  assert.match((first.space_config_snapshot as unknown as { promptTemplate: string }).promptTemplate, /version one/);
 });

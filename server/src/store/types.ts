@@ -1,6 +1,6 @@
 import type { AgentEvent, RunStatus } from '../agent/types.js';
 import type { GoalState } from '../agent/goal.js';
-import type { LlmMessage } from '../llm/types.js';
+import type { LlmMessage, LlmTool } from '../llm/types.js';
 import type { SpaceMode, TenantUserRole, WebPushSubscriptionInput } from '@runforge/contracts';
 
 /** 只有这三种状态真正释放 thread 执行槽；canceling 仍由当前 executor 收口。 */
@@ -100,7 +100,25 @@ export interface StepRow {
   id: string;
   run_id: string;
   idx: number;
+  context_snapshot: StepContextSnapshot | null;
   created_at: string;
+}
+
+/** 模型调用前固定的协议无关上下文。写入后保持不变，供运行恢复和人工审查使用。 */
+export interface StepContextSnapshot {
+  messages: LlmMessage[];
+  tools: LlmTool[];
+  stream: true;
+  capturedAt: string;
+}
+
+export interface StepContextSummaryRow {
+  id: string;
+  run_id: string;
+  idx: number;
+  message_count: number;
+  tool_count: number;
+  captured_at: string;
 }
 
 export interface StoredEvent {
@@ -476,6 +494,12 @@ export interface Store {
   getThreadUnscoped(id: string): Promise<ThreadRow | null>;
 
   createStep(scope: Scope, runId: string, idx: number): Promise<StepRow>;
+  /** 在 Provider 调用前固定该 step 的最终上下文；同一 step 禁止覆盖。 */
+  saveStepContext(scope: Scope, stepId: string, snapshot: StepContextSnapshot): Promise<void>;
+  /** 读取当前分支中已经固定的 step 上下文摘要，不加载完整消息 JSON。 */
+  listStepContextSummaries(scope: Scope, threadId: string, options?: { runId?: string | null }): Promise<StepContextSummaryRow[]>;
+  /** 按 step 读取当前分支中的单个完整上下文。 */
+  getStepContext(scope: Scope, threadId: string, stepId: string, options?: { runId?: string | null }): Promise<StepRow | null>;
   getLastStepIndex(scope: Scope, runId: string): Promise<number>;
   /** 最后一个 assistant turn 已完整落到 messages 的 step。 */
   getLastCompletedStepIndex(scope: Scope, runId: string): Promise<number>;

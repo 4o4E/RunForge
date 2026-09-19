@@ -270,7 +270,11 @@ systemApi.get('/settings/llm', async (_req, res) => {
 
 systemApi.get('/settings/llm/options', async (_req, res) => {
   const settings = await getSystemLlmSettings();
-  res.json({ defaultModelRef: settings.defaultModelRef, models: llmModelOptions(settings) });
+  res.json({
+    defaultModelRef: settings.defaultModelRef,
+    titleModelRef: settings.titleModelRef,
+    models: llmModelOptions(settings),
+  });
 });
 
 systemApi.put('/settings/llm', async (req, res) => {

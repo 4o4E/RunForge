@@ -540,6 +540,7 @@ model steps {
   id                          String                        @id
   run_id                      String
   idx                         Int
+  context_snapshot            Json?
   created_at                  DateTime                      @default(now()) @db.Timestamptz(6)
   events                      events[]
   messages                    messages[]

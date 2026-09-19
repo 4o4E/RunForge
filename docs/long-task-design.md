@@ -1,7 +1,7 @@
-# 长任务支持 · Goal 锚点 + 上下文压缩级联
+# 长任务支持 · Goal 状态 + 上下文压缩级联
 
 > 目标：让 agent 稳定支持**长程任务**（数十步工具调用），去掉「固定最大步数」这一硬性
-> 主控制器，引入 **Goal 锚点**防止目标漂移，引入**上下文压缩级联**防止撞窗口崩溃与
+> 主控制器，引入持久化 **Goal 状态**防止目标漂移，引入**上下文压缩级联**防止撞窗口崩溃与
 > context rot。本文为设计与落地路线，按阶段增量实施，每阶段可独立验证。
 
 ---
@@ -33,7 +33,7 @@
 2. **压缩级联，优先保留信息**：① 压工具输出 → ② 对更早区间生成 LLM 摘要 → ③ 仍超阈值时滑动窗口裁剪旧消息。
 3. **Observation masking 性价比最高**：旧工具结果替换为占位符（保留 reasoning 轨迹），SWE-bench 上成本减半、完成率持平 LLM 摘要。
 4. **锚定式增量摘要**（Factory AI）：不重新生成整段，而是扩展结构化锚点 `intent / changes / decisions / next`，对保留文件路径、错误信息等技术细节准确率最高。
-5. **Goal 靠「结构化外部笔记 + 每轮重注入」**：目标写在上下文之外，压缩后读回。Anthropic 结论：模型够强时，光靠 compaction 即可维持长程连续性。
+5. **Goal 使用「结构化外部状态 + 工具结果」**：`update_plan` 返回合并后的完整 Goal；触发压缩时，最新 Goal 写入压缩摘要。
 6. **触发使用每模型 token 阈值**：达到阈值后执行压缩级联，空间和实例只能进一步收紧阈值。
 
 参考来源：
@@ -59,9 +59,9 @@
 | 用户取消 | run 状态置 `canceling`，loop 每步检查 |
 | 安全兜底 | 很高的 `hardStepCap`（默认 1000），仅防失控 |
 
-### 3.2 Goal 锚点
+### 3.2 Goal 状态
 
-结构化、每轮重注入、跨压缩存活的目标锚点（Factory 四字段），存为 `runs.goal_state` JSONB：
+结构化、跨压缩存活的 Goal 存为 `runs.goal_state` JSONB：
 
 ```typescript
 interface GoalState {
@@ -73,9 +73,12 @@ interface GoalState {
 interface PlanItem { id: number; text: string; status: 'todo' | 'doing' | 'done'; }
 ```
 
-- run 启动时确立 `intent`（首轮直接用 user input；多轮可一次轻量 LLM 抽取）。
+- run 启动时直接使用 user input 作为 `intent`。
 - 新增轻量 `update_plan` 工具（类似 Claude Code TodoWrite）让 agent 维护 `plan/next/decisions`。
-- **每轮把 goal_state 渲染进 system 段之后** —— 即使历史被压缩，目标永远在场。
+- `update_plan` 工具结果返回合并后的完整 Goal。新的 Goal 出现后，模型派生视图把更早的
+  `update_plan` 参数和结果替换为短占位内容，原始消息继续保留。
+- 普通模型请求不额外注入 Goal system 消息。触发 L3 压缩时，压缩摘要固定写入最新
+  `runs.goal_state`，随后附加较早历史摘要。
 
 ### 3.3 上下文压缩级联（核心）
 
@@ -89,7 +92,7 @@ interface PlanItem { id: number; text: string; status: 'todo' | 'doing' | 'done'
   ≥ 当前模型压缩阈值 → L1: 对较老的 tool_result 做 observation masking
                          content → "[tool output elided · N chars · <tool>]"，保留 toolCallId 配对
   遮蔽后仍达到阈值 → L3: 更早区间送一次 LLM，按锚点四字段生成一条 summary 系统消息替换整段
-  摘要后仍达到阈值 → L2: 滑动窗口，最近 K 轮逐字保留
+  摘要后仍达到阈值 → L2: 保留最新 L3 摘要作为锚点，最近 K 轮逐字保留
 ```
 
 - **有效阈值**：`min(模型压缩阈值, 空间上下文预算, LLM_CONTEXT_BUDGET)`；未配置的空间或实例
@@ -121,17 +124,17 @@ ALTER TABLE messages ADD COLUMN summary_of INT[];      -- 若本行是摘要，�
 任务：「把 server/src 下所有 `console.log` 换成 `logger.info`，然后跑测试确认通过」。
 演示用模型压缩阈值 `12000`。
 
-**Step 0** — 启动，`goal_state` 初始化（intent=用户输入，plan 待填）；messages = `[system, system(goal), user]`，≈400 tok。
+**Step 0** — 启动，`goal_state` 初始化（intent=用户输入，plan 待填）；messages = `[system, user]`，≈400 tok。
 
 **Step 1–2** — grep 出 23 处命中（~3KB 结果）；调 `update_plan` 写 plan/decisions。≈2800 tok，低于阈值，原样保留。
 
 **Step 3–10** — 逐文件 read→edit→ok。到 Step 11，≈12600（达到阈值）→ **L1 masking**：最老的已完成 tool_result content 替换为 `[tool output elided · 3,021 chars · grep]`，保留 toolCallId。回落到 ≈8200，masked 写回库。
 
-**Step 15** — 又涨到 ≈14600（达到阈值），L1 后仍超阈值 → **L3+L2**：step1–10 区间送 LLM 生成一条 summary（锚点四字段，强制保留 decisions），必要时再裁剪窗口，回到 ≈4500。被折叠原始行标 `collapsed='summarized'`。
+**Step 15** — 又涨到 ≈14600（达到阈值），L1 后仍超阈值 → **L3+L2**：step1–10 区间送 LLM 生成一条 summary，并把最新 Goal 状态固定写入摘要；必要时再裁剪窗口，回到 ≈4500。被折叠原始行标 `collapsed='summarized'`。
 
 **Step 16–18** — 完成剩余文件 → `npm test` → 47 passed → 无 toolCalls → final，run done。
 
-整个 run 走 18 步，**远超旧 maxSteps=25 也不再是问题**：终止由 final 自然触发，token 由级联控制在预算内，`hardStepCap` 没碰到。
+整个 run 走 18 步，终止由 final 自然触发，token 由级联控制在预算内，`hardStepCap` 没碰到。
 
 ---
 
@@ -140,9 +143,9 @@ ALTER TABLE messages ADD COLUMN summary_of INT[];      -- 若本行是摘要，�
 | 不变式 | 原因 |
 |---|---|
 | `tool_call ↔ tool_result` 配对永不破坏 | masking 改内容不删消息；摘要按完整轮边界折叠 |
-| goal_state 每轮重注入、永不被压缩 | 目标漂移防护 |
+| 最新 `goal_state` 通过工具结果保留，并固定写入 L3 摘要 | 目标漂移防护，同时保持请求前缀稳定 |
 | `decisions` 追加式、摘要时强制保留 | 关键决策丢失会回退返工 |
-| 压缩结果持久化 + 原始保留在 events | LLM 视图省 token；前端回放/审计不丢信息 |
+| 压缩结果持久化 + `messages.content` 保留原始内容 | LLM 视图省 token；前端回放和审查不丢信息 |
 | 用上一轮 `usage.inputTokens` 校准估算 | provider 已返回，免引 tokenizer |
 
 ---
@@ -153,7 +156,7 @@ ALTER TABLE messages ADD COLUMN summary_of INT[];      -- 若本行是摘要，�
 |---|---|
 | [config.ts](../server/src/config.ts) | 加 `contextBudget`、`hardStepCap`、压缩阈值；`maxSteps` 降级为兜底 |
 | [context.ts](../server/src/agent/context.ts) | `Context` → `ContextManager`：token 估算 + `maybeCompact()` + masking/摘要 |
-| [executor.ts](../server/src/agent/executor.ts) | 循环改终止条件；每步前 `maybeCompact()`；接住 `usage`；取消检查；注入 goal_state |
+| [executor.ts](../server/src/agent/executor.ts) | 循环改终止条件；每步前 `maybeCompact()`；接住 `usage`；取消检查；维护完整 Goal 工具结果 |
 | [store/types.ts](../server/src/store/types.ts) + pgStore | runs 加 `goal_state`；messages 加折叠标记；取消状态；`loadThreadMessages` 返回压缩视图 |
 | tools/registry | 新增 `update_plan` 工具 |
 | 新建 `agent/compaction.ts` | 锚定摘要 prompt + masking 逻辑 + token 估算 |
@@ -166,7 +169,7 @@ ALTER TABLE messages ADD COLUMN summary_of INT[];      -- 若本行是摘要，�
 1. **✅ 阶段 1 — 安全网（已实现）**：取消能力 + 接住 `usage` + `hardStepCap` 替代 maxSteps 主控。解锁长任务最低安全网，改动小。
 2. **✅ 阶段 2 — 压缩级联 L1/L2（已实现）**：token 估算 + observation masking + 滑动窗口。无需额外 LLM，直接解决撞窗口硬伤。
 3. **✅ 阶段 2.5 — 压缩落库（已实现）**：masking 决策持久化到 `messages.collapsed`，`loadThreadMessages` 返回压缩视图，**中途重启零数据丢失、不重算**。
-4. **✅ 阶段 3 — Goal 锚点（已实现）**：`runs.goal_state` + 每轮注入 + `update_plan` 工具。
+4. **✅ 阶段 3 — Goal 状态（已实现）**：`runs.goal_state` + 完整 `update_plan` 工具结果 + 历史派生裁剪。
 5. **✅ 阶段 4 — 压缩 L3（已实现）**：锚定 LLM 摘要（`summary_of` 折叠区间）。
 6. **✅ 阶段 5 — 压缩可观测性与 Debug（已实现）**：压缩事件记录时间点、受影响消息与摘要；普通详情只返回压缩元数据，显式 Debug 模式才返回原始工具输入/输出。
 
@@ -217,11 +220,12 @@ ALTER TABLE messages ADD COLUMN summary_of INT[];      -- 若本行是摘要，�
   - 现状：占位符 `[tool output elided · N chars]` 丢掉全部内容，模型对"那步查到了什么"失忆 → 可能重复劳动（70 次工具调用偏多）。
   - 改：占位符保留**前 ~120 字符 + 省略计数**（`<head>…[+N chars elided]`）。store 用保留的原文派生，**零额外存储**。
 
-### Goal 管理（落地阶段 3）
+### Goal 管理（阶段 3）
 
-- **✅ G1 — Goal 锚点 + `update_plan` 工具**
+- **✅ G1 — Goal 状态 + `update_plan` 工具**
   - 现状：21 步全程**无目标/计划跟踪**；masking 折叠历史后，"做了什么 / 还剩什么"全靠被压缩的历史，易漂移/返工。
-  - 改：`runs.goal_state`(intent/plan/decisions/next) 持久化；每步把它**重渲染进 system 段**（masking 只压 tool 消息、不动 system → 目标天然存活）；agent 用 `update_plan` 工具维护 plan/decisions/next。
+  - 改：`runs.goal_state`(intent/plan/decisions/next) 持久化；`update_plan` 返回完整状态；
+    更早更新只在模型视图中缩短；触发 L3 压缩时把最新状态写入摘要。
 
 ### 列出但本次不做（避免过度设计）
 

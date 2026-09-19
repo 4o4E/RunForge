@@ -299,10 +299,45 @@ test('Phase 2: 同一租户下不同用户互相看不到对方的 thread（user
 
 test('GET /api/threads/:id: 原始工具载荷只在显式 Debug 模式返回', async () => {
   const owner = await seedOwner('tn_debug_context', 'owner@debug-context.test', 'pw');
+  const member = await store.createUser({
+    tenantId: 'tn_debug_context',
+    email: 'member@debug-context.test',
+    passwordHash: hashPassword('pw'),
+    role: 'member',
+  });
   const scope = { tenantId: 'tn_debug_context', userId: owner.id };
   const jwt = signTenantAccessToken({ id: owner.id, tenantId: scope.tenantId, role: 'owner' });
+  const memberJwt = signTenantAccessToken({ id: member.id, tenantId: scope.tenantId, role: 'member' });
   const thread = await store.createThread(scope, 'debug context');
   const run = await store.createRun(scope, thread.id, 'inspect');
+  const step = await store.createStep(scope, run.id, 1);
+  await store.saveStepContext(scope, step.id, {
+    messages: [
+      { role: 'system', content: 'actual system prompt' },
+      { role: 'user', content: 'actual user prompt' },
+    ],
+    tools: [{ name: 'shell', description: '执行命令', parameters: { type: 'object' } }],
+    stream: true,
+    capturedAt: new Date().toISOString(),
+  });
+  await store.setRunStatus(scope, run.id, 'done');
+  const inactiveRun = await store.createRun(scope, thread.id, 'inactive branch', { parentRunId: run.id });
+  const inactiveStep = await store.createStep(scope, inactiveRun.id, 2);
+  await store.saveStepContext(scope, inactiveStep.id, {
+    messages: [{ role: 'user', content: 'inactive branch prompt' }],
+    tools: [],
+    stream: true,
+    capturedAt: new Date().toISOString(),
+  });
+  await store.setRunStatus(scope, inactiveRun.id, 'done');
+  const activeRun = await store.createRun(scope, thread.id, 'active branch', { parentRunId: run.id });
+  const activeStep = await store.createStep(scope, activeRun.id, 2);
+  await store.saveStepContext(scope, activeStep.id, {
+    messages: [{ role: 'user', content: 'active branch prompt' }],
+    tools: [],
+    stream: true,
+    capturedAt: new Date().toISOString(),
+  });
   const assistantId = await store.addMessage(scope, thread.id, run.id, null, {
     role: 'assistant',
     content: null,
@@ -330,6 +365,44 @@ test('GET /api/threads/:id: 原始工具载荷只在显式 Debug 模式返回', 
     assert.equal(debugBody.debug, true);
     assert.equal(debugBody.context_messages.some((message) => message.content === 'raw output'), true);
     assert.equal(debugBody.context_messages.some((message) => message.tool_calls.some((call) => call.arguments === '{"command":"echo raw"}')), true);
+
+    const snapshots = await fetch(`http://127.0.0.1:${port}/api/threads/${thread.id}/context-snapshots`, { headers });
+    assert.equal(snapshots.status, 200);
+    const snapshotBody = (await snapshots.json()) as {
+      contexts: Array<{ stepId: string; step: number; messageCount: number; toolCount: number }>;
+    };
+    assert.equal(snapshotBody.contexts.length, 2);
+    assert.equal(snapshotBody.contexts[0].messageCount, 2);
+    assert.equal(snapshotBody.contexts[0].toolCount, 1);
+    assert.equal(snapshotBody.contexts.some((context) => context.stepId === activeStep.id), true);
+    assert.equal(snapshotBody.contexts.some((context) => context.stepId === inactiveStep.id), false);
+
+    const snapshot = await fetch(
+      `http://127.0.0.1:${port}/api/threads/${thread.id}/context-snapshots/${snapshotBody.contexts[0].stepId}`,
+      { headers },
+    );
+    assert.equal(snapshot.status, 200);
+    const context = (await snapshot.json()) as {
+      messages: Array<{ role: string; content: string }>;
+      tools: Array<{ name: string }>;
+    };
+    assert.deepEqual(context.messages.map((message) => [message.role, message.content]), [
+      ['system', 'actual system prompt'],
+      ['user', 'actual user prompt'],
+    ]);
+    assert.deepEqual(context.tools.map((tool) => tool.name), ['shell']);
+
+    const inactiveSnapshot = await fetch(
+      `http://127.0.0.1:${port}/api/threads/${thread.id}/context-snapshots/${inactiveStep.id}`,
+      { headers },
+    );
+    assert.equal(inactiveSnapshot.status, 404);
+
+    const memberSnapshots = await fetch(
+      `http://127.0.0.1:${port}/api/threads/${thread.id}/context-snapshots`,
+      { headers: { Authorization: `Bearer ${memberJwt}` } },
+    );
+    assert.equal(memberSnapshots.status, 403);
   } finally {
     close();
   }

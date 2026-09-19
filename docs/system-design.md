@@ -23,7 +23,7 @@
 - 暴露 REST API 和 WebSocket 事件流。
 - 对话按 `thread -> run -> step` 组织并持久化到 PostgreSQL。
 - 前端提供 React 聊天控制台，可查看 reasoning、工具调用、工具结果和最终输出。
-- 支持上下文压缩、Goal 锚点、取消 run、服务启动恢复、工具输出截断和工具策略。
+- 支持上下文压缩、持久 Goal 状态、取消 run、服务启动恢复、工具输出截断和工具策略。
 - 支持托管 shell session，长耗时命令可以后台运行、轮询、终止，并在右侧 Shell 面板中持续观察。
 - 支持 skill 文件协议，启动后索引内置和用户 skill，按需用 `skill_activate` 加载正文和资源。
 - 支持 workflow 文件协议，LLM 可按需列出和读取稳定流程。
@@ -53,7 +53,7 @@ Server (Node.js / TypeScript 单体)
   |     `-- WebSocket: run 事件订阅和 thread 级 shell 事件
   |
   |-- Agent 执行循环
-  |     |-- ContextManager: system prompt、Goal 锚点、历史消息、压缩视图
+  |     |-- ContextManager: system prompt、历史消息、Goal 派生裁剪和压缩视图
   |     |-- ProviderRunner: invocation/attempt 持久化、统一重试、原始流观测
   |     |     `-- Provider 抽象: AI SDK 协议实现
   |     |-- Skill / MCP / Workflow registry: 按 run 渐进加载外部能力和任务流程
@@ -121,13 +121,19 @@ Web 创建 thread
 
 - `executor.ts`：Agent 主循环，负责 run 状态、step 创建、LLM 调用、工具调度、事件落库。
 - `executor.ts` 内置处理 `skill_activate` 和 `subagent_run` / `subagent_poll` / `subagent_list`，避免这些调度能力退化成普通工具文本。
-- `context.ts`：上下文管理，注入 system prompt、Goal 锚点、历史消息和当前用户输入。
+- `context.ts`：上下文管理，装配 system prompt、历史消息和当前用户输入，缩短旧 Goal 工具记录。
 - `contextCompactor.ts`：上下文压缩策略端口，默认 `current` 策略保留自研级联，`langchain-trim` 策略通过 LangChain Core 接入普通历史裁剪。
 - `compaction.ts`：上下文压缩纯函数，包括 token 估算、tool result masking、L3 摘要候选和滑动窗口。
 - `goal.ts`：GoalState 初始化、更新和渲染。
 - `recovery.ts`：服务启动恢复入口；恢复执行时由 `executor.ts` 补齐中断前缺失的工具结果提示。
 - `bus.ts`：进程内事件 pub/sub。
 - `types.ts`：AgentEvent、RunStatus 等类型。
+
+`server/src/spaces/`
+
+- `prompt.ts`：系统提示词默认模板、占位符校验和替换。模板只负责复制初始配置。
+- `config.ts`：空间配置规范化、旧 `systemPrompt` 转换、run 配置副本和占位符预览。
+- `access.ts`：空间管理权限、可见范围、编辑和预览入口。
 
 `server/src/llm/`
 
@@ -214,6 +220,11 @@ Provider.completeStream(messages, tools, onDelta)
 工具定义和工具结果翻译成目标协议，并通过调用参数接收当前 attempt 的 observing fetch。
 AI SDK 的 `maxRetries` 固定为 `0`，重试只由 `ProviderRunner` 决定，确保每次 HTTP 请求都有
 独立 attempt 记录。
+
+每个主 Agent step 在调用 Provider 前把最终 `messages` 和 `tools` 固定到
+`steps.context_snapshot`。该快照包含当次实际使用的 system、用户消息、工具 Schema 和压缩后的
+历史上下文，供管理员审查与运行恢复分析；`messages` 继续保存 thread 的对话事实。Provider
+观测记录保留协议转换和重试诊断，页面展示实际提示词时读取 step 快照。
 
 当前支持：
 

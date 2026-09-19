@@ -132,6 +132,13 @@ export async function loadWorkflowIndex(workspaceRoot: string, builtinSourceRoot
   return [...userItems, ...builtinItems].sort((a, b) => a.name.localeCompare(b.name) || a.source.localeCompare(b.source));
 }
 
+/** 管理页预览只读取内置目录，不物化文件，也不创建 workspace。 */
+export async function loadBuiltinWorkflowIndex(builtinSourceRoot = BUILTIN_SOURCE_ROOT): Promise<WorkflowIndexItem[]> {
+  return Promise.all((await listWorkflowDirs(builtinSourceRoot)).map((root) => (
+    readWorkflowIndexItem(root, 'builtin', true)
+  )));
+}
+
 export function selectWorkflow(workflows: WorkflowIndexItem[], nameOrId: string): WorkflowIndexItem | undefined {
   const wanted = nameOrId.trim();
   if (!wanted) return undefined;

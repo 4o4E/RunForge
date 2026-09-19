@@ -75,6 +75,60 @@ export interface ThreadContextMessage {
   created_at: string;
 }
 
+export interface StepContextContentPart {
+  type: 'text' | 'image';
+  text?: string;
+  mimeType?: string;
+  path?: string;
+  name?: string;
+}
+
+export interface StepContextToolCall {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
+export interface StepContextMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string | null;
+  contentParts?: StepContextContentPart[];
+  toolCalls?: StepContextToolCall[];
+  toolCallId?: string;
+  collapsed?: 'masked' | 'summarized';
+  providerState?: {
+    reasoningParts: number;
+    encryptedChars: number;
+  };
+}
+
+export interface StepContextTool {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+export interface StepContextSnapshotSummary {
+  stepId: string;
+  runId: string;
+  step: number;
+  messageCount: number;
+  toolCount: number;
+  createdAt: string;
+}
+
+/** 每个 Agent step 调用模型前固定的实际逻辑上下文。 */
+export interface StepContextSnapshotView extends StepContextSnapshotSummary {
+  messages: StepContextMessage[];
+  tools: StepContextTool[];
+}
+
+export interface ThreadStepContextsResponse {
+  threadId: string;
+  activeRunId: string | null;
+  contexts: StepContextSnapshotSummary[];
+}
+
 export interface RunBranchInput {
   input?: string;
   modelRef?: string | null;

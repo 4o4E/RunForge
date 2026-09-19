@@ -25,6 +25,8 @@ import type {
   StoredEvent,
   SubagentRunRow,
   StepRow,
+  StepContextSnapshot,
+  StepContextSummaryRow,
   SystemAdminRow,
   SystemAdminTokenRow,
   TenantRow,
@@ -51,6 +53,10 @@ import {
   newUserId,
 } from '../id.js';
 import { config as instanceConfig } from '../config.js';
+
+function compareEntityIds(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
 
 function defaultMemorySpaceConfig(): Record<string, unknown> {
   const modelRef = `default:${instanceConfig.llm.model}`;
@@ -132,7 +138,7 @@ export class MemoryStore implements Store {
   private threadWithFallbackTitle(thread: ThreadRow): ThreadRow {
     const firstRun = [...this.runs.values()]
       .filter((run) => run.thread_id === thread.id)
-      .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at) || a.id.localeCompare(b.id))[0];
+      .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at) || compareEntityIds(a.id, b.id))[0];
     return { ...thread, fallback_title: firstRun?.input ?? null };
   }
 
@@ -435,7 +441,12 @@ export class MemoryStore implements Store {
 
       if (!isSourceRun) {
         for (const oldStep of this.steps.filter((step) => step.run_id === oldRun.id).sort((a, b) => a.idx - b.idx)) {
-          const newStep: StepRow = { ...oldStep, id: newStepId(), run_id: newRun.id };
+          const newStep: StepRow = {
+            ...oldStep,
+            id: newStepId(),
+            run_id: newRun.id,
+            context_snapshot: oldStep.context_snapshot ? structuredClone(oldStep.context_snapshot) : null,
+          };
           this.steps.push(newStep);
           stepIdMap.set(oldStep.id, newStep.id);
         }
@@ -578,7 +589,7 @@ export class MemoryStore implements Store {
     const subtreeIds = new Set(subtree.map((run) => run.id));
     return subtree
       .filter((run) => !(childrenByParent.get(run.id) ?? []).some((child) => subtreeIds.has(child.id)))
-      .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.id.localeCompare(a.id))[0]?.id ?? selectedRunId;
+      .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || compareEntityIds(b.id, a.id))[0]?.id ?? selectedRunId;
   }
 
   async getRun(scope: Scope, id: string) {
@@ -684,9 +695,46 @@ export class MemoryStore implements Store {
 
   async createStep(scope: Scope, runId: string, idx: number): Promise<StepRow> {
     if (!this.runOwnedBy(this.runs.get(runId), scope)) throw new Error('runId 不存在或不属于当前用户');
-    const row: StepRow = { id: newStepId(), run_id: runId, idx, created_at: this.now() };
+    const row: StepRow = { id: newStepId(), run_id: runId, idx, context_snapshot: null, created_at: this.now() };
     this.steps.push(row);
     return row;
+  }
+  async saveStepContext(scope: Scope, stepId: string, snapshot: StepContextSnapshot): Promise<void> {
+    const step = this.steps.find((item) => item.id === stepId);
+    if (!step || !this.runOwnedBy(this.runs.get(step.run_id), scope) || step.context_snapshot) {
+      throw new Error(`step 不存在、不属于当前用户或上下文已经固定：${stepId}`);
+    }
+    step.context_snapshot = structuredClone(snapshot);
+  }
+  async listStepContextSummaries(
+    scope: Scope,
+    threadId: string,
+    options: { runId?: string | null } = {},
+  ): Promise<StepContextSummaryRow[]> {
+    if (!this.threadOwnedBy(this.threads.get(threadId), scope)) return [];
+    const visibleRunIds = this.branchRunIds(threadId, options.runId);
+    return this.steps
+      .filter((step) => visibleRunIds.has(step.run_id) && step.context_snapshot)
+      .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.idx - b.idx)
+      .map((step) => ({
+        id: step.id,
+        run_id: step.run_id,
+        idx: step.idx,
+        message_count: step.context_snapshot!.messages.length,
+        tool_count: step.context_snapshot!.tools.length,
+        captured_at: step.context_snapshot!.capturedAt,
+      }));
+  }
+  async getStepContext(
+    scope: Scope,
+    threadId: string,
+    stepId: string,
+    options: { runId?: string | null } = {},
+  ): Promise<StepRow | null> {
+    if (!this.threadOwnedBy(this.threads.get(threadId), scope)) return null;
+    const visibleRunIds = this.branchRunIds(threadId, options.runId);
+    const step = this.steps.find((item) => item.id === stepId && visibleRunIds.has(item.run_id) && item.context_snapshot);
+    return step ? { ...step, context_snapshot: structuredClone(step.context_snapshot) } : null;
   }
   async getLastStepIndex(scope: Scope, runId: string): Promise<number> {
     if (!this.runOwnedBy(this.runs.get(runId), scope)) return 0;

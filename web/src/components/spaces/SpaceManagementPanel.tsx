@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { CreateSpaceInput, SpaceOptions, SpaceSummary, TenantUserSummary, UpdateSpaceInput } from '@runforge/contracts';
-import { ArchiveRestore, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { ArchiveRestore, FileText, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import type { SpaceControlApi } from '@/spaceControlApi';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -15,7 +15,13 @@ function userLabel(users: TenantUserSummary[], id: string | null): string {
   return user ? `${user.email} · ${user.role}` : id;
 }
 
-export function SpaceManagementPanel({ api }: { api: SpaceControlApi }) {
+export function SpaceManagementPanel({
+  api,
+  onManagePrompt,
+}: {
+  api: SpaceControlApi;
+  onManagePrompt: (spaceId: string) => void;
+}) {
   const [spaces, setSpaces] = useState<SpaceSummary[]>([]);
   const [users, setUsers] = useState<TenantUserSummary[]>([]);
   const [options, setOptions] = useState<SpaceOptions | null>(null);
@@ -120,7 +126,7 @@ export function SpaceManagementPanel({ api }: { api: SpaceControlApi }) {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <CardTitle className="text-base">空间</CardTitle>
-            <CardDescription>空间属于 tenant；owner/admin 可管理，普通用户严格按可见名单访问。</CardDescription>
+            <CardDescription>空间属于租户；租户管理员和系统管理员可管理，普通用户严格按可见名单访问。</CardDescription>
           </div>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={() => void refresh()} disabled={loading}>
@@ -168,6 +174,9 @@ export function SpaceManagementPanel({ api }: { api: SpaceControlApi }) {
                   <Button size="sm" onClick={() => void restoreSpace(selected)}><ArchiveRestore className="size-4" />恢复</Button>
                 ) : (
                   <>
+                    <Button variant="outline" size="sm" onClick={() => onManagePrompt(selected.id)}>
+                      <FileText className="size-4" />提示词
+                    </Button>
                     <Button variant="outline" size="sm" onClick={() => openEdit(selected)}><Pencil className="size-4" />编辑</Button>
                     {!selected.isDefault && (
                       <Button variant="outline" size="sm" onClick={() => void deleteSpace(selected)}>

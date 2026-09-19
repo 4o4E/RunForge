@@ -30,6 +30,8 @@ import type {
   ThreadDetailResponse,
   ThreadForkResponse,
   ThreadSearchResponse,
+  ThreadStepContextsResponse,
+  StepContextSnapshotView,
   ThreadUpdateInput,
   UpdateUserInput,
   WebPushPublicKeyResponse,
@@ -291,6 +293,22 @@ export const getThread = (id: string, options: { debug?: boolean; spaceId?: stri
   if (options.spaceId) params.set('spaceId', options.spaceId);
   const query = params.toString();
   return authFetch(`/api/threads/${id}${query ? `?${query}` : ''}`).then(json<ThreadDetailResponse>);
+};
+
+export const getThreadStepContexts = (id: string, spaceId?: string | null) => {
+  const params = new URLSearchParams();
+  if (spaceId) params.set('spaceId', spaceId);
+  const query = params.toString();
+  return authFetch(`/api/threads/${id}/context-snapshots${query ? `?${query}` : ''}`)
+    .then(json<ThreadStepContextsResponse>);
+};
+
+export const getThreadStepContext = (id: string, stepId: string, spaceId?: string | null) => {
+  const params = new URLSearchParams();
+  if (spaceId) params.set('spaceId', spaceId);
+  const query = params.toString();
+  return authFetch(`/api/threads/${id}/context-snapshots/${encodeURIComponent(stepId)}${query ? `?${query}` : ''}`)
+    .then(json<StepContextSnapshotView>);
 };
 
 export const createThread = (title?: string, spaceId?: string | null) =>

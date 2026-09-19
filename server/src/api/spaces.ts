@@ -78,6 +78,16 @@ function registerSpaceRoutes(router: Router, resolveActor: ResolveActor): void {
     }
   });
 
+  router.get('/:spaceId/prompt-placeholders', async (req, res) => {
+    const actor = resolveActor(req, res);
+    if (!actor) return;
+    try {
+      res.json(await spaceAccess.promptPlaceholders(actor, req.params.spaceId));
+    } catch (error) {
+      sendSpaceError(res, error);
+    }
+  });
+
   router.get('/:spaceId/debug/mcp/:mcpId', async (req, res) => {
     const actor = resolveActor(req, res);
     if (!actor) return;

@@ -3,6 +3,7 @@ import type {
   SpaceMode,
   SpaceDebugMcpSchema,
   SpaceDebugView,
+  PromptPlaceholdersView,
   SpaceSummary,
   TenantUserRole,
   UpdateSpaceInput,
@@ -66,13 +67,17 @@ function mergeSpaceConfig(current: Record<string, unknown>, update: Record<strin
   const updateCapabilities = isPlainRecord(update.capabilities) ? update.capabilities : {};
   const currentExternal = isPlainRecord(current.external) ? current.external : {};
   const updateExternal = isPlainRecord(update.external) ? update.external : {};
-  return {
+  const merged: Record<string, unknown> = {
     ...current,
     ...update,
     model: { ...currentModel, ...updateModel },
     capabilities: { ...currentCapabilities, ...updateCapabilities },
     external: { ...currentExternal, ...updateExternal },
   };
+  if (typeof update.systemPrompt === 'string' && typeof update.promptTemplate !== 'string') {
+    delete merged.promptTemplate;
+  }
+  return merged;
 }
 
 export function parseCreateSpaceInput(value: unknown): CreateSpaceInput {
@@ -209,8 +214,22 @@ export class SpaceAccessService {
       return await this.configService.debugView(
         space.tenantId,
         space.configVersion,
+        space.mode,
         space.config,
       );
+    } catch (error) {
+      if (error instanceof SpaceConfigError) throw new SpaceAccessError(409, error.code, error.message);
+      throw error;
+    }
+  }
+
+  async promptPlaceholders(
+    actorContext: SpaceActorContext,
+    spaceId: string,
+  ): Promise<PromptPlaceholdersView> {
+    const space = await this.requireManagedSpace(actorContext, spaceId);
+    try {
+      return await this.configService.promptPlaceholders(space.tenantId, space.mode, space.config);
     } catch (error) {
       if (error instanceof SpaceConfigError) throw new SpaceAccessError(409, error.code, error.message);
       throw error;
@@ -416,7 +435,7 @@ export class SpaceAccessService {
       mode: space.mode,
       name: space.name,
       executionUserId: space.execution_user_id,
-      config: normalizeSpaceConfig(space.config),
+      config: normalizeSpaceConfig(space.config, space.mode),
       configVersion: space.config_version,
       createdByUserId: space.created_by_user_id,
       visibleUserIds: space.visible_user_ids,

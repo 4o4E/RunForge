@@ -1,6 +1,6 @@
 import type { LlmConfig, Provider } from './types.js';
 import { createAiSdkProvider } from './providers/aiSdk.js';
-import { getLlmSettings, type LlmProviderSettings } from '../settings.js';
+import { getLlmSettings, getSystemLlmSettings, type LlmProviderSettings, type LlmSettings } from '../settings.js';
 import type { TenantScope } from '../store/types.js';
 import type { ProviderDescriptor } from './providerRunner.js';
 import { catalogMaxOutputTokens } from './modelCatalog.js';
@@ -26,15 +26,16 @@ export function createProviderFromSettings(provider: LlmProviderSettings, model:
   return createAiSdkProvider(configFromProvider(provider, model), { protocol: provider.protocol });
 }
 
-export async function getConfiguredProvider(scope: TenantScope, modelRef?: string): Promise<{
+type ConfiguredProvider = {
   provider: Provider;
   descriptor: ProviderDescriptor;
   modelRef: string;
   contextWindow: number;
   compactionThreshold: number;
-}> {
-  const settings = await getLlmSettings(scope);
-  const ref = modelRef?.trim() || settings.defaultModelRef;
+};
+
+function configuredProvider(settings: LlmSettings, modelRef: string | undefined, fallbackRef: string): ConfiguredProvider {
+  const ref = modelRef?.trim() || fallbackRef;
   const parsed = parseModelRef(ref);
   if (!parsed) throw new Error(`模型引用格式无效：${ref}。请使用 provider:model，例如 default:gpt-4o-mini`);
   const providerSettings = settings.providers.find((item) => item.id === parsed.providerId);
@@ -58,6 +59,17 @@ export async function getConfiguredProvider(scope: TenantScope, modelRef?: strin
     contextWindow: capability.contextWindow,
     compactionThreshold: capability.compactionThreshold,
   };
+}
+
+export async function getConfiguredProvider(scope: TenantScope, modelRef?: string): Promise<ConfiguredProvider> {
+  const settings = await getLlmSettings(scope);
+  return configuredProvider(settings, modelRef, settings.defaultModelRef);
+}
+
+/** 标题生成是系统内部任务，直接使用系统供应商目录，不读取租户授权子集。 */
+export async function getConfiguredSystemTitleProvider(): Promise<ConfiguredProvider> {
+  const settings = await getSystemLlmSettings();
+  return configuredProvider(settings, settings.titleModelRef, settings.defaultModelRef);
 }
 
 export type { Provider } from './types.js';

@@ -469,7 +469,7 @@ export class PrismaExternalRepository implements ExternalRepository {
             source_type: 'external',
             source_caller_id: access.caller.id,
             source_ref: requiredJson(input.source),
-            title: input.title ?? null,
+            title: input.title,
           },
         });
         await tx.runs.create({

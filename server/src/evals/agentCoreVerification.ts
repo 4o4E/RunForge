@@ -50,6 +50,7 @@ interface RawMessage {
   tool_calls: LlmMessage['toolCalls'] | null;
   tool_call_id: string | null;
   collapsed: 'masked' | 'summarized' | null;
+  summary_of: bigint[] | null;
 }
 
 interface ScenarioRunResult {
@@ -142,7 +143,7 @@ function assertFinalAssistantHasNoToolCall(messages: RawMessage[]): AssertionRes
 
 async function rawMessagesForThread(threadId: string): Promise<RawMessage[]> {
   const { rows } = await query<RawMessage>(
-    `SELECT role, content, tool_calls, tool_call_id, collapsed
+    `SELECT role, content, tool_calls, tool_call_id, collapsed, summary_of
      FROM messages
      WHERE thread_id = $1
      ORDER BY id`,
@@ -164,6 +165,13 @@ async function loadRunResult(store: Store, scope: Scope, threadId: string, runId
   };
 }
 
+async function stepContextsForRun(ctx: VerifyContext, runId: string) {
+  const summaries = await ctx.store.listStepContextSummaries(ctx.scope, ctx.thread.id, { runId });
+  return (await Promise.all(summaries.map((summary) => (
+    ctx.store.getStepContext(ctx.scope, ctx.thread.id, summary.id, { runId })
+  )))).flatMap((step) => step?.context_snapshot ? [step.context_snapshot] : []);
+}
+
 function verificationToolSettings(base: ToolSettings, workspaceRoot: string): ToolSettings {
   return {
     ...base,
@@ -182,6 +190,10 @@ async function createPriorCompactionHistory(ctx: VerifyContext): Promise<void> {
   await ctx.store.addMessage(ctx.scope, ctx.thread.id, prior.id, null, {
     role: 'user',
     content: '最早用户消息：锚点短语是 RFG-COMPACTION-ANCHOR。请在后续任务中保留它。',
+  });
+  await ctx.store.addMessage(ctx.scope, ctx.thread.id, prior.id, null, {
+    role: 'assistant',
+    content: `已经记录最早用户目标，继续准备后续文件检查。\n${'早期普通分析。'.repeat(2000)}`,
   });
   await ctx.store.addMessage(ctx.scope, ctx.thread.id, prior.id, null, {
     role: 'assistant',
@@ -218,11 +230,45 @@ const scenarios: Scenario[] = [
     async assert(ctx, result) {
       const assertions = [assertRunDone(result), assertNoBrokenToolPairs(result.rawMessages), assertFinalAssistantHasNoToolCall(result.rawMessages)];
       const output = existsSync(ctx.paths.output) ? await readText(ctx.paths.output) : '';
+      const contexts = await stepContextsForRun(ctx, result.runId);
+      const firstUser = contexts[0]?.messages.find((message) => message.role === 'user')?.content ?? '';
+      const persistedUser = result.rawMessages.find((message) => message.role === 'user')?.content ?? '';
+      const systemMessages = contexts.flatMap((context) => context.messages.filter((message) => message.role === 'system'));
+      const updatePlanIds = new Set(result.rawMessages.flatMap((message) => (
+        message.role === 'assistant'
+          ? (message.tool_calls ?? []).filter((call) => call.name === 'update_plan').map((call) => call.id)
+          : []
+      )));
+      const persistedGoalResults = result.rawMessages.filter((message) => (
+        message.role === 'tool' && message.tool_call_id && updatePlanIds.has(message.tool_call_id)
+      ));
+      const latestContext = contexts.at(-1)?.messages ?? [];
+      const latestGoalResults = latestContext.filter((message) => (
+        message.role === 'tool' && message.toolCallId && updatePlanIds.has(message.toolCallId)
+      ));
       assertions.push(output.includes('source=alpha') && output.includes('status=verified')
         ? ok('文件输出内容正确')
         : fail('文件输出内容正确', `实际内容：${output || '文件不存在或为空'}`));
       assertions.push(hasTool(result.events, 'file_read') ? ok('调用过 file_read') : fail('调用过 file_read'));
       assertions.push(hasTool(result.events, 'file_write') ? ok('调用过 file_write') : fail('调用过 file_write'));
+      assertions.push(Boolean(persistedUser) && firstUser === persistedUser
+        ? ok('首次模型请求保留原始用户消息')
+        : fail('首次模型请求保留原始用户消息', `实际内容：${firstUser}`));
+      assertions.push(systemMessages.every((message) => !(message.content ?? '').includes('## 当前目标'))
+        ? ok('普通模型请求没有前置 Goal system 消息')
+        : fail('普通模型请求没有前置 Goal system 消息'));
+      assertions.push(systemMessages.every((message) => !(message.content ?? '').includes('当前 run 已激活能力'))
+        ? ok('普通模型请求没有激活状态 system 消息')
+        : fail('普通模型请求没有激活状态 system 消息'));
+      assertions.push(persistedGoalResults.length > 1 && persistedGoalResults.every((message) => (message.content ?? '').includes('## 当前目标'))
+        ? ok('update_plan 原始工具结果保存完整 Goal')
+        : fail('update_plan 原始工具结果保存完整 Goal'));
+      assertions.push(
+        latestGoalResults.some((message) => message.content === '这次 Goal 更新已被后续完整 Goal 状态取代。')
+          && latestGoalResults.some((message) => (message.content ?? '').includes('## 当前目标'))
+          ? ok('模型派生视图缩短旧 Goal 并保留最新完整状态')
+          : fail('模型派生视图缩短旧 Goal 并保留最新完整状态'),
+      );
       return assertions;
     },
   },
@@ -290,7 +336,7 @@ const scenarios: Scenario[] = [
     id: 'context-compaction-survival',
     title: '上下文压缩：大历史裁剪后仍完成当前目标',
     hardStepCap: 14,
-    context: { contextBudget: 400, keepRecentMessages: 2 },
+    context: { contextBudget: 8_000, keepRecentMessages: 2 },
     async prepare(ctx) {
       ctx.paths.big = resolve(ctx.workspaceRoot, 'compaction/big.txt');
       ctx.paths.target = resolve(ctx.workspaceRoot, 'compaction/target.txt');
@@ -312,12 +358,25 @@ const scenarios: Scenario[] = [
     async assert(ctx, result) {
       const content = existsSync(ctx.paths.result) ? await readText(ctx.paths.result) : '';
       const collapsed = result.rawMessages.filter((message) => message.collapsed === 'masked' || message.collapsed === 'summarized');
+      const contextSnapshots = await ctx.store.listStepContextSummaries(ctx.scope, ctx.thread.id, { runId: result.runId });
+      const persistedSummaries = result.rawMessages.filter((message) => (
+        message.role === 'system' && Boolean(message.summary_of?.length)
+      ));
       return [
         assertRunDone(result),
         assertNoBrokenToolPairs(result.rawMessages),
         assertFinalAssistantHasNoToolCall(result.rawMessages),
         result.events.some((event) => event.type === 'compaction') ? ok('产生 compaction 事件') : fail('产生 compaction 事件'),
         collapsed.length ? ok('messages.collapsed 有记录', `collapsed=${collapsed.length}`) : fail('messages.collapsed 有记录'),
+        contextSnapshots.length && contextSnapshots.every((snapshot) => snapshot.message_count > 0)
+          ? ok('每次 Provider 调用前的 step 上下文已固定', `snapshots=${contextSnapshots.length}`)
+          : fail('每次 Provider 调用前的 step 上下文已固定'),
+        persistedSummaries.some((message) => (
+          (message.content ?? '').includes('最新 Goal 状态:')
+          && (message.content ?? '').includes('context-compaction-survival')
+        ))
+          ? ok('持久化 L3 摘要包含最新 Goal 状态')
+          : fail('持久化 L3 摘要包含最新 Goal 状态'),
         content.includes('RFG-COMPACTION-ANCHOR') && content.includes('target=ok')
           ? ok('压缩后仍保留锚点并完成目标')
           : fail('压缩后仍保留锚点并完成目标', `实际内容：${content || '文件不存在或为空'}`),
@@ -397,6 +456,11 @@ async function runScenario(
       scope,
       hardStepCap: scenario.hardStepCap ?? 16,
       generateThreadTitle: false,
+      contextSettings: scenario.context ? {
+        modelContextWindow: scenario.context.modelContextWindow ?? config.agent.modelContextWindow,
+        contextBudget: scenario.context.contextBudget ?? config.agent.contextBudget,
+        contextBudgetSource: scenario.context.contextBudgetSource ?? config.agent.contextBudgetSource,
+      } : undefined,
       toolSettings: verificationToolSettings(baseToolSettings, workspaceRoot),
       mcpSettings: { servers: [] },
       workloadRuntimeEnv: async () => ({

@@ -33,11 +33,43 @@ test('maybeCompact reports the DB ids of newly-masked tool results', async () =>
     const view = ctx.all();
     assert.ok(view.some((m) => m.content === maskPlaceholder('x'.repeat(4000))));
     ctx.setGoal('压缩后仍可刷新 Goal');
-    assert.ok(ctx.all().some((message) => message.role === 'system' && message.content === '压缩后仍可刷新 Goal'));
+    assert.equal(ctx.all().some((message) => message.content === '压缩后仍可刷新 Goal'), false);
   } finally {
     config.agent.contextBudget = contextBudget;
     config.agent.keepRecentMessages = keepRecentMessages;
   }
+});
+
+test('ContextManager 只在派生视图裁剪旧 Goal 更新并保留最新完整状态', () => {
+  const prior: ThreadMessage[] = [
+    {
+      id: 1,
+      role: 'assistant',
+      content: null,
+      toolCalls: [
+        { id: 'plan_1', name: 'update_plan', arguments: '{"plan":[{"text":"旧计划","status":"doing"}]}' },
+        { id: 'read_1', name: 'file_read', arguments: '{"path":"a.txt"}' },
+      ],
+    },
+    { id: 2, role: 'tool', content: '旧 Goal 完整状态', toolCallId: 'plan_1' },
+    { id: 3, role: 'tool', content: '文件内容', toolCallId: 'read_1' },
+    {
+      id: 4,
+      role: 'assistant',
+      content: null,
+      toolCalls: [{ id: 'plan_2', name: 'update_plan', arguments: '{"plan":[{"text":"新计划","status":"doing"}]}' }],
+    },
+    { id: 5, role: 'tool', content: '最新 Goal 完整状态', toolCallId: 'plan_2' },
+  ];
+  const source = structuredClone(prior);
+  const context = new ContextManager(prior, '继续');
+  const messages = context.all();
+  const firstAssistant = messages.find((message) => message.toolCalls?.some((call) => call.id === 'plan_1'));
+  assert.equal(firstAssistant?.toolCalls?.find((call) => call.id === 'plan_1')?.arguments, '{"superseded":true}');
+  assert.equal(firstAssistant?.toolCalls?.find((call) => call.id === 'read_1')?.arguments, '{"path":"a.txt"}');
+  assert.equal(messages.find((message) => message.toolCallId === 'plan_1')?.content, '这次 Goal 更新已被后续完整 Goal 状态取代。');
+  assert.equal(messages.find((message) => message.toolCallId === 'plan_2')?.content, '最新 Goal 完整状态');
+  assert.deepEqual(prior, source);
 });
 
 test('compactForHistory masks old bulky payloads even below live threshold', () => {

@@ -265,8 +265,10 @@ function defaultLlmProviderSettings(): LlmProviderSettings {
 
 function defaultLlmSettings(): LlmSettings {
   const provider = defaultLlmProviderSettings();
+  const defaultModelRef = modelRef(provider.id, provider.defaultModel);
   return {
-    defaultModelRef: modelRef(provider.id, provider.defaultModel),
+    defaultModelRef,
+    titleModelRef: defaultModelRef,
     providers: [provider],
   };
 }
@@ -529,7 +531,7 @@ function normalizeLlmProvider(input: unknown, fallback: LlmProviderSettings, use
   };
 }
 
-export function llmModelOptions(settings: LlmSettings): LlmModelOption[] {
+export function llmModelOptions(settings: Pick<LlmSettings, 'providers'>): LlmModelOption[] {
   return settings.providers.flatMap((provider) =>
     provider.models.filter((model) => {
       const capability = provider.modelCapabilities.find((item) => item.model === model);
@@ -554,10 +556,12 @@ export function normalizeLlmSettings(input: unknown): LlmSettings {
     .map((item, index) => normalizeLlmProvider(item, defaults.providers[index] ?? defaultLlmProviderSettings(), usedIds))
     .filter((provider) => provider.id);
   const safeProviders = providers.length ? providers : defaults.providers;
-  const options = llmModelOptions({ providers: safeProviders, defaultModelRef: defaults.defaultModelRef });
+  const options = llmModelOptions({ providers: safeProviders });
   const requestedDefault = typeof body.defaultModelRef === 'string' ? body.defaultModelRef.trim() : defaults.defaultModelRef;
   const defaultModelRef = options.some((option) => option.ref === requestedDefault) ? requestedDefault : options[0]?.ref ?? '';
-  return { defaultModelRef, providers: safeProviders };
+  const requestedTitle = typeof body.titleModelRef === 'string' ? body.titleModelRef.trim() : defaultModelRef;
+  const titleModelRef = options.some((option) => option.ref === requestedTitle) ? requestedTitle : defaultModelRef;
+  return { defaultModelRef, titleModelRef, providers: safeProviders };
 }
 
 export async function getSystemLlmSettings(): Promise<LlmSettings> {
@@ -578,11 +582,11 @@ export async function getLlmSettings(scope: TenantScope): Promise<LlmSettings> {
   ]);
   const allowed = new Set(authorization.llmProviderIds);
   const providers = settings.providers.filter((provider) => allowed.has(provider.id));
-  const options = llmModelOptions({ providers, defaultModelRef: settings.defaultModelRef });
+  const options = llmModelOptions({ providers });
   const defaultModelRef = options.some((option) => option.ref === settings.defaultModelRef)
     ? settings.defaultModelRef
     : options[0]?.ref ?? '';
-  return { providers, defaultModelRef };
+  return { providers, defaultModelRef, titleModelRef: defaultModelRef };
 }
 
 export async function saveLlmSettings(scope: TenantScope, input: unknown): Promise<LlmSettings> {

@@ -3,7 +3,12 @@ import assert from 'node:assert/strict';
 import { config } from '../config.js';
 import { signSystemAccessToken, signTenantAccessToken } from '../auth/jwt.js';
 import { store } from '../store/index.js';
-import type { SpaceDebugView, SpaceOptions, SpaceSummary } from '@runforge/contracts';
+import type {
+  PromptPlaceholdersView,
+  SpaceDebugView,
+  SpaceOptions,
+  SpaceSummary,
+} from '@runforge/contracts';
 import { buildApp, listen, seedOwner, seedSystemAdmin } from './testHelpers.js';
 import { newThreadId } from '../id.js';
 import type { ThreadRow } from '../store/types.js';
@@ -45,23 +50,41 @@ test('space API: 管理权限、可见名单、execution user 和软删除语义
     const webSpace = (await createdWebResponse.json()) as SpaceSummary;
     assert.match(webSpace.id, /^sp_[0-9A-Za-z]+$/);
     assert.deepEqual(webSpace.visibleUserIds, [member.id]);
-    assert.equal(webSpace.config.schemaVersion, 1);
-    assert.equal(webSpace.config.systemPrompt, 'v1');
+    assert.equal(webSpace.config.schemaVersion, 3);
+    assert.match(webSpace.config.promptTemplate, /v1/);
 
     const ownerDebugResponse = await fetch(`${base}/spaces/${webSpace.id}/debug`, { headers: bearer(ownerToken) });
     assert.equal(ownerDebugResponse.status, 200);
     const ownerDebug = (await ownerDebugResponse.json()) as SpaceDebugView;
     assert.equal(ownerDebug.configVersion, webSpace.configVersion);
-    assert.equal(ownerDebug.systemPrompt, 'v1');
+    assert.match(ownerDebug.promptTemplate, /v1/);
     assert.ok(ownerDebug.tools.some((tool) => (
       tool.name === 'file_read'
       && (tool.parameters.properties as Record<string, unknown>).path !== undefined
     )));
     assert.ok(ownerDebug.skills.some((skill) => skill.id.startsWith('builtin:') && skill.content.length > 0));
 
+    const ownerPlaceholdersResponse = await fetch(
+      `${base}/spaces/${webSpace.id}/prompt-placeholders`,
+      { headers: bearer(ownerToken) },
+    );
+    assert.equal(ownerPlaceholdersResponse.status, 200);
+    const ownerPlaceholders = (await ownerPlaceholdersResponse.json()) as PromptPlaceholdersView;
+    assert.equal(ownerPlaceholders.placeholders.length, 12);
+    assert.ok(ownerPlaceholders.placeholders.some((item) => (
+      item.key === 'skills.catalog'
+      && item.token === '{{skills.catalog}}'
+      && item.content.includes('Available skills')
+    )));
+
     const memberDebugResponse = await fetch(`${base}/spaces/${webSpace.id}/debug`, { headers: bearer(memberToken) });
     assert.equal(memberDebugResponse.status, 403);
     assert.equal(((await memberDebugResponse.json()) as { code: string }).code, 'SPACE_MANAGE_FORBIDDEN');
+    const memberPlaceholdersResponse = await fetch(
+      `${base}/spaces/${webSpace.id}/prompt-placeholders`,
+      { headers: bearer(memberToken) },
+    );
+    assert.equal(memberPlaceholdersResponse.status, 403);
 
     const unknownMcpSchema = await fetch(`${base}/spaces/${webSpace.id}/debug/mcp/missing`, {
       headers: bearer(ownerToken),
@@ -264,6 +287,13 @@ test('system space API: system admin 可管理指定 tenant，但 createdByUserI
     assert.equal(body.tenantId, tenantId);
     assert.equal(body.createdByUserId, null);
     assert.equal(body.executionUserId, owner.id);
+
+    const placeholdersResponse = await fetch(
+      `http://127.0.0.1:${port}/api/system/tenants/${tenantId}/spaces/${body.id}/prompt-placeholders`,
+      { headers: bearer(token) },
+    );
+    assert.equal(placeholdersResponse.status, 200);
+    assert.equal(((await placeholdersResponse.json()) as PromptPlaceholdersView).placeholders.length, 12);
   } finally {
     close();
   }

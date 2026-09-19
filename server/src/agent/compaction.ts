@@ -141,7 +141,11 @@ export function maskOldAssistantToolCalls(
 /** Leading contiguous system messages — always preserved at the front. */
 function leadingSystem(messages: LlmMessage[]): number {
   let i = 0;
-  while (i < messages.length && messages[i].role === 'system') i += 1;
+  while (
+    i < messages.length
+    && messages[i].role === 'system'
+    && messages[i].collapsed !== 'summarized'
+  ) i += 1;
   return i;
 }
 
@@ -241,9 +245,15 @@ export function slidingWindow(
 ): { messages: LlmMessage[]; dropped: number } {
   const sysEnd = leadingSystem(messages);
   const head = messages.slice(0, sysEnd);
-  // First user message after the system prefix, kept as the anchor.
+  // L3 摘要已经包含最新 Goal 和旧上下文摘要，后续 L2 必须保留它；没有 L3 时
+  // 才继续使用首条用户消息作为低成本锚点。
+  let summaryIdx = -1;
+  for (let i = sysEnd; i < messages.length; i += 1) {
+    if (messages[i].role === 'system' && messages[i].collapsed === 'summarized') summaryIdx = i;
+  }
   const firstUserIdx = messages.findIndex((m, i) => i >= sysEnd && m.role === 'user');
-  const anchor = firstUserIdx >= 0 ? [messages[firstUserIdx]] : [];
+  const anchorIdx = summaryIdx >= 0 ? summaryIdx : firstUserIdx;
+  const anchor = anchorIdx >= 0 ? [messages[anchorIdx]] : [];
 
   const desiredStart = Math.max(sysEnd, messages.length - opts.keepRecent);
   // Walk forward to a safe boundary: a 'user' or 'assistant' message. Never start a
@@ -251,12 +261,14 @@ export function slidingWindow(
   let start = desiredStart;
   while (start < messages.length && messages[start].role === 'tool') start += 1;
 
-  // Nothing meaningful to drop (window already covers everything past the anchor).
-  if (start <= firstUserIdx + 1 || start >= messages.length) {
+  // 没有 L3 时保留既有行为：首条用户消息已进入最近窗口就无需继续裁剪。
+  if ((summaryIdx < 0 && start <= firstUserIdx + 1) || start >= messages.length) {
     return { messages, dropped: 0 };
   }
 
   const tail = messages.slice(start);
-  const dropped = start - sysEnd - anchor.length;
-  return { messages: [...head, ...anchor, ...tail], dropped: Math.max(0, dropped) };
+  const kept = new Set([...head, ...anchor, ...tail]);
+  const compacted = messages.filter((message) => kept.has(message));
+  const dropped = messages.length - compacted.length;
+  return dropped > 0 ? { messages: compacted, dropped } : { messages, dropped: 0 };
 }

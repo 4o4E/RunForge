@@ -2,9 +2,9 @@ import type { Tool } from './types.js';
 
 /**
  * 维护当前任务的工作计划。工具本身无状态，只负责确认；
- * executor 会读取同一份参数，更新 run 持久化的目标锚点
- * （intent/plan/decisions/next），并在每一步重新注入上下文，
- * 使其在压缩后仍保留（长任务设计 §3.2、§9/G1）。
+ * executor 会读取同一份参数，更新 run 持久化的 Goal
+ * （intent/plan/decisions/next），并把合并后的完整状态作为工具结果。
+ * 压缩器只在生成摘要时读取最新 Goal。
  */
 export const updatePlanTool: Tool = {
   name: 'update_plan',

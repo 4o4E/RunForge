@@ -208,7 +208,9 @@ export async function loadSkillIndex(workspaceRoot: string, builtinSourceRoot = 
   return [...userItems, ...builtinItems].sort((a, b) => a.name.localeCompare(b.name) || a.source.localeCompare(b.source));
 }
 
-export function renderSkillCatalog(skills: SkillIndexItem[]): string {
+export function renderSkillCatalog(
+  skills: ReadonlyArray<Pick<SkillIndexItem, 'id' | 'description'>>,
+): string {
   if (!skills.length) return '可用 Skills / Available skills: none';
   return [
     '可用 Skills / Available skills:',

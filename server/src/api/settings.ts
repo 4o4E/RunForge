@@ -44,7 +44,11 @@ export async function getToolSettingsOptions(): Promise<ToolSettingsOptions> {
 
 export async function getLlmSettingsOptions(scope: TenantScope): Promise<LlmSettingsOptions> {
   const settings = await getLlmSettings(scope);
-  return { defaultModelRef: settings.defaultModelRef, models: llmModelOptions(settings) };
+  return {
+    defaultModelRef: settings.defaultModelRef,
+    titleModelRef: settings.titleModelRef,
+    models: llmModelOptions(settings),
+  };
 }
 
 export async function getMcpSettingsOptions(): Promise<McpSettingsOptions> {

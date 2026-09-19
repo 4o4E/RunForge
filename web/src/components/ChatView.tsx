@@ -246,6 +246,7 @@ export function ChatView({
           readOnly={readOnly}
           showToc={false}
           debugSpaceId={canInspectSpace ? space?.id ?? null : null}
+          debugThreadId={canInspectSpace ? thread?.id ?? null : null}
         />
       </div>
 

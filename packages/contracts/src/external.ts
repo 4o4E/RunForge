@@ -30,7 +30,7 @@ export const externalCommandSchema = z.discriminatedUnion('operation', [
   z.object({
     operation: z.literal('run.create'),
     idempotencyKey,
-    title: z.string().trim().min(1).max(200).optional(),
+    title: z.string().trim().min(1).max(200),
     artifactIds,
     ...runInputFields,
   }).strict(),

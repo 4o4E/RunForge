@@ -28,6 +28,8 @@ import type {
   SpaceWithVisibilityRow,
   SubagentRunRow,
   StepRow,
+  StepContextSnapshot,
+  StepContextSummaryRow,
   SystemAdminRow,
   SystemAdminTokenRow,
   TenantRow,
@@ -1039,6 +1041,79 @@ export class PgStore implements Store {
   async createStep(scope: Scope, runId: string, idx: number): Promise<StepRow> {
     if (!(await this.runBelongsToScope(scope, runId))) throw new Error('runId 不存在或不属于当前用户');
     return toStepRow(await prisma.steps.create({ data: { id: newStepId(), run_id: runId, idx } }));
+  }
+
+  async saveStepContext(scope: Scope, stepId: string, snapshot: StepContextSnapshot): Promise<void> {
+    const updated = await prisma.steps.updateMany({
+      where: {
+        id: stepId,
+        context_snapshot: { equals: Prisma.DbNull },
+        runs: {
+          threads_runs_thread_idTothreads: {
+            tenant_id: scope.tenantId,
+            user_id: scope.userId,
+          },
+        },
+      },
+      data: { context_snapshot: requiredJson(snapshot) },
+    });
+    if (updated.count !== 1) {
+      throw new Error(`step 不存在、不属于当前用户或上下文已经固定：${stepId}`);
+    }
+  }
+
+  async listStepContextSummaries(
+    scope: Scope,
+    threadId: string,
+    options: { runId?: string | null } = {},
+  ): Promise<StepContextSummaryRow[]> {
+    const visibleRunIds = await this.visibleRunIds(scope, threadId, options.runId);
+    if (!visibleRunIds?.length) return [];
+    const rows = await prisma.$queryRaw<Array<{
+      id: string;
+      run_id: string;
+      idx: number;
+      message_count: number;
+      tool_count: number;
+      captured_at: string | null;
+      created_at: Date;
+    }>>(Prisma.sql`
+      SELECT id, run_id, idx,
+             jsonb_array_length(COALESCE(context_snapshot->'messages', '[]'::jsonb))::int AS message_count,
+             jsonb_array_length(COALESCE(context_snapshot->'tools', '[]'::jsonb))::int AS tool_count,
+             context_snapshot->>'capturedAt' AS captured_at,
+             created_at
+      FROM steps
+      WHERE run_id IN (${Prisma.join(visibleRunIds)})
+        AND context_snapshot IS NOT NULL
+      ORDER BY created_at, idx
+    `);
+    return rows.map((row) => ({
+      id: row.id,
+      run_id: row.run_id,
+      idx: row.idx,
+      message_count: row.message_count,
+      tool_count: row.tool_count,
+      captured_at: row.captured_at ?? row.created_at.toISOString(),
+    }));
+  }
+
+  async getStepContext(
+    scope: Scope,
+    threadId: string,
+    stepId: string,
+    options: { runId?: string | null } = {},
+  ): Promise<StepRow | null> {
+    const visibleRunIds = await this.visibleRunIds(scope, threadId, options.runId);
+    if (!visibleRunIds?.length) return null;
+    const row = await prisma.steps.findFirst({
+      where: {
+        id: stepId,
+        run_id: { in: visibleRunIds },
+        context_snapshot: { not: Prisma.DbNull },
+      },
+    });
+    return row ? toStepRow(row) : null;
   }
 
   async getLastStepIndex(scope: Scope, runId: string): Promise<number> {

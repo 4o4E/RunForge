@@ -6,12 +6,25 @@ export type SpaceMode = 'web' | 'external';
 const idListSchema = z.array(z.string().trim().min(1)).default([]);
 const runtimeCapabilityNames = ['datasource.credentials', 'llm', 'image', 'video'] as const satisfies readonly RuntimeCapabilityName[];
 
+export interface PromptPlaceholder {
+  key: string;
+  token: string;
+  label: string;
+  description: string;
+  content: string;
+  runtime: boolean;
+}
+
+export interface PromptPlaceholdersView {
+  placeholders: PromptPlaceholder[];
+}
+
 /**
  * 空间保存创建或编辑时选择的完整能力列表。run 接纳后会把配置解析成不含密钥的完整快照。
  */
 export const spaceConfigSchema = z.object({
-  schemaVersion: z.literal(1).default(1),
-  systemPrompt: z.string().default(''),
+  schemaVersion: z.literal(3).default(3),
+  promptTemplate: z.string().default(''),
   model: z.object({
     defaultModelRef: z.string().trim().min(1).nullable().default(null),
     allowedModelRefs: idListSchema,
@@ -31,7 +44,8 @@ export const spaceConfigSchema = z.object({
 }).strict();
 
 export type SpaceConfig = z.output<typeof spaceConfigSchema>;
-export type SpaceConfigInput = z.input<typeof spaceConfigSchema>;
+/** systemPrompt 仅用于兼容旧客户端输入，服务端会转换成完整 promptTemplate。 */
+export type SpaceConfigInput = z.input<typeof spaceConfigSchema> & { systemPrompt?: string };
 
 export interface SpaceSummary {
   id: string;
@@ -81,7 +95,7 @@ export interface SpaceDebugMcpServer {
 /** 对话页管理员调试区使用的当前空间配置视图，不包含密钥和运行时激活状态。 */
 export interface SpaceDebugView {
   configVersion: number;
-  systemPrompt: string;
+  promptTemplate: string;
   tools: SpaceDebugTool[];
   skills: SpaceDebugSkill[];
   mcpServers: SpaceDebugMcpServer[];

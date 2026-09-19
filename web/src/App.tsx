@@ -43,6 +43,7 @@ import { buildChatPath, buildSearchPath, currentBrowserPath, readChatRoute, type
 import { WorkspaceFileContextProvider } from './components/WorkspaceFileContext';
 import { useNotifications } from './components/GlobalNotifications';
 import { browserPushSupported, currentBrowserPushPermission, disableBrowserPush, enableBrowserPush, readBrowserPushState, type BrowserPushState } from './notifications';
+import { attachmentToken, parseFileTokens } from './messageInput';
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -69,6 +70,7 @@ const RIGHT_PANEL_TRANSITION_MS = 200;
 const MODEL_SELECTION_STORAGE_KEY = 'runforge:selected-model-ref';
 const LEGACY_MODEL_SELECTION_STORAGE_KEY = 'my-agent:selected-model-ref';
 const TITLE_REFRESH_DELAYS_MS = [0, 1000, 2000, 4000, 8000, 15000, 30000, 60000];
+const THREAD_LIST_REFRESH_INTERVAL_MS = 5000;
 const MOBILE_MEDIA_QUERY = '(max-width: 767px)';
 
 type ActiveView = 'chat' | 'search';
@@ -284,19 +286,6 @@ function beginSidebarResize(
 
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp, { once: true });
-}
-
-function attachmentToken(att: ComposerAttachment): string {
-  if (att.kind === 'shell') {
-    return att.text ?? `用户标记了 shell 交互：${att.name}`;
-  }
-  const payload = {
-    kind: att.kind,
-    path: att.path,
-    name: att.name,
-    ...(att.size != null ? { size: att.size } : {}),
-  };
-  return `[[file:${JSON.stringify(payload)}]]`;
 }
 
 function defaultAskSpec(question: string): AskUserSpec {
@@ -561,13 +550,35 @@ export function App() {
   }, []);
 
   const refreshThreads = useCallback(() => {
-    if (!route.spaceId) {
+    const spaceId = route.spaceId;
+    if (!spaceId) {
       setThreads([]);
       return;
     }
-    listThreads({ spaceId: route.spaceId }).then(setThreads).catch(() => setThreads([]));
+    void listThreads({ spaceId })
+      .then((next) => {
+        if (spaceIdRef.current === spaceId) setThreads(next);
+      })
+      .catch((error) => console.error('refresh thread list failed', error));
   }, [route.spaceId]);
-  useEffect(refreshThreads, [refreshThreads]);
+  useEffect(() => {
+    setThreads([]);
+    refreshThreads();
+  }, [refreshThreads]);
+
+  useEffect(() => {
+    const refreshVisibleList = () => {
+      if (document.visibilityState === 'visible') refreshThreads();
+    };
+    const interval = window.setInterval(refreshVisibleList, THREAD_LIST_REFRESH_INTERVAL_MS);
+    window.addEventListener('focus', refreshVisibleList);
+    document.addEventListener('visibilitychange', refreshVisibleList);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', refreshVisibleList);
+      document.removeEventListener('visibilitychange', refreshVisibleList);
+    };
+  }, [refreshThreads]);
 
   useEffect(() => {
     let canceled = false;
@@ -847,14 +858,16 @@ export function App() {
       onThreadCreated: (thread) => {
         setThreads((current) => [thread, ...current.filter((item) => item.id !== thread.id)]);
       },
+      onRunStarted: refreshThreads,
       onRunFinished: (threadId) => {
+        refreshThreads();
         refreshThreadTitleAfterRun(threadId);
         // Debug 原始载荷和最终 collapsed 状态来自持久化消息，run 收口后重载一次。
         setHistoryRevision((revision) => revision + 1);
       },
       setActiveRunId,
     }),
-    [navigateChatRoute, refreshThreadTitleAfterRun],
+    [navigateChatRoute, refreshThreadTitleAfterRun, refreshThreads],
   );
 
   const transport = useMemo(() => createAiSdkChatTransport(handle), [handle]);
@@ -936,7 +949,13 @@ export function App() {
               ? { ...current, spaceId: thread.space_id }
               : current
           ));
-          setThreads((current) => [thread, ...current.filter((item) => item.id !== thread.id)]);
+          setThreads((current) => {
+            const index = current.findIndex((item) => item.id === thread.id);
+            if (index < 0) return [...current, thread];
+            const next = [...current];
+            next[index] = thread;
+            return next;
+          });
           const branchRuns = activeBranchRuns(runs, thread.active_run_id);
           setMessages(runsToUiMessages(runs, thread.active_run_id, notices, context_messages, thread.space_id));
           setWaitingRun(readOnly ? null : waitingRunFrom(branchRuns));
@@ -1331,6 +1350,7 @@ export function App() {
   const switchRunBranch = useCallback((runId: string) => {
     if (!activeThreadId || busy) return;
     setEditingRunId(null);
+    setAttachments([]);
     draftRef.current = '';
     setComposerDraft('');
     rememberThreadDraftRef(activeThreadId, '');
@@ -1378,19 +1398,26 @@ export function App() {
 
   const editRunInput = useCallback((runId: string, currentText: string) => {
     if (busy) return;
-    setAttachments([]);
+    const parsed = parseFileTokens(currentText);
+    setAttachments(parsed.files.map((file) => ({
+      kind: file.kind === 'local' ? 'local' : 'remote',
+      path: file.path,
+      name: file.name || file.path,
+      size: file.size,
+    })));
     setEditingRunId(runId);
-    draftRef.current = currentText;
-    setComposerDraft(currentText);
+    draftRef.current = parsed.text;
+    setComposerDraft(parsed.text);
     if (activeThreadId) {
-      rememberThreadDraftRef(activeThreadId, currentText);
+      rememberThreadDraftRef(activeThreadId, parsed.text);
       scheduleThreadDraftSync();
     }
-    replaceDraftRouteLater(activeThreadId, currentText);
+    replaceDraftRouteLater(activeThreadId, parsed.text);
   }, [activeThreadId, busy, rememberThreadDraftRef, replaceDraftRouteLater, scheduleThreadDraftSync]);
 
   const cancelEditRunInput = useCallback(() => {
     setEditingRunId(null);
+    setAttachments([]);
     draftRef.current = '';
     setComposerDraft('');
     if (activeThreadId) {

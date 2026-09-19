@@ -20,12 +20,14 @@ import type { StreamdownProps } from 'streamdown';
 import { AskUserQuestionCard, emptyAskUserDraft, type AskUserDraft } from './AskUserCard';
 import type { AgentEvent, AskUserAnswer, AskUserSpec, GoalState, PlanItem, StreamStats } from '@/api';
 import type { RunBranchInfo, ThreadNoticeData } from '../history';
-import { SpaceDebugMessages } from './SpaceDebugMessages';
+import { SpaceDebugMessages, StepContextDetails } from './SpaceDebugMessages';
+import { StepContextDebugProvider, useStepContextDebug } from './StepContextDebug';
+import { Separator } from '@/components/ui/separator';
+import { parseFileTokens } from '../messageInput';
 
 type Part = UIMessage['parts'][number];
 type Timing = { startedAt?: string; endedAt?: string; durationMs?: number };
 type ActivityEntry = { part: Part; index: number };
-type FileToken = { kind?: string; path: string; name?: string; size?: number };
 
 const RELATIVE_PATH_RE = /(?:\.{1,2}\/)?(?:server|web|docs|src|uploads|tests)\/[A-Za-z0-9._~+/@:-]+/g;
 const FILE_LINK_PREFIX = 'runforge-file://';
@@ -846,23 +848,45 @@ function compactionTime(value: string): string {
   return time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-function ContextCompactionBlock({ data }: { data: CompactionEvent }) {
+function ContextCompactionBlock({ data, runId }: { data: CompactionEvent; runId: string | null }) {
   const [open, setOpen] = useState(false);
+  const [contextError, setContextError] = useState('');
   const affected = data.affected ?? [];
+  const { contexts, details, loadContext } = useStepContextDebug();
+  const occurredAt = Date.parse(data.occurredAt);
+  const nextContextSummary = contexts
+    .filter((context) => !runId || context.runId === runId)
+    .filter((context) => !Number.isFinite(occurredAt) || Date.parse(context.createdAt) >= occurredAt)
+    .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))[0] ?? null;
+  const nextContext = nextContextSummary ? details[nextContextSummary.stepId] ?? null : null;
+  useEffect(() => {
+    if (!open || !nextContextSummary || nextContext) return;
+    let canceled = false;
+    setContextError('');
+    void loadContext(nextContextSummary.stepId).catch((error: Error) => {
+      if (!canceled) setContextError(error.message);
+    });
+    return () => { canceled = true; };
+  }, [loadContext, nextContext, nextContextSummary, open]);
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="group/compaction not-prose w-full">
-      <CollapsibleTrigger className="flex h-6 w-full items-center gap-2 text-left text-sm text-muted-foreground transition-colors hover:text-foreground">
-        <PackageMinus className="size-4 shrink-0" />
-        <span className="min-w-0 truncate">上下文压缩 · Step {data.step}</span>
-        <span className="shrink-0 text-xs tabular-nums">{data.estBefore} → {data.estAfter} tokens</span>
-        {data.occurredAt && <span className="shrink-0 text-xs tabular-nums">{compactionTime(data.occurredAt)}</span>}
-        <ChevronDown className={cn('size-4 shrink-0 transition-transform', open && 'rotate-180')} />
+      <CollapsibleTrigger className="flex h-7 w-full items-center gap-2 text-xs text-muted-foreground transition-colors hover:text-foreground">
+        <Separator className="min-w-4 flex-1" />
+        <span className="inline-flex shrink-0 items-center gap-1.5">
+          <PackageMinus className="size-3.5" />
+          已压缩上下文
+          <ChevronDown className={cn('size-3.5 transition-transform', open && 'rotate-180')} />
+        </span>
+        <Separator className="min-w-4 flex-1" />
       </CollapsibleTrigger>
-      <CollapsibleContent className="mt-1 space-y-2 text-sm text-muted-foreground">
+      <CollapsibleContent className="mt-2 space-y-3 rounded-md border bg-muted/10 p-3 text-sm text-muted-foreground">
         <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+          <span>Step {data.step}</span>
+          <span>{data.estBefore} → {data.estAfter} tokens</span>
           <span>裁剪 {data.masked}</span>
           <span>摘要 {data.summarized}</span>
           <span>窗口移除 {data.dropped}</span>
+          {data.occurredAt && <span className="tabular-nums">{compactionTime(data.occurredAt)}</span>}
           {data.reason && <span className="break-all">触发原因：{data.reason}</span>}
         </div>
         {affected.length > 0 && (
@@ -887,6 +911,19 @@ function ContextCompactionBlock({ data }: { data: CompactionEvent }) {
             <div className="mb-1 text-xs font-medium text-foreground">压缩摘要</div>
             <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/50 px-2 py-1 text-xs">{data.summary}</pre>
           </div>
+        )}
+        {nextContext && (
+          <div>
+            <div className="mb-2 text-xs font-medium text-foreground">压缩后实际发送的提示词</div>
+            <StepContextDetails context={nextContext} />
+          </div>
+        )}
+        {contextError && <div className="text-xs text-destructive">读取压缩后提示词失败：{contextError}</div>}
+        {nextContextSummary && !nextContext && !contextError && (
+          <div className="text-xs text-muted-foreground">正在读取压缩后提示词…</div>
+        )}
+        {!nextContextSummary && (
+          <div className="text-xs text-muted-foreground">该次压缩后没有继续调用 Agent 模型。</div>
         )}
       </CollapsibleContent>
     </Collapsible>
@@ -967,7 +1004,7 @@ function AssistantPart({
     return null;
   }
   if (part.type === 'data-context-compaction') {
-    return <ContextCompactionBlock data={(part as { data: CompactionEvent }).data} />;
+    return <ContextCompactionBlock data={(part as { data: CompactionEvent }).data} runId={runId} />;
   }
   if (isToolPart(part)) {
     return (
@@ -1112,28 +1149,6 @@ function formatBytes(size?: number): string {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function parseFileTokens(text: string): { text: string; files: FileToken[] } {
-  const files: FileToken[] = [];
-  let clean = '';
-  let lastIndex = 0;
-  const tokenRe = /\[\[file:(\{.*?\})\]\]/g;
-
-  for (const match of text.matchAll(tokenRe)) {
-    clean += text.slice(lastIndex, match.index);
-    lastIndex = (match.index ?? 0) + match[0].length;
-    try {
-      const data = JSON.parse(match[1]) as Partial<FileToken>;
-      if (typeof data.path === 'string' && data.path.trim()) files.push(data as FileToken);
-      else clean += match[0];
-    } catch {
-      clean += match[0];
-    }
-  }
-  clean += text.slice(lastIndex);
-
-  return { text: clean.replace(/\n{3,}/g, '\n\n').trimEnd(), files };
-}
-
 function compactTocText(text: string): string {
   const compact = text.replace(/\s+/g, ' ').trim();
   return compact.length > 360 ? `${compact.slice(0, 360)}...` : compact;
@@ -1148,7 +1163,7 @@ function UserMessageText({ message, onOpenRemoteFile }: { message: UIMessage; on
   const parsed = parseFileTokens(userText(message));
   return (
     <div className="space-y-2">
-      {parsed.text && <div className="whitespace-pre-wrap">{parsed.text}</div>}
+      {parsed.text && <MarkdownContent text={parsed.text} streaming={false} />}
       {parsed.files.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {parsed.files.map((file, index) => (
@@ -1380,6 +1395,7 @@ export function Conversation({
   embedded = false,
   showToc = true,
   debugSpaceId = null,
+  debugThreadId = null,
   emptyTitle = 'RunForge',
   emptyDescription = '通用 AI Agent。描述一个任务，它会自主调用工具（shell、文件、glob/grep、web）逐步完成。',
 }: {
@@ -1401,6 +1417,7 @@ export function Conversation({
   embedded?: boolean;
   showToc?: boolean;
   debugSpaceId?: string | null;
+  debugThreadId?: string | null;
   emptyTitle?: string;
   emptyDescription?: string;
 }) {
@@ -1419,7 +1436,14 @@ export function Conversation({
       });
     }
   }
+  const contextRefreshKey = `${messages.length}:${messages[messages.length - 1]?.id ?? ''}`;
   return (
+    <StepContextDebugProvider
+      threadId={debugThreadId}
+      spaceId={debugSpaceId}
+      active={busy}
+      refreshKey={contextRefreshKey}
+    >
     <div className="relative flex h-full min-h-0">
       <AIConversation className="min-h-0 min-w-0 flex-1">
         <ConversationContent>
@@ -1430,7 +1454,7 @@ export function Conversation({
               embedded ? 'max-w-none gap-4 px-3 py-4' : wide ? 'max-w-5xl gap-8' : 'max-w-3xl gap-8',
             )}
           >
-            {debugSpaceId && <SpaceDebugMessages key={debugSpaceId} spaceId={debugSpaceId} />}
+            {debugSpaceId && messages.length > 0 && <SpaceDebugMessages key={debugSpaceId} spaceId={debugSpaceId} />}
             {messages.length === 0 ? (
               <ConversationEmptyState
                 icon={<Bot className="size-6" />}
@@ -1502,5 +1526,6 @@ export function Conversation({
       </AIConversation>
       {showToc && <TableOfContents contentRef={contentRef} />}
     </div>
+    </StepContextDebugProvider>
   );
 }

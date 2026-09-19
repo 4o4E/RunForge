@@ -5,12 +5,16 @@ import type {
   SpaceDebugSkill,
   SpaceDebugTool,
   SpaceDebugView,
+  StepContextMessage,
+  StepContextSnapshotSummary,
+  StepContextSnapshotView,
 } from '@runforge/contracts';
 import { ChevronDown } from 'lucide-react';
 import { getSpaceDebugMcpSchema, getSpaceDebugView } from '@/api';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Message, MessageContent } from '@/components/ai-elements/message';
 import { cn } from '@/lib/utils';
+import { useStepContextDebug } from '@/components/StepContextDebug';
 
 function ToolSchema({ tool }: { tool: SpaceDebugTool }) {
   const [open, setOpen] = useState(false);
@@ -63,6 +67,92 @@ function DebugSection({
         <CollapsibleContent className="border-t p-3">{children}</CollapsibleContent>
       </Collapsible>
     </DebugMessage>
+  );
+}
+
+function ContextMessage({ message, index }: { message: StepContextMessage; index: number }) {
+  return (
+    <div className="rounded-md border bg-background px-3 py-2">
+      <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <span className="font-mono font-medium text-foreground">{index + 1}. {message.role}</span>
+        {message.toolCallId && <span className="font-mono">toolCallId: {message.toolCallId}</span>}
+        {message.collapsed && <span>{message.collapsed === 'masked' ? '已动态裁剪' : '已摘要'}</span>}
+        {message.providerState && (
+          <span>推理状态 {message.providerState.reasoningParts} 段 / 加密内容 {message.providerState.encryptedChars} 字符</span>
+        )}
+      </div>
+      {message.content != null && (
+        <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-foreground">
+          {message.content || '（空内容）'}
+        </pre>
+      )}
+      {message.contentParts?.length ? (
+        <div className="mt-2 grid gap-1 text-xs text-muted-foreground">
+          {message.contentParts.map((part, partIndex) => (
+            <div key={`${part.type}:${partIndex}`} className="rounded bg-muted/40 px-2 py-1">
+              {part.type === 'text'
+                ? part.text
+                : `图片 · ${part.name || part.path || '未命名'} · ${part.mimeType || '未知类型'}`}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {message.toolCalls?.length ? (
+        <div className="mt-2 grid gap-1">
+          {message.toolCalls.map((call) => (
+            <pre key={call.id} className="overflow-auto whitespace-pre-wrap break-words rounded bg-muted/40 px-2 py-1 font-mono text-xs">
+              {`${call.name} · ${call.id}\n${call.arguments}`}
+            </pre>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function StepContextDetails({ context }: { context: StepContextSnapshotView }) {
+  return (
+    <div className="grid gap-2">
+      {context.messages.map((message, index) => (
+        <ContextMessage key={`${index}:${message.role}:${message.toolCallId ?? ''}`} message={message} index={index} />
+      ))}
+      {!context.messages.length && <div className="text-xs text-muted-foreground">该次调用没有消息。</div>}
+    </div>
+  );
+}
+
+function ContextSnapshotItem({ context }: { context: StepContextSnapshotSummary }) {
+  const [open, setOpen] = useState(false);
+  const { details, loadContext } = useStepContextDebug();
+  const detail = details[context.stepId] ?? null;
+  const [error, setError] = useState('');
+  useEffect(() => {
+    if (!open || detail) return;
+    let canceled = false;
+    setError('');
+    void loadContext(context.stepId).catch((requestError: Error) => {
+      if (!canceled) setError(requestError.message);
+    });
+    return () => { canceled = true; };
+  }, [context.stepId, detail, loadContext, open]);
+  const time = new Date(context.createdAt);
+  const timeLabel = Number.isFinite(time.getTime())
+    ? time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    : '';
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} className="rounded-md border bg-background">
+      <CollapsibleTrigger className="flex w-full items-center gap-2 px-3 py-2 text-left">
+        <ChevronDown className={cn('size-4 shrink-0 transition-transform', open && 'rotate-180')} />
+        <span className="min-w-0 flex-1 text-xs font-medium">Step {context.step} · {context.messageCount} 条消息</span>
+        <span className="shrink-0 text-xs text-muted-foreground">{context.toolCount} 个工具</span>
+        {timeLabel && <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{timeLabel}</span>}
+      </CollapsibleTrigger>
+      <CollapsibleContent className="border-t p-3">
+        {error && <div className="text-xs text-destructive">读取提示词失败：{error}</div>}
+        {!error && !detail && <div className="text-xs text-muted-foreground">正在读取提示词…</div>}
+        {detail && <StepContextDetails context={detail} />}
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 
@@ -136,6 +226,7 @@ function McpItem({ spaceId, server }: { spaceId: string; server: SpaceDebugMcpSe
 export function SpaceDebugMessages({ spaceId }: { spaceId: string }) {
   const [view, setView] = useState<SpaceDebugView | null>(null);
   const [error, setError] = useState('');
+  const stepContexts = useStepContextDebug();
 
   useEffect(() => {
     let canceled = false;
@@ -167,10 +258,16 @@ export function SpaceDebugMessages({ spaceId }: { spaceId: string }) {
           : <div className="text-xs text-muted-foreground">当前空间没有配置工具。</div>}
       </DebugSection>
 
-      <DebugSection title="系统提示词">
-        <pre className="max-h-96 overflow-auto whitespace-pre-wrap font-sans text-sm text-foreground">
-          {view.systemPrompt || '未配置'}
-        </pre>
+      <DebugSection title="实际提示词" description={`${stepContexts.contexts.length} 次 Agent 模型调用`}>
+        {stepContexts.loading && !stepContexts.contexts.length && (
+          <div className="text-xs text-muted-foreground">正在读取实际提示词…</div>
+        )}
+        {stepContexts.error && <div className="text-xs text-destructive">读取实际提示词失败：{stepContexts.error}</div>}
+        {stepContexts.contexts.length
+          ? <div className="grid gap-2">{stepContexts.contexts.map((context) => <ContextSnapshotItem key={context.stepId} context={context} />)}</div>
+          : !stepContexts.loading && !stepContexts.error
+            ? <div className="text-xs text-muted-foreground">当前活动分支尚未调用 Agent 模型。</div>
+            : null}
       </DebugSection>
 
       <DebugSection title="Skill" description={`${view.skills.length} 个当前空间 Skill`}>

@@ -17,7 +17,7 @@ import { systemApi } from './system.js';
 import { sendSpaceError, tenantSpacesApi } from './spaces.js';
 import { requireSystemScope, requireTenantScope } from '../auth/guards.js';
 import { getIdentity, requireScope, type IdentityContext } from '../auth/context.js';
-import type { Scope, ShellSessionRow } from '../store/types.js';
+import type { Scope, ShellSessionRow, StepContextSnapshot } from '../store/types.js';
 import { releaseRunLeases } from '../datasources/accountPool.js';
 import type { AskUserAnswer, AskUserOption, AskUserSpec } from '../agent/types.js';
 import { shellManager } from '../shell/manager.js';
@@ -194,6 +194,31 @@ function encryptedReasoningStats(providerState: LlmProviderState | undefined): {
   return { count: encrypted.length, chars: encrypted.reduce((sum, value) => sum + value.length, 0) };
 }
 
+function stepContextMessageView(message: StepContextSnapshot['messages'][number]) {
+  const encrypted = encryptedReasoningStats(message.providerState);
+  return {
+    role: message.role,
+    content: message.content,
+    contentParts: message.contentParts?.map((part) => part.type === 'text'
+      ? { type: 'text' as const, text: part.text }
+      : {
+          type: 'image' as const,
+          mimeType: part.mimeType,
+          path: part.path,
+          name: part.name,
+        }),
+    toolCalls: message.toolCalls,
+    toolCallId: message.toolCallId,
+    collapsed: message.collapsed,
+    providerState: encrypted.count || message.providerState?.reasoningParts?.length
+      ? {
+          reasoningParts: message.providerState?.reasoningParts?.length ?? 0,
+          encryptedChars: encrypted.chars,
+        }
+      : undefined,
+  };
+}
+
 api.get('/search', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
@@ -256,10 +281,80 @@ api.get('/threads', async (req, res) => {
   }
 });
 
+// 管理员查看当前活动分支每个 step 实际固定的模型上下文。
+api.get('/threads/:id/context-snapshots', async (req, res) => {
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
+  if (identity.role !== 'owner' && identity.role !== 'admin') {
+    return res.status(403).json({ error: '需要租户管理员权限' });
+  }
+  let access;
+  try {
+    access = await threadReadAccess.resolve(identity, req.params.id, optionalText(req.query.spaceId));
+  } catch (error) {
+    sendThreadReadError(res, error);
+    return;
+  }
+  const rows = await store.listStepContextSummaries(
+    access.executionScope,
+    access.thread.id,
+    { runId: access.thread.active_run_id },
+  );
+  res.json({
+    threadId: access.thread.id,
+    activeRunId: access.thread.active_run_id,
+    contexts: rows.map((row) => ({
+      stepId: row.id,
+      runId: row.run_id,
+      step: row.idx,
+      messageCount: row.message_count,
+      toolCount: row.tool_count,
+      createdAt: row.captured_at,
+    })),
+  });
+});
+
+api.get('/threads/:id/context-snapshots/:stepId', async (req, res) => {
+  const identity = tenantIdentityOrReject(res);
+  if (!identity) return;
+  if (identity.role !== 'owner' && identity.role !== 'admin') {
+    return res.status(403).json({ error: '需要租户管理员权限' });
+  }
+  let access;
+  try {
+    access = await threadReadAccess.resolve(identity, req.params.id, optionalText(req.query.spaceId));
+  } catch (error) {
+    sendThreadReadError(res, error);
+    return;
+  }
+  const row = await store.getStepContext(
+    access.executionScope,
+    access.thread.id,
+    req.params.stepId,
+    { runId: access.thread.active_run_id },
+  );
+  const snapshot = row?.context_snapshot;
+  if (!row || !snapshot) return res.status(404).json({ error: 'step 上下文不存在' });
+  res.json({
+    stepId: row.id,
+    runId: row.run_id,
+    step: row.idx,
+    messageCount: snapshot.messages.length,
+    toolCount: snapshot.tools.length,
+    messages: snapshot.messages.map(stepContextMessageView),
+    tools: snapshot.tools,
+    createdAt: snapshot.capturedAt,
+  });
+});
+
 // thread 详情：包含 run 和事件，用于恢复对话。
 api.get('/threads/:id', async (req, res) => {
   const identity = tenantIdentityOrReject(res);
   if (!identity) return;
+  const debug = req.query.debug === '1' || req.query.debug === 'true';
+  if (debug && identity.role !== 'owner' && identity.role !== 'admin') {
+    return res.status(403).json({ error: '需要租户管理员权限' });
+  }
   let access;
   try {
     access = await threadReadAccess.resolve(identity, req.params.id, optionalText(req.query.spaceId));
@@ -272,7 +367,6 @@ api.get('/threads/:id', async (req, res) => {
   const withEvents = await Promise.all(
     runs.map(async (run) => ({ ...run, events: await store.getEvents(scope, run.id) })),
   );
-  const debug = req.query.debug === '1' || req.query.debug === 'true';
   const contextMessages = debug
     ? (await store.loadRawThreadMessages(scope, thread.id)).map((message) => {
         const encrypted = encryptedReasoningStats(message.providerState);

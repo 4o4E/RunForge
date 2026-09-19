@@ -15,6 +15,7 @@ import { LlmProviderSettingsPanel, McpServerSettingsPanel } from './settings/Pro
 import { RuntimeCapabilitySettingsPanel } from './settings/RuntimeCapabilitySettingsPanel';
 import { createSystemDatasourceControlApi, createSystemSettingsControlApi } from '../controlApi';
 import { SpaceManagementPanel } from '@/components/spaces/SpaceManagementPanel';
+import { SpacePromptManagementPage } from '@/components/spaces/SpacePromptManagementPage';
 import { createSystemSpaceControlApi } from '@/spaceControlApi';
 import { BusinessPluginManagementPanel } from '@/components/businessPlugins/BusinessPluginManagementPanel';
 import { createSystemBusinessPluginControlApi } from '@/businessPluginControlApi';
@@ -34,6 +35,7 @@ type SysAdminRoute =
   | { page: 'admins' }
   | { page: 'access'; tenantId: string | null }
   | { page: 'tenant'; tenantId: string; section: TenantSection }
+  | { page: 'prompt'; tenantId: string; spaceId: string }
   | { page: 'settings'; section: SystemSection };
 
 const TENANT_SECTIONS = new Set<TenantSection>(['users', 'spaces', 'business-plugins']);
@@ -74,6 +76,9 @@ function parseSysAdminRoute(pathname: string, search: string): SysAdminRoute {
   if (segments[1] === 'tenant-access') {
     return { page: 'access', tenantId: new URLSearchParams(search).get('tenant') };
   }
+  if (segments[1] === 'tenants' && segments[2] && segments[3] === 'spaces' && segments[4] && segments[5] === 'prompt') {
+    return { page: 'prompt', tenantId: segments[2], spaceId: segments[4] };
+  }
   if (segments[1] === 'tenants' && segments[2]) {
     return {
       page: 'tenant',
@@ -95,6 +100,9 @@ function sysAdminRoutePath(route: SysAdminRoute): string {
   if (route.page === 'tenant') {
     return `/sys-admin/tenants/${encodeURIComponent(route.tenantId)}/${route.section}`;
   }
+  if (route.page === 'prompt') {
+    return `/sys-admin/tenants/${encodeURIComponent(route.tenantId)}/spaces/${encodeURIComponent(route.spaceId)}/prompt`;
+  }
   if (route.page === 'settings') return `/sys-admin/settings/${route.section}`;
   return '/sys-admin/tenants';
 }
@@ -105,7 +113,9 @@ export function SysAdminApp() {
   ));
   const [tenants, setTenants] = useState<TenantSummary[]>([]);
   const [tenantError, setTenantError] = useState('');
-  const tenantId = route.page === 'tenant' || route.page === 'access' ? route.tenantId ?? '' : '';
+  const tenantId = route.page === 'tenant' || route.page === 'access' || route.page === 'prompt'
+    ? route.tenantId ?? ''
+    : '';
   const selectedTenant = tenants.find((tenant) => tenant.id === tenantId);
 
   const navigate = useCallback((next: SysAdminRoute, replace = false) => {
@@ -127,7 +137,7 @@ export function SysAdminApp() {
   }, []);
 
   useEffect(() => {
-    if ((route.page !== 'tenant' && route.page !== 'access') || tenants.length > 0) return;
+    if ((route.page !== 'tenant' && route.page !== 'access' && route.page !== 'prompt') || tenants.length > 0) return;
     listSystemTenants()
       .then(({ tenants: rows }) => {
         setTenants(rows);
@@ -164,6 +174,7 @@ export function SysAdminApp() {
   }
 
   function headerTitle(): string {
+    if (route.page === 'prompt') return '提示词管理';
     if (route.page === 'tenant') return selectedTenant?.name ?? '租户详情';
     if (route.page === 'access') return '租户授权';
     if (route.page === 'admins') return '系统管理员';
@@ -172,6 +183,9 @@ export function SysAdminApp() {
   }
 
   function headerDescription(): string {
+    if (route.page === 'prompt') return selectedTenant
+      ? `管理租户 ${selectedTenant.id} 的空间提示词`
+      : '读取租户详情';
     if (route.page === 'tenant') return selectedTenant
       ? `管理租户 ${selectedTenant.id} 的用户、空间和业务插件`
       : '读取租户详情';
@@ -188,11 +202,12 @@ export function SysAdminApp() {
           <p className="mt-1 text-sm text-muted-foreground">{headerDescription()}</p>
         </div>
         <div className="flex items-center gap-2">
-          {(route.page === 'tenant' || route.page === 'access') && tenants.length > 0 && (
+          {(route.page === 'tenant' || route.page === 'access' || route.page === 'prompt') && tenants.length > 0 && (
             <Select
               value={tenantId}
               onValueChange={(value) => {
                 if (route.page === 'tenant') openTenant(value, route.section);
+                else if (route.page === 'prompt') openTenant(value, 'spaces');
                 else navigate({ page: 'access', tenantId: value });
               }}
             >
@@ -257,11 +272,11 @@ export function SysAdminApp() {
               <SectionButton active={route.page === 'settings' && route.section === 'datasource-leases'} icon={<Database className="h-4 w-4" />} onClick={() => navigate({ page: 'settings', section: 'datasource-leases' })}>租约</SectionButton>
             </NavGroup>
 
-            {route.page === 'tenant' && selectedTenant && (
+            {(route.page === 'tenant' || route.page === 'prompt') && selectedTenant && (
               <NavGroup label={selectedTenant.name}>
-                <SectionButton active={route.section === 'users'} icon={<Users className="h-4 w-4" />} onClick={() => openTenant(tenantId, 'users')}>用户</SectionButton>
-                <SectionButton active={route.section === 'spaces'} icon={<Layers3 className="h-4 w-4" />} onClick={() => openTenant(tenantId, 'spaces')}>空间</SectionButton>
-                <SectionButton active={route.section === 'business-plugins'} icon={<Package className="h-4 w-4" />} onClick={() => openTenant(tenantId, 'business-plugins')}>业务插件</SectionButton>
+                <SectionButton active={route.page === 'tenant' && route.section === 'users'} icon={<Users className="h-4 w-4" />} onClick={() => openTenant(tenantId, 'users')}>用户</SectionButton>
+                <SectionButton active={route.page === 'prompt' || (route.page === 'tenant' && route.section === 'spaces')} icon={<Layers3 className="h-4 w-4" />} onClick={() => openTenant(tenantId, 'spaces')}>空间</SectionButton>
+                <SectionButton active={route.page === 'tenant' && route.section === 'business-plugins'} icon={<Package className="h-4 w-4" />} onClick={() => openTenant(tenantId, 'business-plugins')}>业务插件</SectionButton>
               </NavGroup>
             )}
           </CardContent>
@@ -282,17 +297,29 @@ export function SysAdminApp() {
           {route.page === 'settings' && route.section.startsWith('datasource-') && (
             <DatasourceSettingsPanel controlApi={datasourceControlApi} page={route.section as DatasourceSettingsPage} />
           )}
-          {route.page === 'tenant' && !tenantError && tenants.length > 0 && !selectedTenant && (
+          {(route.page === 'tenant' || route.page === 'prompt') && !tenantError && tenants.length > 0 && !selectedTenant && (
             <div className="flex h-full items-center justify-center rounded-lg border border-dashed text-sm text-destructive">租户 {tenantId} 不存在</div>
           )}
           {route.page === 'tenant' && selectedTenant && route.section === 'users' && tenantUsersControlApi && (
             <TenantUsersPanel key={`${tenantId}:users`} api={tenantUsersControlApi} actor={{ kind: 'system' }} />
           )}
           {route.page === 'tenant' && selectedTenant && route.section === 'spaces' && spaceControlApi && (
-            <SpaceManagementPanel key={`${tenantId}:spaces`} api={spaceControlApi} />
+            <SpaceManagementPanel
+              key={`${tenantId}:spaces`}
+              api={spaceControlApi}
+              onManagePrompt={(spaceId) => navigate({ page: 'prompt', tenantId, spaceId })}
+            />
           )}
           {route.page === 'tenant' && selectedTenant && route.section === 'business-plugins' && businessPluginControlApi && (
             <BusinessPluginManagementPanel key={`${tenantId}:business-plugins`} api={businessPluginControlApi} />
+          )}
+          {route.page === 'prompt' && selectedTenant && spaceControlApi && (
+            <SpacePromptManagementPage
+              key={`${tenantId}:${route.spaceId}`}
+              api={spaceControlApi}
+              spaceId={route.spaceId}
+              onBack={() => openTenant(tenantId, 'spaces')}
+            />
           )}
         </div>
       </div>

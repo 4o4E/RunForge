@@ -113,11 +113,13 @@ export interface LlmModelOption {
 
 export interface LlmSettings {
   defaultModelRef: string;
+  titleModelRef: string;
   providers: LlmProviderSettings[];
 }
 
 export interface LlmSettingsOptions {
   defaultModelRef: string;
+  titleModelRef: string;
   models: LlmModelOption[];
 }
 

@@ -122,11 +122,15 @@ test('executeRun: update_plan persists the goal anchor on the run', async () => 
   const run = await store.createRun(scope, thread.id, 'analyze the project');
 
   let turn = 0;
+  let firstMessages: Parameters<Provider['completeStream']>[0] = [];
+  let secondMessages: Parameters<Provider['completeStream']>[0] = [];
+  let thirdMessages: Parameters<Provider['completeStream']>[0] = [];
   const provider: Provider = {
     name: 'scripted',
-    async completeStream() {
+    async completeStream(messages) {
       turn += 1;
       if (turn === 1) {
+        firstMessages = structuredClone(messages);
         return {
           content: null,
           toolCalls: [{
@@ -141,6 +145,7 @@ test('executeRun: update_plan persists the goal anchor on the run', async () => 
         };
       }
       if (turn === 2) {
+        secondMessages = structuredClone(messages);
         return {
           content: 'done',
           toolCalls: [
@@ -156,6 +161,7 @@ test('executeRun: update_plan persists the goal anchor on the run', async () => 
           ],
         };
       }
+      thirdMessages = structuredClone(messages);
       return { content: 'done', toolCalls: [] };
     },
   };
@@ -171,6 +177,12 @@ test('executeRun: update_plan persists the goal anchor on the run', async () => 
   assert.deepEqual(goal!.plan, [{ text: 'read files', status: 'done' }]);
   assert.deepEqual(goal!.decisions, ['focus on server/']);
   assert.equal(goal!.next, '已完成');
+  assert.equal(firstMessages.some((message) => (message.content ?? '').includes('## 当前目标')), false);
+  assert.equal(firstMessages.find((message) => message.role === 'user')?.content, 'analyze the project');
+  assert.match(secondMessages.find((message) => message.toolCallId === 'p1')?.content ?? '', /意图：analyze the project/);
+  assert.match(secondMessages.find((message) => message.toolCallId === 'p1')?.content ?? '', /read files/);
+  assert.equal(thirdMessages.find((message) => message.toolCallId === 'p1')?.content, '这次 Goal 更新已被后续完整 Goal 状态取代。');
+  assert.match(thirdMessages.find((message) => message.toolCallId === 'p2')?.content ?? '', /阶段：reporting/);
 });
 
 test('executeRun: final report wins over an unsettled plan', async () => {

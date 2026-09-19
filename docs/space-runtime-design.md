@@ -36,7 +36,7 @@ space 归属于 tenant，是一套可动态更新的运行配置和权限边界�
 
 空间配置包含：
 
-- 基础系统提示词和可信调用方提示词策略。
+- 完整系统提示词模板和可信调用方提示词策略。
 - 模型、模型参数和上下文预算。
 - 允许使用的 Cordis 插件、skill、MCP、工具和运行时能力。
 - 页面展示模式、外部调用权限和 `next_step` 策略。
@@ -45,6 +45,23 @@ space 归属于 tenant，是一套可动态更新的运行配置和权限边界�
 空间配置直接更新并递增 `config_version`，thread 不固定空间配置版本。每个 run 在创建事务
 中保存当时的完整有效配置副本；run 进入任何非终态后，重启恢复、回答、继续生成都使用该
 副本。下一次新 run 自动读取空间的最新配置。
+
+#### 系统提示词模板
+
+空间保存一个完整的 `promptTemplate` 字符串。创建空间时按空间模式复制默认内容，保存后由空间
+独立维护。管理员直接编辑完整模板，不使用模板列表、提示词分块、启用状态或顺序配置。
+
+模板可以引用受控动态值，例如 workspace 路径、沙箱设置、Workflow/Skill/MCP 目录、运行资源
+和外部可信指令。保存配置时拒绝未知或格式错误的占位符。管理接口返回完整占位符目录及当前
+空间对应的内容；前端完成替换并实时展示预览。Workflow 和 Skill 的管理预览读取当前内置目录
+以及空间选择的业务插件目录，实际运行使用该 run 工作区中加载完成的真实目录。
+
+已发布旧配置中的 `systemPrompt` 会与对应模式的默认内容组合成完整模板，转换后保存为单一模板。
+
+Skill 和 MCP 的可用目录通过对应 system 块进入上下文，用户消息保持原始内容。Skill/MCP 激活
+状态由历史工具调用、工具结果和当前 Tool Schema 表达，不增加独立的激活状态 system 消息。
+Goal 由 `update_plan` 的完整工具结果表达，普通请求不增加 Goal system 消息；触发上下文摘要时，
+最新 Goal 写入摘要。
 
 ### 2.2 Default Space
 
@@ -145,7 +162,7 @@ Token hash 反查 caller、tenant、space 和权限。
 
 操作语义固定为：
 
-- `run.create`：创建新 thread 和首个 run。
+- `run.create`：创建新 thread 和首个 run；`title` 必填并由调用方维护，外部 thread 不执行模型标题生成。
 - `run.append`：向已有 thread 创建下一 run；如果指定 `delivery=next_step`，则改为向当前
   活动 run 持久化待注入输入。
 - `run.get`：读取 caller 有权访问的 run、状态和结果。
@@ -478,7 +495,7 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
 
 ### 阶段 3：配置、权限和内部能力
 
-- 实现 tenant 模板复制、空间配置校验和 run 快照。
+- 实现 tenant 模板复制、空间配置校验、提示词模板预览和 run 快照。
 - 实现 `SpaceAccessService`，拆开执行归属与查看权限。
 - 实现 Cordis 插件依赖解析、动态能力 registry、SecretService 和 workload token 授权。
 

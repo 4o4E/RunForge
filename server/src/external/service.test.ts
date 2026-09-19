@@ -11,6 +11,7 @@ import { FileExternalArtifactStorage } from './artifactStorage.js';
 import { ExternalArtifactMaterializer } from './artifactMaterializer.js';
 import { attachExternalArtifactTokens, externalArtifactRemotePath } from './artifactProtocol.js';
 import { createSpaceRuntimeLock } from '../plugins/lock.js';
+import { defaultPromptTemplate } from '../spaces/prompt.js';
 
 const uuidToken = '123e4567-e89b-42d3-a456-426614174000';
 const space: SpaceWithVisibilityRow = {
@@ -78,10 +79,10 @@ const resolvedConfig = {
   configVersion: 3,
   modelRef: 'main:model-a',
   snapshot: {
-    schemaVersion: 1 as const,
+    schemaVersion: 3 as const,
     spaceId: space.id,
     mode: 'external' as const,
-    systemPrompt: 'space prompt',
+    promptTemplate: defaultPromptTemplate('external', 'space prompt'),
     model: {
       modelRef: 'main:model-a',
       allowedModelRefs: ['main:model-a'],
@@ -105,6 +106,27 @@ const resolvedConfig = {
     plugins: [],
   }),
 };
+
+test('external command: run.create 必须由调用方提供标题', async () => {
+  const service = new ExternalCommandService(
+    fakeRepository({}),
+    () => {},
+    async () => {},
+    { resolveForRun: async () => structuredClone(resolvedConfig) },
+  );
+  await assert.rejects(
+    service.execute(uuidToken, {
+      operation: 'run.create',
+      idempotencyKey: 'missing-title',
+      input: '执行任务',
+      source: {},
+    }),
+    (error: unknown) => error instanceof ExternalApiError
+      && error.status === 400
+      && error.code === 'INVALID_REQUEST'
+      && /title/.test(error.message),
+  );
+});
 
 test('external command: run.create 固化可信提示词，只启动一次 executor', async () => {
   const started: Array<{ runId: string; userId: string }> = [];
@@ -130,6 +152,7 @@ test('external command: run.create 固化可信提示词，只启动一次 execu
   const response = await service.execute(uuidToken, {
     operation: 'run.create',
     idempotencyKey: 'create-1',
+    title: '执行任务',
     input: '执行任务',
     artifactIds: ['ar_input'],
     trustedPrompt: '只返回机器可读结果',
@@ -160,7 +183,7 @@ test('external command: 幂等键不进入请求 hash，重放回执不会再次
     async () => {},
     { resolveForRun: async () => structuredClone(resolvedConfig) },
   );
-  const request = { operation: 'run.create', input: 'same', source: { externalEventId: 'event-1' } } as const;
+  const request = { operation: 'run.create', title: '相同任务', input: 'same', source: { externalEventId: 'event-1' } } as const;
   await service.execute(uuidToken, { ...request, idempotencyKey: 'key-1' });
   await service.execute(uuidToken, { ...request, idempotencyKey: 'key-2' });
   assert.equal(hashes[0], hashes[1]);

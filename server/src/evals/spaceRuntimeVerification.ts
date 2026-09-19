@@ -284,6 +284,7 @@ try {
 
   const createA = {
     operation: 'run.create' as const,
+    title: '空间运行时验证',
     idempotencyKey: 'run-a-v1',
     input: 'APP_A_INITIAL_INPUT',
     trustedPrompt: 'APP_A_TRUSTED_V1',
@@ -309,6 +310,7 @@ try {
 
   const runB = await externalCommands.execute(tokenB, {
     operation: 'run.create',
+    title: '空间运行时重放验证',
     idempotencyKey: 'run-b-v1',
     input: 'APP_B_INITIAL_INPUT',
     trustedPrompt: 'APP_B_TRUSTED',

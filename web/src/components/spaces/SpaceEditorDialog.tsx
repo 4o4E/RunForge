@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import type {
   CreateSpaceInput,
   RuntimeCapabilityName,
+  SpaceConfigInput,
   SpaceMode,
   SpaceOptions,
   SpaceSummary,
@@ -14,14 +15,12 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
-import { Textarea } from '@/components/ui/textarea';
 
 interface Draft {
   name: string;
   mode: SpaceMode;
   executionUserId: string;
   visibleUserIds: string[];
-  systemPrompt: string;
   defaultModelRef: string;
   contextBudget: string;
   allowedModelRefs: string[];
@@ -51,7 +50,6 @@ function initialDraft(space: SpaceSummary | null, options: SpaceOptions | null):
     mode: space?.mode ?? 'web',
     executionUserId: space?.executionUserId ?? '',
     visibleUserIds: space?.visibleUserIds ?? [],
-    systemPrompt: config?.systemPrompt ?? '',
     defaultModelRef: config?.model.defaultModelRef ?? options?.defaultModelRef ?? options?.models[0]?.ref ?? '',
     contextBudget: config?.model.contextBudget == null ? '' : String(config.model.contextBudget),
     allowedModelRefs: config?.model.allowedModelRefs ?? options?.models.map((model) => model.ref) ?? [],
@@ -181,12 +179,10 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
     && unavailableRuntime.length === 0
     && !saving;
 
-  function submit() {
-    if (!canSave) return;
+  function spaceConfig(): SpaceConfigInput {
     const contextBudget = draft.contextBudget.trim() ? Number(draft.contextBudget) : null;
-    const config = {
-      schemaVersion: 1 as const,
-      systemPrompt: draft.systemPrompt,
+    return {
+      schemaVersion: 3,
       model: {
         defaultModelRef: draft.defaultModelRef,
         allowedModelRefs: draft.allowedModelRefs,
@@ -203,6 +199,11 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
         allowNextStep: draft.mode === 'external' && draft.allowNextStep,
       },
     };
+  }
+
+  function submit() {
+    if (!canSave) return;
+    const config = spaceConfig();
     if (space) {
       onSave({
         name: draft.name.trim(),
@@ -245,7 +246,14 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
               <Select
                 value={draft.mode}
                 disabled={Boolean(space)}
-                onValueChange={(mode) => setDraft({ ...draft, mode: mode as SpaceMode, executionUserId: mode === 'web' ? '' : draft.executionUserId })}
+                onValueChange={(value) => {
+                  const mode = value as SpaceMode;
+                  setDraft({
+                    ...draft,
+                    mode,
+                    executionUserId: mode === 'web' ? '' : draft.executionUserId,
+                  });
+                }}
               >
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -282,16 +290,6 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
               onChange={(visibleUserIds) => setDraft({ ...draft, visibleUserIds })}
             />
           </div>
-
-          <label className="grid gap-1.5 text-sm">
-            <span className="font-medium">系统提示词</span>
-            <Textarea
-              className="min-h-28"
-              value={draft.systemPrompt}
-              onChange={(event) => setDraft({ ...draft, systemPrompt: event.target.value })}
-              placeholder="为空时不追加空间级提示词"
-            />
-          </label>
 
           <CapabilitySection
             label="主 Agent 模型"

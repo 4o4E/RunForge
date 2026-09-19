@@ -44,12 +44,12 @@ export interface ExternalRunWriteInput {
   idempotencyKey: string;
   input: string;
   artifactIds?: string[];
-  title?: string;
+  title: string;
   source: ExternalSource;
   snapshot: ExternalRunSnapshot;
 }
 
-export interface ExternalAppendRunInput extends ExternalRunWriteInput {
+export interface ExternalAppendRunInput extends Omit<ExternalRunWriteInput, 'title'> {
   threadId: string;
 }
 

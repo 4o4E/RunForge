@@ -414,6 +414,7 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const [draft, setDraft] = useState<LlmProviderSettings | null>(null);
   const [defaultDraft, setDefaultDraft] = useState<string | null>(null);
+  const [titleDraft, setTitleDraft] = useState<string | null>(null);
   const [customModel, setCustomModel] = useState('');
   const [busyAction, setBusyAction] = useState('');
   const [pendingDelete, setPendingDelete] = useState<number | null>(null);
@@ -442,6 +443,7 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
   const currentSettings = settings;
   const selected = currentSettings.providers[selectedIndex] ?? null;
   const editing = editIndex !== null && draft !== null;
+  const editingModelSelection = defaultDraft !== null || titleDraft !== null;
   const candidates = draft ? providerCandidates(draft) : [];
   const groupedCandidates = groupModels(candidates);
 
@@ -519,7 +521,8 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
     else providers[editIndex] = draft;
     const options = llmOptionsFromSettings({ ...currentSettings, providers });
     const defaultModelRef = options.some((option) => option.ref === currentSettings.defaultModelRef) ? currentSettings.defaultModelRef : options[0]?.ref ?? '';
-    const next = await saveSettings({ providers, defaultModelRef }, 'LLM 供应商已保存');
+    const titleModelRef = options.some((option) => option.ref === currentSettings.titleModelRef) ? currentSettings.titleModelRef : defaultModelRef;
+    const next = await saveSettings({ providers, defaultModelRef, titleModelRef }, 'LLM 供应商已保存');
     if (!next) return;
     setSelectedIndex(Math.min(editIndex, next.providers.length - 1));
     setEditIndex(null);
@@ -530,6 +533,12 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
     if (defaultDraft === null) return;
     const next = await saveSettings({ ...currentSettings, defaultModelRef: defaultDraft }, '默认模型已更新');
     if (next) setDefaultDraft(null);
+  }
+
+  async function saveTitleModel() {
+    if (titleDraft === null) return;
+    const next = await saveSettings({ ...currentSettings, titleModelRef: titleDraft }, '对话标题模型已更新');
+    if (next) setTitleDraft(null);
   }
 
   async function deleteSelected() {
@@ -544,7 +553,8 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
     const providers = currentSettings.providers.filter((_, index) => index !== selectedIndex);
     const options = llmOptionsFromSettings({ ...currentSettings, providers });
     const defaultModelRef = options.some((option) => option.ref === currentSettings.defaultModelRef) ? currentSettings.defaultModelRef : options[0]?.ref ?? '';
-    const next = await saveSettings({ providers, defaultModelRef }, 'LLM 供应商已删除');
+    const titleModelRef = options.some((option) => option.ref === currentSettings.titleModelRef) ? currentSettings.titleModelRef : defaultModelRef;
+    const next = await saveSettings({ providers, defaultModelRef, titleModelRef }, 'LLM 供应商已删除');
     if (!next) return;
     setSelectedIndex(Math.min(selectedIndex, next.providers.length - 1));
     setPendingDelete(null);
@@ -693,19 +703,31 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
     <PanelShell
       title="LLM 供应商"
       description="左侧选择供应商，默认查看摘要；只有编辑状态才加载完整配置表单"
-      actions={<Button onClick={() => void beginCreate()} disabled={editing || defaultDraft !== null || Boolean(busyAction)}><Plus className="h-4 w-4" />新增供应商</Button>}
+      actions={<Button onClick={() => void beginCreate()} disabled={editing || editingModelSelection || Boolean(busyAction)}><Plus className="h-4 w-4" />新增供应商</Button>}
     >
       <div className="grid h-full min-h-0 gap-4 xl:grid-rows-[auto_minmax(0,1fr)]">
         <Card className="rounded-lg shadow-sm">
           <CardContent className="flex items-center justify-between gap-4 p-4">
             <div className="min-w-0"><div className="text-xs text-muted-foreground">主 Agent 默认模型</div><div className="mt-1 truncate text-sm font-medium">{settings.defaultModelRef || '未设置'}</div></div>
             {defaultDraft === null ? (
-              <Button variant="outline" size="sm" onClick={() => setDefaultDraft(settings.defaultModelRef)} disabled={editing}><Pencil className="h-4 w-4" />更改</Button>
+              <Button variant="outline" size="sm" onClick={() => setDefaultDraft(settings.defaultModelRef)} disabled={editing || titleDraft !== null}><Pencil className="h-4 w-4" />更改</Button>
             ) : (
               <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
                 <div className="w-full max-w-md"><ModelSearchSelect value={defaultDraft} options={modelOptions} onChange={setDefaultDraft} /></div>
                 <Button variant="outline" size="sm" onClick={() => setDefaultDraft(null)}><X className="h-4 w-4" />取消</Button>
                 <Button size="sm" onClick={() => void saveDefaultModel()} disabled={busyAction === 'save'}><Save className="h-4 w-4" />保存</Button>
+              </div>
+            )}
+          </CardContent>
+          <CardContent className="flex items-center justify-between gap-4 border-t p-4">
+            <div className="min-w-0"><div className="text-xs text-muted-foreground">对话标题模型</div><div className="mt-1 truncate text-sm font-medium">{settings.titleModelRef || '未设置'}</div></div>
+            {titleDraft === null ? (
+              <Button variant="outline" size="sm" onClick={() => setTitleDraft(settings.titleModelRef)} disabled={editing || defaultDraft !== null}><Pencil className="h-4 w-4" />更改</Button>
+            ) : (
+              <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
+                <div className="w-full max-w-md"><ModelSearchSelect value={titleDraft} options={modelOptions} onChange={setTitleDraft} /></div>
+                <Button variant="outline" size="sm" onClick={() => setTitleDraft(null)}><X className="h-4 w-4" />取消</Button>
+                <Button size="sm" onClick={() => void saveTitleModel()} disabled={busyAction === 'save'}><Save className="h-4 w-4" />保存</Button>
               </div>
             )}
           </CardContent>
@@ -715,7 +737,7 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
             <button
               key={`${provider.id}-${index}`}
               type="button"
-              disabled={editing || defaultDraft !== null}
+              disabled={editing || editingModelSelection}
               onClick={() => { setSelectedIndex(index); setPendingDelete(null); }}
               className={cn('grid gap-1 rounded-md border p-3 text-left transition-colors', index === selectedIndex && !editing ? 'border-primary bg-primary/5' : 'hover:bg-accent/60')}
             >

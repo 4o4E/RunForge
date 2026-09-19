@@ -20,6 +20,7 @@ export interface ChatThreadHandle {
   getSelectedModelRef(): string;
   setThreadId(id: string): void;
   onThreadCreated(thread: Thread): void;
+  onRunStarted(threadId: string): void;
   onRunFinished(threadId: string): void;
   setActiveRunId(id: string | null): void;
 }
@@ -319,6 +320,7 @@ export function createAiSdkChatTransport(handle: ChatThreadHandle): ChatTranspor
 
       const { runId } = await legacyTransport.send(threadId, { text, modelRef: handle.getSelectedModelRef() });
       handle.setActiveRunId(runId);
+      handle.onRunStarted(threadId);
       return uiEventStreamToChunks(runId, abortSignal, legacyTransport.subscribe, () => handle.onRunFinished(threadId));
     },
 

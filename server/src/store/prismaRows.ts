@@ -17,6 +17,7 @@ import type {
   RunRow,
   SpaceRow,
   StepRow,
+  StepContextSnapshot,
   SystemAdminRow,
   SystemAdminTokenRow,
   TenantRow,
@@ -96,6 +97,7 @@ export function toStepRow(row: steps): StepRow {
     id: row.id,
     run_id: row.run_id,
     idx: row.idx,
+    context_snapshot: row.context_snapshot as unknown as StepContextSnapshot | null,
     created_at: timestamp(row.created_at)!,
   };
 }
