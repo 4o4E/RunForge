@@ -59,7 +59,7 @@ server.listen(config.port, config.host, () => {
     console.log(
       `   Tool sandbox: ${settings.sandbox}` +
         (settings.sandbox === 'enforce'
-          ? ` (workspace 基础目录: ${settings.workspaceRoot}; 默认空间按用户隔离，其他空间按 thread 隔离, shell: ${describeShellSandbox({
+          ? ` (workspace 基础目录: ${settings.workspaceRoot}; 所有空间按 space/thread 隔离, shell: ${describeShellSandbox({
               policyMode: settings.sandbox,
               backend: settings.sandboxBackend,
               workspaceRoot: settings.workspaceRoot,

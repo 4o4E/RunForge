@@ -216,7 +216,7 @@ export class BusinessPluginRegistry {
   private readonly currentByTenant = new Map<string, BusinessPluginDefinition[]>();
   private readonly deploymentsByTenant = new Map<string, Map<string, BusinessPluginDefinition>>();
   private readonly loadingByTenant = new Map<string, Promise<BusinessPluginDefinition[]>>();
-  private readonly importingByTenant = new Map<string, Promise<void>>();
+  private readonly mutatingByTenant = new Map<string, Promise<void>>();
 
   constructor(private readonly roots: readonly string[]) {}
 
@@ -235,8 +235,8 @@ export class BusinessPluginRegistry {
   }
 
   async reload(tenantId: string): Promise<BusinessPluginDefinition[]> {
-    const importing = this.importingByTenant.get(tenantId);
-    if (importing) await importing;
+    const mutating = this.mutatingByTenant.get(tenantId);
+    if (mutating) await mutating;
     return this.reloadIndex(tenantId);
   }
 
@@ -252,14 +252,39 @@ export class BusinessPluginRegistry {
     format: BusinessPluginArchiveFormat,
   ): Promise<BusinessPluginImportResult> {
     assertTenantDirectoryName(tenantId);
-    const previous = this.importingByTenant.get(tenantId) ?? Promise.resolve();
-    const pending = previous.then(() => this.installArchive(tenantId, archive, format));
+    return this.mutateTenant(tenantId, () => this.installArchive(tenantId, archive, format));
+  }
+
+  async uninstall<T = void>(
+    tenantId: string,
+    pluginId: string,
+    beforeRemove?: (
+      definition: BusinessPluginDefinition,
+      current: readonly BusinessPluginDefinition[],
+    ) => Promise<T>,
+  ): Promise<T | void> {
+    assertTenantDirectoryName(tenantId);
+    return this.mutateTenant(tenantId, async () => {
+      const current = await this.list(tenantId);
+      const definition = current.find((item) => item.manifest.id === pluginId);
+      if (!definition) {
+        throw new BusinessPluginError('BUSINESS_PLUGIN_NOT_READY', `业务插件不存在：${pluginId}`);
+      }
+      const result = await beforeRemove?.(definition, current);
+      await this.removeDeployment(tenantId, pluginId, current, definition);
+      return result;
+    });
+  }
+
+  async mutateTenant<T>(tenantId: string, mutation: () => Promise<T>): Promise<T> {
+    const previous = this.mutatingByTenant.get(tenantId) ?? Promise.resolve();
+    const pending = previous.then(mutation);
     const lock = pending.then(() => undefined, () => undefined);
-    this.importingByTenant.set(tenantId, lock);
+    this.mutatingByTenant.set(tenantId, lock);
     try {
       return await pending;
     } finally {
-      if (this.importingByTenant.get(tenantId) === lock) this.importingByTenant.delete(tenantId);
+      if (this.mutatingByTenant.get(tenantId) === lock) this.mutatingByTenant.delete(tenantId);
     }
   }
 
@@ -269,8 +294,23 @@ export class BusinessPluginRegistry {
     }
     await this.list(tenantId);
     const deployments = this.deploymentsByTenant.get(tenantId) ?? new Map();
-    return lock.plugins.map((plugin) => {
-      const definition = deployments.get(`${plugin.id}\u0000${plugin.version}\u0000${plugin.contentHash}`);
+    const tenantRoots = await tenantSourceRoots(this.roots, tenantId);
+    return Promise.all(lock.plugins.map(async (plugin) => {
+      let definition = deployments.get(`${plugin.id}\u0000${plugin.version}\u0000${plugin.contentHash}`);
+      if (!definition && plugin.id.startsWith('business.')) {
+        const manifestId = plugin.id.slice('business.'.length);
+        for (const tenantRoot of tenantRoots) {
+          const snapshotRoot = join(tenantRoot, '.runforge-snapshots', manifestId, plugin.contentHash, 'plugin');
+          if (!existsSync(snapshotRoot)) continue;
+          const candidate = await loadBusinessPlugin(snapshotRoot);
+          const version = candidate.manifest.version ?? `local-${candidate.contentHash.slice(0, 12)}`;
+          if (candidate.manifest.id === manifestId && candidate.contentHash === plugin.contentHash && version === plugin.version) {
+            definition = candidate;
+            deployments.set(deploymentKey(candidate), candidate);
+            break;
+          }
+        }
+      }
       if (!definition) {
         throw new BusinessPluginError(
           'BUSINESS_PLUGIN_NOT_READY',
@@ -278,7 +318,26 @@ export class BusinessPluginRegistry {
         );
       }
       return definition;
-    });
+    }));
+  }
+
+  private async removeDeployment(
+    tenantId: string,
+    pluginId: string,
+    current: readonly BusinessPluginDefinition[],
+    definition: BusinessPluginDefinition,
+  ): Promise<void> {
+    const tenantRoots = await tenantSourceRoots(this.roots, tenantId);
+    const ownsDeployment = tenantRoots.some((tenantRoot) => dirname(definition.root) === tenantRoot);
+    if (!ownsDeployment) {
+      throw new BusinessPluginError('BUSINESS_PLUGIN_PATH_INVALID', `业务插件目录不属于当前 tenant：${definition.root}`);
+    }
+
+    await rm(definition.root, { recursive: true, force: true });
+    this.currentByTenant.set(
+      tenantId,
+      current.filter((item) => item.manifest.id !== pluginId),
+    );
   }
 
   private async installArchive(

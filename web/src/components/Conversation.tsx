@@ -20,7 +20,7 @@ import type { StreamdownProps } from 'streamdown';
 import { AskUserQuestionCard, emptyAskUserDraft, type AskUserDraft } from './AskUserCard';
 import type { AgentEvent, AskUserAnswer, AskUserSpec, GoalState, PlanItem, StreamStats } from '@/api';
 import type { RunBranchInfo, ThreadNoticeData } from '../history';
-import { SpaceDebugMessages, StepContextDetails } from './SpaceDebugMessages';
+import { SpaceDebugMessages, StepContextDetails, SystemPromptMessage } from './SpaceDebugMessages';
 import { StepContextDebugProvider, useStepContextDebug } from './StepContextDebug';
 import { Separator } from '@/components/ui/separator';
 import { parseFileTokens } from '../messageInput';
@@ -1124,8 +1124,16 @@ function runIdFromAssistant(message: UIMessage | undefined): string | null {
 }
 
 function runIdForUser(messages: UIMessage[], index: number): string | null {
+  const marker = messages[index]?.parts.find((part) => part.type === 'data-run-user') as { data?: { runId?: string; primary?: boolean } } | undefined;
+  if (marker?.data?.primary === false) return null;
+  if (marker?.data?.runId) return marker.data.runId;
   const fromId = messages[index]?.id?.endsWith(':u') ? messages[index].id.slice(0, -2) : null;
   return fromId || runIdFromAssistant(messages[index + 1]);
+}
+
+function isPrimaryRunUser(message: UIMessage): boolean {
+  const marker = message.parts.find((part) => part.type === 'data-run-user') as { data?: { primary?: boolean } } | undefined;
+  return marker?.data?.primary !== false;
 }
 
 function branchInfoFromUser(message: UIMessage): RunBranchInfo | null {
@@ -1163,7 +1171,7 @@ function UserMessageText({ message, onOpenRemoteFile }: { message: UIMessage; on
   const parsed = parseFileTokens(userText(message));
   return (
     <div className="space-y-2">
-      {parsed.text && <MarkdownContent text={parsed.text} streaming={false} />}
+      {parsed.text && <MarkdownContent text={parsed.text} streaming={false} wrapCodeBlocks />}
       {parsed.files.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {parsed.files.map((file, index) => (
@@ -1205,6 +1213,7 @@ function UserMessageFooter({
   const text = userText(message);
   const time = messageTime(message);
   const branch = branchInfoFromUser(message);
+  const primary = isPrimaryRunUser(message);
   const previousBranchId = branch && branch.activeIndex > 0 ? branch.siblingRunIds[branch.activeIndex - 1] : null;
   const nextBranchId = branch && branch.activeIndex < branch.count - 1 ? branch.siblingRunIds[branch.activeIndex + 1] : null;
   const [copiedText, markCopiedText] = useCopyFeedback();
@@ -1212,7 +1221,7 @@ function UserMessageFooter({
     <div className="ml-auto flex min-h-6 items-center justify-end gap-2 pr-1">
       {time && <span className="text-[11px] tabular-nums text-muted-foreground">{time}</span>}
       <MessageActions className="justify-end opacity-70 transition-opacity group-hover:opacity-100">
-        {!readOnly && branch && branch.count > 1 && (
+        {primary && !readOnly && branch && branch.count > 1 && (
           <>
             <MessageAction
               tooltip="查看上一个分支"
@@ -1235,7 +1244,7 @@ function UserMessageFooter({
             </MessageAction>
           </>
         )}
-        {!readOnly && branch?.canEdit && (
+        {primary && !readOnly && branch?.canEdit && (
           <MessageAction
             tooltip="修改后重新生成"
             label="修改后重新生成"
@@ -1245,7 +1254,7 @@ function UserMessageFooter({
             <Pencil className="size-3.5" />
           </MessageAction>
         )}
-        {!readOnly && (
+        {primary && !readOnly && (
           <MessageAction
             tooltip="从此处继续"
             label="从此处继续"
@@ -1264,7 +1273,7 @@ function UserMessageFooter({
         >
           {copiedText ? <Check className="size-3.5 text-foreground" /> : <Copy className="size-3.5" />}
         </MessageAction>
-        <CopyRunButton runId={runId} />
+        {primary && <CopyRunButton runId={runId} />}
       </MessageActions>
     </div>
   );
@@ -1455,6 +1464,7 @@ export function Conversation({
             )}
           >
             {debugSpaceId && messages.length > 0 && <SpaceDebugMessages key={debugSpaceId} spaceId={debugSpaceId} />}
+            {debugSpaceId && messages.length > 0 && <SystemPromptMessage />}
             {messages.length === 0 ? (
               <ConversationEmptyState
                 icon={<Bot className="size-6" />}

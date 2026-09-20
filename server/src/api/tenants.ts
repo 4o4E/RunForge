@@ -13,6 +13,7 @@ import {
   importBusinessPluginAdminView,
   loadBusinessPluginAdminView,
   loadBusinessPluginMcpTools,
+  uninstallBusinessPluginAdminView,
   updateBusinessPluginAdminView,
 } from '../businessPlugins/settings.js';
 import { BusinessPluginError } from '../businessPlugins/errors.js';
@@ -106,6 +107,19 @@ tenantsApi.post(
       const { archive, format } = parseBusinessPluginArchiveRequest(req);
       const result = await importBusinessPluginAdminView(req.params.id, archive, format);
       res.status(result.replaced ? 200 : 201).json(result);
+    } catch (error) {
+      handleBusinessPluginError(res, error);
+    }
+  },
+);
+
+tenantsApi.delete(
+  '/:id/business-plugins/:pluginId',
+  requireMatchingTenantParam('id'),
+  requireOwnerOrAdmin,
+  async (req, res) => {
+    try {
+      res.json(await uninstallBusinessPluginAdminView(req.params.id, req.params.pluginId));
     } catch (error) {
       handleBusinessPluginError(res, error);
     }

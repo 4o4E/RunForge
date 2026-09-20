@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { useNotifications } from '@/components/GlobalNotifications';
 import { MarkdownContent } from '@/components/MarkdownContent';
@@ -38,6 +39,7 @@ export function BusinessPluginManagementPanel({ api }: { api: BusinessPluginCont
   const [secretDrafts, setSecretDrafts] = useState<Record<string, string>>({});
   const [clearSecrets, setClearSecrets] = useState<Set<string>>(new Set());
   const [mcpTools, setMcpTools] = useState<Record<string, McpToolsState>>({});
+  const [uninstallTarget, setUninstallTarget] = useState<BusinessPluginAdminItem | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const archiveInputRef = useRef<HTMLInputElement>(null);
@@ -142,6 +144,31 @@ export function BusinessPluginManagementPanel({ api }: { api: BusinessPluginCont
     }
   }
 
+  async function uninstall() {
+    if (!uninstallTarget) return;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await api.uninstall(uninstallTarget.id);
+      setPlugins(result.view.plugins);
+      setSelectedId(result.view.plugins[0]?.id ?? '');
+      setUninstallTarget(null);
+      notify({
+        variant: 'success',
+        title: '业务插件已卸载',
+        description: result.affectedSpaces.length
+          ? `已从 ${result.affectedSpaces.length} 个空间移除`
+          : '没有空间使用该插件',
+      });
+    } catch (reason) {
+      const message = (reason as Error).message;
+      setError(message);
+      notify({ variant: 'error', title: '业务插件卸载失败', description: message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (!plugins) return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">{error || '正在读取业务插件...'}</div>;
 
   return (
@@ -197,7 +224,12 @@ export function BusinessPluginManagementPanel({ api }: { api: BusinessPluginCont
                   <CardTitle>{selected.displayName}</CardTitle>
                   <CardDescription>{selected.description}</CardDescription>
                 </div>
-                <Button onClick={() => void save()} disabled={busy}><Save className="h-4 w-4" />保存</Button>
+                <div className="flex gap-2">
+                  <Button variant="outline" onClick={() => setUninstallTarget(selected)} disabled={busy}>
+                    <Trash2 className="h-4 w-4" />卸载
+                  </Button>
+                  <Button onClick={() => void save()} disabled={busy}><Save className="h-4 w-4" />保存</Button>
+                </div>
               </div>
             </CardHeader>
             <CardContent className="grid gap-5">
@@ -357,6 +389,23 @@ export function BusinessPluginManagementPanel({ api }: { api: BusinessPluginCont
           </Card>
         ) : <div className="flex items-center justify-center rounded-lg border border-dashed text-sm text-muted-foreground">选择一个业务插件</div>}
       </div>
+
+      <Dialog open={Boolean(uninstallTarget)} onOpenChange={(open) => { if (!open && !busy) setUninstallTarget(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>卸载业务插件</DialogTitle>
+            <DialogDescription>
+              将卸载 {uninstallTarget?.displayName}，从当前租户的全部有效空间移除，并删除该插件的普通配置。租户 Secret 和历史运行快照会保留。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setUninstallTarget(null)} disabled={busy}>取消</Button>
+            <Button variant="destructive" onClick={() => void uninstall()} disabled={busy}>
+              {busy ? '正在卸载...' : '确认卸载'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

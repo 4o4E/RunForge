@@ -8,36 +8,12 @@ on:
 
 env:
   IMAGE_NAME: ghcr.io/4o4e/runforge
+  DOCKER_BUILD_RECORD_UPLOAD: false
+  DOCKER_BUILD_SUMMARY: false
 
 jobs:
-  verify:
-    name: 构建并验证两套 Compose
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-
-      - name: 设置 Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: 构建本机架构镜像
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          load: true
-          tags: runforge:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: 验证自带和外部 PostgreSQL 部署
-        run: bash scripts/verify-container.sh
-
-  publish:
-    name: 发布 GHCR 镜像和 GitHub Release
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: verify
+  build:
+    name: 构建、验证并发布容器
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -47,17 +23,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 校验 tag 和软件包版本
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         run: test "${GITHUB_REF_NAME}" = "v$(node -p "require('./package.json').version")"
 
       - name: 设置 Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      - name: 登录 GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 生成镜像标签
         id: metadata
@@ -76,23 +46,56 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
 
-      - name: 构建并推送 AMD64 镜像
+      - name: 缓存依赖包
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: dependency-store
+          outputs: type=cacheonly
+          cache-from: type=gha,scope=container-package-store
+          cache-to: type=gha,scope=container-package-store,mode=max
+
+      - name: 构建 AMD64 镜像
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64
-          push: true
-          tags: ${{ steps.metadata.outputs.tags }}
+          load: true
+          tags: runforge:ci
           labels: ${{ steps.metadata.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=container-package-store
+          provenance: false
+
+      - name: 验证自带和外部 PostgreSQL 部署
+        run: bash scripts/verify-container.sh
+
+      - name: 登录 GHCR
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 发布已验证的 AMD64 镜像
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          IMAGE_TAGS: ${{ steps.metadata.outputs.tags }}
+        run: |
+          while IFS= read -r tag; do
+            test -n "${tag}" || continue
+            docker tag runforge:ci "${tag}"
+            docker push "${tag}"
+          done <<< "${IMAGE_TAGS}"
 
       - name: 验证镜像允许匿名拉取
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         run: |
           docker logout ghcr.io
           docker pull "${IMAGE_NAME}:${GITHUB_REF_NAME}"
 
       - name: 创建 GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

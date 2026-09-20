@@ -17,6 +17,10 @@ const [testHelpers, jwt] = await Promise.all([
   import('./testHelpers.js'),
   import('../auth/jwt.js'),
 ]);
+const [{ store }, { getBusinessPluginTenantSettings }] = await Promise.all([
+  import('../store/index.js'),
+  import('../businessPlugins/settings.js'),
+]);
 
 function pluginZip(description: string, options: { id?: string; mcpUrl?: string } = {}): Promise<Buffer> {
   const zip = new ZipFile();
@@ -25,6 +29,12 @@ function pluginZip(description: string, options: { id?: string; mcpUrl?: string 
     `id: ${options.id ?? 'imported-api'}`,
     'displayName: Imported API',
     `description: ${description}`,
+    'configSchema:',
+    '  type: object',
+    '  properties:',
+    '    region: { type: string }',
+    'secrets:',
+    '  - key: shared.api-key',
   ];
   if (options.mcpUrl) {
     manifest.push(
@@ -43,6 +53,11 @@ function pluginZip(description: string, options: { id?: string; mcpUrl?: string 
     zip.outputStream.on('end', () => resolve(Buffer.concat(chunks)));
     zip.end();
   });
+}
+
+function selectBusinessPlugins(config: Record<string, unknown>, pluginIds: string[]): Record<string, unknown> {
+  const capabilities = config.capabilities as Record<string, unknown>;
+  return { ...config, capabilities: { ...capabilities, businessPlugins: pluginIds } };
 }
 
 test.after(async () => {
@@ -125,6 +140,16 @@ test('业务插件导入 API：租户管理员可以新增和覆盖 ZIP，其他
     assert.equal(createdBody.replaced, false);
     assert.equal(createdBody.view.plugins[0]?.description, 'Initial imported plugin.');
 
+    const configured = await fetch(url.slice(0, -'/import'.length), {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        plugins: { 'imported-api': { config: { region: 'cn' } } },
+        secrets: { 'shared.api-key': 'same-tenant-secret' },
+      }),
+    });
+    assert.equal(configured.status, 200);
+
     const updated = await fetch(url, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/zip' },
@@ -133,10 +158,18 @@ test('业务插件导入 API：租户管理员可以新增和覆盖 ZIP，其他
     assert.equal(updated.status, 200);
     const updatedBody = (await updated.json()) as {
       replaced: boolean;
-      view: { plugins: Array<{ description: string }> };
+      view: {
+        plugins: Array<{
+          description: string;
+          config: Record<string, unknown>;
+          secrets: Array<{ key: string; configured: boolean }>;
+        }>;
+      };
     };
     assert.equal(updatedBody.replaced, true);
     assert.equal(updatedBody.view.plugins[0]?.description, 'Updated imported plugin.');
+    assert.deepEqual(updatedBody.view.plugins[0]?.config, { region: 'cn' });
+    assert.equal(updatedBody.view.plugins[0]?.secrets[0]?.configured, true);
 
     const systemUpdated = await fetch(
       `http://127.0.0.1:${port}/api/system/tenants/${owner.tenant_id}/business-plugins/import`,
@@ -158,6 +191,119 @@ test('业务插件导入 API：租户管理员可以新增和覆盖 ZIP，其他
       body: 'invalid',
     });
     assert.equal(unsupported.status, 400);
+  } finally {
+    close();
+  }
+});
+
+test('业务插件卸载 API：清理有效空间和普通配置，保留 Secret 与历史空间', async () => {
+  const owner = await testHelpers.seedOwner('tn_plugin_uninstall_api', 'owner@plugin-uninstall.test', 'pw');
+  const member = await store.createUser({
+    tenantId: owner.tenant_id,
+    email: 'member@plugin-uninstall.test',
+    passwordHash: 'unused',
+    role: 'member',
+  });
+  const systemAdmin = await testHelpers.seedSystemAdmin('sysadmin@plugin-uninstall.test', 'pw');
+  const ownerToken = jwt.signTenantAccessToken({ id: owner.id, tenantId: owner.tenant_id, role: 'owner' });
+  const memberToken = jwt.signTenantAccessToken({ id: member.id, tenantId: member.tenant_id, role: 'member' });
+  const systemToken = jwt.signSystemAccessToken({ id: systemAdmin.id });
+  const { port, close } = await testHelpers.listen(testHelpers.buildApp());
+  const base = `http://127.0.0.1:${port}/api/tenants/${owner.tenant_id}/business-plugins`;
+  try {
+    const archive = await pluginZip('Plugin that can be uninstalled.');
+    const imported = await fetch(`${base}/import`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${ownerToken}`, 'Content-Type': 'application/zip' },
+      body: archive,
+    });
+    assert.equal(imported.status, 201);
+
+    const configured = await fetch(base, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${ownerToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        plugins: { 'imported-api': { config: { region: 'cn' } } },
+        secrets: { 'shared.api-key': 'same-tenant-secret' },
+      }),
+    });
+    assert.equal(configured.status, 200);
+
+    const defaultSpace = await store.getDefaultSpace(owner.tenant_id);
+    assert.ok(defaultSpace);
+    const selectedDefault = await store.updateSpace(owner.tenant_id, defaultSpace.id, {
+      config: selectBusinessPlugins(defaultSpace.config, ['imported-api']),
+    });
+    assert.ok(selectedDefault);
+    const deletedSpace = await store.createSpace({
+      tenantId: owner.tenant_id,
+      mode: 'web',
+      name: 'Deleted plugin space',
+      executionUserId: null,
+      config: selectBusinessPlugins(defaultSpace.config, ['imported-api']),
+      visibleUserIds: [],
+      createdByUserId: owner.id,
+    });
+    await store.softDeleteSpaceAndRevokeTokens(owner.tenant_id, deletedSpace.id);
+
+    const denied = await fetch(`${base}/imported-api`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${memberToken}` },
+    });
+    assert.equal(denied.status, 403);
+
+    const removed = await fetch(`${base}/imported-api`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    });
+    assert.equal(removed.status, 200);
+    const removedBody = (await removed.json()) as {
+      affectedSpaces: Array<{ id: string; name: string }>;
+      view: { plugins: unknown[] };
+    };
+    assert.deepEqual(removedBody.affectedSpaces, [{ id: defaultSpace.id, name: defaultSpace.name }]);
+    assert.deepEqual(removedBody.view.plugins, []);
+
+    const updatedDefault = await store.findSpace(owner.tenant_id, defaultSpace.id);
+    assert.equal(updatedDefault?.config_version, selectedDefault.config_version + 1);
+    assert.deepEqual(
+      ((updatedDefault?.config as Record<string, unknown>).capabilities as Record<string, unknown>).businessPlugins,
+      [],
+    );
+    const untouchedDeleted = await store.findSpace(owner.tenant_id, deletedSpace.id);
+    assert.equal(untouchedDeleted?.config_version, deletedSpace.config_version);
+    assert.deepEqual(
+      ((untouchedDeleted?.config as Record<string, unknown>).capabilities as Record<string, unknown>).businessPlugins,
+      ['imported-api'],
+    );
+    const removedSettings = await getBusinessPluginTenantSettings(owner.tenant_id);
+    assert.equal(Object.hasOwn(removedSettings.plugins, 'imported-api'), false);
+    assert.equal(removedSettings.secrets['shared.api-key'], 'same-tenant-secret');
+
+    const reimported = await fetch(`${base}/import`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${ownerToken}`, 'Content-Type': 'application/zip' },
+      body: archive,
+    });
+    assert.equal(reimported.status, 201);
+    const reimportedBody = (await reimported.json()) as {
+      replaced: boolean;
+      view: { plugins: Array<{ config: Record<string, unknown>; secrets: Array<{ key: string; configured: boolean }> }> };
+    };
+    assert.equal(reimportedBody.replaced, false);
+    assert.deepEqual(reimportedBody.view.plugins[0]?.config, {});
+    assert.deepEqual(reimportedBody.view.plugins[0]?.secrets, [{
+      key: 'shared.api-key',
+      description: '',
+      required: true,
+      configured: true,
+    }]);
+
+    const systemRemoved = await fetch(
+      `http://127.0.0.1:${port}/api/system/tenants/${owner.tenant_id}/business-plugins/imported-api`,
+      { method: 'DELETE', headers: { Authorization: `Bearer ${systemToken}` } },
+    );
+    assert.equal(systemRemoved.status, 200);
   } finally {
     close();
   }

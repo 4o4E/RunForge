@@ -1,25 +1,34 @@
 # syntax=docker/dockerfile:1.7
 
-FROM node:24-bookworm-slim AS build
+FROM node:24-bookworm-slim AS build-base
 
 WORKDIR /workspace
 RUN npm install --global pnpm@11.5.3
 RUN apt-get update && apt-get install --yes --no-install-recommends openssl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+FROM build-base AS dependency-store
+
+COPY pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm config set store-dir /pnpm/store \
+    && pnpm fetch --frozen-lockfile
+
+FROM dependency-store AS dependencies
+
+COPY package.json tsconfig.base.json ./
 COPY server/package.json server/package.json
 COPY web/package.json web/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/workload-sdk/package.json packages/workload-sdk/package.json
 
-RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
-    pnpm config set store-dir /pnpm/store && \
-    pnpm install --frozen-lockfile
+RUN pnpm install --offline --frozen-lockfile
+
+FROM dependencies AS build
 
 COPY . .
 RUN DATABASE_URL=postgresql://runforge@127.0.0.1:5432/runforge pnpm build
-RUN pnpm --filter server deploy --prod --legacy /opt/runforge-server
+RUN pnpm --filter server deploy --prod --legacy /opt/runforge-server \
+    && bash docker/prune-production-deps.sh /opt/runforge-server
 
 FROM node:24-bookworm-slim AS runtime
 
@@ -27,7 +36,7 @@ ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=8080 \
     RUNFORGE_WEB_DIST=/app/web \
-    TOOL_WORKSPACE_ROOT=/var/lib/runforge/workspaces \
+    TOOL_WORKSPACE_ROOT=/w \
     RUNFORGE_PROVIDER_TRACE_DIR=/var/lib/runforge/provider-traces \
     RUNFORGE_BUSINESS_PLUGIN_ROOTS=/var/lib/runforge/business-plugins
 
@@ -51,6 +60,7 @@ RUN apt-get update && apt-get install --yes --no-install-recommends \
       /var/lib/runforge/workspaces \
       /var/lib/runforge/provider-traces \
       /var/lib/runforge/business-plugins \
+    && ln -s /var/lib/runforge/workspaces /w \
     && chown -R node:node /var/lib/runforge
 
 WORKDIR /app/server

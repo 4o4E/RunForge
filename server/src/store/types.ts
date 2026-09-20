@@ -118,6 +118,7 @@ export interface StepContextSummaryRow {
   idx: number;
   message_count: number;
   tool_count: number;
+  system_prompt: string | null;
   captured_at: string;
 }
 
@@ -230,9 +231,11 @@ export interface ThreadMessageMetadata {
   role: LlmMessage['role'];
   toolCalls: Array<{ id: string; name: string; argumentChars: number }>;
   toolCallId: string | null;
-  collapsed: 'masked' | 'summarized';
+  collapsed: 'masked' | 'summarized' | null;
   summaryOf: number[];
   contentChars: number;
+  /** 用户消息属于对话正文，普通详情接口也返回原文；其他角色只在 Debug 模式返回。 */
+  content?: string | null;
   created_at: string;
 }
 

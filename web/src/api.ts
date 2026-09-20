@@ -60,7 +60,8 @@ export interface FileShareLink {
 export interface FileShareAccess {
   tenant: string;
   user: string;
-  threadId?: string;
+  spaceId: string;
+  threadId: string;
   expires: string;
   sig: string;
 }
@@ -357,9 +358,10 @@ export const previewRemoteFile = (path: string, startLine = 1, limit = 200, opti
   if (options.share) {
     params.set('tenant', options.share.tenant);
     params.set('user', options.share.user);
+    params.set('spaceId', options.share.spaceId);
     params.set('expires', options.share.expires);
     params.set('sig', options.share.sig);
-    if (options.share.threadId) params.set('threadId', options.share.threadId);
+    params.set('threadId', options.share.threadId);
   }
   return authFetch(`/api/files/preview?${params.toString()}`).then(json<FilePreview>);
 };
@@ -374,9 +376,10 @@ export const previewRemoteFileHex = (path: string, offset = 0, limit = 4096, opt
   if (options.share) {
     params.set('tenant', options.share.tenant);
     params.set('user', options.share.user);
+    params.set('spaceId', options.share.spaceId);
     params.set('expires', options.share.expires);
     params.set('sig', options.share.sig);
-    if (options.share.threadId) params.set('threadId', options.share.threadId);
+    params.set('threadId', options.share.threadId);
   }
   return authFetch(`/api/files/hex?${params.toString()}`).then(json<FileHexPreview>);
 };
@@ -389,16 +392,24 @@ export const remoteFilePdfPreviewUrl = (path: string, share?: FileShareAccess, t
   if (share) {
     params.set('tenant', share.tenant);
     params.set('user', share.user);
+    params.set('spaceId', share.spaceId);
     params.set('expires', share.expires);
     params.set('sig', share.sig);
-    if (share.threadId) params.set('threadId', share.threadId);
+    params.set('threadId', share.threadId);
   }
   return `/api/files/pdf-preview?${params.toString()}`;
 };
 
 export const signedRemoteFileUrl = (path: string, share: FileShareAccess, options: { download?: boolean } = {}) => {
-  const params = new URLSearchParams({ path, tenant: share.tenant, user: share.user, expires: share.expires, sig: share.sig });
-  if (share.threadId) params.set('threadId', share.threadId);
+  const params = new URLSearchParams({
+    path,
+    tenant: share.tenant,
+    user: share.user,
+    spaceId: share.spaceId,
+    threadId: share.threadId,
+    expires: share.expires,
+    sig: share.sig,
+  });
   if (options.download) params.set('download', '1');
   return `/api/files/raw?${params.toString()}`;
 };
@@ -546,7 +557,12 @@ export const answerRun = (runId: string, answer: AskUserAnswer) =>
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ answer }),
-  }).then(json<{ id: string; threadId: string; status: 'running' }>);
+  }).then(json<{
+    id: string;
+    threadId: string;
+    status: 'running';
+    userMessage: { id: number; content: string; createdAt: string };
+  }>);
 
 export const listShellSessions = (threadId: string) =>
   authFetch(`/api/shell-sessions?threadId=${encodeURIComponent(threadId)}`).then(json<{ sessions: ShellSession[] }>);

@@ -56,6 +56,7 @@ import {
   importBusinessPluginAdminView,
   loadBusinessPluginAdminView,
   loadBusinessPluginMcpTools,
+  uninstallBusinessPluginAdminView,
   updateBusinessPluginAdminView,
 } from '../businessPlugins/settings.js';
 import { BusinessPluginError } from '../businessPlugins/errors.js';
@@ -199,6 +200,16 @@ systemApi.post('/tenants/:tenantId/business-plugins/import', businessPluginArchi
     const { archive, format } = parseBusinessPluginArchiveRequest(req);
     const result = await importBusinessPluginAdminView(scope.tenantId, archive, format);
     res.status(result.replaced ? 200 : 201).json(result);
+  } catch (error) {
+    handleBusinessPluginError(res, error);
+  }
+});
+
+systemApi.delete('/tenants/:tenantId/business-plugins/:pluginId', async (req, res) => {
+  const scope = await systemTenantScope(req, res);
+  if (!scope) return;
+  try {
+    res.json(await uninstallBusinessPluginAdminView(scope.tenantId, req.params.pluginId));
   } catch (error) {
     handleBusinessPluginError(res, error);
   }

@@ -34,6 +34,12 @@ Issue 中的 v0.2 草案是协议基线；本文记录仓库当前已经实现�
 tenant 非敏感配置和 Secret 继续按相同插件 ID 保留。压缩包限制为 50 MiB，解压后限制为
 200 MiB、10000 个条目和 32 层目录；路径穿越、符号链接、硬链接和特殊文件都会被拒绝。
 
+管理员可以从业务插件管理页卸载当前部署。卸载会从该 tenant 的全部未删除空间中移除插件，
+每个受影响空间各保存一个新的配置版本，并删除该插件的 tenant 非敏感配置。tenant Secret
+按 key 共享，卸载时继续保留；运行期间生成的不可变插件快照也继续保留，供已有运行按内容
+hash 恢复。同 ID 压缩包再次导入后视为重新安装，不恢复已经删除的非敏感配置；直接覆盖
+现有部署时继续保留配置。
+
 RunForge 不拉取 Git，也不建设业务插件发布仓库。活动 run 在首次启动时保存的工作副本继续
 使用原内容；更新后的内容只供之后接纳的新 run 使用。
 
@@ -88,9 +94,9 @@ HTTP/HTTPS，并且 `url` 与 `urlConfigKey` 必须二选一。
 - run 接纳时在已有 `runs.plugin_lock` 固定业务插件 ID、内容 hash 和非敏感 tenant 配置。
 - Secret 不进入 `plugin_lock`。业务 MCP 在激活和实际调用前读取 tenant 当前值；值变化时
   run 级 MCP session 会关闭旧连接并按新连接签名重连。
-- run 第一次启动时把整个插件目录复制到当前 workspace 的
-  `.agents/business-plugins/<pluginId>/<hash>/plugin`。该目录受工具写保护，用于活动、等待
-  和服务重启后的同一 run 继续使用原内容；它是 run 工作副本，不是发布仓库。
+- run 第一次启动时按内容 hash 保存一个不可变插件快照，并把快照通过写时复制克隆到当前
+  workspace 的 `plugins/<pluginId>`。支持写时复制的文件系统只在文件被修改后增加数据块；
+  其他文件系统回退为普通复制。工作副本使用独立 inode，旧快照仍可按运行锁恢复。
 - 业务 Skill 加入现有渐进加载目录，使用 `skill_activate` 激活；业务 MCP 随插件整体进入
   当前空间，但仍使用 `mcp_activate` 渐进发现工具。
 - 管理页可以展开查看每个 Skill 的名称、描述和 `SKILL.md` 入口正文。每个 MCP 会显示其

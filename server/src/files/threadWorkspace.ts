@@ -8,7 +8,7 @@ import { store as defaultStore } from '../store/index.js';
 import type { Store, ThreadRow } from '../store/types.js';
 import { getSystemToolSettings as readSystemToolSettings } from '../settings.js';
 import type { ToolSettings } from '@runforge/contracts';
-import { resolveWorkspaceRoot, resolveWorkspaceRootForThread } from './workspaceRoot.js';
+import { ensureThreadWorkspaceRoot, resolveWorkspaceRootForThread } from './workspaceRoot.js';
 
 type TenantIdentity = Extract<IdentityContext, { scope: 'tenant' }>;
 
@@ -24,9 +24,9 @@ export class ThreadWorkspaceAccessError extends Error {
 }
 
 export interface ThreadWorkspaceResolution {
-  kind: 'user' | 'thread';
   root: string;
-  threadId: string | null;
+  threadId: string;
+  spaceId: string;
 }
 
 export class ThreadWorkspaceAccessService {
@@ -37,7 +37,7 @@ export class ThreadWorkspaceAccessService {
   ) {}
 
   /** Web 文件入口的授权规则：
-   * - 不带 threadId 时只表示 default 空间的历史用户级 workspace；
+   * - 文件入口必须绑定 thread，工作目录固定为 `{base}/{spaceId}/{threadId}`；
    * - Web 空间的 thread 仍只属于创建用户；空间可见不等于能查看其他用户的对话文件；
    * - external 空间允许可见用户只读，写入和 shell 始终拒绝。 */
   async resolveForWeb(
@@ -46,12 +46,7 @@ export class ThreadWorkspaceAccessService {
     access: 'read' | 'write',
   ): Promise<ThreadWorkspaceResolution> {
     if (!threadId) {
-      const { workspaceRoot } = await this.getSystemToolSettings();
-      return {
-        kind: 'user',
-        root: resolveWorkspaceRoot(identity, workspaceRoot),
-        threadId: null,
-      };
+      throw new ThreadWorkspaceAccessError(409, 'THREAD_REQUIRED', '文件工作区需要先创建会话');
     }
 
     let thread = await this.store.getThread(
@@ -89,13 +84,13 @@ export class ThreadWorkspaceAccessService {
   }
 
   private async resolveThread(thread: ThreadRow): Promise<ThreadWorkspaceResolution> {
-    const tenant = await this.store.findTenant(thread.tenant_id);
-    if (!tenant) throw new ThreadWorkspaceAccessError(404, 'TENANT_NOT_FOUND', 'tenant 不存在');
     const { workspaceRoot } = await this.getSystemToolSettings();
-    const resolved = resolveWorkspaceRootForThread(thread, tenant, workspaceRoot);
+    const resolved = resolveWorkspaceRootForThread(thread, workspaceRoot);
+    await ensureThreadWorkspaceRoot(thread.space_id, thread.id, workspaceRoot);
     return {
       ...resolved,
-      threadId: resolved.kind === 'thread' ? thread.id : null,
+      threadId: thread.id,
+      spaceId: thread.space_id,
     };
   }
 

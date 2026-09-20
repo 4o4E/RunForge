@@ -1,7 +1,8 @@
 import { Component, lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
-import { Copy, Download, Eye, ChevronRight, FileText, Folder, FolderOpen, FolderTree, Link, LocateFixed, PanelRightClose, PanelRightOpen, Paperclip, Pencil, RefreshCw, RotateCcw, Save, X } from 'lucide-react';
+import type { BundledLanguage } from 'shiki';
+import { Code2, Copy, Download, Eye, ChevronRight, FileText, Folder, FolderOpen, FolderTree, Link, LocateFixed, PanelRightClose, PanelRightOpen, Paperclip, Pencil, RefreshCw, RotateCcw, Save, X } from 'lucide-react';
 import {
   createRemoteFileShareLink,
   getRemoteFileContent,
@@ -19,6 +20,7 @@ import {
   type RemoteFileEntry,
 } from '@/api';
 import { useNotifications } from '@/components/GlobalNotifications';
+import { CodeBlock } from '@/components/ai-elements/code-block';
 import { MarkdownContent } from '@/components/MarkdownContent';
 import { OfficePreview, officePreviewKindForPath } from '@/components/OfficePreview';
 import { Button } from '@/components/ui/button';
@@ -77,7 +79,7 @@ interface Props {
   onOpenFile?: (path: string) => void;
 }
 
-const MONACO_LANGUAGE_BY_EXT: Record<string, string> = {
+const PREVIEW_LANGUAGE_BY_EXT: Record<string, BundledLanguage> = {
   c: 'c',
   cc: 'cpp',
   cpp: 'cpp',
@@ -87,14 +89,15 @@ const MONACO_LANGUAGE_BY_EXT: Record<string, string> = {
   java: 'java',
   js: 'javascript',
   json: 'json',
-  jsx: 'javascript',
+  jsx: 'jsx',
   md: 'markdown',
+  csv: 'csv',
   py: 'python',
   rs: 'rust',
-  sh: 'shell',
+  sh: 'shellscript',
   sql: 'sql',
   ts: 'typescript',
-  tsx: 'typescript',
+  tsx: 'tsx',
   toml: 'toml',
   xml: 'xml',
   yaml: 'yaml',
@@ -187,7 +190,15 @@ function extOf(path: string): string {
 }
 
 function editorLanguageForPath(path: string): string {
-  return MONACO_LANGUAGE_BY_EXT[extOf(path)] ?? 'plaintext';
+  const extension = extOf(path);
+  if (extension === 'jsx') return 'javascript';
+  if (extension === 'sh') return 'shell';
+  if (extension === 'tsx') return 'typescript';
+  return PREVIEW_LANGUAGE_BY_EXT[extension] ?? 'plaintext';
+}
+
+function previewLanguageForPath(path: string): BundledLanguage {
+  return PREVIEW_LANGUAGE_BY_EXT[extOf(path)] ?? 'log';
 }
 
 function mediaKindForPath(path: string): MediaKind | null {
@@ -287,7 +298,7 @@ export function RemoteFilesPanel({
   const [chunks, setChunks] = useState<PreviewChunk[]>([]);
   const [hexPreview, setHexPreview] = useState<FileHexPreview | null>(null);
   const [hexRows, setHexRows] = useState<FileHexRow[]>([]);
-  const [previewMode, setPreviewMode] = useState<'preview' | 'edit'>('preview');
+  const [previewMode, setPreviewMode] = useState<'preview' | 'source' | 'edit'>('preview');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [editContent, setEditContent] = useState('');
@@ -354,7 +365,13 @@ export function RemoteFilesPanel({
       setRawUrl('');
       setDownloadUrl('');
       setShareOpen(false);
-      setPreviewMode(!readOnly && !shareAccess && !hexPreviewFile && !mediaKind && !officePreviewKindForPath(path) && !renderable ? 'edit' : 'preview');
+      setPreviewMode(
+        renderable || mediaKind || officePreviewKindForPath(path)
+          ? 'preview'
+          : !readOnly && !shareAccess && !hexPreviewFile
+            ? 'edit'
+            : 'source',
+      );
     } else {
       pendingPreviewStartsRef.current.add(startLine);
     }
@@ -536,6 +553,7 @@ export function RemoteFilesPanel({
   }, [compact, previewPath]);
 
   const editorLanguage = selectedPath ? editorLanguageForPath(selectedPath) : 'plaintext';
+  const previewLanguage = selectedPath ? previewLanguageForPath(selectedPath) : 'log';
   const selectedExt = selectedPath ? extOf(selectedPath) : '';
   const selectedMediaKind = selectedPath ? mediaKindForPath(selectedPath) : null;
   const selectedOfficeKind = selectedPath ? officePreviewKindForPath(selectedPath) : null;
@@ -543,8 +561,18 @@ export function RemoteFilesPanel({
   const selectedIsHtml = ['html', 'htm'].includes(selectedExt);
   const selectedIsMarkdown = selectedExt === 'md';
   const selectedCanRender = selectedIsHtml || selectedIsMarkdown || selectedMediaKind != null || selectedOfficeKind != null;
-  const selectedCanEdit = Boolean(selectedPath && !readOnly && !shareAccess && !selectedUsesHexPreview && !selectedMediaKind && !selectedOfficeKind);
-  const selectedCanPreview = Boolean(selectedPath && (selectedCanRender || selectedUsesHexPreview || shareAccess));
+  const selectedCanSource = Boolean(selectedPath);
+  const selectedCanEdit = Boolean(
+    selectedPath
+    && !readOnly
+    && !shareAccess
+    && selectedPath !== 'plugins'
+    && !selectedPath.startsWith('plugins/')
+    && !selectedUsesHexPreview
+    && !selectedMediaKind
+    && !selectedOfficeKind,
+  );
+  const selectedCanPreview = Boolean(selectedPath && selectedCanRender);
   const editorDirty = editContent !== editOriginal;
   const editorTheme = typeof document !== 'undefined' && document.documentElement.classList.contains('dark') ? 'vs-dark' : 'light';
   const previewRows = useMemo<PreviewRow[]>(() => {
@@ -565,6 +593,7 @@ export function RemoteFilesPanel({
     return rows;
   }, [chunks]);
   const previewCode = useMemo(() => previewRows.map((row) => row.text).join('\n'), [previewRows]);
+  const previewStartLine = previewRows[0]?.lineNumber ?? 1;
   const totalLines = preview?.totalLines ?? null;
 
   useEffect(() => {
@@ -780,7 +809,7 @@ export function RemoteFilesPanel({
                     {formatSize(selectedSize)}{!selectedUsesHexPreview && totalLines != null ? ` · ${totalLines} 行` : ''}
                   </div>
                 </div>
-                {(selectedCanPreview || selectedCanEdit) && (
+                {(selectedCanPreview || selectedCanSource || selectedCanEdit) && (
                   <div className="flex rounded-md border bg-background p-0.5">
                     {selectedCanPreview && (
                       <Button
@@ -788,9 +817,21 @@ export function RemoteFilesPanel({
                         size="sm"
                         className="h-8 px-2"
                         onClick={() => setPreviewMode('preview')}
-                        title={selectedOfficeKind ? '预览文档' : selectedMediaKind ? '预览媒体' : selectedUsesHexPreview ? '预览 Hex' : selectedIsHtml ? '渲染 HTML' : selectedIsMarkdown ? '渲染 Markdown' : '预览文本'}
+                        title={selectedOfficeKind ? '预览文档' : selectedMediaKind ? '预览媒体' : selectedIsHtml ? '渲染 HTML' : '渲染 Markdown'}
                       >
                         <Eye className="size-4" />
+                      </Button>
+                    )}
+                    {selectedCanSource && (
+                      <Button
+                        variant={previewMode === 'source' ? 'secondary' : 'ghost'}
+                        size="sm"
+                        className="h-8 px-2"
+                        onClick={() => setPreviewMode('source')}
+                        title="查看原文"
+                        aria-label="查看原文"
+                      >
+                        <Code2 className="size-4" />
                       </Button>
                     )}
                     {selectedCanEdit && (
@@ -978,7 +1019,7 @@ export function RemoteFilesPanel({
                   </div>
                 ) : selectedOfficeKind && previewMode === 'preview' ? (
                   <OfficePreview path={selectedPath} kind={selectedOfficeKind} shareAccess={shareAccess} />
-                ) : selectedUsesHexPreview && previewMode === 'preview' && hexRows.length > 0 ? (
+                ) : selectedUsesHexPreview && previewMode === 'source' && hexRows.length > 0 ? (
                   <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-md border bg-background">
                     <div className="grid grid-cols-[6rem_minmax(24rem,1fr)_8rem] border-b bg-muted/40 px-3 py-2 font-mono text-[11px] text-muted-foreground">
                       <span>Offset</span>
@@ -1005,13 +1046,13 @@ export function RemoteFilesPanel({
                       )}
                     </div>
                   </div>
-                ) : selectedUsesHexPreview && previewMode === 'preview' && hexPreview ? (
+                ) : selectedUsesHexPreview && previewMode === 'source' && hexPreview ? (
                   <div className="flex h-full items-center justify-center rounded-md border bg-muted/20 px-3 py-8 text-center text-sm text-muted-foreground">
                     暂无 Hex 内容
                   </div>
-                ) : selectedUsesHexPreview && previewMode === 'preview' ? (
+                ) : selectedUsesHexPreview && previewMode === 'source' ? (
                   <div className="flex h-full items-center justify-center rounded-md border bg-muted/20 px-3 py-8 text-center text-sm text-muted-foreground">
-                    正在加载 Hex 预览…
+                    正在加载 Hex 原文…
                   </div>
                 ) : loading && chunks.length === 0 ? (
                   <div className="flex h-full items-center justify-center rounded-md border bg-muted/20 px-3 py-8 text-center text-sm text-muted-foreground">
@@ -1029,28 +1070,24 @@ export function RemoteFilesPanel({
                   <div className="h-full overflow-auto rounded-md border bg-background px-5 py-4">
                     <MarkdownContent text={previewCode} />
                   </div>
-                ) : chunks.length > 0 && previewMode === 'preview' ? (
-                  <div className="scrollbar-thin h-full overflow-auto rounded-md border bg-background font-mono text-[12px] leading-5">
-                    {previewRows.map((row) => (
-                      <div key={row.lineNumber} className="grid grid-cols-[4rem_minmax(0,1fr)] border-b border-border/30">
-                        <span className="select-none bg-muted/30 px-2 text-right text-muted-foreground">{row.lineNumber}</span>
-                        <pre className="overflow-visible whitespace-pre px-3 py-0.5 text-foreground">{row.text || ' '}</pre>
-                      </div>
-                    ))}
-                    {preview?.hasMore && (
-                      <div className="flex justify-center p-3">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => selectedPath && preview.nextLine ? void openFile(selectedPath, selectedSize, preview.nextLine) : undefined}
-                          disabled={loading}
-                        >
-                          {loading ? '正在加载…' : '加载更多'}
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                ) : loading && previewMode === 'preview' && chunks.length > 0 ? (
+                ) : chunks.length > 0 && previewMode === 'source' ? (
+                  <CodeBlock
+                    className="h-full"
+                    code={previewCode}
+                    fillHeight
+                    language={previewLanguage}
+                    loadingMore={loading && chunks.length > 0}
+                    onReachEnd={selectedPath && preview?.nextLine
+                      ? () => void openFile(selectedPath, selectedSize, preview.nextLine ?? 1)
+                      : undefined}
+                    showLineNumbers
+                    startLineNumber={previewStartLine}
+                    showGlance
+                    showRenderToggle={false}
+                    showWrapToggle
+                    maxHighlightChars={80_000}
+                  />
+                ) : loading && previewMode === 'source' && chunks.length > 0 ? (
                   <div className="flex h-full items-center justify-center rounded-md border bg-muted/20 px-3 py-8 text-center text-sm text-muted-foreground">
                     正在加载更多内容…
                   </div>

@@ -2,6 +2,7 @@ import type {
   BusinessPluginAdminView,
   BusinessPluginImportResponse,
   BusinessPluginMcpToolsView,
+  BusinessPluginUninstallResponse,
   UpdateBusinessPluginSettingsInput,
 } from '@runforge/contracts';
 import { authFetch } from './api';
@@ -12,6 +13,7 @@ export interface BusinessPluginControlApi {
   update(input: UpdateBusinessPluginSettingsInput): Promise<BusinessPluginAdminView>;
   reload(): Promise<BusinessPluginAdminView>;
   importArchive(file: File): Promise<BusinessPluginImportResponse>;
+  uninstall(pluginId: string): Promise<BusinessPluginUninstallResponse>;
   loadMcpTools(pluginId: string, serverId: string): Promise<BusinessPluginMcpToolsView>;
 }
 
@@ -39,6 +41,9 @@ function createBusinessPluginControlApi(base: string, fetcher: Fetcher): Busines
       body: JSON.stringify(input),
     }).then(json<BusinessPluginAdminView>),
     reload: () => fetcher(`${base}/reload`, { method: 'POST' }).then(json<BusinessPluginAdminView>),
+    uninstall: (pluginId) => fetcher(`${base}/${encodeURIComponent(pluginId)}`, {
+      method: 'DELETE',
+    }).then(json<BusinessPluginUninstallResponse>),
     loadMcpTools: (pluginId, serverId) => fetcher(
       `${base}/${encodeURIComponent(pluginId)}/mcp/${encodeURIComponent(serverId)}/tools`,
       { method: 'POST' },

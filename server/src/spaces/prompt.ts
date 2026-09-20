@@ -47,7 +47,7 @@ const DATABASE_ACCESS_PROMPT = '- 涉及数据库、数据源、schema、库表�
 const EXTERNAL_MODE_PROMPT = '当前 run 来自 external 空间：不能向 Web 用户提问或进入 waiting_for_user；信息不足时采用合理假设，或在最终结果中明确说明缺失信息。';
 const WORKSPACE_RUNTIME_PROMPT = `运行时文件系统上下文:
 - 持久工作区根目录: {{workspace.root}}
-- 请把这个目录视为本次 run 当前可用目录。clone 仓库、创建报告、写入任何需要保留的文件，都必须放在这个目录下。
+- 这是当前会话唯一允许写入的工作目录。所有新建、下载、克隆、解压、转换、生成和需要保留的文件，都必须放在这个目录下。
 - 不要把需要保留的文件写到 /home/user、/tmp、应用仓库根目录或 workspace 之外的路径，除非用户明确要求且工具策略允许。
 - Python 依赖必须安装在虚拟环境中；优先在工作区创建 .venv 并使用 uv 管理依赖，不要全局安装 pip 包。
 - 工具沙箱: {{sandbox.mode}}；shell 后端: {{sandbox.backend}}；shell 使用宿主机 PATH: {{shell.hostPath}}；网络: {{network.mode}}。

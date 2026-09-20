@@ -4,6 +4,7 @@ import { getThreadStepContext, getThreadStepContexts } from '@/api';
 
 interface StepContextDebugData {
   contexts: StepContextSnapshotSummary[];
+  systemPrompt: string | null;
   details: Record<string, StepContextSnapshotView>;
   loading: boolean;
   error: string;
@@ -15,6 +16,7 @@ interface StepContextDebugState extends StepContextDebugData {
 
 const emptyData: StepContextDebugData = {
   contexts: [],
+  systemPrompt: null,
   details: {},
   loading: false,
   error: '',
@@ -71,6 +73,7 @@ export function StepContextDebugProvider({
         .then((response) => {
           if (!canceled) setState({
             contexts: response.contexts,
+            systemPrompt: response.systemPrompt,
             details: detailsRef.current,
             loading: false,
             error: '',

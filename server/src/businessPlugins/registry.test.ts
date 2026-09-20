@@ -130,6 +130,75 @@ test('业务插件导入：支持 ZIP 新增和 TGZ 原子覆盖', async () => {
   assert.deepEqual((await registry.list('tn_import')).map((definition) => definition.manifest.id), ['crm']);
 });
 
+test('业务插件卸载：删除当前部署并保留可恢复旧运行的不可变快照', async () => {
+  const sourceRoot = await mkdtemp(join(tmpdir(), 'runforge-business-uninstall-source-'));
+  const importRoot = await mkdtemp(join(tmpdir(), 'runforge-business-uninstall-target-'));
+  const workspaceRoot = await mkdtemp(join(tmpdir(), 'runforge-business-uninstall-workspace-'));
+  const pluginRoot = await createPlugin(sourceRoot, 'crm');
+  const registry = new BusinessPluginRegistry([importRoot]);
+  const imported = await registry.importArchive('tn_business', await zipDirectory(pluginRoot), 'zip');
+  const lock = runLock(imported.definition);
+  const runtime = new BusinessPluginRuntimeService();
+  const handle = await runtime.startRun({
+    runId: 'ru_before_uninstall',
+    workspaceRoot,
+    definitions: [imported.definition],
+    lock,
+    resolveSecrets: async () => ({ 'crm.api-key': 'same-tenant-secret' }),
+  });
+  await handle.dispose();
+  await runtime.dispose();
+
+  const snapshotRoot = join(
+    importRoot,
+    'tn_business',
+    '.runforge-snapshots',
+    'crm',
+    imported.definition.contentHash,
+    'plugin',
+  );
+  assert.equal(existsSync(snapshotRoot), true);
+
+  await registry.uninstall('tn_business', 'crm');
+  assert.equal(existsSync(imported.definition.root), false);
+  assert.equal(existsSync(snapshotRoot), true);
+  assert.deepEqual(await registry.list('tn_business'), []);
+  assert.deepEqual(
+    (await new BusinessPluginRegistry([importRoot]).resolveLock('tn_business', lock)).map((item) => item.contentHash),
+    [imported.definition.contentHash],
+  );
+});
+
+test('业务插件卸载：tenant 修改锁覆盖配置清理和部署删除的完整区间', async () => {
+  const sourceRoot = await mkdtemp(join(tmpdir(), 'runforge-business-uninstall-lock-source-'));
+  const importRoot = await mkdtemp(join(tmpdir(), 'runforge-business-uninstall-lock-target-'));
+  const pluginRoot = await createPlugin(sourceRoot, 'crm');
+  const registry = new BusinessPluginRegistry([importRoot]);
+  await registry.importArchive('tn_business_lock', await zipDirectory(pluginRoot), 'zip');
+
+  const events: string[] = [];
+  let releaseCleanup!: () => void;
+  const cleanupGate = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+  let cleanupStarted!: () => void;
+  const started = new Promise<void>((resolve) => { cleanupStarted = resolve; });
+  const uninstalling = registry.uninstall('tn_business_lock', 'crm', async () => {
+    events.push('cleanup-start');
+    cleanupStarted();
+    await cleanupGate;
+    events.push('cleanup-end');
+  });
+  await started;
+  const savingSpace = registry.mutateTenant('tn_business_lock', async () => {
+    events.push('space-save');
+  });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ['cleanup-start']);
+  releaseCleanup();
+  await Promise.all([uninstalling, savingSpace]);
+  assert.deepEqual(events, ['cleanup-start', 'cleanup-end', 'space-save']);
+});
+
 test('业务插件导入：无效更新保持当前版本，链接和路径穿越被拒绝', async () => {
   const sourceRoot = await mkdtemp(join(tmpdir(), 'runforge-business-import-invalid-source-'));
   const importRoot = await mkdtemp(join(tmpdir(), 'runforge-business-import-invalid-target-'));
@@ -304,7 +373,13 @@ test('业务插件运行时：materialize 多文件 Skill，并通过 tenant res
 
   assert.equal(handle.skills[0]?.source, 'business');
   assert.equal(handle.skills[0]?.id, 'business:crm/customer-query');
+  assert.equal(handle.skills[0]?.root, join(workspaceRoot, 'plugins', 'crm', 'skills', 'customer-query'));
   assert.equal(existsSync(join(handle.skills[0]!.root, 'references', 'schema.md')), true);
+  await writeFile(join(handle.skills[0]!.root, 'references', 'schema.md'), '# workspace changed');
+  assert.equal(
+    await readFile(join(sourceRoot, '.runforge-snapshots', 'crm', definition.contentHash, 'plugin', 'skills', 'customer-query', 'references', 'schema.md'), 'utf8'),
+    '# Customer schema',
+  );
   assert.equal(handle.mcpServers[0]?.bearerToken, '');
   const debugServer = resolveBusinessPluginMcpServer(
     definition,

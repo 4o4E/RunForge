@@ -5,7 +5,7 @@ import { mkdir, open as openFile, readdir, readFile, rename, rm, stat, writeFile
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Request, Response } from 'express';
-import { resolveThreadWorkspaceRoot, resolveWorkspaceRoot } from '../files/workspaceRoot.js';
+import { ensureThreadWorkspaceRoot, resolveThreadWorkspaceRoot } from '../files/workspaceRoot.js';
 import { threadWorkspaceAccess, ThreadWorkspaceAccessError } from '../files/threadWorkspace.js';
 import { ensureOfficePdfPreview, isOfficeConvertiblePath } from '../files/officePreview.js';
 import { mediaTypeFromPath, normalizeRemotePath, streamWorkspaceFile, toRemotePath, workspaceRoot } from '../files/workspace.js';
@@ -52,15 +52,13 @@ function canonicalRemotePath(abs: string, configuredRoot: string): string {
   return remotePath === '.' ? '' : remotePath;
 }
 
-function rawFileUrl(path: string, tenantId: string, userId: string, expires: number, sig: string, threadId?: string | null): string {
-  const params = new URLSearchParams({ path, tenant: tenantId, user: userId, expires: String(expires), sig });
-  if (threadId) params.set('threadId', threadId);
+function rawFileUrl(path: string, tenantId: string, userId: string, expires: number, sig: string, spaceId: string, threadId: string): string {
+  const params = new URLSearchParams({ path, tenant: tenantId, user: userId, spaceId, threadId, expires: String(expires), sig });
   return `/api/files/raw?${params.toString()}`;
 }
 
-function sharePageUrl(path: string, tenantId: string, userId: string, expires: number, sig: string, threadId?: string | null): string {
-  const params = new URLSearchParams({ path, tenant: tenantId, user: userId, expires: String(expires), sig });
-  if (threadId) params.set('threadId', threadId);
+function sharePageUrl(path: string, tenantId: string, userId: string, expires: number, sig: string, spaceId: string, threadId: string): string {
+  const params = new URLSearchParams({ path, tenant: tenantId, user: userId, spaceId, threadId, expires: String(expires), sig });
   return `/share/file?${params.toString()}`;
 }
 
@@ -74,7 +72,8 @@ type FileAccessMode = 'read' | 'write';
 interface FileAccess {
   tenantId: string;
   userId: string;
-  threadId: string | null;
+  spaceId: string;
+  threadId: string;
   workspaceRoot: string;
   workspaceKey: string;
   file: string;
@@ -94,8 +93,7 @@ function sendFileError(res: Response, error: unknown): void {
 }
 
 /** 已登录请求先按可见空间和 thread 归属授权，再计算 workspace；签名分享没有身份，
- *  因此 tenant/user/threadId 都必须进入 HMAC。带 threadId 的分享只表示非 default
- *  thread workspace，default 空间仍生成历史用户级链接。 */
+ *  因此 tenant/user/space/thread 都必须进入 HMAC。 */
 async function resolveFileAccess(
   req: Request,
   res: Response,
@@ -111,13 +109,19 @@ async function resolveFileAccess(
       // 系统管理员不能借这条普通文件路径绕过审计；这里只有租户身份可以进入。
       const workspace = await threadWorkspaceAccess.resolveForWeb(identity, requestedThreadId(req), mode);
       await mkdir(workspace.root, { recursive: true });
+      const file = normalizeRemotePath(requestedPath, workspace.root);
+      const remotePath = toRemotePath(file, workspace.root);
+      if (mode === 'write' && (remotePath === 'plugins' || remotePath.startsWith('plugins/'))) {
+        throw new ThreadWorkspaceAccessError(403, 'MANAGED_RESOURCE_READ_ONLY', '业务插件目录只读');
+      }
       return {
         tenantId: identity.tenantId,
         userId: identity.userId,
+        spaceId: workspace.spaceId,
         threadId: workspace.threadId,
         workspaceRoot: workspace.root,
-        workspaceKey: workspace.kind === 'thread' ? `thread:${workspace.threadId}` : `user:${identity.userId}`,
-        file: normalizeRemotePath(requestedPath, workspace.root),
+        workspaceKey: `space:${workspace.spaceId}:thread:${workspace.threadId}`,
+        file,
       };
     } catch (error) {
       sendFileError(res, error);
@@ -126,24 +130,25 @@ async function resolveFileAccess(
   }
   const tenantId = typeof req.query.tenant === 'string' ? req.query.tenant.trim() : '';
   const userId = typeof req.query.user === 'string' && req.query.user.trim() ? req.query.user.trim() : '';
+  const spaceId = typeof req.query.spaceId === 'string' ? req.query.spaceId.trim() : '';
   const threadId = requestedThreadId(req);
-  if (!tenantId || !userId) {
-    res.status(403).json({ error: '文件分享缺少租户或用户身份' });
+  if (!tenantId || !userId || !spaceId || !threadId) {
+    res.status(403).json({ error: '文件分享缺少工作区身份' });
     return null;
   }
   const { workspaceRoot: baseRoot } = await getSystemToolSettings();
-  const root = threadId
-    ? resolveThreadWorkspaceRoot(threadId, baseRoot)
-    : resolveWorkspaceRoot({ tenantId, userId }, baseRoot);
+  const root = resolveThreadWorkspaceRoot(spaceId, threadId, baseRoot);
   const file = normalizeRemotePath(requestedPath, root);
   const path = canonicalRemotePath(file, root);
-  if (verifyFileShare(path, tenantId, userId, req.query.expires, req.query.sig, undefined, threadId)) {
+  if (verifyFileShare(path, tenantId, userId, req.query.expires, req.query.sig, spaceId, threadId)) {
+    await ensureThreadWorkspaceRoot(spaceId, threadId, baseRoot);
     return {
       tenantId,
       userId,
+      spaceId,
       threadId,
       workspaceRoot: root,
-      workspaceKey: threadId ? `thread:${threadId}` : `user:${userId}`,
+      workspaceKey: `space:${spaceId}:thread:${threadId}`,
       file,
     };
   }
@@ -307,12 +312,12 @@ filesApi.post('/share-link', requireTenantScope, async (req, res) => {
     const path = canonicalRemotePath(file, root);
     const ttlSeconds = clampShareTtlSeconds(req.body?.ttlSeconds);
     const expires = Math.floor(Date.now() / 1000) + ttlSeconds;
-    const sig = signFileShare(path, access.tenantId, access.userId, expires, access.threadId);
+    const sig = signFileShare(path, access.tenantId, access.userId, expires, access.spaceId, access.threadId);
     res.status(201).json({
       path,
       expiresAt: new Date(expires * 1000).toISOString(),
-      url: sharePageUrl(path, access.tenantId, access.userId, expires, sig, access.threadId),
-      rawUrl: rawFileUrl(path, access.tenantId, access.userId, expires, sig, access.threadId),
+      url: sharePageUrl(path, access.tenantId, access.userId, expires, sig, access.spaceId, access.threadId),
+      rawUrl: rawFileUrl(path, access.tenantId, access.userId, expires, sig, access.spaceId, access.threadId),
     });
   } catch (err) {
     sendFileError(res, err);

@@ -66,17 +66,17 @@ export function clampShareTtlSeconds(value: unknown): number {
   return Math.min(MAX_SHARE_TTL_SECONDS, Math.max(MIN_SHARE_TTL_SECONDS, Math.floor(raw)));
 }
 
-// tenantId/userId/threadId 进签名输入:分享链接本身不带身份，匿名访问时这些定位字段
-// 只能来自 query。非 default 空间的 threadId 必须被签名绑定，否则同一路径的签名
-// 可以被换到另一个 thread workspace 重放。threadId 为空时保持历史签名格式兼容旧链接。
+// tenantId/userId/spaceId/threadId 进入签名输入。分享链接本身不带登录身份，匿名访问时
+// 这些定位字段只能来自 query，必须全部绑定，避免同一路径的签名跨工作区重放。
 export function signFileShare(
   canonicalPath: string,
   tenantId: string,
   userId: string,
   expiresEpochSeconds: number,
-  threadId?: string | null,
+  spaceId: string,
+  threadId: string,
 ): string {
-  const scope = threadId ? `${tenantId}\n${userId}\n${threadId}` : `${tenantId}\n${userId}`;
+  const scope = `${tenantId}\n${userId}\n${spaceId}\n${threadId}`;
   return createHmac('sha256', shareSecret())
     .update(`${scope}\n${canonicalPath}\n${expiresEpochSeconds}`)
     .digest('base64url');
@@ -88,12 +88,13 @@ export function verifyFileShare(
   userId: string,
   expiresRaw: unknown,
   signatureRaw: unknown,
+  spaceId: string,
+  threadId: string,
   nowSeconds = Math.floor(Date.now() / 1000),
-  threadId?: string | null,
 ): boolean {
   if (typeof expiresRaw !== 'string' || typeof signatureRaw !== 'string') return false;
   const expires = Number(expiresRaw);
   if (!Number.isInteger(expires) || expires < nowSeconds) return false;
-  const expected = signFileShare(canonicalPath, tenantId, userId, expires, threadId);
+  const expected = signFileShare(canonicalPath, tenantId, userId, expires, spaceId, threadId);
   return safeEqual(signatureRaw, expected);
 }

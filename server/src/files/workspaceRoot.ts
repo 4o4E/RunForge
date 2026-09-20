@@ -1,7 +1,7 @@
 import { join, resolve } from 'node:path';
 import { access, mkdir, rename } from 'node:fs/promises';
 import { config } from '../config.js';
-import { scopeForThread, type TenantRow, type ThreadRow } from '../store/types.js';
+import type { ThreadRow } from '../store/types.js';
 
 export interface WorkspaceScope {
   tenantId: string;
@@ -51,20 +51,42 @@ export function resolveWorkspaceRoot(scope: WorkspaceScope | string, base: strin
   return resolve(join(tenantRoot, 'users', safeSegment(userId), 'workspace'));
 }
 
-/** 非默认空间按全局唯一 thread ID 使用短路径，不重复 tenant/space/user 层级。 */
-export function resolveThreadWorkspaceRoot(threadId: string, base: string = config.tools.workspaceRoot): string {
-  return resolve(join(base, safeSegment(threadId)));
+/** 每个 thread 使用空间隔离的固定工作目录。space/thread ID 均由服务端生成且不可修改。 */
+export function resolveThreadWorkspaceRoot(
+  spaceId: string,
+  threadId: string,
+  base: string = config.tools.workspaceRoot,
+): string {
+  return resolve(join(base, safeSegment(spaceId), safeSegment(threadId)));
 }
 
-/** 默认空间使用用户级 workspace；其他空间统一使用 thread 短路径。
- * thread 创建后 space/user 均不可迁移，因此这个映射在整个 thread 生命周期内稳定。 */
+/** 把旧版 `<base>/<threadId>` 工作目录原子移动到空间目录下；已迁移时可重复调用。 */
+export async function ensureThreadWorkspaceRoot(
+  spaceId: string,
+  threadId: string,
+  base: string = config.tools.workspaceRoot,
+): Promise<string> {
+  const target = resolveThreadWorkspaceRoot(spaceId, threadId, base);
+  if (await pathExists(target)) return target;
+  const legacy = resolve(join(base, safeSegment(threadId)));
+  await mkdir(resolve(target, '..'), { recursive: true });
+  if (await pathExists(legacy)) {
+    try {
+      await rename(legacy, target);
+      return target;
+    } catch (error) {
+      if (!await pathExists(target)) throw error;
+    }
+  }
+  await mkdir(target, { recursive: true });
+  return target;
+}
+
+/** 所有空间统一按 `/w/{spaceId}/{threadId}` 派生工作目录。
+ * thread 创建后 space 不可迁移，因此这个映射在整个 thread 生命周期内稳定。 */
 export function resolveWorkspaceRootForThread(
   thread: ThreadRow,
-  tenant: Pick<TenantRow, 'default_space_id'>,
   base: string = config.tools.workspaceRoot,
-): { kind: 'user' | 'thread'; root: string } {
-  if (thread.space_id === tenant.default_space_id) {
-    return { kind: 'user', root: resolveWorkspaceRoot(scopeForThread(thread), base) };
-  }
-  return { kind: 'thread', root: resolveThreadWorkspaceRoot(thread.id, base) };
+): { root: string } {
+  return { root: resolveThreadWorkspaceRoot(thread.space_id, thread.id, base) };
 }

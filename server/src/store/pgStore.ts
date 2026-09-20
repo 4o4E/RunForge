@@ -1075,12 +1075,19 @@ export class PgStore implements Store {
       idx: number;
       message_count: number;
       tool_count: number;
+      system_prompt: string | null;
       captured_at: string | null;
       created_at: Date;
     }>>(Prisma.sql`
       SELECT id, run_id, idx,
              jsonb_array_length(COALESCE(context_snapshot->'messages', '[]'::jsonb))::int AS message_count,
              jsonb_array_length(COALESCE(context_snapshot->'tools', '[]'::jsonb))::int AS tool_count,
+             CASE
+               WHEN row_number() OVER (ORDER BY created_at DESC, idx DESC) = 1
+                 AND context_snapshot->'messages'->0->>'role' = 'system'
+               THEN context_snapshot->'messages'->0->>'content'
+               ELSE NULL
+             END AS system_prompt,
              context_snapshot->>'capturedAt' AS captured_at,
              created_at
       FROM steps
@@ -1094,6 +1101,7 @@ export class PgStore implements Store {
       idx: row.idx,
       message_count: row.message_count,
       tool_count: row.tool_count,
+      system_prompt: row.system_prompt,
       captured_at: row.captured_at ?? row.created_at.toISOString(),
     }));
   }
@@ -1201,13 +1209,15 @@ export class PgStore implements Store {
       role: LlmMessage['role'];
       tool_calls: Array<{ id: string; name: string; argumentChars: number }>;
       tool_call_id: string | null;
-      collapsed: 'masked' | 'summarized';
+      collapsed: 'masked' | 'summarized' | null;
       summary_of: bigint[] | null;
       content_chars: number;
+      content: string | null;
       created_at: Date;
     }>>(Prisma.sql`
       SELECT m.id, m.run_id, m.step_id, m.role, m.tool_call_id, m.collapsed, m.summary_of,
              length(COALESCE(m.content, ''))::int AS content_chars,
+             CASE WHEN m.role = 'user' THEN m.content ELSE NULL END AS content,
              m.created_at,
              COALESCE((
                SELECT jsonb_agg(jsonb_build_object(
@@ -1220,7 +1230,7 @@ export class PgStore implements Store {
       FROM messages m
       WHERE m.thread_id = ${threadId}
         AND m.run_id IN (${Prisma.join(visibleRunIds)})
-        AND m.collapsed IS NOT NULL
+        AND (m.role = 'user' OR m.collapsed IS NOT NULL)
       ORDER BY m.id
     `);
     return rows.map((row) => ({
@@ -1233,6 +1243,7 @@ export class PgStore implements Store {
       collapsed: row.collapsed,
       summaryOf: (row.summary_of ?? []).map(serialId),
       contentChars: row.content_chars,
+      content: row.role === 'user' ? row.content : undefined,
       created_at: row.created_at.toISOString(),
     }));
   }

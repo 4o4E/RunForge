@@ -110,8 +110,8 @@ Server (Node.js / TypeScript 单体)
   |     |-- PgStore:所有查询强制带 tenant_id(+ user_id,见 §2 可见性规则)过滤 + RLS 兜底
   |     `-- MemoryStore:测试用,按 tenant_id 分 Map
   |
-  |-- Workspace 根:tenants/<tenant_id>/users/<user_id>/workspace
-  |-- Sandbox:bwrap bind mount 只挂载该用户的 workspace
+  |-- Workspace 根:<space_id>/<thread_id>
+  |-- Sandbox:bwrap bind mount 只挂载当前 thread 的 workspace
   |
   v
 PostgreSQL(单库,行级按 tenant_id / user_id 隔离)
@@ -125,7 +125,7 @@ Web 带 JWT access token 发起请求
 -> 后续所有 API handler、executeRun、tool registry、store 查询
    都从 AsyncLocalStorage 取 {tenant_id, user_id, role},不需要显式在每层传参
 -> Store 层查询自动带上 tenant_id(+ 按 §2 规则的 user_id)条件(应用层 + 数据库 RLS 双保险)
--> 文件工具/沙箱按 tenant_id + user_id 派生的 workspaceRoot 执行
+-> 文件工具/沙箱根据已授权 thread 的 space_id + thread_id 派生 workspaceRoot 执行
 -> 事件经 run bus 按 tenant_id 过滤后推送给对应租户的 WebSocket 连接
 ```
 
@@ -372,17 +372,16 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 
 ## 6. 文件系统与 workspace 隔离
 
-系统管理员通过 `/api/system/settings/tools` 维护 `workspaceRoot` 基础目录。运行时再按空间类型派生实际目录:
-
-默认空间统一使用 `<workspaceRoot>/tenants/<tenant_id>/users/<user_id>/workspace`；其他空间使用 `<workspaceRoot>/<thread_id>`。
+系统管理员通过 `/api/system/settings/tools` 维护 `workspaceRoot` 基础目录，生产镜像默认使用
+`/w`。所有空间统一使用 `<workspaceRoot>/<space_id>/<thread_id>`，因此生产路径为
+`/w/{spaceId}/{threadId}`。
 
 - `getSystemToolSettings()` 读取系统工具策略和 `workspaceRoot` 基础目录；租户身份无法读取或修改这组配置。
-- `getToolSettings(scope)` 使用系统基础目录派生 default 空间的用户目录。Agent、文件 API 和 shell session 在处理具体 thread 时共同调用 `resolveWorkspaceRootForThread(...)`,保证同一个 thread 使用同一路径。
-- 没有 `userId` 的 `resolveWorkspaceRoot({ tenantId }, base)` 只返回租户基础目录,用于启动日志等不代表具体用户的场景,不能作为工具执行目录。
-- `normalizeRemotePath`/`isWithin`(`server/src/files/workspace.ts`)的围栏逻辑不需要改——它们已经是"给定一个 root,判断路径是否在 root 内",只要传入的 root 换成用户专属路径即可。
-- Office 预览缓存(`server/src/files/officePreview.ts`)的 `officeCacheDir` 同理按租户 + 用户分目录,`officePdfCacheKey` 的哈希输入也带 `tenantId`/`userId`(目录隔离和哈希隔离是两个独立的加固点,防止未来目录结构变化时退化成只靠哈希去重)。
-- 签名文件分享链接(`/api/files/{raw,preview,hex,pdf-preview}` 的免身份分支)本身不带身份,匿名访问时的 `tenantId`/`userId` 只能来自请求方自己在 query 里声明的 `tenant`/`user` 参数——`signFileShare`/`verifyFileShare` 把二者一起签进 HMAC；非 default 空间还会签入 `threadId`，防止篡改 query 让同一个签名在另一个用户或 thread workspace 下"重放"。
-- 从旧 `id='default'` 升级时，启动引导把已有 `<workspaceRoot>/users/` 原子移动到新 ID 对应的 `<workspaceRoot>/tenants/<tenant_id>/users/`。目标路径已经存在时立即终止启动，避免覆盖文件。
+- Agent、文件 API 和 shell session 在处理具体 thread 时共同调用 `resolveWorkspaceRootForThread(...)`，保证同一个 thread 使用同一路径。文件入口缺少 `threadId` 时返回 `THREAD_REQUIRED`；新会话首次上传附件会先创建 thread。
+- `normalizeRemotePath`/`isWithin`(`server/src/files/workspace.ts`)继续以当前 thread 的工作目录作为唯一围栏。
+- Office 预览缓存键包含 tenant 和 `space/thread` 工作区标识，避免跨工作区复用缓存。
+- 签名文件分享链接把 `tenantId`、`userId`、`spaceId` 和 `threadId` 全部写入 HMAC，任一定位字段被修改都会使签名失效。
+- 旧版 `<workspaceRoot>/<threadId>` 目录在首次访问时原子移动到 `<workspaceRoot>/<spaceId>/<threadId>`；目标已经存在时直接使用目标目录。
 
 ---
 
@@ -390,9 +389,9 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 
 延续 [工具沙箱设计](tool-sandbox.md) 已确立的两层模型(应用层路径策略 + bwrap OS 隔离),多租户在这两层之上都要收紧:
 
-**应用层路径策略**:围栏 root 从全局 `workspaceRoot` 换成按租户 + 用户派生的 root(见 §6),不需要新增机制,直接复用现有的 `none`/`workspace`/`allowlist` 三档策略。
+**应用层路径策略**:围栏 root 使用当前 thread 的 `/w/{spaceId}/{threadId}`(见 §6)，直接复用现有路径检查。
 
-**bwrap 沙箱层**:`--bind <workspaceRoot> <workspaceRoot>` 的 `workspaceRoot` 同样换成租户专属路径,天然做到"租户 A 的 shell 子进程即使命令被绕过,也 bind mount 不到租户 B 的文件"。命令白名单(`shellAllowCommands`)和网络开关(`network`)由系统设置统一维护,执行时仍使用当前用户派生的 `workspaceRoot`。
+**bwrap 沙箱层**:`--bind <workspaceRoot> <workspaceRoot>` 只挂载当前 thread 工作目录；`plugins/` 再覆盖为只读挂载。命令白名单和网络开关由系统设置统一维护。
 
 **全局单例改造**:现有代码里几个 module-level 的全局状态,都要从"单例"变成"按 tenant_id 分片":
 
@@ -409,8 +408,8 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 ## 8. Skills / Workflows
 
 - 内置 skill/workflow(`server/src/skills/builtin/`、`server/src/workflows/builtin/`)继续全局共享——它们是代码自带的能力,不含租户数据,没有隔离必要,所有租户看到同一份。
-- 用户自定义 skill(`<workspaceRoot>/.skills/<name>`)因为 §6 已经把 `workspaceRoot` 换成了租户专属路径,`loadSkillIndex(workspaceRoot)` 不需要额外改造就自动按租户隔离——传入不同租户的 root,天然读到不同的 `.skills/` 目录。
-- 唯一要注意的是 `activateSkill` 物化内置 skill 到 `<workspaceRoot>/.agents/skills/<name>` 的逻辑(`registry.ts:168-177`)——这个物化操作现在会在每个租户的 workspace 下各跑一份,属于预期行为(每个租户独立物化,互不影响),不需要额外去重。
+- 用户自定义 skill 位于当前 thread 的 `<workspaceRoot>/.skills/<name>`，随空间和会话隔离。
+- 内置 skill 物化到 `<workspaceRoot>/.agents/skills/<name>`；业务插件位于 `<workspaceRoot>/plugins/<pluginId>`，文件从不可变快照写时复制到工作目录，并由文件工具和文件 API 保持只读。
 
 ---
 
@@ -422,7 +421,7 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 - **租户授权**:system admin 在 `/sys-admin/tenant-access?tenant=<tenantId>` 选择租户可使用的 LLM provider 和数据源。授权保存在租户自己的 `tenant.resourceAuthorization` JSON 设置中。
 - **租户内设置**:用户、空间和业务插件。owner/admin 通过 `/admin` 管理本租户,system admin 通过 `/sys-admin/tenants/:tenantId/{users|spaces|business-plugins}` 管理指定租户。
 
-监听端口、数据库连接串和启动引导密钥继续由 `config.ts` 从 env 读取。系统工具策略存入 `app_settings`；其中 `workspaceRoot` 保存基础目录，执行时根据空间类型派生用户目录或 thread 目录。
+监听端口、数据库连接串和启动引导密钥继续由 `config.ts` 从 env 读取。系统工具策略存入 `app_settings`；其中 `workspaceRoot` 保存基础目录，执行时统一派生 `space/thread` 目录。
 
 `preview.officeConverterUrl`(office 预览转换服务地址)保持实例级——它是一个外部服务的地址,不需要每个租户配一份,但 `officeCacheDir` 的实际写入路径按 §6 分租户子目录。
 
@@ -469,7 +468,7 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 改造完成后(即 §5-§9 都实施完)的隔离强度:
 
 - ⚠️ 数据库层:**只有应用层查询过滤,没有 Postgres RLS 兜底**。Phase 2 已经给 `threads`/`subagent_runs`/`shell_sessions`/`datasources`/`push_subscriptions` 等业务表加了 `tenant_id`/`user_id` 列,Store 层(`pgStore.ts`/`memoryStore.ts`)每个方法按 scope 过滤,是当前唯一的强制边界。**明确跳过 RLS 的原因**:Prisma 和过渡期原生 SQL 共用 `server/src/db/pool.ts` 的 `pg.Pool`,当前没有“一个请求固定同一连接和事务”的执行上下文；RLS 所需的 `SET LOCAL app.tenant_id` 因此不能稳定覆盖整个请求。**这意味着**:任何绕过 Store/repository、直接用 `query()`/`pool` 手写 SQL 的新代码,如果忘记租户过滤,就是完整的跨租户数据泄露,且没有数据库层兜底会拦住它——`accountPool.ts` 里 `datasources`/`workload_tokens`/`datasource_account_leases` 等尚未迁移查询仍需逐条核对 scope。空间阶段不再新增散落原生 SQL，后续需要更高保证级别时再单独设计 RLS 请求事务边界。
-- ✅ 文件系统层:default 空间按租户和用户分目录，其他空间按全局唯一 thread ID 分目录；应用层路径围栏与 bwrap bind mount 使用同一个派生目录。基础目录只允许 system admin 通过系统设置修改，租户接口不提供工具设置读写能力(见 §6)。
+- ✅ 文件系统层:所有空间统一按 `spaceId/threadId` 分目录；应用层路径围栏与 bwrap bind mount 使用同一个派生目录。基础目录只允许 system admin 通过系统设置修改，租户接口不提供工具设置读写能力(见 §6)。
 - ✅ 事件流:WebSocket 订阅前按 `{tenantId, userId}` 查一次归属(`store.getRun`/`store.getThread`),查不到直接 1008 拒绝,不会走到 `subscribe`——实现方式和最初设想的"事件打 tenant_id 标签"不同,记录在 §7,但达到的隔离粒度更细(连 user_id 都校验了,不只是 tenant 边界)。
 - ✅ 用户可见性:所有 Tier 1 查询按 `(tenant_id, user_id)` 双重过滤,同租户内的普通用户看不到彼此的 thread;Tier 2 表(`runs`/`messages`/`events`/`shell_commands` 等)通过 JOIN 父表间接过滤(见 §5)。唯一的例外(管理员审计)目前还没实现,仍是设计态,不是已落地的旁路。
 - ⚠️ 管理员审计本身是一个需要被信任的高权限能力:tenant owner/admin 能看到本租户任意成员的对话,system admin 能看到任意租户任意成员的对话——这不是"漏洞",而是设计如此(见 §1/§4),但意味着这两类身份的账号安全(密码强度、是否启用后续可能加的 2FA)比普通 member 更值得重视,一旦这两类账号被盗,影响面是"审计范围内的所有对话",需要在运营上对这两类账号的登录/密码策略从紧要求,这一版设计不包含强制 2FA,留作后续加固项。

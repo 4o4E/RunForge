@@ -184,6 +184,7 @@ function hostPathForConfig(cfg: ShellSandboxConfig): { envPath: string; cleanupP
 /** 生成 bwrap 参数;纯函数便于单测,实际执行由 runShellCommand 完成。 */
 export function buildBwrapArgs(opts: BwrapOptions): string[] {
   const workspaceRoot = resolve(opts.workspaceRoot);
+  const readonlyWorkspacePaths = existing([resolve(workspaceRoot, 'plugins')]);
   const shell: ResolvedCommand = { name: 'sh', source: realpathSync('/bin/sh'), dest: '/bin/sh' };
   const commands = resolveAllowedCommands(opts.allowCommands, opts.envPath);
   const bindFiles = unique([shell, ...commands].map((cmd) => `${cmd.source}\0${cmd.dest}`)).map((pair) => {
@@ -207,6 +208,7 @@ export function buildBwrapArgs(opts: BwrapOptions): string[] {
     ...extraReadOnlyPaths.flatMap(parentDirs),
     ...bindFiles.flatMap((file) => parentDirs(file.dest)),
     ...parentDirs(workspaceRoot),
+    ...readonlyWorkspacePaths.flatMap(parentDirs),
   ]);
 
   const args = ['--unshare-all', '--die-with-parent', '--new-session', '--tmpfs', '/'];
@@ -221,6 +223,7 @@ export function buildBwrapArgs(opts: BwrapOptions): string[] {
   for (const file of bindFiles) args.push('--ro-bind', file.source, file.dest);
 
   args.push('--bind', workspaceRoot, workspaceRoot);
+  for (const path of readonlyWorkspacePaths) args.push('--ro-bind', path, path);
   args.push('--chdir', workspaceRoot);
   args.push('--setenv', 'PATH', pathDirs.length ? pathDirs.join(':') : '/usr/bin:/bin');
   args.push('--setenv', 'HOME', workspaceRoot, '--setenv', 'PWD', workspaceRoot);

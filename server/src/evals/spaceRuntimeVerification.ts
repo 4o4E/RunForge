@@ -413,14 +413,12 @@ try {
   assert.doesNotMatch(attemptByRun.get(runB.runId) ?? '', /SPACE_A_PROMPT/);
   assert.doesNotMatch(attemptByRun.get(runB.runId) ?? '', /APP_A_/);
 
-  const tenant = await store.findTenant(tenantId);
   const externalThreadA = await store.getThread(scheduledRuns.get(runA.runId)!, runA.threadId);
-  assert.ok(tenant && externalThreadA);
-  const defaultWorkspace = resolveWorkspaceRootForThread(webThread, tenant, runtimeRoot);
-  const externalWorkspace = resolveWorkspaceRootForThread(externalThreadA, tenant, runtimeRoot);
-  assert.equal(defaultWorkspace.kind, 'user');
-  assert.equal(externalWorkspace.kind, 'thread');
+  assert.ok(externalThreadA);
+  const defaultWorkspace = resolveWorkspaceRootForThread(webThread, runtimeRoot);
+  const externalWorkspace = resolveWorkspaceRootForThread(externalThreadA, runtimeRoot);
   assert.notEqual(defaultWorkspace.root, externalWorkspace.root);
+  assert.match(defaultWorkspace.root, new RegExp(`${webThread.space_id}/${webThread.id}$`));
   assert.match(externalWorkspace.root, new RegExp(`${runA.threadId}$`));
 
   const ownerSpaces = await spaceAccess.list(ownerActor);

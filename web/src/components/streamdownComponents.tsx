@@ -1,5 +1,5 @@
 import rawMermaid, { type MermaidConfig } from 'mermaid';
-import { CopyIcon, DownloadIcon, Maximize2Icon, RotateCcwIcon, ZoomInIcon, ZoomOutIcon } from 'lucide-react';
+import { AlignLeftIcon, CopyIcon, DownloadIcon, Maximize2Icon, RotateCcwIcon, ZoomInIcon, ZoomOutIcon } from 'lucide-react';
 import {
   type ComponentProps,
   type PointerEvent as ReactPointerEvent,
@@ -33,6 +33,7 @@ import { useWorkspaceFileContext } from '@/components/WorkspaceFileContext';
 
 interface MarkdownRenderOptions {
   streaming?: boolean;
+  wrapCodeBlocks?: boolean;
 }
 
 const MarkdownRenderOptionsContext = createContext<MarkdownRenderOptions>({});
@@ -860,6 +861,8 @@ function EagerMermaidBlock({ chart, className, isIncomplete }: { chart: string; 
 
 function StreamdownCode({ className, children, node, ...props }: MarkdownCodeProps) {
   const { controls, lineNumbers } = useContext(StreamdownContext);
+  const { wrapCodeBlocks } = useContext(MarkdownRenderOptionsContext);
+  const [wrap, setWrap] = useState(false);
   const isIncomplete = useIsCodeFenceIncomplete();
   const isBlock = 'data-block' in props;
   const language = className?.match(LANGUAGE_CLASS_RE)?.[1] ?? '';
@@ -882,7 +885,31 @@ function StreamdownCode({ className, children, node, ...props }: MarkdownCodePro
   const showDownload = showCodeControls && getControl(controls, 'code', 'download');
 
   return (
-    <StreamdownCodeBlock code={code} language={language} isIncomplete={isIncomplete} lineNumbers={lineNumbers} startLine={startLine} className={className}>
+    <StreamdownCodeBlock
+      code={code}
+      language={language}
+      isIncomplete={isIncomplete}
+      lineNumbers={lineNumbers}
+      startLine={startLine}
+      className={cn(
+        className,
+        wrap && '[&_[data-streamdown=code-block-body]]:overflow-x-hidden [&_[data-streamdown=code-block-body]_pre]:whitespace-pre-wrap [&_[data-streamdown=code-block-body]_pre]:break-words',
+      )}
+    >
+      {wrapCodeBlocks ? (
+        <button
+          type="button"
+          className={cn(
+            'cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:text-foreground',
+            wrap && 'bg-muted text-foreground',
+          )}
+          onClick={() => setWrap((value) => !value)}
+          title={wrap ? '关闭代码自动换行' : '开启代码自动换行'}
+          aria-label={wrap ? '关闭代码自动换行' : '开启代码自动换行'}
+        >
+          <AlignLeftIcon className="size-3.5" />
+        </button>
+      ) : null}
       {showDownload ? <CodeBlockDownloadButton code={code} language={language} /> : null}
       {showCopy ? <CodeBlockCopyButton code={code} /> : null}
     </StreamdownCodeBlock>

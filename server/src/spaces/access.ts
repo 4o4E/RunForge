@@ -12,6 +12,7 @@ import type { IdentityContext } from '../auth/context.js';
 import type { SpaceWithVisibilityRow, Store, UserRow } from '../store/types.js';
 import { DefaultSpaceImmutableError } from '../store/types.js';
 import { store as defaultStore } from '../store/index.js';
+import { businessPluginRegistry } from '../businessPlugins/registry.js';
 import {
   normalizeSpaceConfig,
   spaceConfigService as defaultSpaceConfigService,
@@ -183,12 +184,18 @@ export class SpaceAccessService {
 
   async create(actorContext: SpaceActorContext, input: CreateSpaceInput): Promise<SpaceSummary> {
     const actor = await this.resolveManagerActor(actorContext);
-    return this.createManaged(actor.tenantId, actor.createdByUserId, input);
+    return businessPluginRegistry.mutateTenant(
+      actor.tenantId,
+      () => this.createManaged(actor.tenantId, actor.createdByUserId, input),
+    );
   }
 
   async update(actorContext: SpaceActorContext, spaceId: string, input: UpdateSpaceInput): Promise<SpaceSummary> {
     const actor = await this.resolveManagerActor(actorContext);
-    return this.updateManaged(actor.tenantId, spaceId, input);
+    return businessPluginRegistry.mutateTenant(
+      actor.tenantId,
+      () => this.updateManaged(actor.tenantId, spaceId, input),
+    );
   }
 
   async delete(actorContext: SpaceActorContext, spaceId: string): Promise<SpaceSummary> {

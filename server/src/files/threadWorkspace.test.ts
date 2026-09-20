@@ -7,7 +7,7 @@ import {
   ThreadWorkspaceAccessError,
   ThreadWorkspaceAccessService,
 } from './threadWorkspace.js';
-import { resolveThreadWorkspaceRoot, resolveWorkspaceRoot } from './workspaceRoot.js';
+import { resolveThreadWorkspaceRoot } from './workspaceRoot.js';
 
 async function fixture() {
   const store = new MemoryStore();
@@ -46,20 +46,25 @@ async function fixture() {
   return { store, spaces, provisioned, admin, member, hidden, ownerIdentity };
 }
 
-test('thread workspace: default 保持用户目录，非 default Web thread 使用短路径且不共享他人文件', async () => {
+test('thread workspace: 所有空间都按 space/thread 隔离且文件入口必须绑定 thread', async () => {
   const ctx = await fixture();
   const base = '/srv/runforge/thread-workspace-test';
   const access = new ThreadWorkspaceAccessService(ctx.store, ctx.spaces, async () => ({ workspaceRoot: base }));
   const ownerScope = { tenantId: ctx.provisioned.tenant.id, userId: ctx.provisioned.owner.id };
-  const defaultWorkspace = await access.resolveForWeb(ctx.ownerIdentity, null, 'write');
-  assert.equal(defaultWorkspace.kind, 'user');
-  assert.equal(defaultWorkspace.root, resolveWorkspaceRoot(ownerScope, base));
+  await assert.rejects(
+    access.resolveForWeb(ctx.ownerIdentity, null, 'write'),
+    (error: unknown) => error instanceof ThreadWorkspaceAccessError && error.code === 'THREAD_REQUIRED',
+  );
+
+  const defaultThread = await ctx.store.createThread(ownerScope, 'Default Thread', { spaceId: ctx.provisioned.defaultSpace.id });
+  const defaultWorkspace = await access.resolveForWeb(ctx.ownerIdentity, defaultThread.id, 'write');
+  assert.equal(defaultWorkspace.root, resolveThreadWorkspaceRoot(defaultThread.space_id, defaultThread.id, base));
 
   const space = await ctx.spaces.create(ctx.ownerIdentity, { mode: 'web', name: 'Project' });
   const thread = await ctx.store.createThread(ownerScope, 'Project Thread', { spaceId: space.id });
   const resolved = await access.resolveForWeb(ctx.ownerIdentity, thread.id, 'write');
-  assert.equal(resolved.kind, 'thread');
-  assert.equal(resolved.root, resolveThreadWorkspaceRoot(thread.id, base));
+  assert.equal(resolved.root, resolveThreadWorkspaceRoot(thread.space_id, thread.id, base));
+  assert.notEqual(resolved.root, defaultWorkspace.root);
 
   const adminIdentity = {
     scope: 'tenant' as const,
@@ -121,7 +126,7 @@ test('thread workspace: external thread 对可见用户只读且不冒充 execut
     role: 'member' as const,
   };
   const visible = await access.resolveForWeb(memberIdentity, externalThread.id, 'read');
-  assert.equal(visible.root, resolveThreadWorkspaceRoot(externalThread.id, base));
+  assert.equal(visible.root, resolveThreadWorkspaceRoot(externalThread.space_id, externalThread.id, base));
   await assert.rejects(
     access.resolveForWeb(memberIdentity, externalThread.id, 'write'),
     (error: unknown) => error instanceof ThreadWorkspaceAccessError && error.code === 'SPACE_READ_ONLY',

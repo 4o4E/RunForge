@@ -1,6 +1,6 @@
 import { cp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 
 export type SkillSource = 'builtin' | 'user' | 'business';
@@ -243,16 +243,20 @@ export function selectSkill(skills: SkillIndexItem[], nameOrId: string): SkillIn
   return matches.find((skill) => skill.source === 'user') ?? matches[0];
 }
 
-export async function activateSkillItem(skill: SkillIndexItem): Promise<SkillActivation> {
+export async function activateSkillItem(skill: SkillIndexItem, workspaceRoot?: string): Promise<SkillActivation> {
   const skillPath = join(skill.root, 'SKILL.md');
   const { body } = parseSkillDocument(await readFile(skillPath, 'utf8'), skillPath);
+  const relativeRoot = workspaceRoot ? relative(resolve(workspaceRoot), resolve(skill.root)) : '';
+  const displayedRoot = relativeRoot && relativeRoot !== '..' && !relativeRoot.startsWith(`..${sep}`) && !isAbsolute(relativeRoot)
+    ? relativeRoot
+    : skill.root;
   const systemMessage = [
     '当前 run 的 Skill 激活结果 / Skill activation result for the current run:',
     '- 这段入口说明只在当前 run 生效；如果它出现在后续 run 的历史里，不代表仍处于激活状态。',
     '- These entry instructions apply only to the current run; seeing them in later run history does not mean the skill is still active.',
     `- name: ${skill.name}`,
     `- id: ${skill.id}`,
-    `- root: ${skill.root}`,
+    `- root: ${displayedRoot}`,
     '',
     '正文 / Instructions:',
     body.trim() || '（空正文）',
@@ -264,5 +268,5 @@ export async function activateSkill(workspaceRoot: string, nameOrId: string): Pr
   const skills = await loadSkillIndex(workspaceRoot);
   const skill = selectSkill(skills, nameOrId);
   if (!skill) throw new Error(`未找到 skill: ${nameOrId}`);
-  return activateSkillItem(skill);
+  return activateSkillItem(skill, workspaceRoot);
 }

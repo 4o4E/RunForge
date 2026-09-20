@@ -303,6 +303,7 @@ api.get('/threads/:id/context-snapshots', async (req, res) => {
   res.json({
     threadId: access.thread.id,
     activeRunId: access.thread.active_run_id,
+    systemPrompt: rows.at(-1)?.system_prompt ?? null,
     contexts: rows.map((row) => ({
       stepId: row.id,
       runId: row.run_id,
@@ -401,6 +402,7 @@ api.get('/threads/:id', async (req, res) => {
         collapsed: message.collapsed,
         summary_of: message.summaryOf,
         content_chars: message.contentChars,
+        content: message.role === 'user' ? message.content : undefined,
         created_at: message.created_at,
       }));
   res.json({
@@ -662,9 +664,24 @@ api.post('/runs/:id/answer', async (req, res) => {
     if (sendRunActiveConflict(res, err)) return;
     return res.status(500).json({ error: (err as Error).message });
   }
+  const userMessage = (await store.loadThreadMessageMetadata(scope, thread.id, { runId: run.id }))
+    .filter((message) => message.run_id === run.id && message.role === 'user')
+    .at(-1);
+  if (!userMessage || userMessage.content == null) {
+    throw new Error(`恢复 run ${run.id} 后缺少持久化用户消息`);
+  }
   await store.addEvent(scope, run.id, null, { type: 'user_answer', step: (await store.getLastStepIndex(scope, run.id)) + 1, answer });
   void executeRun(run.id, { resume: true, scope });
-  res.json({ id: run.id, threadId: run.thread_id, status: 'running' });
+  res.json({
+    id: run.id,
+    threadId: run.thread_id,
+    status: 'running',
+    userMessage: {
+      id: userMessage.id,
+      content: userMessage.content,
+      createdAt: userMessage.created_at,
+    },
+  });
 });
 
 // --- Managed shell ---

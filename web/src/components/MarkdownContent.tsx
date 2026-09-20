@@ -11,18 +11,20 @@ export function MarkdownContent({
   components,
   plugins = streamdownPlugins,
   streaming = false,
+  wrapCodeBlocks = false,
 }: {
   text: string;
   className?: string;
   components?: StreamdownProps['components'];
   plugins?: StreamdownProps['plugins'];
   streaming?: boolean;
+  wrapCodeBlocks?: boolean;
 }) {
   const mermaid = useThemedMermaid();
   const mergedComponents = useStreamdownComponents(components);
 
   return (
-    <MarkdownRenderOptionsProvider value={{ streaming }}>
+    <MarkdownRenderOptionsProvider value={{ streaming, wrapCodeBlocks }}>
       <Streamdown
         className={cn(
           'markdown-content text-sm leading-relaxed text-foreground [&_pre]:my-2 [&_pre]:max-h-[70vh] [&_pre]:overflow-auto',

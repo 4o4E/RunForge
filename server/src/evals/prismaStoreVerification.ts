@@ -464,6 +464,18 @@ try {
   });
   assert.equal((await store.getRun(scope, run.id))?.goal_state?.intent, '验证 Prisma Store');
   const step = await store.createStep(scope, run.id, 1);
+  await store.saveStepContext(scope, step.id, {
+    messages: [
+      { role: 'system', content: 'Prisma 实际系统提示词' },
+      { role: 'user', content: 'Prisma 上下文输入' },
+    ],
+    tools: [],
+    stream: true,
+    capturedAt: new Date().toISOString(),
+  });
+  const contextSummaries = await store.listStepContextSummaries(scope, thread.id, { runId: run.id });
+  assert.equal(contextSummaries.length, 1);
+  assert.equal(contextSummaries[0]?.system_prompt, 'Prisma 实际系统提示词');
   await upsertSettings(tenantId, [{
     key: 'businessPlugins.settings',
     value: {
@@ -687,7 +699,9 @@ try {
   assert.equal((await store.listThreadNotices(scope, thread.id))[0]?.kind, 'verification');
 
   await store.markMessagesCollapsed(scope, [toolMessageId], 'masked');
-  assert.equal((await store.loadThreadMessageMetadata(scope, thread.id)).length, 1);
+  const messageMetadata = await store.loadThreadMessageMetadata(scope, thread.id);
+  assert.equal(messageMetadata.length, 2);
+  assert.equal(messageMetadata.find((message) => message.role === 'user')?.content, '验证输入');
   assert.match((await store.loadThreadMessages(scope, thread.id)).at(-1)?.content ?? '', /chars elided/);
   assert.equal((await store.loadRawThreadMessages(scope, thread.id)).at(-1)?.content, toolResult);
 

@@ -1,5 +1,4 @@
 import { agentContextSettings, config, type AgentContextSettings } from '../config.js';
-import { mkdir } from 'node:fs/promises';
 import { getConfiguredProvider, getConfiguredSystemTitleProvider } from '../llm/index.js';
 import type { LlmDelta, LlmMessage, LlmUsage, Provider } from '../llm/types.js';
 import { parseToolArguments } from '../llm/toolArgs.js';
@@ -56,7 +55,7 @@ import {
   runtimeCapabilityPromptValues,
   validatePromptTemplate,
 } from '../spaces/prompt.js';
-import { resolveWorkspaceRootForThread } from '../files/workspaceRoot.js';
+import { ensureThreadWorkspaceRoot, resolveWorkspaceRootForThread } from '../files/workspaceRoot.js';
 import { externalArtifactMaterializer } from '../external/artifactMaterializer.js';
 import { attachExternalArtifactTokens, type ExternalArtifactTokenSource } from '../external/artifactProtocol.js';
 import {
@@ -145,7 +144,7 @@ export interface ExecutorDeps {
     workspaceRoot: string,
   ) => Promise<ExternalArtifactTokenSource[]>;
   businessPluginRegistry: Pick<BusinessPluginRegistry, 'list' | 'resolveLock'>;
-  businessPluginRuntime: Pick<BusinessPluginRuntimeService, 'startRun'>;
+  businessPluginRuntime: Pick<BusinessPluginRuntimeService, 'startRun' | 'syncWorkspace'>;
   businessPluginSecretResolver: TenantSecretResolver;
   releaseRuntimeResources?: (runId: string) => Promise<number>;
 }
@@ -823,11 +822,10 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     if (!initialRun.goal_state) await store.setGoalState(scope, runId, goal);
     let toolSettings = deps.toolSettings ?? (await getSystemToolSettings());
     if (!deps.toolSettings) {
-      const tenant = await store.findTenant(scope.tenantId);
-      if (!tenant?.default_space_id) throw new Error(`tenant 缺少 default space：${scope.tenantId}`);
-      const workspace = resolveWorkspaceRootForThread(initialThread, tenant, toolSettings.workspaceRoot);
+      const workspaceBase = toolSettings.workspaceRoot;
+      const workspace = resolveWorkspaceRootForThread(initialThread, workspaceBase);
+      await ensureThreadWorkspaceRoot(initialThread.space_id, initialThread.id, workspaceBase);
       toolSettings = { ...toolSettings, workspaceRoot: workspace.root };
-      await mkdir(toolSettings.workspaceRoot, { recursive: true });
     }
     const materializeRunArtifacts = deps.materializeRunArtifacts
       ?? (store === defaultStore
@@ -864,6 +862,8 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           workloadToken: runWorkloadToken,
         }),
       });
+    } else if (pluginLock) {
+      await deps.businessPluginRuntime.syncWorkspace(toolSettings.workspaceRoot, new Set());
     }
     const tenantMcpSettings = deps.mcpSettings ?? (deps.store === defaultStore ? await getSystemMcpSettings() : { servers: [] });
     const allowedMcpServerIds = spaceConfig ? new Set(spaceConfig.capabilities.mcpServers) : null;
@@ -910,7 +910,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
     const activateIndexedSkill = async (nameOrId: string): Promise<SkillActivation> => {
       const skill = selectSkill(skillIndex, nameOrId);
       if (!skill) throw new Error(`未找到 skill: ${nameOrId}`);
-      return activateSkillItem(skill);
+      return activateSkillItem(skill, toolSettings.workspaceRoot);
     };
     const workflowIndex = await loadWorkflowIndex(toolSettings.workspaceRoot);
     const mcpToolLoader = async (settings: McpSettings, serverId: string, stepId?: string | null): Promise<McpActivation> => {

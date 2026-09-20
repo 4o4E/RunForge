@@ -154,13 +154,16 @@ pnpm db:migrate
 `db:baseline` 只用于已有完整旧结构的数据库，不能用于空库，否则会登记成功但不会创建表。
 可用 `pnpm --filter server db:status` 检查 migration 状态。
 
+从 0.5.x 升级到 0.6.0 时还需要调整工作区基础目录，完整步骤见
+[升级到 0.6.0](docs/upgrade-0.6.0.md)。
+
 如需确认表已创建：
 
 ```bash
 psql "$DATABASE_URL" -c "\dt"
 ```
 
-首次启动后,服务会把 env 中的工具默认配置补进系统 `app_settings`。当前开发库里这些 key 已存在：`tools.sandbox`、`tools.sandboxBackend`、`tools.workspaceRoot`、`tools.network`、`tools.maxOutput` 等；保存过系统设置后,数据库值会覆盖 env 默认值。`workspaceRoot` 保存基础目录，default 空间按租户和用户派生目录，其他空间按 thread ID 派生目录。如果要复现当前开发机的强沙箱配置,可在系统设置页保存 `sandbox=enforce`、`sandboxBackend=bwrap`、`workspaceRoot=<repo>/workspace`,并按任务需要决定是否开启网络。
+首次启动后,服务会把 env 中的工具默认配置补进系统 `app_settings`。当前开发库里这些 key 已存在：`tools.sandbox`、`tools.sandboxBackend`、`tools.workspaceRoot`、`tools.network`、`tools.maxOutput` 等；保存过系统设置后,数据库值会覆盖 env 默认值。`workspaceRoot` 保存基础目录，所有空间统一派生为 `<workspaceRoot>/<spaceId>/<threadId>`。生产容器使用 `/w`，本地开发可以在系统设置页保存实际可写的绝对目录。
 
 ```bash
 psql "$DATABASE_URL" -c "select key, value from app_settings order by key;"

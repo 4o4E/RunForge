@@ -297,7 +297,7 @@ test('Phase 2: 同一租户下不同用户互相看不到对方的 thread（user
   }
 });
 
-test('GET /api/threads/:id: 原始工具载荷只在显式 Debug 模式返回', async () => {
+test('GET /api/threads/:id: 用户正文始终返回，原始工具载荷只在显式 Debug 模式返回', async () => {
   const owner = await seedOwner('tn_debug_context', 'owner@debug-context.test', 'pw');
   const member = await store.createUser({
     tenantId: 'tn_debug_context',
@@ -333,10 +333,17 @@ test('GET /api/threads/:id: 原始工具载荷只在显式 Debug 模式返回', 
   const activeRun = await store.createRun(scope, thread.id, 'active branch', { parentRunId: run.id });
   const activeStep = await store.createStep(scope, activeRun.id, 2);
   await store.saveStepContext(scope, activeStep.id, {
-    messages: [{ role: 'user', content: 'active branch prompt' }],
+    messages: [
+      { role: 'system', content: 'active system prompt' },
+      { role: 'user', content: 'active branch prompt' },
+    ],
     tools: [],
     stream: true,
     capturedAt: new Date().toISOString(),
+  });
+  await store.addMessage(scope, thread.id, run.id, null, {
+    role: 'user',
+    content: '持久化用户消息',
   });
   const assistantId = await store.addMessage(scope, thread.id, run.id, null, {
     role: 'assistant',
@@ -356,8 +363,9 @@ test('GET /api/threads/:id: 原始工具载荷只在显式 Debug 模式返回', 
     const normal = await fetch(`http://127.0.0.1:${port}/api/threads/${thread.id}`, { headers });
     const normalBody = (await normal.json()) as { debug: boolean; context_messages: Array<{ content?: string; tool_calls: Array<{ arguments?: string }> }> };
     assert.equal(normalBody.debug, false);
-    assert.equal(normalBody.context_messages.length, 1);
-    assert.equal(normalBody.context_messages.some((message) => Object.prototype.hasOwnProperty.call(message, 'content')), false);
+    assert.equal(normalBody.context_messages.length, 2);
+    assert.equal(normalBody.context_messages.some((message) => message.content === '持久化用户消息'), true);
+    assert.equal(normalBody.context_messages.some((message) => message.content === 'raw output'), false);
     assert.equal(normalBody.context_messages.some((message) => message.tool_calls.some((call) => call.arguments !== undefined)), false);
 
     const debug = await fetch(`http://127.0.0.1:${port}/api/threads/${thread.id}?debug=1`, { headers });
@@ -369,11 +377,13 @@ test('GET /api/threads/:id: 原始工具载荷只在显式 Debug 模式返回', 
     const snapshots = await fetch(`http://127.0.0.1:${port}/api/threads/${thread.id}/context-snapshots`, { headers });
     assert.equal(snapshots.status, 200);
     const snapshotBody = (await snapshots.json()) as {
+      systemPrompt: string | null;
       contexts: Array<{ stepId: string; step: number; messageCount: number; toolCount: number }>;
     };
     assert.equal(snapshotBody.contexts.length, 2);
     assert.equal(snapshotBody.contexts[0].messageCount, 2);
     assert.equal(snapshotBody.contexts[0].toolCount, 1);
+    assert.equal(snapshotBody.systemPrompt, 'active system prompt');
     assert.equal(snapshotBody.contexts.some((context) => context.stepId === activeStep.id), true);
     assert.equal(snapshotBody.contexts.some((context) => context.stepId === inactiveStep.id), false);
 

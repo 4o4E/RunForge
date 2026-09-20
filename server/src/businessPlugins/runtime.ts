@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { cp, mkdir, rename, rm } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { cp, lstat, mkdir, readdir, rename, rm } from 'node:fs/promises';
+import { constants, existsSync } from 'node:fs';
 import { validateHeaderValue } from 'node:http';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import type { McpServerSettings } from '@runforge/contracts';
 import { CordisRuntimeManager } from '../plugins/runtime.js';
 import type { SpaceRuntimeLock } from '../plugins/types.js';
@@ -52,56 +52,32 @@ interface McpContributionValue {
   definition: BusinessMcpServerDeclaration;
 }
 
-function materializedPluginRoot(
-  workspaceRoot: string,
+function snapshotPluginRoot(
+  candidateRoot: string,
   pluginId: string,
   contentHash: string,
 ): string {
   return resolve(
-    workspaceRoot,
-    '.agents/business-plugins',
+    dirname(candidateRoot),
+    '.runforge-snapshots',
     pluginId,
     contentHash,
     'plugin',
   );
 }
 
-async function materializePlugin(
-  workspaceRoot: string,
-  pluginId: string,
-  contentHash: string,
-  candidate?: BusinessPluginDefinition,
-): Promise<BusinessPluginDefinition> {
-  const target = materializedPluginRoot(workspaceRoot, pluginId, contentHash);
-  if (existsSync(target)) {
-    try {
-      const cached = await loadBusinessPlugin(target);
-      if (cached.manifest.id === pluginId && cached.contentHash === contentHash) return cached;
-    } catch {
-      // 下方统一删除损坏副本；部署源仍是同一 hash 时可立即重新复制，否则走标准不可用错误。
-    }
-    await rm(target, { recursive: true, force: true });
-  }
-  if (!candidate || candidate.manifest.id !== pluginId || candidate.contentHash !== contentHash) {
-    throw new BusinessPluginError(
-      'BUSINESS_PLUGIN_NOT_READY',
-      `业务插件部署和运行副本均不可用：${pluginId} (${contentHash})`,
-    );
-  }
+function linkedPluginRoot(workspaceRoot: string, pluginId: string): string {
+  return resolve(workspaceRoot, 'plugins', pluginId);
+}
 
-  // 部署目录可能在索引后被原子替换；复制前重新计算 hash，不能把新内容写进旧 hash 路径。
-  const fresh = await loadBusinessPlugin(candidate.root);
-  if (fresh.contentHash !== contentHash || fresh.manifest.id !== pluginId) {
-    throw new BusinessPluginError(
-      'BUSINESS_PLUGIN_NOT_READY',
-      `业务插件 ${pluginId} 已更新，当前 run 需要的内容 ${contentHash} 不再可用`,
-    );
-  }
-  const parent = resolve(target, '..');
+async function ensureWorkspaceCopy(source: string, target: string): Promise<void> {
+  const parent = dirname(target);
   await mkdir(parent, { recursive: true });
   const staging = `${target}.tmp-${process.pid}-${randomUUID()}`;
   try {
-    await cp(fresh.root, staging, { recursive: true });
+    // COPYFILE_FICLONE 在支持的文件系统上使用写时复制；不支持时由 Node.js 回退为普通复制。
+    // 工作副本必须使用独立 inode，shell 直接写入时不能修改按 hash 保存的运行快照。
+    await cp(source, staging, { recursive: true, mode: constants.COPYFILE_FICLONE });
     try {
       await rename(staging, target);
     } catch (error) {
@@ -110,15 +86,96 @@ async function materializePlugin(
   } finally {
     await rm(staging, { recursive: true, force: true });
   }
-  const snapshot = await loadBusinessPlugin(target);
-  if (snapshot.contentHash !== contentHash || snapshot.manifest.id !== pluginId) {
+}
+
+async function ensureSnapshot(source: string, target: string): Promise<void> {
+  const parent = dirname(target);
+  await mkdir(parent, { recursive: true });
+  const staging = `${target}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    await cp(source, staging, { recursive: true });
+    try {
+      await rename(staging, target);
+    } catch (error) {
+      if (!existsSync(target)) throw error;
+    }
+  } finally {
+    await rm(staging, { recursive: true, force: true });
+  }
+}
+
+async function expectedPlugin(root: string, pluginId: string, contentHash: string): Promise<BusinessPluginDefinition | null> {
+  if (!existsSync(root)) return null;
+  try {
+    const definition = await loadBusinessPlugin(root);
+    return definition.manifest.id === pluginId && definition.contentHash === contentHash ? definition : null;
+  } catch {
+    return null;
+  }
+}
+
+async function removeUnselectedPluginLinks(workspaceRoot: string, selectedIds: ReadonlySet<string>): Promise<void> {
+  const root = resolve(workspaceRoot, 'plugins');
+  if (!existsSync(root)) return;
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (selectedIds.has(entry.name)) continue;
+    await rm(join(root, entry.name), { recursive: true, force: true });
+  }
+}
+
+async function materializePlugin(
+  workspaceRoot: string,
+  pluginId: string,
+  contentHash: string,
+  candidate?: BusinessPluginDefinition,
+): Promise<BusinessPluginDefinition> {
+  const target = linkedPluginRoot(workspaceRoot, pluginId);
+  const linked = await expectedPlugin(target, pluginId, contentHash);
+  if (linked) return linked;
+  if (existsSync(target)) {
+    const stats = await lstat(target);
+    if (!stats.isDirectory()) {
+      throw new BusinessPluginError('BUSINESS_PLUGIN_PATH_INVALID', `业务插件工作目录被占用：${target}`);
+    }
+    await rm(target, { recursive: true });
+  }
+
+  if (!candidate || candidate.manifest.id !== pluginId) {
+    throw new BusinessPluginError(
+      'BUSINESS_PLUGIN_NOT_READY',
+      `业务插件部署和运行链接均不可用：${pluginId} (${contentHash})`,
+    );
+  }
+
+  const snapshotRoot = snapshotPluginRoot(candidate.root, pluginId, contentHash);
+  let snapshot = await expectedPlugin(snapshotRoot, pluginId, contentHash);
+  if (!snapshot) {
+    // 部署目录可能在索引后被原子替换；创建链接前重新计算 hash，不能把新内容写进旧 hash 路径。
+    const fresh = await loadBusinessPlugin(candidate.root);
+    if (fresh.contentHash !== contentHash || fresh.manifest.id !== pluginId) {
+      throw new BusinessPluginError(
+        'BUSINESS_PLUGIN_NOT_READY',
+        `业务插件 ${pluginId} 已更新，当前 run 需要的内容 ${contentHash} 不再可用`,
+      );
+    }
+    if (existsSync(snapshotRoot)) await rm(snapshotRoot, { recursive: true });
+    await ensureSnapshot(fresh.root, snapshotRoot);
+    snapshot = await expectedPlugin(snapshotRoot, pluginId, contentHash);
+  }
+  if (!snapshot) {
+    throw new BusinessPluginError('BUSINESS_PLUGIN_NOT_READY', `业务插件快照创建失败：${pluginId} (${contentHash})`);
+  }
+
+  await ensureWorkspaceCopy(snapshot.root, target);
+  const materialized = await expectedPlugin(target, pluginId, contentHash);
+  if (!materialized) {
     await rm(target, { recursive: true, force: true });
     throw new BusinessPluginError(
       'BUSINESS_PLUGIN_NOT_READY',
       `业务插件 ${pluginId} 在复制期间发生变化，拒绝启动 run`,
     );
   }
-  return snapshot;
+  return materialized;
 }
 
 function stringConfig(config: Readonly<Record<string, unknown>>, key: string): string | null {
@@ -250,12 +307,17 @@ export class BusinessPluginRuntimeService {
   private readonly manager = new CordisRuntimeManager();
   private readonly registered = new Set<string>();
 
+  async syncWorkspace(workspaceRoot: string, selectedPluginIds: ReadonlySet<string>): Promise<void> {
+    await removeUnselectedPluginLinks(workspaceRoot, selectedPluginIds);
+  }
+
   async startRun(input: BusinessPluginRuntimeInput): Promise<BusinessPluginRunHandle> {
     const candidates = new Map(input.definitions.map((definition) => [definition.manifest.id, definition]));
     const selections = input.lock.plugins.map((plugin) => ({
       id: businessPluginId(plugin.id),
       contentHash: plugin.contentHash,
     }));
+    await this.syncWorkspace(input.workspaceRoot, new Set(selections.map((selection) => selection.id)));
     const definitions = await Promise.all(selections.map((selection) => materializePlugin(
       input.workspaceRoot,
       selection.id,

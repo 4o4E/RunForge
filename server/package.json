@@ -1,6 +1,6 @@
 {
   "name": "server",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -9,7 +9,8 @@
     "predev": "pnpm --filter @runforge/workload-sdk build && pnpm prisma:generate",
     "dev": "tsx watch src/index.ts",
     "prebuild": "pnpm --filter @runforge/workload-sdk build && pnpm prisma:generate",
-    "build": "tsc -p tsconfig.json && cp src/llm/model-catalog.json dist/llm/model-catalog.json",
+    "build": "pnpm run build:compile",
+    "build:compile": "tsc -p tsconfig.json && cp src/llm/model-catalog.json dist/llm/model-catalog.json",
     "model-catalog:update": "tsx src/llm/updateModelCatalog.ts",
     "model-catalog:check": "tsx src/llm/updateModelCatalog.ts --check",
     "start": "node dist/index.js",

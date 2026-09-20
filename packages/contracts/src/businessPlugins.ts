@@ -72,6 +72,12 @@ export interface BusinessPluginImportResponse {
   view: BusinessPluginAdminView;
 }
 
+export interface BusinessPluginUninstallResponse {
+  pluginId: string;
+  affectedSpaces: Array<{ id: string; name: string }>;
+  view: BusinessPluginAdminView;
+}
+
 /** secrets 只提交变更：字符串设置当前值，null 删除，未出现的 key 保持不变。 */
 export interface UpdateBusinessPluginSettingsInput {
   plugins?: Record<string, { config: Record<string, unknown> }>;

@@ -713,15 +713,18 @@ export class MemoryStore implements Store {
   ): Promise<StepContextSummaryRow[]> {
     if (!this.threadOwnedBy(this.threads.get(threadId), scope)) return [];
     const visibleRunIds = this.branchRunIds(threadId, options.runId);
-    return this.steps
+    const steps = this.steps
       .filter((step) => visibleRunIds.has(step.run_id) && step.context_snapshot)
-      .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.idx - b.idx)
-      .map((step) => ({
+      .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.idx - b.idx);
+    return steps.map((step, index) => ({
         id: step.id,
         run_id: step.run_id,
         idx: step.idx,
         message_count: step.context_snapshot!.messages.length,
         tool_count: step.context_snapshot!.tools.length,
+        system_prompt: index === steps.length - 1 && step.context_snapshot!.messages[0]?.role === 'system'
+          ? step.context_snapshot!.messages[0].content ?? ''
+          : null,
         captured_at: step.context_snapshot!.capturedAt,
       }));
   }
@@ -814,10 +817,10 @@ export class MemoryStore implements Store {
     if (!this.threadOwnedBy(this.threads.get(threadId), scope)) return [];
     const branchRunIds = this.branchRunIds(threadId, options.runId);
     return this.messages
-      .filter((message): message is StoredMsg & { collapsed: 'masked' | 'summarized' } => (
+      .filter((message) => (
         branchRunIds.has(message.run_id)
         && message.thread_id === threadId
-        && message.collapsed != null
+        && (message.role === 'user' || message.collapsed != null)
         && !isEphemeralSystemMessage(message.role, message.content)
       ))
       .sort((a, b) => a.seq - b.seq)
@@ -828,9 +831,10 @@ export class MemoryStore implements Store {
         role: message.role,
         toolCalls: (message.toolCalls ?? []).map((call) => ({ id: call.id, name: call.name, argumentChars: call.arguments.length })),
         toolCallId: message.toolCallId ?? null,
-        collapsed: message.collapsed,
+        collapsed: message.collapsed ?? null,
         summaryOf: message.summaryOf ?? [],
         contentChars: message.content?.length ?? 0,
+        content: message.role === 'user' ? message.content : undefined,
         created_at: message.created_at,
       }));
   }

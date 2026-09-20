@@ -1,5 +1,9 @@
 import Ajv, { type ErrorObject } from 'ajv';
 import { z } from 'zod';
+import { prisma } from '../db/prisma.js';
+import { Prisma } from '../generated/prisma/client.js';
+import { store } from '../store/index.js';
+import { requiredJson } from '../store/prismaRows.js';
 import { findSetting, updateSettingAtomically } from '../store/settingsRepository.js';
 import { probeMcpServer } from '../mcp/client.js';
 import { BusinessPluginError } from './errors.js';
@@ -8,6 +12,7 @@ import type {
   BusinessPluginAdminView,
   BusinessPluginImportResponse,
   BusinessPluginMcpToolsView,
+  BusinessPluginUninstallResponse,
   UpdateBusinessPluginSettingsInput,
 } from '@runforge/contracts';
 import { businessPluginRegistry } from './registry.js';
@@ -15,6 +20,7 @@ import type { BusinessPluginArchiveFormat } from './archive.js';
 import { resolveBusinessPluginMcpServer } from './runtime.js';
 
 const BUSINESS_PLUGIN_SETTINGS_KEY = 'businessPlugins.settings';
+const useMemory = process.env.STORE === 'memory';
 const jsonObjectSchema = z.record(z.string(), z.unknown());
 const tenantSettingsSchema = z.object({
   schemaVersion: z.literal(1).default(1),
@@ -32,6 +38,16 @@ export interface BusinessPluginReadiness {
   definition: BusinessPluginDefinition;
   ready: boolean;
   error?: string;
+}
+
+interface AffectedSpace {
+  id: string;
+  name: string;
+}
+
+interface RemovedBusinessPluginTenantState {
+  affectedSpaces: AffectedSpace[];
+  settings: BusinessPluginTenantSettings;
 }
 
 const ajv = new Ajv({ allErrors: true, strict: false });
@@ -259,9 +275,11 @@ export async function updateBusinessPluginAdminView(
   tenantId: string,
   input: UpdateBusinessPluginSettingsInput,
 ): Promise<BusinessPluginAdminView> {
-  const definitions = await businessPluginRegistry.list(tenantId);
-  const settings = await updateBusinessPluginTenantSettings(tenantId, definitions, input);
-  return businessPluginAdminView(definitions, settings);
+  return businessPluginRegistry.mutateTenant(tenantId, async () => {
+    const definitions = await businessPluginRegistry.list(tenantId);
+    const settings = await updateBusinessPluginTenantSettings(tenantId, definitions, input);
+    return businessPluginAdminView(definitions, settings);
+  });
 }
 
 export async function importBusinessPluginAdminView(
@@ -276,6 +294,130 @@ export async function importBusinessPluginAdminView(
     view: businessPluginAdminView(
       await businessPluginRegistry.list(tenantId),
       await getBusinessPluginTenantSettings(tenantId),
+    ),
+  };
+}
+
+function withoutPluginConfig(
+  settings: BusinessPluginTenantSettings,
+  pluginId: string,
+): BusinessPluginTenantSettings {
+  const plugins = structuredClone(settings.plugins);
+  delete plugins[pluginId];
+  return { schemaVersion: 1, plugins, secrets: { ...settings.secrets } };
+}
+
+function spaceConfigWithoutPlugin(config: unknown, pluginId: string): Record<string, unknown> | null {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    throw new BusinessPluginError('BUSINESS_PLUGIN_CONFIG_INVALID', '空间配置必须是 JSON 对象');
+  }
+  const current = config as Record<string, unknown>;
+  const capabilitiesValue = current.capabilities;
+  if (capabilitiesValue === undefined) return null;
+  if (!capabilitiesValue || typeof capabilitiesValue !== 'object' || Array.isArray(capabilitiesValue)) {
+    throw new BusinessPluginError('BUSINESS_PLUGIN_CONFIG_INVALID', '空间 capabilities 配置必须是 JSON 对象');
+  }
+  const capabilities = capabilitiesValue as Record<string, unknown>;
+  const pluginsValue = capabilities.businessPlugins;
+  if (pluginsValue === undefined) return null;
+  if (!Array.isArray(pluginsValue) || pluginsValue.some((id) => typeof id !== 'string')) {
+    throw new BusinessPluginError('BUSINESS_PLUGIN_CONFIG_INVALID', '空间 businessPlugins 配置必须是字符串数组');
+  }
+  if (!pluginsValue.includes(pluginId)) return null;
+  return {
+    ...current,
+    capabilities: {
+      ...capabilities,
+      businessPlugins: pluginsValue.filter((id) => id !== pluginId),
+    },
+  };
+}
+
+async function removeBusinessPluginTenantState(
+  tenantId: string,
+  pluginId: string,
+): Promise<RemovedBusinessPluginTenantState> {
+  if (useMemory) {
+    const spaces = await store.listSpaces(tenantId);
+    const updates = spaces.flatMap((space) => {
+      const config = spaceConfigWithoutPlugin(space.config, pluginId);
+      return config ? [{ space, config }] : [];
+    });
+    const settings = await updateSettingAtomically(tenantId, BUSINESS_PLUGIN_SETTINGS_KEY, (stored) => (
+      withoutPluginConfig(normalizeBusinessPluginTenantSettings(stored), pluginId)
+    ));
+    for (const { space, config } of updates) {
+      const updated = await store.updateSpace(tenantId, space.id, { config });
+      if (!updated) throw new Error(`更新空间 ${space.id} 的业务插件配置失败`);
+    }
+    return {
+      affectedSpaces: updates.map(({ space }) => ({ id: space.id, name: space.name })),
+      settings,
+    };
+  }
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await prisma.$transaction(async (tx) => {
+        const [stored, spaces] = await Promise.all([
+          tx.app_settings.findUnique({
+            where: { tenant_id_key: { tenant_id: tenantId, key: BUSINESS_PLUGIN_SETTINGS_KEY } },
+            select: { value: true },
+          }),
+          tx.spaces.findMany({
+            where: { tenant_id: tenantId, deleted_at: null },
+            select: { id: true, name: true, config: true },
+            orderBy: [{ created_at: 'asc' }, { id: 'asc' }],
+          }),
+        ]);
+        const updates = spaces.flatMap((space) => {
+          const config = spaceConfigWithoutPlugin(space.config, pluginId);
+          return config ? [{ space, config }] : [];
+        });
+        const settings = withoutPluginConfig(normalizeBusinessPluginTenantSettings(stored?.value), pluginId);
+        await tx.app_settings.upsert({
+          where: { tenant_id_key: { tenant_id: tenantId, key: BUSINESS_PLUGIN_SETTINGS_KEY } },
+          create: { tenant_id: tenantId, key: BUSINESS_PLUGIN_SETTINGS_KEY, value: requiredJson(settings) },
+          update: { value: requiredJson(settings), updated_at: new Date() },
+        });
+        for (const { space, config } of updates) {
+          await tx.spaces.update({
+            where: { id: space.id },
+            data: { config: requiredJson(config), config_version: { increment: 1 }, updated_at: new Date() },
+          });
+        }
+        return {
+          affectedSpaces: updates.map(({ space }) => ({ id: space.id, name: space.name })),
+          settings,
+        };
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (error) {
+      const code = error && typeof error === 'object' ? (error as { code?: string }).code : undefined;
+      if (attempt === 2 || (code !== 'P2034' && code !== 'P2002')) throw error;
+    }
+  }
+  throw new Error('业务插件卸载配置并发更新重试耗尽');
+}
+
+export async function uninstallBusinessPluginAdminView(
+  tenantId: string,
+  pluginId: string,
+): Promise<BusinessPluginUninstallResponse> {
+  const result = await businessPluginRegistry.uninstall(
+    tenantId,
+    pluginId,
+    async (_definition, definitions) => ({
+      definitions,
+      removedState: await removeBusinessPluginTenantState(tenantId, pluginId),
+    }),
+  );
+  if (!result) throw new Error(`业务插件 ${pluginId} 卸载结果缺失`);
+  return {
+    pluginId,
+    affectedSpaces: result.removedState.affectedSpaces,
+    view: businessPluginAdminView(
+      result.definitions.filter((definition) => definition.manifest.id !== pluginId),
+      result.removedState.settings,
     ),
   };
 }

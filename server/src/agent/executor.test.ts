@@ -1,5 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -337,6 +338,62 @@ test('executeRun: 按 plugin_lock 装配并激活 tenant 业务 Skill', async ()
   } finally {
     await runtime.dispose();
     await rm(sourceRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test('executeRun: 空业务插件选择会清理工作目录中的旧插件链接', async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), 'runforge-executor-empty-business-'));
+  const stalePluginRoot = join(workspaceRoot, 'plugins', 'stale-plugin');
+  await mkdir(stalePluginRoot, { recursive: true });
+  await writeFile(join(stalePluginRoot, 'stale.txt'), 'stale');
+
+  const store = new MemoryStore();
+  const thread = await store.createThread(scope);
+  const lock = createSpaceRuntimeLock({
+    tenantId: scope.tenantId,
+    spaceId: thread.space_id,
+    configVersion: 1,
+    plugins: [],
+  });
+  const run = await store.createRun(scope, thread.id, 'run without business plugins', {
+    pluginLock: lock,
+    spaceConfigSnapshot: {
+      schemaVersion: 1,
+      spaceId: thread.space_id,
+      mode: 'web',
+      systemPrompt: '',
+      model: {
+        modelRef: 'main:model-a',
+        allowedModelRefs: ['main:model-a'],
+        contextWindow: 40_000,
+        contextBudget: 20_000,
+        contextBudgetSource: 'space-config',
+      },
+      capabilities: { tools: [], mcpServers: [], businessPlugins: [], runtime: [] },
+      external: { allowTrustedPrompt: false, allowNextStep: false },
+    },
+  });
+  const runtime = new BusinessPluginRuntimeService();
+  try {
+    await executeRun(run.id, {
+      store,
+      provider: {
+        name: 'empty-business-plugin-selection',
+        async completeStream() {
+          return { content: 'done', toolCalls: [] };
+        },
+      },
+      publish: () => {},
+      hardStepCap: 3,
+      toolSettings: testToolSettings({ workspaceRoot }),
+      businessPluginRuntime: runtime,
+    });
+
+    assert.equal((await store.getRun(scope, run.id))?.status, 'done');
+    assert.equal(existsSync(stalePluginRoot), false);
+  } finally {
+    await runtime.dispose();
     await rm(workspaceRoot, { recursive: true, force: true });
   }
 });
@@ -724,7 +781,7 @@ test('executeRun: injects the current workspace root into the LLM context', asyn
   assert.match(systemText, new RegExp(testWorkspace.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(systemText, /\/home\/user/);
   assert.match(systemText, /\/tmp/);
-  assert.match(systemText, /当前可用目录/);
+  assert.match(systemText, /所有新建、下载、克隆、解压、转换、生成和需要保留的文件，都必须放在这个目录下/);
 });
 
 test('executeRun: injects the unified workload token at run startup', async () => {

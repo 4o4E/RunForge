@@ -6,7 +6,6 @@ import type {
   SpaceDebugTool,
   SpaceDebugView,
   StepContextMessage,
-  StepContextSnapshotSummary,
   StepContextSnapshotView,
 } from '@runforge/contracts';
 import { ChevronDown } from 'lucide-react';
@@ -121,38 +120,32 @@ export function StepContextDetails({ context }: { context: StepContextSnapshotVi
   );
 }
 
-function ContextSnapshotItem({ context }: { context: StepContextSnapshotSummary }) {
+export function SystemPromptMessage() {
   const [open, setOpen] = useState(false);
-  const { details, loadContext } = useStepContextDebug();
-  const detail = details[context.stepId] ?? null;
-  const [error, setError] = useState('');
-  useEffect(() => {
-    if (!open || detail) return;
-    let canceled = false;
-    setError('');
-    void loadContext(context.stepId).catch((requestError: Error) => {
-      if (!canceled) setError(requestError.message);
-    });
-    return () => { canceled = true; };
-  }, [context.stepId, detail, loadContext, open]);
-  const time = new Date(context.createdAt);
-  const timeLabel = Number.isFinite(time.getTime())
-    ? time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    : '';
+  const { contexts, systemPrompt, loading, error } = useStepContextDebug();
+  const latest = contexts[contexts.length - 1] ?? null;
+  if (!latest && !loading && !error) return null;
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="rounded-md border bg-background">
-      <CollapsibleTrigger className="flex w-full items-center gap-2 px-3 py-2 text-left">
-        <ChevronDown className={cn('size-4 shrink-0 transition-transform', open && 'rotate-180')} />
-        <span className="min-w-0 flex-1 text-xs font-medium">Step {context.step} · {context.messageCount} 条消息</span>
-        <span className="shrink-0 text-xs text-muted-foreground">{context.toolCount} 个工具</span>
-        {timeLabel && <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{timeLabel}</span>}
-      </CollapsibleTrigger>
-      <CollapsibleContent className="border-t p-3">
-        {error && <div className="text-xs text-destructive">读取提示词失败：{error}</div>}
-        {!error && !detail && <div className="text-xs text-muted-foreground">正在读取提示词…</div>}
-        {detail && <StepContextDetails context={detail} />}
-      </CollapsibleContent>
-    </Collapsible>
+    <Message from="assistant" className="conversation-history-message">
+      <MessageContent>
+        <Collapsible open={open} onOpenChange={setOpen} className="rounded-lg border border-sky-500/35 bg-sky-500/10 text-sky-950 dark:text-sky-100">
+          <CollapsibleTrigger className="flex w-full items-center gap-2 px-3 py-2.5 text-left">
+            <ChevronDown className={cn('size-4 shrink-0 transition-transform', open && 'rotate-180')} />
+            <span className="text-sm font-medium">系统提示词</span>
+          </CollapsibleTrigger>
+          <CollapsibleContent className="border-t border-sky-500/25 p-3">
+            {error && <div className="text-xs text-destructive">读取系统提示词失败：{error}</div>}
+            {!error && !latest && <div className="text-xs opacity-70">正在读取系统提示词…</div>}
+            {latest && systemPrompt == null && <div className="text-xs opacity-70">该次调用没有系统提示词。</div>}
+            {systemPrompt != null && (
+              <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-words font-sans text-sm leading-relaxed">
+                {systemPrompt || '（空内容）'}
+              </pre>
+            )}
+          </CollapsibleContent>
+        </Collapsible>
+      </MessageContent>
+    </Message>
   );
 }
 
@@ -226,7 +219,6 @@ function McpItem({ spaceId, server }: { spaceId: string; server: SpaceDebugMcpSe
 export function SpaceDebugMessages({ spaceId }: { spaceId: string }) {
   const [view, setView] = useState<SpaceDebugView | null>(null);
   const [error, setError] = useState('');
-  const stepContexts = useStepContextDebug();
 
   useEffect(() => {
     let canceled = false;
@@ -256,18 +248,6 @@ export function SpaceDebugMessages({ spaceId }: { spaceId: string }) {
         {view.tools.length
           ? <div className="grid gap-2">{view.tools.map((tool) => <ToolSchema key={tool.name} tool={tool} />)}</div>
           : <div className="text-xs text-muted-foreground">当前空间没有配置工具。</div>}
-      </DebugSection>
-
-      <DebugSection title="实际提示词" description={`${stepContexts.contexts.length} 次 Agent 模型调用`}>
-        {stepContexts.loading && !stepContexts.contexts.length && (
-          <div className="text-xs text-muted-foreground">正在读取实际提示词…</div>
-        )}
-        {stepContexts.error && <div className="text-xs text-destructive">读取实际提示词失败：{stepContexts.error}</div>}
-        {stepContexts.contexts.length
-          ? <div className="grid gap-2">{stepContexts.contexts.map((context) => <ContextSnapshotItem key={context.stepId} context={context} />)}</div>
-          : !stepContexts.loading && !stepContexts.error
-            ? <div className="text-xs text-muted-foreground">当前活动分支尚未调用 Agent 模型。</div>
-            : null}
       </DebugSection>
 
       <DebugSection title="Skill" description={`${view.skills.length} 个当前空间 Skill`}>

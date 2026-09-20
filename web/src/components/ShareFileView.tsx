@@ -8,11 +8,12 @@ function readShareParams(): { path: string; share: FileShareAccess } | null {
   const path = params.get('path')?.trim() ?? '';
   const tenant = params.get('tenant')?.trim() ?? '';
   const user = params.get('user')?.trim() ?? '';
+  const spaceId = params.get('spaceId')?.trim() ?? '';
   const expires = params.get('expires')?.trim() ?? '';
   const sig = params.get('sig')?.trim() ?? '';
-  const threadId = params.get('threadId')?.trim() || undefined;
-  if (!path || !tenant || !user || !expires || !sig) return null;
-  return { path, share: { tenant, user, threadId, expires, sig } };
+  const threadId = params.get('threadId')?.trim() ?? '';
+  if (!path || !tenant || !user || !spaceId || !threadId || !expires || !sig) return null;
+  return { path, share: { tenant, user, spaceId, threadId, expires, sig } };
 }
 
 export function ShareFileView() {
@@ -26,7 +27,7 @@ export function ShareFileView() {
   }
 
   return (
-    <WorkspaceFileContextProvider threadId={params.share.threadId ?? null} shareAccess={params.share}>
+    <WorkspaceFileContextProvider threadId={params.share.threadId} shareAccess={params.share}>
       <main className="app-main-surface h-full min-h-0 overflow-hidden">
         <RemoteFilesPanel
           open

@@ -68,7 +68,7 @@ export interface ThreadContextMessage {
   collapsed: 'masked' | 'summarized' | null;
   summary_of: number[];
   content_chars: number;
-  /** 仅在显式 Debug 模式下返回；默认详情接口不会携带原文。 */
+  /** 用户消息始终返回；assistant/tool/system 原文只在显式 Debug 模式下返回。 */
   content?: string | null;
   encrypted_reasoning_count?: number;
   encrypted_reasoning_chars?: number;
@@ -126,6 +126,7 @@ export interface StepContextSnapshotView extends StepContextSnapshotSummary {
 export interface ThreadStepContextsResponse {
   threadId: string;
   activeRunId: string | null;
+  systemPrompt: string | null;
   contexts: StepContextSnapshotSummary[];
 }
 

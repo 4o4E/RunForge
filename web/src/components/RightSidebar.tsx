@@ -314,7 +314,7 @@ export function RightSidebar({
       </div>
 
       <div className="min-h-0 flex-1 overflow-hidden">
-        {activeTab === 'files' && (
+        {activeTab === 'files' && threadId && (
           <RemoteFilesPanel
             open
             width={width}
@@ -327,7 +327,7 @@ export function RightSidebar({
             onOpenFile={openFileAndCloseBrowser}
           />
         )}
-        {activeFilePath && (
+        {activeFilePath && threadId && (
           <RemoteFilesPanel
             open
             width={width}
@@ -339,6 +339,11 @@ export function RightSidebar({
             onAttach={onAttach}
             onOpenFile={onOpenFileTab}
           />
+        )}
+        {(activeTab === 'files' || activeFilePath) && !threadId && (
+          <div className="flex h-full items-center justify-center px-6 text-center text-sm text-muted-foreground">
+            发送消息或上传附件后会创建会话工作目录。
+          </div>
         )}
         {activeShellSessionId && (
           <ShellPanel

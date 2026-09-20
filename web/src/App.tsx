@@ -8,6 +8,7 @@ import {
   branchRun,
   cancelRun,
   continueRun,
+  createThread,
   deleteThread,
   forkThreadFromRun,
   getCurrentUser,
@@ -31,7 +32,13 @@ import {
   type Thread,
 } from './api';
 import { createAiSdkChatTransport, type ChatThreadHandle } from './transport/aiSdkChat';
-import { foldUiEventsToParts, runsToUiMessages } from './history';
+import {
+  appendPersistedRunUserMessage,
+  assistantRunId,
+  foldUiEventsToParts,
+  generatedUserRunId,
+  runsToUiMessages,
+} from './history';
 import { toUiEvent } from './transport/legacy';
 import { Sidebar } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
@@ -391,16 +398,28 @@ function assistantMessageFromEvents(runId: string, events: AgentEvent[]): UIMess
   return { id: `${runId}:a`, role: 'assistant', parts };
 }
 
-function assistantRunId(message: UIMessage): string | null {
-  if (message.role !== 'assistant') return null;
-  const part = message.parts.find((p) => p.type === 'data-run-id') as { data?: { runId?: string } } | undefined;
-  return part?.data?.runId ?? null;
-}
-
 function replaceAssistantMessage(messages: UIMessage[], runId: string, events: AgentEvent[]): UIMessage[] {
-  const assistant = assistantMessageFromEvents(runId, events);
+  const generatedUserCount = messages.filter((message) => generatedUserRunId(message) === runId).length;
+  let boundaryCount = 0;
+  let tailStart = 0;
+  for (let eventIndex = 0; eventIndex < events.length && boundaryCount < generatedUserCount; eventIndex += 1) {
+    const event = events[eventIndex];
+    if (event.type !== 'external_input_applied' && event.type !== 'user_answer') continue;
+    boundaryCount += 1;
+    tailStart = eventIndex + 1;
+  }
+  const assistant = assistantMessageFromEvents(runId, events.slice(tailStart));
   // AI SDK 直播消息的 id 由 SDK 生成；恢复 ask_user 时必须用 data-run-id 对齐同一个 run。
-  const index = messages.findIndex((m) => m.id === assistant.id || assistantRunId(m) === runId);
+  const exactIndex = messages.findIndex((message) => message.id === assistant.id);
+  let index = exactIndex;
+  if (index < 0) {
+    for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+      if (assistantRunId(messages[messageIndex]) === runId) {
+        index = messageIndex;
+        break;
+      }
+    }
+  }
   if (index >= 0) return messages.map((m, i) => (i === index ? assistant : m));
   return [...messages, assistant];
 }
@@ -636,7 +655,7 @@ export function App() {
   useEffect(() => {
     let canceled = false;
     setWorkspaceRoot(null);
-    if (!activeThreadId && !activeSpace?.isDefault) return () => {
+    if (!activeThreadId) return () => {
       canceled = true;
     };
     getRemoteFileInfo(activeThreadId)
@@ -649,7 +668,7 @@ export function App() {
     return () => {
       canceled = true;
     };
-  }, [activeSpace?.isDefault, activeThreadId]);
+  }, [activeThreadId]);
 
   // 只用来决定要不要在侧边栏显示"管理后台"入口；失败时静默保持 null(不显示入口)。
   useEffect(() => {
@@ -852,6 +871,7 @@ export function App() {
           ? selectedModelRefRef.current
           : '',
       setThreadId: (id) => {
+        threadIdRef.current = id;
         skipNextHistoryLoadRef.current = id;
         navigateChatRoute({ draft: '', spaceId: spaceIdRef.current, threadId: id }, 'replace');
       },
@@ -1210,7 +1230,8 @@ export function App() {
     setResumingRunId(runId);
     setActiveRunId(runId);
     void answerRun(runId, answer)
-      .then(() => {
+      .then(({ userMessage }) => {
+        setMessages((current) => appendPersistedRunUserMessage(current, runId, userMessage, answer));
         let unsubscribe = () => {};
         const events: AgentEvent[] = [];
         let renderFrame = 0;
@@ -1456,7 +1477,15 @@ export function App() {
   }
 
   async function uploadLocalAttachment(file: File, path: string) {
-    const targetThreadId = activeThreadId;
+    let targetThreadId = threadIdRef.current;
+    if (!targetThreadId) {
+      const spaceId = spaceIdRef.current;
+      if (!spaceId) throw new Error('请先选择空间');
+      const thread = await createThread(undefined, spaceId);
+      targetThreadId = thread.id;
+      handle.setThreadId(thread.id);
+      handle.onThreadCreated(thread);
+    }
     const contentBase64 = await fileToBase64(file);
     const uploaded = await uploadLocalFile(path, contentBase64, targetThreadId);
     if (threadIdRef.current !== targetThreadId) {

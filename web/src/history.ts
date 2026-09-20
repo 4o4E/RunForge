@@ -1,8 +1,8 @@
 // 把 REST 加载的持久化 run 历史转换成 AI SDK UIMessage，便于切换/刷新会话后恢复。
-// 每个 run 会变成一条用户消息和一条由事件折叠出来的 assistant 消息。
+// 每个 run 按持久化用户消息的分界拆成用户/assistant 消息段，保持模型实际交互顺序。
 
 import type { UIMessage } from 'ai';
-import type { RunWithEvents, StreamStats, ThreadContextMessage, ThreadNotice } from './api';
+import type { AskUserAnswer, RunWithEvents, StreamStats, ThreadContextMessage, ThreadNotice } from './api';
 import { toUiEvent } from './transport/legacy';
 import type { UiEvent } from './transport/types';
 
@@ -24,6 +24,64 @@ export interface ThreadNoticeData {
   threadTitle: string;
   linkedThreadId: string | null;
   href: string | null;
+}
+
+export function assistantRunId(message: UIMessage): string | null {
+  if (message.role !== 'assistant') return null;
+  const part = message.parts.find((item) => item.type === 'data-run-id') as { data?: { runId?: string } } | undefined;
+  return part?.data?.runId ?? null;
+}
+
+export function generatedUserRunId(message: UIMessage): string | null {
+  if (message.role !== 'user') return null;
+  const part = message.parts.find((item) => item.type === 'data-run-user') as { data?: { runId?: string; primary?: boolean } } | undefined;
+  return part?.data?.primary === false ? part.data.runId ?? null : null;
+}
+
+export function appendPersistedRunUserMessage(
+  messages: UIMessage[],
+  runId: string,
+  userMessage: { id: number; content: string; createdAt: string },
+  answer?: AskUserAnswer,
+): UIMessage[] {
+  if (messages.some((message) => (
+    message.role === 'user'
+    && message.parts.some((part) => part.type === 'data-run-user' && part.id === `run-user-${userMessage.id}`)
+  ))) return messages;
+  const generatedCount = messages.filter((message) => generatedUserRunId(message) === runId).length;
+  let previousAssistantIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (assistantRunId(messages[index]) === runId) {
+      previousAssistantIndex = index;
+      break;
+    }
+  }
+  const next = messages.map((message, index) => {
+    if (index !== previousAssistantIndex) return message;
+    const parts = answer && message.parts.some((part) => part.type === 'data-ask-user-question')
+      && !message.parts.some((part) => part.type === 'data-ask-user-answer')
+      ? [
+          ...message.parts,
+          { type: 'data-ask-user-answer', id: `answer-${userMessage.id}`, data: answer } as unknown as Part,
+        ]
+      : message.parts;
+    return { ...message, id: `${runId}:a:${generatedCount}`, parts };
+  });
+  next.push({
+    id: `${runId}:u:${userMessage.id}`,
+    role: 'user',
+    parts: [
+      { type: 'text', text: userMessage.content },
+      { type: 'data-run-user', id: `run-user-${userMessage.id}`, data: { runId, primary: false } } as unknown as Part,
+      { type: 'data-message-time', id: `time-${userMessage.id}:u`, data: { sentAt: userMessage.createdAt } } as unknown as Part,
+    ],
+  });
+  next.push({
+    id: `${runId}:a`,
+    role: 'assistant',
+    parts: [{ type: 'data-run-id', id: runId, data: { runId } } as unknown as Part],
+  });
+  return next;
 }
 
 function noticeThreadTitle(notice: ThreadNotice): string {
@@ -335,6 +393,38 @@ function noticeMessage(notice: ThreadNotice, spaceId: string | null): UIMessage 
   };
 }
 
+interface RunUserMessageData {
+  runId: string;
+  primary: boolean;
+}
+
+function runUserMessage(
+  run: RunWithEvents,
+  content: string,
+  createdAt: string,
+  primary: boolean,
+  branch: RunBranchInfo,
+  messageId?: number,
+): UIMessage {
+  const parts: Part[] = [
+    { type: 'text', text: content },
+    { type: 'data-run-user', id: `run-user-${messageId ?? run.id}`, data: { runId: run.id, primary } satisfies RunUserMessageData } as unknown as Part,
+    { type: 'data-message-time', id: `time-${messageId ?? run.id}:u`, data: { sentAt: createdAt } } as unknown as Part,
+  ];
+  if (primary) {
+    parts.splice(1, 0, { type: 'data-branch-info', id: `branch-${run.id}`, data: branch } as unknown as Part);
+  }
+  return {
+    id: primary ? `${run.id}:u` : `${run.id}:u:${messageId ?? createdAt}`,
+    role: 'user',
+    parts,
+  };
+}
+
+function isUserBoundary(event: RunWithEvents['events'][number]): boolean {
+  return event.type === 'external_input_applied' || event.type === 'user_answer';
+}
+
 /** 把按时间排序的持久化 runs 映射成当前分支的扁平 UIMessage 列表。 */
 export function runsToUiMessages(
   runs: RunWithEvents[],
@@ -357,32 +447,65 @@ export function runsToUiMessages(
     }
   }
   for (const run of visibleRuns) {
-    messages.push({
-      id: `${run.id}:u`,
-      role: 'user',
-      parts: [
-        { type: 'text', text: run.input },
-        { type: 'data-branch-info', id: `branch-${run.id}`, data: branchInfoFor(run, runs, editableRunId) } as unknown as Part,
-        { type: 'data-message-time', id: `time-${run.id}:u`, data: { sentAt: run.created_at } } as unknown as Part,
-      ],
-    });
-    const parts = foldUiEventsToParts(
-      run.events.map(toUiEvent).filter((e): e is UiEvent => e !== null),
-    );
-    applyContextMessages(parts, contextMessages.filter((message) => message.run_id === run.id));
-    if (run.goal_state?.plan?.length && !parts.some((part) => part.type === 'data-plan-state')) {
-      parts.unshift({ type: 'data-plan-state', id: `plan-${run.id}`, data: run.goal_state } as unknown as Part);
-    }
-    if (!parts.some((part) => part.type === 'data-stream-stats')) {
-      const stats = terminalStats(run);
-      if (stats) parts.push({ type: 'data-stream-stats', id: `stats-${run.id}`, data: stats } as unknown as Part);
-    }
-    if (parts.length) {
+    const runContextMessages = contextMessages.filter((message) => message.run_id === run.id);
+    const storedUsers = runContextMessages.filter((message) => message.role === 'user' && message.content !== undefined);
+    const branch = branchInfoFor(run, runs, editableRunId);
+    const primary = storedUsers[0];
+    messages.push(runUserMessage(run, primary?.content ?? run.input, primary?.created_at ?? run.created_at, true, branch, primary?.id));
+
+    const generatedUsers = storedUsers.slice(1);
+    let generatedIndex = 0;
+    let segmentIndex = 0;
+    let segmentEvents: RunWithEvents['events'] = [];
+    const appendAssistantSegment = (finalSegment: boolean) => {
+      const parts = foldUiEventsToParts(
+        segmentEvents.map(toUiEvent).filter((event): event is UiEvent => event !== null),
+      );
+      applyContextMessages(parts, runContextMessages);
+      if (finalSegment && run.goal_state?.plan?.length && !parts.some((part) => part.type === 'data-plan-state')) {
+        parts.unshift({ type: 'data-plan-state', id: `plan-${run.id}`, data: run.goal_state } as unknown as Part);
+      }
+      if (finalSegment && !parts.some((part) => part.type === 'data-stream-stats')) {
+        const stats = terminalStats(run);
+        if (stats) parts.push({ type: 'data-stream-stats', id: `stats-${run.id}`, data: stats } as unknown as Part);
+      }
+      if (!parts.length) {
+        segmentEvents = [];
+        return;
+      }
       parts.unshift({ type: 'data-run-id', id: run.id, data: { runId: run.id } } as unknown as Part);
-      if (isTerminalRun(run)) {
+      if (finalSegment && isTerminalRun(run)) {
         parts.push({ type: 'data-message-time', id: `time-${run.id}:a`, data: { completedAt: run.updated_at } } as unknown as Part);
       }
-      messages.push({ id: `${run.id}:a`, role: 'assistant', parts });
+      messages.push({ id: finalSegment ? `${run.id}:a` : `${run.id}:a:${segmentIndex}`, role: 'assistant', parts });
+      segmentIndex += 1;
+      segmentEvents = [];
+    };
+
+    for (const event of run.events) {
+      if (!isUserBoundary(event) || generatedIndex >= generatedUsers.length) {
+        segmentEvents.push(event);
+        continue;
+      }
+      // ask_user 卡片需要读取紧随其后的 user_answer；先把回答事件留在前一段，再切换消息角色。
+      if (event.type === 'user_answer') segmentEvents.push(event);
+      appendAssistantSegment(false);
+      const generated = generatedUsers[generatedIndex];
+      generatedIndex += 1;
+      messages.push(runUserMessage(
+        run,
+        generated.content ?? '',
+        generated.created_at,
+        false,
+        branch,
+        generated.id,
+      ));
+    }
+    appendAssistantSegment(true);
+    while (generatedIndex < generatedUsers.length) {
+      const generated = generatedUsers[generatedIndex];
+      generatedIndex += 1;
+      messages.push(runUserMessage(run, generated.content ?? '', generated.created_at, false, branch, generated.id));
     }
     for (const notice of noticesByRun.get(run.id) ?? []) {
       messages.push(noticeMessage(notice, spaceId));
