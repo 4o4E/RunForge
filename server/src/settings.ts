@@ -38,7 +38,6 @@ const MAX_PAGE_STATE_BYTES = 200_000;
 const TOOL_SETTING_KEYS = [
   'tools.sandbox',
   'tools.sandboxBackend',
-  'tools.workspaceRoot',
   'tools.shellEnabled',
   'tools.shellUseHostPath',
   'tools.shellPathMode',
@@ -306,12 +305,12 @@ function rowsToMap(rows: SettingRow[]): Map<string, unknown> {
   return new Map(rows.map((row) => [row.key, row.value]));
 }
 
-function mergeToolSettings(values: Map<string, unknown>): ToolSettings {
+function mergeToolSettings(values: Map<string, unknown>, workspaceRoot = config.tools.workspaceRoot): ToolSettings {
   const defaults = defaultToolSettings();
   return {
     sandbox: sandboxValue(values.get('tools.sandbox'), defaults.sandbox),
     sandboxBackend: backendValue(values.get('tools.sandboxBackend'), defaults.sandboxBackend),
-    workspaceRoot: resolve(stringValue(values.get('tools.workspaceRoot'), defaults.workspaceRoot)),
+    workspaceRoot,
     shellEnabled: boolValue(values.get('tools.shellEnabled'), defaults.shellEnabled),
     shellUseHostPath: boolValue(values.get('tools.shellUseHostPath'), defaults.shellUseHostPath),
     shellPathMode: shellPathModeValue(values.get('tools.shellPathMode'), defaults.shellPathMode),
@@ -343,7 +342,7 @@ async function insertMissingDefaults(tenantId: string, rows: SettingRow[]): Prom
   await insertMissingSettings(tenantId, missing);
 }
 
-/** 读取系统统一维护的工具策略和 workspace 基础目录。 */
+/** 读取数据库中的系统工具策略，并附加实例启动配置中的 workspace 基础目录。 */
 export async function getSystemToolSettings(): Promise<ToolSettings> {
   const tenantId = await getSystemResourceTenantId();
   try {
@@ -366,7 +365,6 @@ function toolSettingsToEntries(settings: ToolSettings): Array<[string, unknown]>
   return [
     ['tools.sandbox', settings.sandbox],
     ['tools.sandboxBackend', settings.sandboxBackend],
-    ['tools.workspaceRoot', settings.workspaceRoot],
     ['tools.shellEnabled', settings.shellEnabled],
     ['tools.shellUseHostPath', settings.shellUseHostPath],
     ['tools.shellPathMode', settings.shellPathMode],
@@ -384,7 +382,7 @@ export function normalizeToolSettings(input: unknown): ToolSettings {
   for (const [key, value] of Object.entries(body)) {
     values.set(`tools.${key}`, value);
   }
-  return mergeToolSettings(values);
+  return mergeToolSettings(values, resolve(stringValue(body.workspaceRoot, config.tools.workspaceRoot)));
 }
 
 export function shellPathForSettings(settings: ToolSettings): string {
@@ -393,7 +391,8 @@ export function shellPathForSettings(settings: ToolSettings): string {
 
 export async function saveToolSettings(scope: TenantScope, input: unknown): Promise<ToolSettings> {
   if (scope.tenantId !== await getSystemResourceTenantId()) throw new Error('工具设置只能由系统管理员修改');
-  const settings = normalizeToolSettings(input);
+  // 系统设置请求不能覆盖实例环境中的工作区根目录。
+  const settings = { ...normalizeToolSettings(input), workspaceRoot: config.tools.workspaceRoot };
   await upsertSettings(scope.tenantId, toolSettingsToEntries(settings).map(([key, value]) => ({ key, value })));
   await mkdir(settings.workspaceRoot, { recursive: true });
   return settings;

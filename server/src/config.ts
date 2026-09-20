@@ -166,7 +166,7 @@ export const config = {
     // shell 子进程沙箱后端:auto=Linux+bwrap 时启用,none=直通,bwrap=强制启用。
     sandboxBackend: sandboxBackend(process.env.TOOL_SANDBOX_BACKEND),
     // Filesystem tools are confined under this root in enforce mode. thread 工作目录固定派生为
-    // `<root>/<spaceId>/<threadId>`，生产镜像把 /w 链接到持久数据卷。
+    // `<root>/<spaceId>/<threadId>`；该实例路径只由启动环境配置。
     workspaceRoot: resolve(process.env.TOOL_WORKSPACE_ROOT ?? '/w'),
     shellEnabled: (process.env.SHELL_ENABLED ?? 'true') !== 'false',
     // true 时 shell 直接使用宿主机 PATH 和 cwd=workspaceRoot，避免 bwrap 白名单漏投射 CLI。

@@ -372,11 +372,11 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 
 ## 6. 文件系统与 workspace 隔离
 
-系统管理员通过 `/api/system/settings/tools` 维护 `workspaceRoot` 基础目录，生产镜像默认使用
+实例启动环境通过 `TOOL_WORKSPACE_ROOT` 配置 `workspaceRoot` 基础目录，生产 Compose 使用
 `/w`。所有空间统一使用 `<workspaceRoot>/<space_id>/<thread_id>`，因此生产路径为
 `/w/{spaceId}/{threadId}`。
 
-- `getSystemToolSettings()` 读取系统工具策略和 `workspaceRoot` 基础目录；租户身份无法读取或修改这组配置。
+- `getSystemToolSettings()` 从数据库读取系统工具策略，并从实例启动配置附加 `workspaceRoot`；系统设置接口不能修改该路径。
 - Agent、文件 API 和 shell session 在处理具体 thread 时共同调用 `resolveWorkspaceRootForThread(...)`，保证同一个 thread 使用同一路径。文件入口缺少 `threadId` 时返回 `THREAD_REQUIRED`；新会话首次上传附件会先创建 thread。
 - `normalizeRemotePath`/`isWithin`(`server/src/files/workspace.ts`)继续以当前 thread 的工作目录作为唯一围栏。
 - Office 预览缓存键包含 tenant 和 `space/thread` 工作区标识，避免跨工作区复用缓存。
@@ -421,7 +421,7 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 - **租户授权**:system admin 在 `/sys-admin/tenant-access?tenant=<tenantId>` 选择租户可使用的 LLM provider 和数据源。授权保存在租户自己的 `tenant.resourceAuthorization` JSON 设置中。
 - **租户内设置**:用户、空间和业务插件。owner/admin 通过 `/admin` 管理本租户,system admin 通过 `/sys-admin/tenants/:tenantId/{users|spaces|business-plugins}` 管理指定租户。
 
-监听端口、数据库连接串和启动引导密钥继续由 `config.ts` 从 env 读取。系统工具策略存入 `app_settings`；其中 `workspaceRoot` 保存基础目录，执行时统一派生 `space/thread` 目录。
+监听端口、数据库连接串、启动引导密钥和工作区基础目录由 `config.ts` 从 env 读取。系统工具策略存入 `app_settings`，执行时在实例工作区根目录下统一派生 `space/thread` 目录。
 
 `preview.officeConverterUrl`(office 预览转换服务地址)保持实例级——它是一个外部服务的地址,不需要每个租户配一份,但 `officeCacheDir` 的实际写入路径按 §6 分租户子目录。
 
@@ -468,7 +468,7 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 改造完成后(即 §5-§9 都实施完)的隔离强度:
 
 - ⚠️ 数据库层:**只有应用层查询过滤,没有 Postgres RLS 兜底**。Phase 2 已经给 `threads`/`subagent_runs`/`shell_sessions`/`datasources`/`push_subscriptions` 等业务表加了 `tenant_id`/`user_id` 列,Store 层(`pgStore.ts`/`memoryStore.ts`)每个方法按 scope 过滤,是当前唯一的强制边界。**明确跳过 RLS 的原因**:Prisma 和过渡期原生 SQL 共用 `server/src/db/pool.ts` 的 `pg.Pool`,当前没有“一个请求固定同一连接和事务”的执行上下文；RLS 所需的 `SET LOCAL app.tenant_id` 因此不能稳定覆盖整个请求。**这意味着**:任何绕过 Store/repository、直接用 `query()`/`pool` 手写 SQL 的新代码,如果忘记租户过滤,就是完整的跨租户数据泄露,且没有数据库层兜底会拦住它——`accountPool.ts` 里 `datasources`/`workload_tokens`/`datasource_account_leases` 等尚未迁移查询仍需逐条核对 scope。空间阶段不再新增散落原生 SQL，后续需要更高保证级别时再单独设计 RLS 请求事务边界。
-- ✅ 文件系统层:所有空间统一按 `spaceId/threadId` 分目录；应用层路径围栏与 bwrap bind mount 使用同一个派生目录。基础目录只允许 system admin 通过系统设置修改，租户接口不提供工具设置读写能力(见 §6)。
+- ✅ 文件系统层:所有空间统一按 `spaceId/threadId` 分目录；应用层路径围栏与 bwrap bind mount 使用同一个派生目录。基础目录由实例启动环境固定，系统设置和租户接口均不能修改(见 §6)。
 - ✅ 事件流:WebSocket 订阅前按 `{tenantId, userId}` 查一次归属(`store.getRun`/`store.getThread`),查不到直接 1008 拒绝,不会走到 `subscribe`——实现方式和最初设想的"事件打 tenant_id 标签"不同,记录在 §7,但达到的隔离粒度更细(连 user_id 都校验了,不只是 tenant 边界)。
 - ✅ 用户可见性:所有 Tier 1 查询按 `(tenant_id, user_id)` 双重过滤,同租户内的普通用户看不到彼此的 thread;Tier 2 表(`runs`/`messages`/`events`/`shell_commands` 等)通过 JOIN 父表间接过滤(见 §5)。唯一的例外(管理员审计)目前还没实现,仍是设计态,不是已落地的旁路。
 - ⚠️ 管理员审计本身是一个需要被信任的高权限能力:tenant owner/admin 能看到本租户任意成员的对话,system admin 能看到任意租户任意成员的对话——这不是"漏洞",而是设计如此(见 §1/§4),但意味着这两类身份的账号安全(密码强度、是否启用后续可能加的 2FA)比普通 member 更值得重视,一旦这两类账号被盗,影响面是"审计范围内的所有对话",需要在运营上对这两类账号的登录/密码策略从紧要求,这一版设计不包含强制 2FA,留作后续加固项。

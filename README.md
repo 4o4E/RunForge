@@ -45,11 +45,15 @@ docker compose --env-file .env.docker -f deploy/compose.external-postgres.yml up
 两套 Compose 都在 `http://localhost:8080` 提供 Web 控制台、REST API 和 WebSocket。
 `.env.docker` 只保存当前 Compose 实际使用的数据库密钥、签名密钥和初始账号密码。LLM
 Provider 在服务启动后由系统管理员写入系统设置,再授权给租户使用。镜像版本、端口、工具参数及外部服务地址直接在
-对应 Compose 文件中修改。`runforge-data` 卷保存用户 workspace、Provider 记录和业务插件目录；
-自带 PostgreSQL 的版本额外使用 `runforge-postgres` 卷保存数据库。
+对应 Compose 文件中修改。`runforge-workspaces`、`runforge-business-plugins` 和
+`runforge-provider-traces` 分别保存会话文件、业务插件和 Provider 观测记录；自带 PostgreSQL
+的版本额外使用 `runforge-postgres` 卷保存数据库。
 
-业务插件可以直接写入 `runforge-data` 卷内的 `/var/lib/runforge/business-plugins`，也可以在
+业务插件可以直接写入 `runforge-business-plugins` 卷内的 `/app/business-plugins`，也可以在
 Compose 中为该目录增加只读 bind mount。Office 转换服务地址也直接写入 Compose。
+
+已有部署从合并数据目录切换到独立挂载时，参照
+[工作区存储迁移](docs/workspace-storage-migration.md)。
 
 发布流程接受 `v*.*.*` tag。它会构建 `linux/amd64` 镜像，推送版本标签与 `latest`，验证匿名
 拉取，并创建带两套 Compose 和环境变量模板的 GitHub Release。
@@ -163,7 +167,10 @@ pnpm db:migrate
 psql "$DATABASE_URL" -c "\dt"
 ```
 
-首次启动后,服务会把 env 中的工具默认配置补进系统 `app_settings`。当前开发库里这些 key 已存在：`tools.sandbox`、`tools.sandboxBackend`、`tools.workspaceRoot`、`tools.network`、`tools.maxOutput` 等；保存过系统设置后,数据库值会覆盖 env 默认值。`workspaceRoot` 保存基础目录，所有空间统一派生为 `<workspaceRoot>/<spaceId>/<threadId>`。生产容器使用 `/w`，本地开发可以在系统设置页保存实际可写的绝对目录。
+首次启动后,服务会把工具策略默认配置补进系统 `app_settings`，包括 `tools.sandbox`、
+`tools.sandboxBackend`、`tools.network` 和 `tools.maxOutput` 等。工作区基础目录只读取
+`TOOL_WORKSPACE_ROOT`，不会写入数据库；所有空间统一派生为
+`<TOOL_WORKSPACE_ROOT>/<spaceId>/<threadId>`。生产 Compose 直接把工作区卷挂载到 `/w`。
 
 ```bash
 psql "$DATABASE_URL" -c "select key, value from app_settings order by key;"

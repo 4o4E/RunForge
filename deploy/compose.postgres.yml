@@ -30,6 +30,12 @@ services:
       TOOL_NETWORK: disabled
       # 单条工具结果的最大字符数，可选范围：1000 至 40000。
       TOOL_MAX_OUTPUT: "40000"
+      # 会话工作区基础目录；所有空间按 /w/{spaceId}/{threadId} 隔离。
+      TOOL_WORKSPACE_ROOT: /w
+      # Provider 调用观测记录目录。
+      RUNFORGE_PROVIDER_TRACE_DIR: /app/provider-traces
+      # 租户业务插件部署和历史运行快照目录；多个目录时使用逗号分隔。
+      RUNFORGE_BUSINESS_PLUGIN_ROOTS: /app/business-plugins
       # Office 转换服务地址；空值关闭 Office 文件预览。
       OFFICE_PREVIEW_CONVERTER_URL: ""
       # Office 转换请求超时时间，单位为毫秒，必须为正整数。
@@ -37,7 +43,9 @@ services:
       # Office 预览缓存版本；空值使用默认缓存，修改该值会使旧缓存失效。
       OFFICE_PREVIEW_CACHE_VERSION: ""
     volumes:
-      - runforge-data:/var/lib/runforge
+      - runforge-workspaces:/w
+      - runforge-business-plugins:/app/business-plugins
+      - runforge-provider-traces:/app/provider-traces
     depends_on:
       postgres:
         condition: service_healthy
@@ -67,5 +75,7 @@ services:
       retries: 12
 
 volumes:
-  runforge-data:
+  runforge-workspaces:
+  runforge-business-plugins:
+  runforge-provider-traces:
   runforge-postgres:

@@ -626,10 +626,8 @@ function ArchivedThreadsSettingsPanel({ onThreadsChanged }: { onThreadsChanged?:
 
 export function ToolsSettingsPanel({
   controlApi,
-  onWorkspaceChanged,
 }: {
   controlApi: SettingsControlApi;
-  onWorkspaceChanged?: () => void;
 }) {
   const [settings, setSettings] = useState<ToolSettings | null>(null);
   const [options, setOptions] = useState<ToolSettingsOptions | null>(null);
@@ -709,7 +707,6 @@ export function ToolsSettingsPanel({
       setSettings(next);
       setOptions(await controlApi.getToolSettingsOptions());
       setShellDenyText(listToText(next.shellDeny));
-      onWorkspaceChanged?.();
       setMessage('已保存');
     } catch (err) {
       setMessage(`保存失败：${(err as Error).message}`);
@@ -736,14 +733,8 @@ export function ToolsSettingsPanel({
         </>
       }
     >
-
       <div className="grid gap-4">
-          <div>
-            <Field label="工作区基础目录">
-              <Input value={settings.workspaceRoot} onChange={(event) => setSettings({ ...settings, workspaceRoot: event.target.value })} />
-            </Field>
-          </div>
-          <div className="grid gap-4 md:grid-cols-3">
+        <div className="grid gap-4 md:grid-cols-3">
             <Field label="Shell 执行方式">
               <Select
                 value={settings.shellUseHostPath ? 'host' : 'sandbox'}

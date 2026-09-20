@@ -37,8 +37,8 @@ ENV NODE_ENV=production \
     PORT=8080 \
     RUNFORGE_WEB_DIST=/app/web \
     TOOL_WORKSPACE_ROOT=/w \
-    RUNFORGE_PROVIDER_TRACE_DIR=/var/lib/runforge/provider-traces \
-    RUNFORGE_BUSINESS_PLUGIN_ROOTS=/var/lib/runforge/business-plugins
+    RUNFORGE_PROVIDER_TRACE_DIR=/app/provider-traces \
+    RUNFORGE_BUSINESS_PLUGIN_ROOTS=/app/business-plugins
 
 RUN apt-get update && apt-get install --yes --no-install-recommends \
       bash \
@@ -57,11 +57,10 @@ RUN apt-get update && apt-get install --yes --no-install-recommends \
       sed \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p \
-      /var/lib/runforge/workspaces \
-      /var/lib/runforge/provider-traces \
-      /var/lib/runforge/business-plugins \
-    && ln -s /var/lib/runforge/workspaces /w \
-    && chown -R node:node /var/lib/runforge
+      /w \
+      /app/provider-traces \
+      /app/business-plugins \
+    && chown -R node:node /w /app/provider-traces /app/business-plugins
 
 WORKDIR /app/server
 COPY --from=build --chown=node:node /opt/runforge-server/ ./
@@ -70,7 +69,7 @@ COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/runforge-entrypoint
 
 USER node
 EXPOSE 8080
-VOLUME ["/var/lib/runforge"]
+VOLUME ["/w", "/app/provider-traces", "/app/business-plugins"]
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=6 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
 

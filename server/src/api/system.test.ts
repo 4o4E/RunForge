@@ -6,6 +6,7 @@ import { signTenantAccessToken } from '../auth/jwt.js';
 import { hashPassword } from '../auth/passwords.js';
 import { store } from '../store/index.js';
 import { saveTenantResourceAuthorization } from '../settings.js';
+import { findSetting } from '../store/settingsRepository.js';
 
 test.before(() => {
   config.auth.jwtSecret = config.auth.jwtSecret || 'test-jwt-secret';
@@ -259,7 +260,18 @@ test('系统设置与租户授权接口: system admin 可管理，租户身份�
       headers: { Authorization: `Bearer ${accessToken}` },
     });
     assert.equal(systemToolsRead.status, 200);
-    assert.equal(typeof ((await systemToolsRead.json()) as { workspaceRoot?: unknown }).workspaceRoot, 'string');
+    const systemTools = (await systemToolsRead.json()) as { workspaceRoot?: unknown };
+    assert.equal(systemTools.workspaceRoot, config.tools.workspaceRoot);
+    assert.equal(await findSetting('default', 'tools.workspaceRoot'), undefined);
+
+    const systemToolsWrite = await fetch(`${base}/system/settings/tools`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify({ ...systemTools, workspaceRoot: '/tmp/request-workspace' }),
+    });
+    assert.equal(systemToolsWrite.status, 200);
+    assert.equal(((await systemToolsWrite.json()) as { workspaceRoot?: unknown }).workspaceRoot, config.tools.workspaceRoot);
+    assert.equal(await findSetting('default', 'tools.workspaceRoot'), undefined);
 
     const systemUsers = await fetch(`${base}/system/tenants/tn_system_settings/users`, {
       headers: { Authorization: `Bearer ${accessToken}` },
