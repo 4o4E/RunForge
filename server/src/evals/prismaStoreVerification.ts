@@ -14,8 +14,8 @@ import {
   tenantSettingsTemplateEntries,
 } from '../settings.js';
 import { getSystemResourceTenantId } from '../systemResourceTenant.js';
-import { DefaultSpaceImmutableError, RunActiveError } from '../store/types.js';
-import { newArtifactId, newSpaceId } from '../id.js';
+import { DeleteConflictError, RunActiveError } from '../store/types.js';
+import { newArtifactId, newSpaceId, newThreadId } from '../id.js';
 import { SpaceAccessService } from '../spaces/access.js';
 import { SpaceConfigService } from '../spaces/config.js';
 import { RunAdmissionService } from '../spaces/runAdmission.js';
@@ -28,6 +28,7 @@ import { externalArtifactRemotePath } from '../external/artifactProtocol.js';
 import { ProviderRunner } from '../llm/providerRunner.js';
 import { PrismaProviderObservationRepository } from '../llm/observability/repository.js';
 import type { Provider } from '../llm/types.js';
+import { registerRunExecution } from '../agent/executionControl.js';
 import express from 'express';
 import type { Server } from 'node:http';
 import {
@@ -46,6 +47,7 @@ import { executeRun } from '../agent/executor.js';
 const suffix = randomUUID().replaceAll('-', '').slice(0, 12);
 const tenantId = `prisma-verify-${suffix}`;
 const otherTenantId = `prisma-verify-other-${suffix}`;
+const ownerInvariantTenantId = `prisma-owner-invariant-${suffix}`;
 const systemAdminEmail = `prisma-verify-${suffix}@system.test`;
 const toolResult = `验证工具结果：${'原始内容'.repeat(60)}`;
 const store = new PgStore();
@@ -106,18 +108,37 @@ try {
       },
     }),
   );
+  await assert.rejects(
+    store.createSpace({
+      tenantId,
+      mode: 'web',
+      name: '非法跨租户创建者',
+      executionUserId: null,
+      config: {},
+      createdByUserId: otherTenant.owner.id,
+      visibleUserIds: [],
+    }),
+    /createdByUserId 不属于当前租户/,
+  );
   assert.equal((await store.updateTenantStatus(tenantId, 'suspended'))?.status, 'suspended');
   assert.equal((await store.updateTenantStatus(tenantId, 'active'))?.status, 'active');
   assert.equal((await store.findUserByEmail(tenantId, user.email))?.id, user.id);
   assert.equal((await store.findUserById(user.id))?.id, user.id);
   assert.equal((await store.listUsersByTenant(tenantId)).length, 1);
-  assert.equal((await store.updateUserRole(user.id, 'admin'))?.role, 'admin');
-  assert.equal((await store.updateUserStatus(user.id, 'disabled'))?.status, 'disabled');
+  const roleChangeGuardOwner = await store.createUser({
+    tenantId,
+    email: `owner-role-guard-${suffix}@tenant.test`,
+    passwordHash: 'verification-only',
+    role: 'owner',
+  });
+  assert.equal((await store.updateUser(user.id, { role: 'admin' }))?.role, 'admin');
+  assert.equal((await store.updateUser(user.id, { status: 'disabled' }))?.status, 'disabled');
   assert.equal((await store.updateUser(user.id, {
     role: 'owner',
     status: 'active',
     passwordHash: 'verification-updated',
   }))?.password_hash, 'verification-updated');
+  assert.equal(await store.deleteUser(tenantId, roleChangeGuardOwner.id), true);
 
   const visibleMember = await store.createUser({
     tenantId,
@@ -140,10 +161,16 @@ try {
   });
   assert.equal(updatedExternalSpace.configVersion, 2);
 
+  const disposableSpace = await spaceAccess.create(ownerIdentity, {
+    mode: 'external',
+    name: '待删除外部空间',
+    executionUserId: visibleMember.id,
+    visibleUserIds: [visibleMember.id],
+  });
   const externalTokenValue = randomUUID();
   const externalCaller = await externalRepository.createCaller({
     tenantId,
-    spaceId: externalSpace.id,
+    spaceId: disposableSpace.id,
     name: 'Prisma 验证调用方',
     metadata: { applicationRef: 'prisma-verifier' },
     tokenHash: hashOpaqueToken(externalTokenValue),
@@ -152,16 +179,45 @@ try {
   });
   const callerId = externalCaller.caller.id;
   const externalToken = externalCaller.tokens[0];
-  const deletedExternalSpace = await spaceAccess.delete(ownerIdentity, externalSpace.id);
-  assert.notEqual(deletedExternalSpace.deletedAt, null);
-  assert.notEqual((await prisma.external_tokens.findUnique({ where: { id: externalToken.id } }))?.revoked_at, null);
-  const restoredExternalSpace = await spaceAccess.restore(ownerIdentity, externalSpace.id);
-  assert.equal(restoredExternalSpace.deletedAt, null);
-  assert.deepEqual(restoredExternalSpace.visibleUserIds, [visibleMember.id]);
-  assert.notEqual((await prisma.external_tokens.findUnique({ where: { id: externalToken.id } }))?.revoked_at, null);
+  const disposableScope = { tenantId, userId: visibleMember.id };
+  const disposableThread = await prisma.threads.create({
+    data: {
+      id: newThreadId(),
+      tenant_id: tenantId,
+      user_id: visibleMember.id,
+      space_id: disposableSpace.id,
+      source_type: 'external',
+      source_caller_id: callerId,
+      source_ref: {},
+      title: '空间 Shell 删除保护',
+    },
+  });
+  const disposableShell = await store.createShellSession(disposableScope, {
+    threadId: disposableThread.id,
+    name: 'Default',
+    owner: 'user',
+    workspaceRoot: '/tmp/runforge-prisma-space-shell',
+    backend: 'none',
+  });
+  const disposableCommand = await store.createShellCommand(disposableScope, {
+    sessionId: disposableShell.id,
+    actor: 'user',
+    command: 'sleep 60',
+    cwd: '/tmp/runforge-prisma-space-shell',
+    waitMode: 'background',
+  });
   await assert.rejects(
-    store.softDeleteSpaceAndRevokeTokens(tenantId, defaultSpace.id),
-    (error: unknown) => error instanceof DefaultSpaceImmutableError,
+    store.deleteSpace(tenantId, disposableSpace.id),
+    (error: unknown) => error instanceof DeleteConflictError && error.code === 'SPACE_HAS_ACTIVE_SHELLS',
+  );
+  await store.updateShellCommand(disposableScope, disposableCommand.id, { status: 'killed', ended_at: new Date().toISOString() });
+  await spaceAccess.delete(ownerIdentity, disposableSpace.id, {});
+  assert.equal(await prisma.spaces.findUnique({ where: { id: disposableSpace.id } }), null);
+  assert.equal(await prisma.external_tokens.findUnique({ where: { id: externalToken.id } }), null);
+  await assert.rejects(
+    store.deleteSpace(tenantId, defaultSpace.id),
+    (error: unknown) => error instanceof DeleteConflictError
+      && error.code === 'DEFAULT_SPACE_REPLACEMENT_REQUIRED',
   );
 
   const commandTokenValue = randomUUID();
@@ -422,6 +478,14 @@ try {
   await externalRepository.revokeToken(tenantId, externalSpace.id, commandCaller.caller.id, rotatedToken.id);
   assert.equal(await externalRepository.authenticateToken(hashOpaqueToken(rotatedTokenValue)), null);
 
+  await store.updateThread(externalScope, externalCreated.response.threadId, { archived: true });
+  const deletedExternalThread = await store.deleteThread(externalScope, externalCreated.response.threadId);
+  assert.deepEqual(
+    new Set(deletedExternalThread?.artifactStorageKeys),
+    new Set([artifactInput.storageKey, `${commandCaller.caller.id}/${nextStepArtifactId}`]),
+  );
+  assert.equal(await prisma.artifacts.count({ where: { thread_id: externalCreated.response.threadId } }), 0);
+
   const guardedWebSpace = await spaceAccess.create(ownerIdentity, {
     mode: 'web',
     name: 'Prisma 权限兜底空间',
@@ -526,9 +590,15 @@ try {
     runtimeApiBase: `http://127.0.0.1:${runtimeAddress.port}/api/runtime`,
     stepId: step.id,
   });
-  assert.equal(await workloadClient.secrets.get('crm.api-key'), 'tenant-current-secret');
-  assert.equal(await workloadClient.secrets.get('shared.operations-key'), 'tenant-shared-secret');
-  await assert.rejects(workloadClient.secrets.get('missing.key'), /tenant Secret 未配置/);
+  const workloadExecution = registerRunExecution(run.id);
+  workloadExecution.bindThread(thread.id);
+  try {
+    assert.equal(await workloadClient.secrets.get('crm.api-key'), 'tenant-current-secret');
+    assert.equal(await workloadClient.secrets.get('shared.operations-key'), 'tenant-shared-secret');
+    await assert.rejects(workloadClient.secrets.get('missing.key'), /tenant Secret 未配置/);
+  } finally {
+    workloadExecution.finish();
+  }
   assert.equal(
     (await readAuditedWorkloadSecrets(workload.token, 'backend', step.id, ['crm.api-key']))['crm.api-key'],
     'tenant-current-secret',
@@ -740,6 +810,126 @@ try {
   await store.revokeAuthToken(token.id);
   assert.equal((await store.findAuthTokenByHash(token.token_hash))?.revoked_at != null, true);
 
+  const deletionRunStates = ['pending', 'running', 'waiting_for_user', 'canceling'] as const;
+  const deletionRuns = [];
+  for (const status of deletionRunStates) {
+    const thread = await store.createThread(scope, `批量取消 ${status}`);
+    const run = await store.createRun(scope, thread.id, status);
+    if (status !== 'pending') await store.setRunStatus(scope, run.id, status);
+    deletionRuns.push({ thread, run });
+  }
+  const unrelatedScope = { tenantId: otherTenantId, userId: otherTenant.owner.id };
+  const unrelatedThread = await store.createThread(unrelatedScope, '批量取消隔离验证');
+  const unrelatedRun = await store.createRun(unrelatedScope, unrelatedThread.id, 'pending');
+  const canceledForDeletion = await store.cancelRunsForDeletion(deletionRuns.map(({ thread }) => thread.id));
+  assert.deepEqual(
+    new Set(canceledForDeletion.map((run) => run.id)),
+    new Set(deletionRuns.map(({ run }) => run.id)),
+  );
+  for (const { thread, run } of deletionRuns) {
+    assert.equal((await store.getRun(scope, run.id))?.status, 'canceled');
+    assert.equal((await store.getThread(scope, thread.id))?.executing_run_id, null);
+  }
+  assert.equal((await store.getRun(unrelatedScope, unrelatedRun.id))?.status, 'pending');
+
+  const removableUser = await store.createUser({
+    tenantId,
+    email: `removable-${suffix}@example.test`,
+    passwordHash: 'verification-only',
+    role: 'member',
+  });
+  const createdSpace = await store.createSpace({
+    tenantId,
+    mode: 'web',
+    name: '创建者删除验证',
+    executionUserId: null,
+    config: defaultSpace.config,
+    createdByUserId: removableUser.id,
+    visibleUserIds: [],
+  });
+  assert.equal(await store.deleteUser(tenantId, removableUser.id), true);
+  assert.equal((await store.findSpace(tenantId, createdSpace.id))?.created_by_user_id, null);
+
+  const associatedUser = await store.createUser({
+    tenantId,
+    email: `associated-${suffix}@example.test`,
+    passwordHash: 'verification-only',
+    role: 'member',
+  });
+  await store.updateSpace(tenantId, defaultSpace.id, { visibleUserIds: [associatedUser.id] });
+  const associatedThread = await store.createThread({ tenantId, userId: associatedUser.id }, '关联用户验证');
+  await assert.rejects(
+    store.deleteUser(tenantId, associatedUser.id),
+    (error: unknown) => error instanceof DeleteConflictError && error.code === 'USER_HAS_THREADS',
+  );
+  await store.updateThread({ tenantId, userId: associatedUser.id }, associatedThread.id, { archived: true });
+  assert.deepEqual(
+    await store.deleteThread({ tenantId, userId: associatedUser.id }, associatedThread.id),
+    { artifactStorageKeys: [] },
+  );
+  assert.equal(await store.deleteUser(tenantId, associatedUser.id), true);
+
+  const ownerInvariantTenant = await store.createTenantWithOwner({
+    id: ownerInvariantTenantId,
+    name: 'owner 并发约束验证',
+    ownerEmail: `owner-invariant-a-${suffix}@example.test`,
+    ownerPasswordHash: 'verification-only',
+    settingsTemplate: [],
+  });
+  const secondInvariantOwner = await store.createUser({
+    tenantId: ownerInvariantTenantId,
+    email: `owner-invariant-b-${suffix}@example.test`,
+    passwordHash: 'verification-only',
+    role: 'owner',
+  });
+  const concurrentDemotions = await Promise.allSettled([
+    store.updateUser(ownerInvariantTenant.owner.id, { role: 'member' }),
+    store.updateUser(secondInvariantOwner.id, { role: 'member' }),
+  ]);
+  assert.equal(concurrentDemotions.filter((result) => result.status === 'fulfilled').length, 1);
+  assert.equal(
+    (await store.listUsersByTenant(ownerInvariantTenantId)).filter((item) => item.role === 'owner').length,
+    1,
+  );
+  assert.ok(await store.deleteTenant(ownerInvariantTenantId));
+
+  const deletionTenantId = `prisma-delete-${suffix}`;
+  const deletionTenant = await store.createTenantWithOwner({
+    id: deletionTenantId,
+    name: '租户删除验证',
+    ownerEmail: `owner-delete-${suffix}@example.test`,
+    ownerPasswordHash: 'verification-only',
+    settingsTemplate: [],
+  });
+  const deletionScope = { tenantId: deletionTenantId, userId: deletionTenant.owner.id };
+  const deletionThread = await store.createThread(deletionScope, '租户级联删除验证');
+  const deletionRun = await store.createRun(deletionScope, deletionThread.id, 'delete tenant');
+  await store.setRunStatus(deletionScope, deletionRun.id, 'done');
+  const deletionShell = await store.createShellSession(deletionScope, {
+    threadId: deletionThread.id,
+    name: 'Default',
+    owner: 'user',
+    workspaceRoot: '/tmp/runforge-prisma-tenant-shell',
+    backend: 'none',
+  });
+  const deletionCommand = await store.createShellCommand(deletionScope, {
+    sessionId: deletionShell.id,
+    actor: 'user',
+    command: 'sleep 60',
+    cwd: '/tmp/runforge-prisma-tenant-shell',
+    waitMode: 'background',
+  });
+  await assert.rejects(
+    store.deleteTenant(deletionTenantId),
+    (error: unknown) => error instanceof DeleteConflictError && error.code === 'TENANT_HAS_ACTIVE_SHELLS',
+  );
+  await store.updateShellCommand(deletionScope, deletionCommand.id, { status: 'killed', ended_at: new Date().toISOString() });
+  const deletedTenant = await store.deleteTenant(deletionTenantId);
+  assert.deepEqual(deletedTenant, { artifactStorageKeys: [] });
+  assert.equal(await store.findTenant(deletionTenantId), null);
+  assert.equal(await prisma.threads.findUnique({ where: { id: deletionThread.id } }), null);
+  assert.equal(await store.findUserById(deletionTenant.owner.id), null);
+
   const admin = await store.createSystemAdmin({ email: systemAdminEmail, passwordHash: 'verification-only' });
   assert.equal((await store.findSystemAdminByEmail(systemAdminEmail))?.id, admin.id);
   assert.equal((await store.findSystemAdminById(admin.id))?.id, admin.id);
@@ -751,6 +941,8 @@ try {
   assert.equal((await store.findSystemAdminTokenByHash(adminToken.token_hash))?.system_admin_id, admin.id);
   await store.revokeSystemAdminToken(adminToken.id);
   assert.equal((await store.findSystemAdminTokenByHash(adminToken.token_hash))?.revoked_at != null, true);
+  assert.equal(await store.deleteSystemAdmin(admin.id), true);
+  assert.equal(await store.findSystemAdminById(admin.id), null);
 
   console.log(JSON.stringify({
     ok: true,
@@ -778,6 +970,10 @@ try {
   await prisma.spaces.deleteMany({ where: { tenant_id: otherTenantId } });
   await prisma.users.deleteMany({ where: { tenant_id: otherTenantId } });
   await prisma.tenants.deleteMany({ where: { id: otherTenantId } });
+  await prisma.tenants.updateMany({ where: { id: ownerInvariantTenantId }, data: { default_space_id: null } });
+  await prisma.spaces.deleteMany({ where: { tenant_id: ownerInvariantTenantId } });
+  await prisma.users.deleteMany({ where: { tenant_id: ownerInvariantTenantId } });
+  await prisma.tenants.deleteMany({ where: { id: ownerInvariantTenantId } });
   await prisma.system_admins.deleteMany({ where: { email: systemAdminEmail } });
   await prisma.$disconnect();
   await pool.end();

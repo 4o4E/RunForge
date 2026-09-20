@@ -137,7 +137,7 @@ test('PATCH /api/system/tenants/:id: 禁用租户后该租户的用户登录/ref
   }
 });
 
-test('系统管理员可以在租户范围内创建和编辑用户，并保留唯一 active owner', async () => {
+test('系统管理员可以在租户范围内创建和编辑用户，并保证租户至少存在一个 owner', async () => {
   await seedSystemAdmin('sysadmin@tenant-users.test', 'sys-pw');
   const owner = await seedOwner('tn_system_users', 'owner@system-users.test', 'pw');
   const member = await store.createUser({
@@ -193,12 +193,25 @@ test('系统管理员可以在租户范围内创建和编辑用户，并保留�
     });
     assert.equal(crossTenant.status, 404);
 
-    const removeOnlyOwner = await fetch(`${base}/system/tenants/tn_system_users/users/${owner.id}`, {
+    const disableOnlyOwner = await fetch(`${base}/system/tenants/tn_system_users/users/${owner.id}`, {
       method: 'PATCH',
       headers,
       body: JSON.stringify({ status: 'disabled' }),
     });
-    assert.equal(removeOnlyOwner.status, 409);
+    assert.equal(disableOnlyOwner.status, 200);
+
+    const demoteOnlyOwner = await fetch(`${base}/system/tenants/tn_system_users/users/${owner.id}`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ role: 'member' }),
+    });
+    assert.equal(demoteOnlyOwner.status, 409);
+
+    const deleteOnlyOwner = await fetch(`${base}/system/tenants/tn_system_users/users/${owner.id}`, {
+      method: 'DELETE',
+      headers,
+    });
+    assert.equal(deleteOnlyOwner.status, 409);
   } finally {
     close();
   }
@@ -237,6 +250,61 @@ test('GET/POST /api/system/admins: 列出并创建系统管理员账号', async 
       body: JSON.stringify({ email: 'new-admin@admins.test', password: 'pw2' }),
     });
     assert.equal(duplicate.status, 409);
+  } finally {
+    close();
+  }
+});
+
+test('DELETE /api/system/admins/:id: 允许删除普通管理员，保护默认系统管理员', async () => {
+  const defaultAdmin = await store.createSystemAdmin({
+    email: 'default-sysadmin@delete-admins.test',
+    passwordHash: hashPassword('pw'),
+    isBootstrap: true,
+  });
+  const caller = await seedSystemAdmin('caller@delete-admins.test', 'pw');
+  const removable = await seedSystemAdmin('remove@delete-admins.test', 'pw');
+  const { port, close } = await listen(buildApp());
+  try {
+    const base = `http://127.0.0.1:${port}/api`;
+    const { accessToken } = await systemLogin(base, caller.email, 'pw');
+    const headers = { Authorization: `Bearer ${accessToken}` };
+    assert.equal((await fetch(`${base}/system/admins/${defaultAdmin.id}`, { method: 'DELETE', headers })).status, 409);
+    assert.equal((await fetch(`${base}/system/admins/${removable.id}`, { method: 'DELETE', headers })).status, 204);
+    assert.equal(await store.findSystemAdminById(removable.id), null);
+    assert.equal((await fetch(`${base}/system/admins/${caller.id}`, { method: 'DELETE', headers })).status, 204);
+    assert.equal(await store.findSystemAdminById(caller.id), null);
+  } finally {
+    close();
+  }
+});
+
+test('DELETE /api/system/tenants/:id: 永久删除普通租户并保护 default 租户', async () => {
+  const systemAdmin = await seedSystemAdmin('sysadmin@delete-tenants.test', 'pw');
+  const protectedTenant = await store.createTenantWithOwner({
+    id: 'tn_default_delete_guard',
+    name: 'Default',
+    isBootstrap: true,
+    ownerEmail: 'owner@default-delete-guard.test',
+    ownerPasswordHash: 'pw',
+    settingsTemplate: [],
+  });
+  const removableTenant = await store.createTenantWithOwner({
+    id: 'tn_permanent_delete',
+    name: 'Delete me',
+    ownerEmail: 'owner@permanent-delete.test',
+    ownerPasswordHash: 'pw',
+    settingsTemplate: [],
+  });
+  const { port, close } = await listen(buildApp());
+  try {
+    const base = `http://127.0.0.1:${port}/api`;
+    const { accessToken } = await systemLogin(base, systemAdmin.email, 'pw');
+    const headers = { Authorization: `Bearer ${accessToken}` };
+    assert.equal((await fetch(`${base}/system/tenants/${protectedTenant.tenant.id}`, { method: 'DELETE', headers })).status, 409);
+    assert.equal((await fetch(`${base}/system/tenants/${removableTenant.tenant.id}`, { method: 'DELETE', headers })).status, 204);
+    assert.equal(await store.findTenant(removableTenant.tenant.id), null);
+    assert.equal(await store.findUserById(removableTenant.owner.id), null);
+    assert.equal(await store.findSpace(removableTenant.tenant.id, removableTenant.defaultSpace.id), null);
   } finally {
     close();
   }

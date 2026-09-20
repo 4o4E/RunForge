@@ -16,6 +16,7 @@ import type {
   UpdateBusinessPluginSettingsInput,
 } from '@runforge/contracts';
 import { businessPluginRegistry } from './registry.js';
+import { deletionGate } from '../deletion/gate.js';
 import type { BusinessPluginArchiveFormat } from './archive.js';
 import { resolveBusinessPluginMcpServer } from './runtime.js';
 
@@ -48,6 +49,18 @@ interface AffectedSpace {
 interface RemovedBusinessPluginTenantState {
   affectedSpaces: AffectedSpace[];
   settings: BusinessPluginTenantSettings;
+}
+
+async function withTenantPluginMutation<T>(tenantId: string, mutation: () => Promise<T>): Promise<T> {
+  const operation = deletionGate.enter({ tenantId });
+  try {
+    if (!await store.findTenant(tenantId)) {
+      throw new BusinessPluginError('BUSINESS_PLUGIN_NOT_READY', '租户不存在');
+    }
+    return await mutation();
+  } finally {
+    operation.finish();
+  }
 }
 
 const ajv = new Ajv({ allErrors: true, strict: false });
@@ -265,20 +278,26 @@ export async function loadBusinessPluginAdminView(
   tenantId: string,
   reload = false,
 ): Promise<BusinessPluginAdminView> {
-  const definitions = reload
-    ? await businessPluginRegistry.reload(tenantId)
-    : await businessPluginRegistry.list(tenantId);
-  return businessPluginAdminView(definitions, await getBusinessPluginTenantSettings(tenantId));
+  if (!reload) {
+    const definitions = await businessPluginRegistry.list(tenantId);
+    return businessPluginAdminView(definitions, await getBusinessPluginTenantSettings(tenantId));
+  }
+  return withTenantPluginMutation(tenantId, async () => businessPluginAdminView(
+    await businessPluginRegistry.reload(tenantId),
+    await getBusinessPluginTenantSettings(tenantId),
+  ));
 }
 
 export async function updateBusinessPluginAdminView(
   tenantId: string,
   input: UpdateBusinessPluginSettingsInput,
 ): Promise<BusinessPluginAdminView> {
-  return businessPluginRegistry.mutateTenant(tenantId, async () => {
-    const definitions = await businessPluginRegistry.list(tenantId);
-    const settings = await updateBusinessPluginTenantSettings(tenantId, definitions, input);
-    return businessPluginAdminView(definitions, settings);
+  return withTenantPluginMutation(tenantId, async () => {
+    return await businessPluginRegistry.mutateTenant(tenantId, async () => {
+      const definitions = await businessPluginRegistry.list(tenantId);
+      const settings = await updateBusinessPluginTenantSettings(tenantId, definitions, input);
+      return businessPluginAdminView(definitions, settings);
+    });
   });
 }
 
@@ -287,15 +306,17 @@ export async function importBusinessPluginAdminView(
   archive: Buffer,
   format: BusinessPluginArchiveFormat,
 ): Promise<BusinessPluginImportResponse> {
-  const imported = await businessPluginRegistry.importArchive(tenantId, archive, format);
-  return {
-    pluginId: imported.definition.manifest.id,
-    replaced: imported.replaced,
-    view: businessPluginAdminView(
-      await businessPluginRegistry.list(tenantId),
-      await getBusinessPluginTenantSettings(tenantId),
-    ),
-  };
+  return withTenantPluginMutation(tenantId, async () => {
+    const imported = await businessPluginRegistry.importArchive(tenantId, archive, format);
+    return {
+      pluginId: imported.definition.manifest.id,
+      replaced: imported.replaced,
+      view: businessPluginAdminView(
+        await businessPluginRegistry.list(tenantId),
+        await getBusinessPluginTenantSettings(tenantId),
+      ),
+    };
+  });
 }
 
 function withoutPluginConfig(
@@ -365,7 +386,7 @@ async function removeBusinessPluginTenantState(
             select: { value: true },
           }),
           tx.spaces.findMany({
-            where: { tenant_id: tenantId, deleted_at: null },
+            where: { tenant_id: tenantId },
             select: { id: true, name: true, config: true },
             orderBy: [{ created_at: 'asc' }, { id: 'asc' }],
           }),
@@ -403,21 +424,23 @@ export async function uninstallBusinessPluginAdminView(
   tenantId: string,
   pluginId: string,
 ): Promise<BusinessPluginUninstallResponse> {
-  const result = await businessPluginRegistry.uninstall(
-    tenantId,
-    pluginId,
-    async (_definition, definitions) => ({
-      definitions,
-      removedState: await removeBusinessPluginTenantState(tenantId, pluginId),
-    }),
-  );
-  if (!result) throw new Error(`业务插件 ${pluginId} 卸载结果缺失`);
-  return {
-    pluginId,
-    affectedSpaces: result.removedState.affectedSpaces,
-    view: businessPluginAdminView(
-      result.definitions.filter((definition) => definition.manifest.id !== pluginId),
-      result.removedState.settings,
-    ),
-  };
+  return withTenantPluginMutation(tenantId, async () => {
+    const result = await businessPluginRegistry.uninstall(
+      tenantId,
+      pluginId,
+      async (_definition, definitions) => ({
+        definitions,
+        removedState: await removeBusinessPluginTenantState(tenantId, pluginId),
+      }),
+    );
+    if (!result) throw new Error(`业务插件 ${pluginId} 卸载结果缺失`);
+    return {
+      pluginId,
+      affectedSpaces: result.removedState.affectedSpaces,
+      view: businessPluginAdminView(
+        result.definitions.filter((definition) => definition.manifest.id !== pluginId),
+        result.removedState.settings,
+      ),
+    };
+  });
 }

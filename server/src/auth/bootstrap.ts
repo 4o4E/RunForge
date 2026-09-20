@@ -35,7 +35,7 @@ export interface BootstrapOptions {
 }
 
 /** 幂等的启动期引导(docs/multi-tenancy-design.md §4):确保 bootstrap tenant、
- *  至少一个 active owner、至少一个 active system admin 存在。迁移场景复用
+ *  至少一个 owner、至少一个 active system admin 存在。迁移场景复用
  *  RUNFORGE_ACCESS_TOKEN 注册成 owner 的 API token；登录密码统一走固定默认值
  *  (可通过 RUNFORGE_BOOTSTRAP_ADMIN_PASSWORD / RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD 覆盖)。 */
 export async function runBootstrap(storeArg: Store = defaultStore, options: BootstrapOptions = {}): Promise<BootstrapReport> {
@@ -91,18 +91,31 @@ export async function runBootstrap(storeArg: Store = defaultStore, options: Boot
     }
   } else {
     const existingUsers = await storeArg.listUsersByTenant(tenant.id);
-    const hasActiveOwner = existingUsers.some((u) => u.role === 'owner' && u.status === 'active');
-    if (!hasActiveOwner) {
+    const hasOwner = existingUsers.some((user) => user.role === 'owner');
+    if (!hasOwner) {
       const password = adminPasswordOverride || DEFAULT_BOOTSTRAP_PASSWORD;
-      await storeArg.createUser({
+      const created = await storeArg.createUser({
         tenantId: tenant.id,
         email: DEFAULT_ADMIN_EMAIL,
         passwordHash: hashPassword(password),
         role: 'owner',
+        isBootstrap: !existingUsers.some((user) => user.is_bootstrap),
       });
       report.ownerCreated = true;
       report.ownerSource = 'default-password';
       console.log(`[bootstrap] 已创建 owner 账号 ${DEFAULT_ADMIN_EMAIL}，登录密码: ${password}`);
+      existingUsers.push(created);
+    }
+    if (!existingUsers.some((user) => user.is_bootstrap)) {
+      const defaultAdmin = [...existingUsers]
+        .sort((left, right) => (
+          Number(right.email === DEFAULT_ADMIN_EMAIL) - Number(left.email === DEFAULT_ADMIN_EMAIL)
+          || Number(right.role === 'owner') - Number(left.role === 'owner')
+          || left.created_at.localeCompare(right.created_at)
+          || left.id.localeCompare(right.id)
+        ))[0];
+      if (!defaultAdmin) throw new Error('bootstrap tenant 缺少可标记的默认管理员');
+      await storeArg.markBootstrapUser(defaultAdmin.id);
     }
   }
 
@@ -116,9 +129,24 @@ export async function runBootstrap(storeArg: Store = defaultStore, options: Boot
   const hasActiveSystemAdmin = existingSystemAdmins.some((a) => a.status === 'active');
   if (!hasActiveSystemAdmin) {
     const password = sysadminPasswordOverride || DEFAULT_BOOTSTRAP_PASSWORD;
-    await storeArg.createSystemAdmin({ email: DEFAULT_SYSADMIN_EMAIL, passwordHash: hashPassword(password) });
+    const created = await storeArg.createSystemAdmin({
+      email: DEFAULT_SYSADMIN_EMAIL,
+      passwordHash: hashPassword(password),
+      isBootstrap: !existingSystemAdmins.some((admin) => admin.is_bootstrap),
+    });
+    existingSystemAdmins.push(created);
     report.systemAdminCreated = true;
     console.log(`[bootstrap] 已创建系统管理员账号 ${DEFAULT_SYSADMIN_EMAIL}，登录密码: ${password}`);
+  }
+  if (!existingSystemAdmins.some((admin) => admin.is_bootstrap)) {
+    const defaultAdmin = [...existingSystemAdmins]
+      .sort((left, right) => (
+        Number(right.email === DEFAULT_SYSADMIN_EMAIL) - Number(left.email === DEFAULT_SYSADMIN_EMAIL)
+        || left.created_at.localeCompare(right.created_at)
+        || left.id.localeCompare(right.id)
+      ))[0];
+    if (!defaultAdmin) throw new Error('系统缺少可标记的默认系统管理员');
+    await storeArg.markBootstrapSystemAdmin(defaultAdmin.id);
   }
 
   return report;

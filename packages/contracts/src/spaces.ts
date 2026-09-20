@@ -58,9 +58,12 @@ export interface SpaceSummary {
   createdByUserId: string | null;
   visibleUserIds: string[];
   isDefault: boolean;
-  deletedAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface DeleteSpaceInput {
+  replacementDefaultSpaceId?: string;
 }
 
 /** 空间管理页使用的 tenant 能力目录，不包含供应商密钥或连接配置。 */

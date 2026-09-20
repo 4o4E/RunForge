@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MemoryStore } from '../store/memoryStore.js';
-import type { Scope, ThreadRow } from '../store/types.js';
+import { DeleteConflictError, type Scope, type ThreadRow } from '../store/types.js';
 import { SpaceAccessService } from '../spaces/access.js';
 import {
   ThreadWorkspaceAccessError,
   ThreadWorkspaceAccessService,
 } from './threadWorkspace.js';
 import { resolveThreadWorkspaceRoot } from './workspaceRoot.js';
+import { deletionGate } from '../deletion/gate.js';
 
 async function fixture() {
   const store = new MemoryStore();
@@ -149,4 +150,21 @@ test('thread workspace: external thread 对可见用户只读且不冒充 execut
     access.resolveForWeb(hiddenIdentity, externalThread.id, 'read'),
     (error: unknown) => error instanceof ThreadWorkspaceAccessError && error.code === 'THREAD_NOT_FOUND',
   );
+});
+
+test('thread workspace: 删除开始后不再创建工作目录', async () => {
+  const ctx = await fixture();
+  const base = '/srv/runforge/deleting-thread-workspace-test';
+  const access = new ThreadWorkspaceAccessService(ctx.store, ctx.spaces, async () => ({ workspaceRoot: base }));
+  const scope = { tenantId: ctx.provisioned.tenant.id, userId: ctx.provisioned.owner.id };
+  const thread = await ctx.store.createThread(scope, 'Deleting Thread');
+  const deletion = deletionGate.begin({ tenantId: scope.tenantId, threadId: thread.id });
+  try {
+    await assert.rejects(
+      access.resolveForWeb(ctx.ownerIdentity, thread.id, 'write'),
+      (error: unknown) => error instanceof DeleteConflictError && error.code === 'RESOURCE_DELETION_IN_PROGRESS',
+    );
+  } finally {
+    deletion.finish();
+  }
 });

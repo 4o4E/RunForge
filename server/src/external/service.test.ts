@@ -24,7 +24,6 @@ const space: SpaceWithVisibilityRow = {
   config_version: 3,
   created_by_user_id: null,
   visible_user_ids: [],
-  deleted_at: null,
   created_at: new Date(0).toISOString(),
   updated_at: new Date(0).toISOString(),
 };

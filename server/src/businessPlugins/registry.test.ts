@@ -199,6 +199,25 @@ test('业务插件卸载：tenant 修改锁覆盖配置清理和部署删除的�
   assert.deepEqual(events, ['cleanup-start', 'cleanup-end', 'space-save']);
 });
 
+test('租户删除：数据库删除成功后清理插件目录，失败时保留目录', async () => {
+  const sourceRoot = await mkdtemp(join(tmpdir(), 'runforge-business-tenant-delete-source-'));
+  const importRoot = await mkdtemp(join(tmpdir(), 'runforge-business-tenant-delete-target-'));
+  const pluginRoot = await createPlugin(sourceRoot, 'crm');
+  const registry = new BusinessPluginRegistry([importRoot]);
+  await registry.importArchive('tn_delete_success', await zipDirectory(pluginRoot), 'zip');
+  await registry.deleteTenant('tn_delete_success', async () => 'deleted');
+  assert.equal(existsSync(join(importRoot, 'tn_delete_success')), false);
+
+  await registry.importArchive('tn_delete_rollback', await zipDirectory(pluginRoot), 'zip');
+  await assert.rejects(
+    registry.deleteTenant('tn_delete_rollback', async () => {
+      throw new Error('数据库删除失败');
+    }),
+    /数据库删除失败/,
+  );
+  assert.equal(existsSync(join(importRoot, 'tn_delete_rollback', 'crm')), true);
+});
+
 test('业务插件导入：无效更新保持当前版本，链接和路径穿越被拒绝', async () => {
   const sourceRoot = await mkdtemp(join(tmpdir(), 'runforge-business-import-invalid-source-'));
   const importRoot = await mkdtemp(join(tmpdir(), 'runforge-business-import-invalid-target-'));

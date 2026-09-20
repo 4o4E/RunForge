@@ -15,6 +15,7 @@ import { getRuntimeCapabilitiesSettings } from '../settings.js';
 import { store } from '../store/index.js';
 import { scopeForThread, type Scope } from '../store/types.js';
 import { providerRunner } from '../llm/providerRunner.js';
+import { retainRunExecution, type RunExecutionRegistration } from '../agent/executionControl.js';
 
 export const runtimeCapabilitiesApi = Router();
 
@@ -228,6 +229,7 @@ runtimeCapabilitiesApi.post('/credentials', async (req, res) => {
   const startedAt = new Date();
   let audit: { scope: Scope; runId: string; tokenId: string; capability: RuntimeCapabilityName } | null = null;
   let stepId: string | null = null;
+  let execution: RunExecutionRegistration | undefined;
   try {
     const capability = normalizeCapability(req.body?.capability);
     const token = bearerToken(req.headers.authorization);
@@ -238,6 +240,8 @@ runtimeCapabilitiesApi.post('/credentials', async (req, res) => {
       tokenId: validated.token.id,
       capability,
     };
+    execution = retainRunExecution(audit.runId);
+    execution.signal.throwIfAborted();
     stepId = await auditStepId(req, audit.runId);
     if (!tokenAllowsCapability(validated.token, capability)) throw new DatasourceError(403, `WORKLOAD_TOKEN 无权使用运行时能力：${capability}`);
     const settings = await loadSettingsAndEnsureEnabled(audit.scope, capability);
@@ -263,6 +267,8 @@ runtimeCapabilitiesApi.post('/credentials', async (req, res) => {
       }).catch(() => {});
     }
     handleError(res, err);
+  } finally {
+    execution?.finish();
   }
 });
 
@@ -271,8 +277,11 @@ async function handleLlmChat(req: Request, res: import('express').Response, body
   let audit: Awaited<ReturnType<typeof identifyWorkloadRequest>> | null = null;
   let stepId: string | null = null;
   let modelRef: string | undefined;
+  let execution: RunExecutionRegistration | undefined;
   try {
     audit = await identifyWorkloadRequest(req);
+    execution = retainRunExecution(audit.runId);
+    execution.signal.throwIfAborted();
     stepId = await auditStepId(req, audit.runId);
     const body = jsonObject(bodyOverride ?? req.body);
     const settings = await requireCapabilityEnabled(audit, 'llm');
@@ -296,6 +305,7 @@ async function handleLlmChat(req: Request, res: import('express').Response, body
       },
       messages,
       tools: [],
+      abortSignal: execution.signal,
     });
     await addCapabilityAudit({
       scope: audit.scope,
@@ -327,6 +337,8 @@ async function handleLlmChat(req: Request, res: import('express').Response, body
       }).catch(() => {});
     }
     handleError(res, err);
+  } finally {
+    execution?.finish();
   }
 }
 
@@ -357,6 +369,7 @@ async function proxyPackyImage(
   req: Request,
   mode: 'generate' | 'edit',
   settings: RuntimeCapabilitiesSettings,
+  abortSignal: AbortSignal,
 ): Promise<{ status: number; body: unknown; model: RuntimeImageCapabilityModel }> {
   const body = jsonObject(req.body);
   const image = selectImageModel(settings, body);
@@ -379,7 +392,7 @@ async function proxyPackyImage(
       method: 'POST',
       headers,
       body: upstreamBody,
-      signal: ctrl.signal,
+      signal: AbortSignal.any([abortSignal, ctrl.signal]),
     });
     const text = await response.text();
     let parsed: unknown = text;
@@ -400,12 +413,15 @@ async function imageRoute(req: Request, res: import('express').Response, mode: '
   let settings: RuntimeCapabilitiesSettings | null = null;
   let selectedImageModel: RuntimeImageCapabilityModel | null = null;
   let stepId: string | null = null;
+  let execution: RunExecutionRegistration | undefined;
   try {
     audit = await identifyWorkloadRequest(req);
+    execution = retainRunExecution(audit.runId);
+    execution.signal.throwIfAborted();
     stepId = await auditStepId(req, audit.runId);
     settings = await requireCapabilityEnabled(audit, 'image');
     if (!settings) throw new DatasourceError(500, '图片生成能力配置缺失');
-    const proxied = await proxyPackyImage(req, mode, settings);
+    const proxied = await proxyPackyImage(req, mode, settings, execution.signal);
     selectedImageModel = proxied.model;
     await addCapabilityAudit({
       scope: audit.scope,
@@ -439,6 +455,8 @@ async function imageRoute(req: Request, res: import('express').Response, mode: '
       }).catch(() => {});
     }
     handleError(res, err);
+  } finally {
+    execution?.finish();
   }
 }
 
@@ -449,8 +467,11 @@ runtimeCapabilitiesApi.post('/videos/generate', async (req, res) => {
   const startedAt = new Date();
   let audit: Awaited<ReturnType<typeof identifyWorkloadRequest>> | null = null;
   let stepId: string | null = null;
+  let execution: RunExecutionRegistration | undefined;
   try {
     audit = await identifyWorkloadRequest(req);
+    execution = retainRunExecution(audit.runId);
+    execution.signal.throwIfAborted();
     stepId = await auditStepId(req, audit.runId);
     await requireCapabilityEnabled(audit, 'video');
     throw new DatasourceError(501, '视频生成能力尚未接入 provider');
@@ -468,5 +489,7 @@ runtimeCapabilitiesApi.post('/videos/generate', async (req, res) => {
       }).catch(() => {});
     }
     handleError(res, err);
+  } finally {
+    execution?.finish();
   }
 });

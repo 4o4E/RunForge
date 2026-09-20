@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { ArrowRight, Plus, RefreshCw } from 'lucide-react';
-import { createSystemTenant, listSystemTenants, updateSystemTenantStatus } from '../../sysAdminApi';
+import { ArrowRight, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { createSystemTenant, deleteSystemTenant, listSystemTenants, updateSystemTenantStatus } from '../../sysAdminApi';
 import type { TenantSummary } from '@runforge/contracts';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -25,6 +25,8 @@ export function SysAdminTenantsPanel({
   const [ownerEmail, setOwnerEmail] = useState('');
   const [ownerPassword, setOwnerPassword] = useState('');
   const [creating, setCreating] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<TenantSummary | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   async function refresh() {
     setLoading(true);
@@ -75,6 +77,24 @@ export function SysAdminTenantsPanel({
     }
   }
 
+  async function deleteTenant() {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    setMessage('');
+    try {
+      await deleteSystemTenant(deleteTarget.id);
+      const next = tenants.filter((tenant) => tenant.id !== deleteTarget.id);
+      setTenants(next);
+      onTenantsChanged?.(next);
+      setDeleteTarget(null);
+      setMessage('租户及其数据库记录已永久删除，关联文件清理已经执行');
+    } catch (err) {
+      setMessage(`删除租户失败：${(err as Error).message}`);
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   return (
     <Card className="flex h-full min-h-0 flex-col rounded-lg shadow-sm">
       <CardHeader className="shrink-0">
@@ -120,10 +140,17 @@ export function SysAdminTenantsPanel({
                 </TableCell>
                 <TableCell className="text-xs text-muted-foreground">{new Date(tenant.createdAt).toLocaleString()}</TableCell>
                 <TableCell className="text-right">
-                  <Button variant="ghost" size="sm" onClick={() => onSelectTenant(tenant.id)}>
-                    管理
-                    <ArrowRight className="h-4 w-4" />
-                  </Button>
+                  <div className="flex justify-end gap-1">
+                    <Button variant="ghost" size="sm" onClick={() => onSelectTenant(tenant.id)}>
+                      管理
+                      <ArrowRight className="h-4 w-4" />
+                    </Button>
+                    {!tenant.isDefault && (
+                      <Button variant="ghost" size="sm" onClick={() => setDeleteTarget(tenant)}>
+                        <Trash2 className="h-4 w-4" />删除
+                      </Button>
+                    )}
+                  </div>
                 </TableCell>
               </TableRow>
             ))}
@@ -149,6 +176,21 @@ export function SysAdminTenantsPanel({
               disabled={creating || !name.trim() || !ownerEmail.trim() || !ownerPassword}
             >
               {creating ? '创建中…' : '创建'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>永久删除租户</DialogTitle>
+            <DialogDescription>将永久删除 {deleteTarget?.name} 下的用户、空间、会话、插件配置和文件。</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>取消</Button>
+            <Button variant="destructive" onClick={() => void deleteTenant()} disabled={deleting}>
+              {deleting ? '删除中…' : '永久删除'}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -31,12 +31,14 @@ test('runBootstrap: fresh install with no legacy access token generates a login 
   const users = await store.listUsersByTenant(report.tenantId);
   assert.equal(users.length, 1);
   assert.equal(users[0].role, 'owner');
+  assert.equal(users[0].is_bootstrap, true);
   assert.equal(users[0].email, 'admin@local');
   assert.ok(verifyPassword('fresh-admin-pw', users[0].password_hash));
   assert.equal(defaultSpace.created_by_user_id, users[0].id);
 
   const admins = await store.listSystemAdmins();
   assert.equal(admins.length, 1);
+  assert.equal(admins[0].is_bootstrap, true);
   assert.ok(verifyPassword('fresh-sysadmin-pw', admins[0].password_hash));
 });
 
@@ -90,6 +92,26 @@ test('runBootstrap: idempotent — second run against the same store is a no-op'
   assert.equal(adminsAfterSecond.length, adminsAfterFirst.length);
 });
 
+test('runBootstrap: 已停用的 owner 仍满足租户 owner 存在性约束', async () => {
+  const store = new MemoryStore();
+  const first = await runBootstrap(store, {
+    legacyAccessToken: '',
+    adminPassword: 'admin-password',
+    sysadminPassword: 'sysadmin-password',
+  });
+  const [owner] = await store.listUsersByTenant(first.tenantId);
+  await store.updateUser(owner.id, { status: 'disabled' });
+
+  const second = await runBootstrap(store, {
+    legacyAccessToken: '',
+    adminPassword: 'admin-password',
+    sysadminPassword: 'sysadmin-password',
+  });
+
+  assert.equal(second.ownerCreated, false);
+  assert.equal((await store.listUsersByTenant(first.tenantId)).length, 1);
+});
+
 test('runBootstrap: 旧 default 主键迁移为雪花 ID，并更新关联数据', async () => {
   const store = new MemoryStore();
   const provisioned = await store.createTenantWithOwner({
@@ -122,6 +144,7 @@ test('runBootstrap: 旧 default 主键迁移为雪花 ID，并更新关联数据
   assert.equal((await store.findTenant(report.tenantId))?.name, 'Default');
   assert.equal((await store.findTenant(report.tenantId))?.is_bootstrap, true);
   assert.equal((await store.findUserById(provisioned.owner.id))?.tenant_id, report.tenantId);
+  assert.equal((await store.findUserById(provisioned.owner.id))?.is_bootstrap, true);
   assert.equal((await store.findSpace(report.tenantId, provisioned.defaultSpace.id))?.tenant_id, report.tenantId);
   assert.equal((await store.getThread({ tenantId: report.tenantId, userId: provisioned.owner.id }, thread.id))?.tenant_id, report.tenantId);
   assert.equal((await store.findAuthTokenByHash(hashOpaqueToken('legacy-owner-token')))?.tenant_id, report.tenantId);

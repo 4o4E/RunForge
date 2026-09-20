@@ -33,7 +33,7 @@ Prisma invocation/attempt 和本地 JSONL trace。这样协议与隔离验收可
 - 数据库 event cursor 从 0 完整回放到 final，使用最后 cursor 续读返回空集。
 - 每个验收 run 对应一个成功 invocation 和一个成功 attempt；URL 裸 `key` 已脱敏，请求头
   密钥不出现在数据库或 JSONL，本地 trace 行数与 attempt 数一致。
-- 软删除空间 B 后 Token 立即失效；恢复空间后旧 Token 仍不恢复；空间 A 不受影响。
+- 永久删除空间 B 后 Token、调用方和运行记录一并删除；空间 A 不受影响。
 
 ## 组合验收证据
 

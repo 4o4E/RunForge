@@ -319,10 +319,10 @@ export const createThread = (title?: string, spaceId?: string | null) =>
     body: JSON.stringify({ title, spaceId: spaceId ?? undefined }),
   }).then(json<Thread>);
 
-export const deleteThread = (id: string) =>
-  authFetch(`/api/threads/${id}`, { method: 'DELETE' }).then((res) => {
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  });
+export const deleteThread = async (id: string): Promise<void> => {
+  const response = await authFetch(`/api/threads/${id}`, { method: 'DELETE' });
+  if (!response.ok) await json<never>(response);
+};
 
 export const updateThread = (id: string, input: ThreadUpdateInput) =>
   authFetch(`/api/threads/${id}`, {
@@ -474,6 +474,11 @@ export const updateTenantUser = (tenantId: string, userId: string, input: Update
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   }).then(json<TenantUserSummary>);
+
+export const deleteTenantUser = async (tenantId: string, userId: string): Promise<void> => {
+  const response = await authFetch(`/api/tenants/${tenantId}/users/${userId}`, { method: 'DELETE' });
+  if (!response.ok) await json<never>(response);
+};
 
 export const listDatasources = () =>
   authFetch('/api/datasources').then(json<{ datasources: Datasource[] }>);

@@ -136,7 +136,6 @@ export function toSpaceRow(row: spaces): SpaceRow {
     config: row.config as Record<string, unknown>,
     config_version: row.config_version,
     created_by_user_id: row.created_by_user_id,
-    deleted_at: timestamp(row.deleted_at),
     created_at: timestamp(row.created_at)!,
     updated_at: timestamp(row.updated_at)!,
   };
@@ -150,6 +149,7 @@ export function toUserRow(row: users): UserRow {
     password_hash: row.password_hash,
     role: row.role as UserRow['role'],
     status: row.status as UserRow['status'],
+    is_bootstrap: row.is_bootstrap,
     created_at: timestamp(row.created_at)!,
   };
 }
@@ -174,6 +174,7 @@ export function toSystemAdminRow(row: system_admins): SystemAdminRow {
     email: row.email,
     password_hash: row.password_hash,
     status: row.status as SystemAdminRow['status'],
+    is_bootstrap: row.is_bootstrap,
     created_at: timestamp(row.created_at)!,
   };
 }

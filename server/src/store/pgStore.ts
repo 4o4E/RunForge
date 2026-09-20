@@ -6,13 +6,14 @@ import type { LlmMessage } from '../llm/types.js';
 import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
 import { sanitizeThreadMessagesForModel } from './messageView.js';
-import { DefaultSpaceImmutableError, isTerminalRunStatus, RunActiveError, SpaceConfigChangedError } from './types.js';
+import { DeleteConflictError, isTerminalRunStatus, RunActiveError, SpaceConfigChangedError } from './types.js';
 import type {
   AuthTokenRow,
   AppliedRunInput,
   CreateRunOptions,
   CreateSpaceRecordInput,
   CreateTenantWithOwnerInput,
+  DeleteResourceResult,
   PushSubscriptionRow,
   RawThreadMessage,
   RunRow,
@@ -241,7 +242,6 @@ export class PgStore implements Store {
           id: targetSpaceId,
           tenant_id: scope.tenantId,
           mode: 'web',
-          deleted_at: null,
           ...((user.role === 'owner' || user.role === 'admin')
             ? {}
             : { space_visible_users: { some: { user_id: user.id } } }),
@@ -397,11 +397,34 @@ export class PgStore implements Store {
     return rows[0] ? toThreadRow(rows[0]) : null;
   }
 
-  async deleteThread(scope: Scope, id: string): Promise<boolean> {
-    const result = await prisma.threads.deleteMany({
-      where: { id, tenant_id: scope.tenantId, user_id: scope.userId },
-    });
-    return result.count > 0;
+  async deleteThread(scope: Scope, id: string): Promise<DeleteResourceResult | null> {
+    return prisma.$transaction(async (tx) => {
+      const thread = await tx.threads.findFirst({
+        where: { id, tenant_id: scope.tenantId, user_id: scope.userId },
+        select: { archived_at: true },
+      });
+      if (!thread) return null;
+      if (!thread.archived_at) {
+        throw new DeleteConflictError('THREAD_NOT_ARCHIVED', '只能永久删除已经归档的对话');
+      }
+      const activeRuns = await tx.runs.count({
+        where: { thread_id: id, status: { notIn: ['done', 'error', 'canceled'] } },
+      });
+      if (activeRuns) throw new DeleteConflictError('THREAD_HAS_ACTIVE_RUN', '对话仍有运行中的任务');
+      const activeShellCommands = await tx.shell_commands.count({
+        where: {
+          status: { in: ['queued', 'running'] },
+          shell_sessions: { thread_id: id },
+        },
+      });
+      if (activeShellCommands) {
+        throw new DeleteConflictError('THREAD_HAS_ACTIVE_SHELL', '对话仍有运行中的 Shell 命令');
+      }
+      const artifacts = await tx.artifacts.findMany({ where: { thread_id: id }, select: { storage_key: true } });
+      await tx.artifacts.deleteMany({ where: { thread_id: id } });
+      await tx.threads.delete({ where: { id } });
+      return { artifactStorageKeys: artifacts.map((artifact) => artifact.storage_key) };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
 
   async searchThreadMessages(
@@ -705,7 +728,6 @@ export class PgStore implements Store {
             select: {
               config: true,
               config_version: true,
-              deleted_at: true,
               mode: true,
               space_visible_users: { where: { user_id: scope.userId }, select: { user_id: true } },
             },
@@ -713,7 +735,6 @@ export class PgStore implements Store {
         },
       });
       if (!thread) throw new Error('threadId 不存在或不属于当前用户');
-      if (thread.spaces.deleted_at) throw new Error('space 已删除，不能创建新 run');
       if (thread.spaces.mode !== 'web') throw new Error('外部空间在 Web 中只读');
       if (
         options.expectedSpaceConfigVersion !== undefined
@@ -833,6 +854,42 @@ export class PgStore implements Store {
       where: { status: { in: statuses } },
       orderBy: [{ updated_at: 'asc' }, { created_at: 'asc' }],
     })).map(toRunRow);
+  }
+
+  async cancelRunsForDeletion(threadIds: string[]): Promise<RunRow[]> {
+    if (!threadIds.length) return [];
+    return prisma.$transaction(async (tx) => {
+      const rows = await tx.runs.findMany({
+        where: {
+          thread_id: { in: threadIds },
+          status: { notIn: ['done', 'error', 'canceled'] },
+        },
+        orderBy: [{ updated_at: 'asc' }, { created_at: 'asc' }],
+      });
+      if (!rows.length) return [];
+      const ids = rows.map((run) => run.id);
+      const now = new Date();
+      await tx.runs.updateMany({
+        where: { id: { in: ids }, status: { notIn: ['done', 'error', 'canceled'] } },
+        data: {
+          status: 'canceled',
+          error: '所属资源已删除，运行已取消。',
+          external_input_open: false,
+          updated_at: now,
+        },
+      });
+      await tx.threads.updateMany({
+        where: { id: { in: threadIds }, executing_run_id: { in: ids } },
+        data: { executing_run_id: null, updated_at: now },
+      });
+      return rows.map((row) => toRunRow({
+        ...row,
+        status: 'canceled',
+        error: '所属资源已删除，运行已取消。',
+        external_input_open: false,
+        updated_at: now,
+      }));
+    });
   }
 
   async setRunStatus(scope: Scope, id: string, status: RunStatus, fields: { output?: string | null; error?: string | null } = {}): Promise<void> {
@@ -1036,6 +1093,13 @@ export class PgStore implements Store {
   async getThreadUnscoped(id: string): Promise<ThreadRow | null> {
     const row = await prisma.threads.findUnique({ where: { id } });
     return row ? toThreadRow(row) : null;
+  }
+
+  async listThreadsForDeletion(tenantId: string, spaceId?: string): Promise<ThreadRow[]> {
+    return (await prisma.threads.findMany({
+      where: { tenant_id: tenantId, space_id: spaceId },
+      orderBy: [{ created_at: 'asc' }, { id: 'asc' }],
+    })).map((row) => toThreadRow(row));
   }
 
   async createStep(scope: Scope, runId: string, idx: number): Promise<StepRow> {
@@ -1621,6 +1685,30 @@ export class PgStore implements Store {
     return rows;
   }
 
+  async cancelShellCommandsForDeletion(threadIds: string[]): Promise<void> {
+    if (!threadIds.length) return;
+    const now = new Date();
+    await prisma.$transaction(async (tx) => {
+      await tx.shell_commands.updateMany({
+        where: {
+          status: { in: ['queued', 'running'] },
+          shell_sessions: { thread_id: { in: threadIds } },
+        },
+        data: {
+          status: 'killed',
+          attention: 'resource_deleted',
+          signal: 'SIGTERM',
+          ended_at: now,
+          updated_at: now,
+        },
+      });
+      await tx.shell_sessions.updateMany({
+        where: { thread_id: { in: threadIds }, status: { in: ['opening', 'busy', 'closing'] } },
+        data: { status: 'idle', lease_actor: null, lease_run_id: null, updated_at: now },
+      });
+    });
+  }
+
   async updateShellCommandUnscoped(
     id: string,
     fields: Partial<
@@ -1789,6 +1877,7 @@ export class PgStore implements Store {
           email: input.ownerEmail,
           password_hash: input.ownerPasswordHash,
           role: 'owner',
+          is_bootstrap: input.isBootstrap ?? false,
         },
       });
 
@@ -1856,6 +1945,41 @@ export class PgStore implements Store {
     return row ? toTenantRow(row) : null;
   }
 
+  async deleteTenant(id: string): Promise<DeleteResourceResult | null> {
+    return prisma.$transaction(async (tx) => {
+      const tenant = await tx.tenants.findUnique({ where: { id } });
+      if (!tenant) return null;
+      if (tenant.is_bootstrap) {
+        throw new DeleteConflictError('DEFAULT_TENANT_PROTECTED', 'default 租户不能删除');
+      }
+      const activeRuns = await tx.runs.count({
+        where: {
+          status: { notIn: ['done', 'error', 'canceled'] },
+          threads_runs_thread_idTothreads: { tenant_id: id },
+        },
+      });
+      if (activeRuns) throw new DeleteConflictError('TENANT_HAS_ACTIVE_RUNS', '租户仍有运行中的任务');
+      const activeShellCommands = await tx.shell_commands.count({
+        where: {
+          status: { in: ['queued', 'running'] },
+          shell_sessions: { threads: { tenant_id: id } },
+        },
+      });
+      if (activeShellCommands) {
+        throw new DeleteConflictError('TENANT_HAS_ACTIVE_SHELLS', '租户仍有运行中的 Shell 命令');
+      }
+      const artifacts = await tx.artifacts.findMany({
+        where: { spaces: { tenant_id: id } },
+        select: { storage_key: true },
+      });
+      await tx.tenants.update({ where: { id }, data: { default_space_id: null } });
+      await tx.tenants.delete({ where: { id } });
+      return {
+        artifactStorageKeys: artifacts.map((artifact) => artifact.storage_key),
+      };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }
+
   async getDefaultSpace(tenantId: string): Promise<SpaceRow | null> {
     const tenant = await prisma.tenants.findUnique({
       where: { id: tenantId },
@@ -1864,9 +1988,9 @@ export class PgStore implements Store {
     return tenant?.default_space ? toSpaceRow(tenant.default_space) : null;
   }
 
-  async listSpaces(tenantId: string, options: { includeDeleted?: boolean } = {}): Promise<SpaceWithVisibilityRow[]> {
+  async listSpaces(tenantId: string): Promise<SpaceWithVisibilityRow[]> {
     const rows = await prisma.spaces.findMany({
-      where: { tenant_id: tenantId, ...(options.includeDeleted ? {} : { deleted_at: null }) },
+      where: { tenant_id: tenantId },
       include: { space_visible_users: { select: { user_id: true } } },
       orderBy: [{ created_at: 'asc' }, { id: 'asc' }],
     });
@@ -1883,6 +2007,13 @@ export class PgStore implements Store {
 
   async createSpace(input: CreateSpaceRecordInput): Promise<SpaceWithVisibilityRow> {
     const row = await prisma.$transaction(async (tx) => {
+      if (input.createdByUserId) {
+        const creator = await tx.users.findFirst({
+          where: { id: input.createdByUserId, tenant_id: input.tenantId },
+          select: { id: true },
+        });
+        if (!creator) throw new Error('createdByUserId 不属于当前租户');
+      }
       const created = await tx.spaces.create({
         data: {
           id: newSpaceId(),
@@ -1920,9 +2051,7 @@ export class PgStore implements Store {
       const current = await tx.spaces.findFirst({ where: { id, tenant_id: tenantId } });
       if (!current) return null;
       const updated = await tx.spaces.updateMany({
-        // Service 层先给出“已删除，请先恢复”的稳定错误；这里的 deleted_at 条件处理
-        // 更新与软删除并发的窄窗口，避免已经删除的空间被随后到达的更新写穿。
-        where: { id, tenant_id: tenantId, deleted_at: null },
+        where: { id, tenant_id: tenantId },
         data: {
           name: fields.name,
           execution_user_id: fields.executionUserId !== undefined
@@ -1950,48 +2079,51 @@ export class PgStore implements Store {
     return row ? toSpaceWithVisibility(row) : null;
   }
 
-  async softDeleteSpaceAndRevokeTokens(tenantId: string, id: string): Promise<SpaceWithVisibilityRow | null> {
-    const row = await prisma.$transaction(async (tx) => {
+  async deleteSpace(
+    tenantId: string,
+    id: string,
+    replacementDefaultSpaceId?: string,
+  ): Promise<DeleteResourceResult | null> {
+    return prisma.$transaction(async (tx) => {
       const tenant = await tx.tenants.findUnique({ where: { id: tenantId }, select: { default_space_id: true } });
       const current = await tx.spaces.findFirst({ where: { id, tenant_id: tenantId } });
-      if (!current) return null;
-      if (tenant?.default_space_id === id) throw new DefaultSpaceImmutableError('default 空间不能删除');
-      const now = new Date();
-      await tx.spaces.update({
-        where: { id },
-        data: { deleted_at: current.deleted_at ?? now, updated_at: now },
-      });
-      await tx.external_tokens.updateMany({
+      if (!tenant || !current) return null;
+      const activeRuns = await tx.runs.count({
         where: {
-          revoked_at: null,
-          external_callers: { space_id: id, tenant_id: tenantId },
+          status: { notIn: ['done', 'error', 'canceled'] },
+          threads_runs_thread_idTothreads: { space_id: id, tenant_id: tenantId },
         },
-        data: { revoked_at: now },
       });
-      return tx.spaces.findUniqueOrThrow({
-        where: { id },
-        include: { space_visible_users: { select: { user_id: true } } },
+      if (activeRuns) throw new DeleteConflictError('SPACE_HAS_ACTIVE_RUNS', '空间仍有运行中的任务');
+      const activeShellCommands = await tx.shell_commands.count({
+        where: {
+          status: { in: ['queued', 'running'] },
+          shell_sessions: { threads: { space_id: id, tenant_id: tenantId } },
+        },
       });
-    });
-    return row ? toSpaceWithVisibility(row) : null;
+      if (activeShellCommands) {
+        throw new DeleteConflictError('SPACE_HAS_ACTIVE_SHELLS', '空间仍有运行中的 Shell 命令');
+      }
+      if (tenant.default_space_id === id) {
+        if (!replacementDefaultSpaceId || replacementDefaultSpaceId === id) {
+          throw new DeleteConflictError('DEFAULT_SPACE_REPLACEMENT_REQUIRED', '删除默认空间前必须选择新的默认空间');
+        }
+        const replacement = await tx.spaces.findFirst({
+          where: { id: replacementDefaultSpaceId, tenant_id: tenantId, mode: 'web' },
+          select: { id: true },
+        });
+        if (!replacement) {
+          throw new DeleteConflictError('DEFAULT_SPACE_REPLACEMENT_INVALID', '新的默认空间必须是当前租户的 Web 空间');
+        }
+        await tx.tenants.update({ where: { id: tenantId }, data: { default_space_id: replacement.id } });
+      }
+      const artifacts = await tx.artifacts.findMany({ where: { space_id: id }, select: { storage_key: true } });
+      await tx.spaces.delete({ where: { id } });
+      return { artifactStorageKeys: artifacts.map((artifact) => artifact.storage_key) };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
 
-  async restoreSpace(tenantId: string, id: string): Promise<SpaceWithVisibilityRow | null> {
-    const row = await prisma.$transaction(async (tx) => {
-      const updated = await tx.spaces.updateMany({
-        where: { id, tenant_id: tenantId },
-        data: { deleted_at: null, updated_at: new Date() },
-      });
-      if (updated.count === 0) return null;
-      return tx.spaces.findUniqueOrThrow({
-        where: { id },
-        include: { space_visible_users: { select: { user_id: true } } },
-      });
-    });
-    return row ? toSpaceWithVisibility(row) : null;
-  }
-
-  async createUser(input: { tenantId: string; email: string; passwordHash: string; role: TenantUserRole }): Promise<UserRow> {
+  async createUser(input: { tenantId: string; email: string; passwordHash: string; role: TenantUserRole; isBootstrap?: boolean }): Promise<UserRow> {
     return toUserRow(await prisma.users.create({
       data: {
         id: newUserId(),
@@ -1999,6 +2131,7 @@ export class PgStore implements Store {
         email: input.email,
         password_hash: input.passwordHash,
         role: input.role,
+        is_bootstrap: input.isBootstrap ?? false,
       },
     }));
   }
@@ -2017,30 +2150,57 @@ export class PgStore implements Store {
     return (await prisma.users.findMany({ where: { tenant_id: tenantId }, orderBy: { created_at: 'asc' } })).map(toUserRow);
   }
 
-  async updateUserRole(id: string, role: TenantUserRole): Promise<UserRow | null> {
-    const [row] = await prisma.users.updateManyAndReturn({ where: { id }, data: { role } });
-    return row ? toUserRow(row) : null;
-  }
-
-  async updateUserStatus(id: string, status: 'active' | 'disabled'): Promise<UserRow | null> {
-    const [row] = await prisma.users.updateManyAndReturn({ where: { id }, data: { status } });
-    return row ? toUserRow(row) : null;
-  }
-
   async updateUser(
     id: string,
     fields: { email?: string; passwordHash?: string; role?: TenantUserRole; status?: 'active' | 'disabled' },
   ): Promise<UserRow | null> {
-    const [row] = await prisma.users.updateManyAndReturn({
-      where: { id },
-      data: {
-        email: fields.email,
-        password_hash: fields.passwordHash,
-        role: fields.role,
-        status: fields.status,
-      },
-    });
-    return row ? toUserRow(row) : null;
+    return prisma.$transaction(async (tx) => {
+      const target = await tx.users.findUnique({ where: { id } });
+      if (!target) return null;
+      if (target.role === 'owner' && fields.role !== undefined && fields.role !== 'owner') {
+        const otherOwners = await tx.users.count({
+          where: { tenant_id: target.tenant_id, role: 'owner', id: { not: id } },
+        });
+        if (!otherOwners) throw new DeleteConflictError('LAST_OWNER_PROTECTED', '租户必须至少保留一个 owner');
+      }
+      return toUserRow(await tx.users.update({
+        where: { id },
+        data: {
+          email: fields.email,
+          password_hash: fields.passwordHash,
+          role: fields.role,
+          status: fields.status,
+        },
+      }));
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }
+
+  async deleteUser(tenantId: string, id: string): Promise<boolean> {
+    return prisma.$transaction(async (tx) => {
+      const target = await tx.users.findFirst({ where: { id, tenant_id: tenantId } });
+      if (!target) return false;
+      if (target.is_bootstrap) {
+        throw new DeleteConflictError('DEFAULT_ADMIN_PROTECTED', 'default 租户管理员不能删除');
+      }
+      if (await tx.threads.count({ where: { tenant_id: tenantId, user_id: id } })) {
+        throw new DeleteConflictError('USER_HAS_THREADS', '用户仍有关联对话，不能删除');
+      }
+      if (await tx.spaces.count({ where: { tenant_id: tenantId, execution_user_id: id } })) {
+        throw new DeleteConflictError('USER_IS_EXECUTION_USER', '用户仍是空间的执行用户，不能删除');
+      }
+      if (target.role === 'owner') {
+        const otherOwners = await tx.users.count({
+          where: { tenant_id: tenantId, role: 'owner', id: { not: id } },
+        });
+        if (!otherOwners) throw new DeleteConflictError('LAST_OWNER_PROTECTED', '租户必须至少保留一个 owner');
+      }
+      await tx.users.delete({ where: { id } });
+      return true;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }
+
+  async markBootstrapUser(id: string): Promise<UserRow> {
+    return toUserRow(await prisma.users.update({ where: { id }, data: { is_bootstrap: true } }));
   }
 
   async revokeRefreshTokensByUser(userId: string): Promise<void> {
@@ -2087,9 +2247,14 @@ export class PgStore implements Store {
     })).map(toAuthTokenRow);
   }
 
-  async createSystemAdmin(input: { email: string; passwordHash: string }): Promise<SystemAdminRow> {
+  async createSystemAdmin(input: { email: string; passwordHash: string; isBootstrap?: boolean }): Promise<SystemAdminRow> {
     return toSystemAdminRow(await prisma.system_admins.create({
-      data: { id: newSystemAdminId(), email: input.email, password_hash: input.passwordHash },
+      data: {
+        id: newSystemAdminId(),
+        email: input.email,
+        password_hash: input.passwordHash,
+        is_bootstrap: input.isBootstrap ?? false,
+      },
     }));
   }
 
@@ -2105,6 +2270,22 @@ export class PgStore implements Store {
 
   async listSystemAdmins(): Promise<SystemAdminRow[]> {
     return (await prisma.system_admins.findMany({ orderBy: { created_at: 'asc' } })).map(toSystemAdminRow);
+  }
+
+  async deleteSystemAdmin(id: string): Promise<boolean> {
+    return prisma.$transaction(async (tx) => {
+      const target = await tx.system_admins.findUnique({ where: { id } });
+      if (!target) return false;
+      if (target.is_bootstrap) {
+        throw new DeleteConflictError('DEFAULT_SYSTEM_ADMIN_PROTECTED', '默认系统管理员不能删除');
+      }
+      await tx.system_admins.delete({ where: { id } });
+      return true;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }
+
+  async markBootstrapSystemAdmin(id: string): Promise<SystemAdminRow> {
+    return toSystemAdminRow(await prisma.system_admins.update({ where: { id }, data: { is_bootstrap: true } }));
   }
 
   async createSystemAdminToken(input: {

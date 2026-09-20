@@ -77,6 +77,7 @@ import { readAuditedWorkloadSecrets } from '../businessPlugins/secretService.js'
 import { verifySpaceRuntimeLock } from '../plugins/lock.js';
 import type { JsonValue, SpaceRuntimeLock } from '../plugins/types.js';
 import { materializeWorkloadSdk } from '../workloadSdk/materialize.js';
+import { registerRunExecution, retainRunExecution } from './executionControl.js';
 
 const ASK_USER_TOOL_NAME = 'ask_user';
 const DATABASE_ACCESS_SKILL_NAME = 'database-access';
@@ -616,6 +617,20 @@ function runtimeApiBase(): string {
  * 所有依赖都可注入，便于在没有 PG/网络的情况下做单元测试。
  */
 export async function executeRun(runId: string, overrides: Partial<ExecutorDeps> & { scope?: Scope } = {}): Promise<void> {
+  const registration = registerRunExecution(runId);
+  try {
+    await executeRunControlled(runId, overrides, registration.signal, registration.bindThread);
+  } finally {
+    registration.finish();
+  }
+}
+
+async function executeRunControlled(
+  runId: string,
+  overrides: Partial<ExecutorDeps> & { scope?: Scope },
+  cancellationSignal: AbortSignal,
+  bindExecutionThread: (threadId: string) => void,
+): Promise<void> {
   const { scope: scopeOverride, ...depOverrides } = overrides;
   const usesDefaultStore = depOverrides.store === undefined;
   const store = depOverrides.store ?? defaultStore;
@@ -627,6 +642,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
   if (!run) throw new Error(`run 不存在：${runId}`);
   const owningThread = await store.getThreadUnscoped(run.thread_id);
   if (!owningThread) throw new Error(`thread 不存在：${run.thread_id}`);
+  bindExecutionThread(owningThread.id);
   const initialThread = owningThread;
   const scope: Scope = scopeOverride ?? scopeForThread(owningThread);
   let spaceConfig: RunSpaceConfigSnapshot | null = null;
@@ -663,6 +679,17 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       releaseRuntimeResources: depOverrides.releaseRuntimeResources ?? (usesDefaultStore ? releaseRunLeases : undefined),
     }, run.model_ref ?? spaceConfig?.model.modelRef, spaceConfig);
   } catch (err) {
+    const current = await store.getRun(scope, runId);
+    if (cancellationSignal.aborted || current?.status === 'canceling' || current?.status === 'canceled') {
+      if (current && current.status !== 'canceled') {
+        const message = cancellationSignal.reason instanceof Error
+          ? cancellationSignal.reason.message
+          : '用户已取消 run。';
+        await store.setRunStatus(scope, runId, 'canceled', { error: message });
+      }
+      if (usesDefaultStore) await releaseRunLeases(runId).catch(() => {});
+      return;
+    }
     const message = (err as Error).message;
     console.warn(`[agent] run ${runId} failed before start: ${errorStack(err)}`);
     const publish = depOverrides.publish ?? ((targetRunId, event) => runBus.publish(targetRunId, event));
@@ -703,6 +730,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         tools,
         onDelta,
         onRetry,
+        abortSignal: cancellationSignal,
       }),
     };
   };
@@ -778,10 +806,21 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       () => runLoop(),
     );
   } catch (err) {
-    const message = (err as Error).message;
-    console.warn(`[agent] run ${runId} step ${currentStepIdx || 0} provider ${provider.name} failed: ${errorStack(err)}`);
-    await emit(null, { type: 'error', step: 0, message });
-    await store.setRunStatus(scope, runId, 'error', { error: message });
+    if (cancellationSignal.aborted) {
+      const current = await store.getRun(scope, runId);
+      if (current && current.status !== 'canceled') {
+        const message = cancellationSignal.reason instanceof Error
+          ? cancellationSignal.reason.message
+          : '用户已取消 run。';
+        await emit(null, { type: 'error', step: currentStepIdx || 0, message });
+        await store.setRunStatus(scope, runId, 'canceled', { error: message });
+      }
+    } else {
+      const message = (err as Error).message;
+      console.warn(`[agent] run ${runId} step ${currentStepIdx || 0} provider ${provider.name} failed: ${errorStack(err)}`);
+      await emit(null, { type: 'error', step: 0, message });
+      await store.setRunStatus(scope, runId, 'error', { error: message });
+    }
   } finally {
     const cleanup = await Promise.allSettled([
       mcpSession.dispose(),
@@ -919,7 +958,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       }
       return deps.mcpToolLoader
         ? deps.mcpToolLoader(settings, serverId)
-        : mcpSession.activate(settings, serverId);
+        : mcpSession.activate(settings, serverId, cancellationSignal);
     };
     const runEvents = await store.getEvents(scope, runId);
     const activeSkills: SkillIndexItem[] = [];
@@ -1069,6 +1108,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       stepId: string,
       stepIdx: number,
       startedAt: string,
+      abortSignal: AbortSignal,
     ): Promise<void> => {
       const task = optionalString(args.task) ?? '未记录';
       const workflowId = optionalString(args.workflowId);
@@ -1081,6 +1121,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       const profile = subagentProfile(runtimeProfileId);
 
       try {
+        abortSignal.throwIfAborted();
         if (modelRef && spaceConfig && !spaceConfig.model.allowedModelRefs.includes(modelRef)) {
           throw new Error(`subagent 模型未被当前空间允许：${modelRef}`);
         }
@@ -1154,7 +1195,8 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         let output = '';
         let usage: LlmUsage | undefined;
         for (let turn = 0; turn < SUBAGENT_MAX_TOOL_TURNS; turn += 1) {
-          const result = await subagentProvider.completeStream(messages, tools, () => {});
+          const result = await subagentProvider.completeStream(messages, tools, () => {}, { abortSignal });
+          abortSignal.throwIfAborted();
           usage = addUsage(usage, result.usage);
           output = result.content?.trim() || output;
           const assistantMsg = {
@@ -1167,6 +1209,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
           if (!result.toolCalls.length) break;
 
           for (const call of result.toolCalls) {
+            abortSignal.throwIfAborted();
             let text: string;
             const parsedArgs = parseToolArguments(call.arguments || '{}');
             if (!allowedToolNames.has(call.name)) {
@@ -1191,10 +1234,12 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
                   stepId,
                   step: stepIdx,
                   mcpSettings,
+                  abortSignal,
                 });
                 text = resultText.text;
               }
             }
+            abortSignal.throwIfAborted();
             toolTrace.push(`- ${call.name}: ${text.split('\n')[0]?.slice(0, 200) ?? ''}`);
             messages.push({ role: 'tool', content: text, toolCallId: call.id });
           }
@@ -1283,7 +1328,9 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
         startedAt: toolStartedAt,
       });
 
-      void completeSubagent(row, args, stepId, stepIdx, toolStartedAt);
+      const subagentExecution = retainRunExecution(runId);
+      void completeSubagent(row, args, stepId, stepIdx, toolStartedAt, subagentExecution.signal)
+        .finally(() => subagentExecution.finish());
       return {
         text: [
           `subagentRunId: ${row.id}`,
@@ -1341,7 +1388,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
       currentStepIdx = stepIdx;
       // 取消接口会把状态改成 canceling；每步开头检查后干净退出。
       const current = await store.getRun(scope, runId);
-      if (current?.status === 'canceling') {
+      if (cancellationSignal.aborted || current?.status === 'canceling' || current?.status === 'canceled') {
         try {
           await shellManager.killRunCommands(scope, runId, 'run_cancel');
         } catch (err) {
@@ -1559,7 +1606,8 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
               .catch((err) => console.warn(`对话完成通知推送失败：${(err as Error).message}`));
           }
           if (deps.generateThreadTitle) {
-            scheduleThreadTitleGeneration(scope, runId, {
+            const titleExecution = retainRunExecution(runId);
+            void scheduleThreadTitleGeneration(scope, runId, {
               store,
               provider: observedProvider(
                 'title',
@@ -1567,7 +1615,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
                 deps.titleProvider,
                 deps.titleProviderDescriptor,
               ),
-            });
+            }).finally(() => titleExecution.finish());
           }
           return;
         }
@@ -1649,6 +1697,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
 
       // 执行模型请求的每个工具，并把结果回填给模型。
       for (const call of toolCalls) {
+        cancellationSignal.throwIfAborted();
         const parsedArgs = parseToolArguments(call.arguments || '{}');
         const args = parsedArgs.args;
         const startedAt = new Date().toISOString();
@@ -1784,6 +1833,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
                 step: stepIdx,
                 mcpSettings,
                 activeMcpServerIds: requestMcpServerIds,
+                abortSignal: cancellationSignal,
                 mcpCallTool: async (name, input, settings, context) => {
                   const parsed = parseMcpToolName(name);
                   if (parsed && runtimeResources.businessPluginHandle?.mcpServers.some((server) => server.id === parsed.serverId)) {
@@ -1799,6 +1849,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
             }
           },
         );
+        cancellationSignal.throwIfAborted();
         if (call.name === 'update_plan') {
           goal = mergeGoal(goal, parseGoalPatch(args));
           await store.setGoalState(scope, runId, goal);

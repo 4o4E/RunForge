@@ -256,7 +256,6 @@ test('space config: run 接纳解析显式能力并从 external 空间双重移�
     config_version: 3,
     created_by_user_id: null,
     visible_user_ids: [],
-    deleted_at: null,
     created_at: new Date(0).toISOString(),
     updated_at: new Date(0).toISOString(),
   });
@@ -287,7 +286,6 @@ test('space config: 空间预算只有进一步收紧模型阈值时才成为有
     config_version: 1,
     created_by_user_id: null,
     visible_user_ids: [],
-    deleted_at: null,
     created_at: new Date(0).toISOString(),
     updated_at: new Date(0).toISOString(),
   };
@@ -346,7 +344,6 @@ test('space config: 系统 instance 预算不能超过模型窗口', async () =>
       config_version: 1,
       created_by_user_id: null,
       visible_user_ids: [],
-      deleted_at: null,
       created_at: new Date(0).toISOString(),
       updated_at: new Date(0).toISOString(),
     });

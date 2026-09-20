@@ -23,13 +23,18 @@ import {
 } from '../businessPlugins/archiveHttp.js';
 import {
   createTenantUser,
+  deleteTenantUser,
   TenantUserError,
   updateTenantUser,
 } from '../tenants/users.js';
+import { DeleteConflictError } from '../store/types.js';
 
 export const tenantsApi = Router();
 
 function handleBusinessPluginError(res: Response, error: unknown) {
+  if (error instanceof DeleteConflictError) {
+    return res.status(409).json({ error: error.message, code: error.code });
+  }
   if (error instanceof BusinessPluginError) {
     return res.status(400).json({ error: error.message, code: error.code });
   }
@@ -188,6 +193,24 @@ tenantsApi.patch('/:id/users/:userId', requireMatchingTenantParam('id'), require
       role: identity.role,
     }, req.body);
     res.json(toUserSummary(user));
+  } catch (error) {
+    handleTenantUserError(res, error);
+  }
+});
+
+tenantsApi.delete('/:id/users/:userId', requireMatchingTenantParam('id'), requireOwnerOrAdmin, async (req, res) => {
+  const identity = getIdentity();
+  if (!identity || identity.scope !== 'tenant') {
+    res.status(403).json({ error: '需要租户身份' });
+    return;
+  }
+  try {
+    await deleteTenantUser(identity.tenantId, req.params.userId, {
+      scope: 'tenant',
+      userId: identity.userId,
+      role: identity.role,
+    });
+    res.status(204).send();
   } catch (error) {
     handleTenantUserError(res, error);
   }

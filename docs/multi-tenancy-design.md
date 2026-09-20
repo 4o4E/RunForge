@@ -66,13 +66,13 @@
 | 创建/禁用/提升 `admin`,或对另一个 `owner` 做任何变更 | ✓ | ✗ | ✗ |
 | 管理租户成员和角色 | ✓ | ✓(仅 member) | ✗ |
 | 颁发/吊销 API token | ✓ | ✗ | ✗ |
-| 暂停/删除整个 tenant | ✓ | ✗ | ✗ |
+| 暂停/删除整个 tenant（系统管理员操作） | ✗ | ✗ | ✗ |
 | 通过审计接口查看本租户内其他用户的对话(留痕,见 §4) | ✓ | ✓ | ✗ |
 
 **为什么要分 `owner` 和 `admin` 两级,而不是一个"管理员"角色:**
 
-- **防止租户被锁死**:如果只有一种管理员角色,"最后一个管理员被禁用或误操作降级"会导致整个租户没有人能再管理它。`owner` 是一个不能被 `admin` 触碰(创建/禁用/降级)的身份,任何时候至少保留一个活跃 `owner`(见 §4 的引导逻辑),给租户留一条"总能找到人负责"的退路。
-- **收敛最高风险操作的颁发范围**:API token 是长期有效、拿到就能持续以某个用户身份调用的凭证——泄露的影响面和"一次性密码"完全不是一个量级。把"谁能签发/吊销它"限制在人数最少的 `owner`,是在"这类操作需要经常做"和"做错代价很高"之间选择后者优先,而不是图方便让所有管理员都能发。同理,暂停/删除 tenant 这种不可逆或影响全体成员的操作也只留给 `owner`。
+- **保留租户归属**:`owner` 是一个不能被 `admin` 触碰(创建/禁用/降级)的身份。任何时候至少保留一个 `owner` 记录；停用不改变归属，系统管理员仍可重新启用该 owner 或增加新的 owner。
+- **收敛最高风险操作的颁发范围**:`owner` 负责签发和吊销长期 API token，以及管理租户内的高权限角色。暂停和删除整个 tenant 由系统管理员执行。
 - **`admin` 承担租户内部管理**:邀请新成员、启停 member,以及管理本租户空间和业务插件。LLM、数据源、MCP、沙箱和生图/视频供应商由 system admin 在系统设置中统一维护。
 
 ### 数据可见性
@@ -251,7 +251,7 @@ CREATE INDEX idx_auth_tokens_user ON auth_tokens(user_id, kind, revoked_at);
    -> 已存在:继续使用其 `tn_` ID
    -> 不存在且发现旧 `id = 'default'`:生成新的 `tn_` ID，更新主键并标记 `is_bootstrap = true`
    -> 两者都不存在:生成新的 `tn_` ID，创建名称为 `Default` 的 bootstrap tenant
-2. 确保 bootstrap tenant 下至少有一个 status='active' 的 owner 用户
+2. 确保 bootstrap tenant 下至少有一个 owner 用户；停用的 owner 仍计入存在性约束
    -> 已存在:什么都不做(幂等,不会在每次重启时重置密码或重复建号)
    -> 不存在,分两种情况:
       a. 迁移场景:配置了 RUNFORGE_ACCESS_TOKEN
@@ -297,14 +297,14 @@ CREATE INDEX idx_auth_tokens_user ON auth_tokens(user_id, kind, revoked_at);
 
 ```sql
 ALTER TABLE threads              ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL REFERENCES tenants(id) ON UPDATE CASCADE;
-ALTER TABLE threads              ADD COLUMN IF NOT EXISTS user_id   TEXT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE threads              ADD COLUMN IF NOT EXISTS user_id   TEXT REFERENCES users(id) ON DELETE NO ACTION;
 ALTER TABLE subagent_runs        ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL REFERENCES tenants(id) ON UPDATE CASCADE;
 ALTER TABLE shell_sessions       ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL REFERENCES tenants(id) ON UPDATE CASCADE;
 ALTER TABLE datasources          ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL REFERENCES tenants(id) ON UPDATE CASCADE;
 ALTER TABLE push_subscriptions   ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL REFERENCES tenants(id) ON UPDATE CASCADE;
 ```
 
-`threads.user_id` 落地 §2 的可见性规则:记录创建者,任何查询(包括 owner/admin 发起的)都按 `tenant_id = ? AND user_id = ?` 过滤,没有放开 `user_id` 条件的例外路径。允许为空(`ON DELETE SET NULL`)是因为通过服务 API token 发起的调用绑定的是某个具体用户,但如果这个用户后续被删除,历史 thread 不应该级联删除,只需要断开归属显示为"已删除用户"(此时该 thread 对所有人都不再可查——`user_id IS NULL` 不会匹配任何 `user_id = ?` 条件,数据仍在但等同不可达,如需清理由运维直接按 `tenant_id` 批量导出/删除)。
+`threads.user_id` 落地 §2 的可见性规则:记录创建者,任何查询(包括 owner/admin 发起的)都按 `tenant_id = ? AND user_id = ?` 过滤,没有放开 `user_id` 条件的例外路径。用户存在关联 thread 时禁止删除；用户需要先在归档对话页面永久删除全部对话，再删除账号。字段保留可空性只用于兼容已有数据库记录和内部恢复场景，新删除流程不会产生没有归属用户的 thread。
 
 `subagent_runs`、`shell_sessions` 不需要单独的 `user_id`——它们总是挂在某个 `thread`(或 `parent_run_id` 间接指向的 thread)之下,归属通过 `thread_id`/`parent_run_id` 传递,不需要冗余存一份。`datasources` 是 §2 定义的租户级共享资源,故意不挂 `user_id`。
 
@@ -453,8 +453,9 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 - **`/sys-admin` 是完全独立的身份体系**:`web/src/sysAdminApi.ts` 基于新抽的 `web/src/lib/authSession.ts` 工厂造一份独立会话(不同 localStorage key、不同失效事件名),和 `/`、`/admin` 的会话互不干扰,可以在同一浏览器不同标签页同时保持登录。系统管理员的 refresh token 存在新表 `system_admin_tokens`(不能复用 `auth_tokens`,那张表的 `tenant_id`/`user_id` 是 NOT NULL 外键)。
 - **新建租户必须同时建一个 owner**(`POST /api/system/tenants` 接收 `{id, name, ownerEmail, ownerPassword}`),否则新租户没人能登录管理——参照 `bootstrap.ts` "tenant + owner 一起建"的既有模式。
 - **禁用租户(`PATCH /api/system/tenants/:id`)在登录路径同步生效**:`POST /api/auth/login`、`POST /api/auth/refresh` 都新增了 `tenant.status !== 'active'` 检查,不是只改一个没人看的字段。
-- **`/admin` 的用户编辑(`PATCH /api/tenants/:id/users/:userId`)有三条边界规则**:本人只能改邮箱/密码,不能改自己的角色或状态;admin 只能管理 member、也不能把任何人提到 admin/owner;不能把租户唯一的 active owner 降级或禁用。重置密码会吊销该用户已有的 refresh token,避免旧登录态继续续期。
-- **系统管理员通过租户详情管理用户**:`POST /api/system/tenants/:tenantId/users` 和 `PATCH /api/system/tenants/:tenantId/users/:userId` 允许创建、编辑、禁用租户用户。系统管理员可以设置三种租户角色；唯一 active owner、邮箱唯一性和密码重置凭证吊销规则与租户管理接口共用同一份业务逻辑。
+- **`/admin` 的用户编辑(`PATCH /api/tenants/:id/users/:userId`)有三条边界规则**:本人只能改邮箱/密码,不能改自己的角色或状态;admin 只能管理 member、也不能把任何人提到 admin/owner;租户必须至少保留一个 owner，owner 是否启用不影响这条存在性约束。重置密码会吊销该用户已有的 refresh token,避免旧登录态继续续期。
+- **系统管理员通过租户详情管理用户**:`POST /api/system/tenants/:tenantId/users` 和 `PATCH /api/system/tenants/:tenantId/users/:userId` 允许创建、编辑、禁用租户用户。系统管理员可以设置三种租户角色；owner 存在性、邮箱唯一性和密码重置凭证吊销规则与租户管理接口共用同一份业务逻辑。
+- **永久删除规则**:default 租户、default 租户管理员和默认系统管理员禁止删除；其他租户、租户用户和系统管理员可以永久删除。删除用户时，关联对话或作为空间 execution user 都会阻止删除，租户始终至少保留一个 owner。删除对话、空间或租户时先阻止新任务进入，主动中止模型请求和 Shell 命令，等待运行资源释放后级联删除数据库记录。随后直接清理工作目录、外部附件和租户业务插件目录；文件删除失败会记录可供人工处理的路径，不回滚数据库删除。普通对话只能归档，永久删除入口只出现在已归档页面。
 - **租户详情只包含租户内设置**:`/sys-admin/tenants` 展示租户列表,选择租户后进入 `/sys-admin/tenants/:tenantId/{users|spaces|business-plugins}`。详情页支持切换租户,浏览器刷新、前进和后退会恢复同一页面。
 - **系统设置使用独立路由**:LLM、运行时能力、MCP、工具和数据源位于 `/sys-admin/settings/:section`,统一修改全系统资源。
 - **租户授权使用独立路由**:`/sys-admin/tenant-access?tenant=<tenantId>` 选择目标租户和授权资源,租户 owner/admin 无法访问该页面或对应 API。

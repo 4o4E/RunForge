@@ -1,5 +1,6 @@
 import type {
   CreateSpaceInput,
+  DeleteSpaceInput,
   SpaceMode,
   SpaceDebugMcpSchema,
   SpaceDebugView,
@@ -9,10 +10,14 @@ import type {
   UpdateSpaceInput,
 } from '@runforge/contracts';
 import type { IdentityContext } from '../auth/context.js';
-import type { SpaceWithVisibilityRow, Store, UserRow } from '../store/types.js';
-import { DefaultSpaceImmutableError } from '../store/types.js';
+import type { DeleteResourceResult, SpaceWithVisibilityRow, Store, UserRow } from '../store/types.js';
+import { DeleteConflictError } from '../store/types.js';
 import { store as defaultStore } from '../store/index.js';
 import { businessPluginRegistry } from '../businessPlugins/registry.js';
+import { removeSpaceWorkspace } from '../files/workspaceRoot.js';
+import { deletionGate } from '../deletion/gate.js';
+import { stopThreadsForDeletion } from '../deletion/runtime.js';
+import { removeExternalArtifacts } from '../deletion/files.js';
 import {
   normalizeSpaceConfig,
   spaceConfigService as defaultSpaceConfigService,
@@ -133,6 +138,16 @@ export function parseUpdateSpaceInput(value: unknown): UpdateSpaceInput {
   return output;
 }
 
+export function parseDeleteSpaceInput(value: unknown): DeleteSpaceInput {
+  if (value === undefined || value === null) return {};
+  if (!isPlainRecord(value)) throw new SpaceAccessError(400, 'SPACE_DELETE_INPUT_INVALID', '请求体必须是对象');
+  if (value.replacementDefaultSpaceId === undefined) return {};
+  if (typeof value.replacementDefaultSpaceId !== 'string' || !value.replacementDefaultSpaceId.trim()) {
+    throw new SpaceAccessError(400, 'SPACE_REPLACEMENT_INVALID', 'replacementDefaultSpaceId 必须是非空空间 ID');
+  }
+  return { replacementDefaultSpaceId: value.replacementDefaultSpaceId.trim() };
+}
+
 function isManager(role: TenantUserRole): boolean {
   return role === 'owner' || role === 'admin';
 }
@@ -143,19 +158,19 @@ export class SpaceAccessService {
     private readonly configService: SpaceConfigService = defaultSpaceConfigService,
   ) {}
 
-  async list(actorContext: SpaceActorContext, includeDeleted = false): Promise<SpaceSummary[]> {
+  async list(actorContext: SpaceActorContext): Promise<SpaceSummary[]> {
     if (actorContext.scope === 'system') {
       await this.requireTenant(actorContext.tenantId);
       return this.toSummaries(
         actorContext.tenantId,
-        await this.store.listSpaces(actorContext.tenantId, { includeDeleted }),
+        await this.store.listSpaces(actorContext.tenantId),
       );
     }
     const actor = await this.resolveTenantActor(actorContext);
-    const rows = await this.store.listSpaces(actor.tenantId, { includeDeleted: isManager(actor.role) && includeDeleted });
+    const rows = await this.store.listSpaces(actor.tenantId);
     const visible = isManager(actor.role)
       ? rows
-      : rows.filter((space) => !space.deleted_at && space.visible_user_ids.includes(actor.userId));
+      : rows.filter((space) => space.visible_user_ids.includes(actor.userId));
     return this.toSummaries(actor.tenantId, visible);
   }
 
@@ -166,7 +181,7 @@ export class SpaceAccessService {
     }
     const actor = await this.resolveTenantActor(actorContext);
     const space = await this.requireSpace(actor.tenantId, spaceId);
-    if (!isManager(actor.role) && (space.deleted_at || !space.visible_user_ids.includes(actor.userId))) {
+    if (!isManager(actor.role) && !space.visible_user_ids.includes(actor.userId)) {
       throw new SpaceAccessError(404, 'SPACE_NOT_FOUND', '空间不存在');
     }
     const tenant = await this.requireTenant(actor.tenantId);
@@ -198,14 +213,12 @@ export class SpaceAccessService {
     );
   }
 
-  async delete(actorContext: SpaceActorContext, spaceId: string): Promise<SpaceSummary> {
+  async delete(actorContext: SpaceActorContext, spaceId: string, input: DeleteSpaceInput): Promise<void> {
     const actor = await this.resolveManagerActor(actorContext);
-    return this.deleteManaged(actor.tenantId, spaceId);
-  }
-
-  async restore(actorContext: SpaceActorContext, spaceId: string): Promise<SpaceSummary> {
-    const actor = await this.resolveManagerActor(actorContext);
-    return this.restoreManaged(actor.tenantId, spaceId);
+    await businessPluginRegistry.mutateTenant(
+      actor.tenantId,
+      () => this.deleteManaged(actor.tenantId, spaceId, input.replacementDefaultSpaceId),
+    );
   }
 
   /** caller/Token 等空间控制面复用同一管理权限，不在各业务服务重复判断角色。 */
@@ -264,7 +277,6 @@ export class SpaceAccessService {
     const spaceId = requestedSpaceId ?? tenant.default_space_id;
     if (!spaceId) throw new SpaceAccessError(409, 'DEFAULT_SPACE_MISSING', '当前 tenant 缺少 default 空间');
     const space = await this.requireSpace(actor.tenantId, spaceId);
-    if (space.deleted_at) throw new SpaceAccessError(409, 'SPACE_DELETED', '空间已删除');
     if (space.mode !== 'web') throw new SpaceAccessError(403, 'SPACE_READ_ONLY', '外部空间在 Web 中只读');
     if (!isManager(actor.role) && !space.visible_user_ids.includes(actor.userId)) {
       throw new SpaceAccessError(404, 'SPACE_NOT_FOUND', '空间不存在');
@@ -291,7 +303,6 @@ export class SpaceAccessService {
 
   private async updateManaged(tenantId: string, spaceId: string, input: UpdateSpaceInput): Promise<SpaceSummary> {
     const current = await this.requireSpace(tenantId, spaceId);
-    if (current.deleted_at) throw new SpaceAccessError(409, 'SPACE_DELETED', '空间已删除，请先恢复后再修改');
     const tenant = await this.requireTenant(tenantId);
     let executionUserId = input.executionUserId;
     if (current.mode === 'external') {
@@ -323,25 +334,46 @@ export class SpaceAccessService {
     return this.toSummary(updated, tenant.default_space_id);
   }
 
-  private async deleteManaged(tenantId: string, spaceId: string): Promise<SpaceSummary> {
+  private async deleteManaged(
+    tenantId: string,
+    spaceId: string,
+    replacementDefaultSpaceId?: string,
+  ): Promise<void> {
+    const tenant = await this.requireTenant(tenantId);
+    const spaces = await this.store.listSpaces(tenantId);
+    const current = spaces.find((space) => space.id === spaceId);
+    if (!current) throw new SpaceAccessError(404, 'SPACE_NOT_FOUND', '空间不存在');
+    if (tenant.default_space_id === spaceId) {
+      const replacement = spaces.find((space) => space.id === replacementDefaultSpaceId);
+      if (!replacementDefaultSpaceId || replacementDefaultSpaceId === spaceId) {
+        throw new SpaceAccessError(409, 'DEFAULT_SPACE_REPLACEMENT_REQUIRED', '删除默认空间前必须选择新的默认空间');
+      }
+      if (!replacement || replacement.mode !== 'web') {
+        throw new SpaceAccessError(409, 'DEFAULT_SPACE_REPLACEMENT_INVALID', '新的默认空间必须是当前租户的 Web 空间');
+      }
+    }
+    const deletion = deletionGate.begin({ tenantId, spaceId });
     try {
-      const deleted = await this.store.softDeleteSpaceAndRevokeTokens(tenantId, spaceId);
+      const threads = await this.store.listThreadsForDeletion(tenantId, spaceId);
+      deletion.addThreads(threads.map((thread) => thread.id));
+      await deletion.waitForOperations();
+      await stopThreadsForDeletion(threads);
+      const deleted: DeleteResourceResult | null = await this.store.deleteSpace(
+        tenantId,
+        spaceId,
+        replacementDefaultSpaceId,
+      );
       if (!deleted) throw new SpaceAccessError(404, 'SPACE_NOT_FOUND', '空间不存在');
-      const tenant = await this.requireTenant(tenantId);
-      return this.toSummary(deleted, tenant.default_space_id);
+      await removeSpaceWorkspace(spaceId);
+      await removeExternalArtifacts(deleted.artifactStorageKeys);
     } catch (error) {
-      if (error instanceof DefaultSpaceImmutableError) {
+      if (error instanceof DeleteConflictError) {
         throw new SpaceAccessError(409, error.code, error.message);
       }
       throw error;
+    } finally {
+      deletion.finish();
     }
-  }
-
-  private async restoreManaged(tenantId: string, spaceId: string): Promise<SpaceSummary> {
-    const restored = await this.store.restoreSpace(tenantId, spaceId);
-    if (!restored) throw new SpaceAccessError(404, 'SPACE_NOT_FOUND', '空间不存在');
-    const tenant = await this.requireTenant(tenantId);
-    return this.toSummary(restored, tenant.default_space_id);
   }
 
   private async resolveTenantActor(identity: TenantIdentity): Promise<ResolvedTenantActor> {
@@ -447,7 +479,6 @@ export class SpaceAccessService {
       createdByUserId: space.created_by_user_id,
       visibleUserIds: space.visible_user_ids,
       isDefault: defaultSpaceId === space.id,
-      deletedAt: space.deleted_at,
       createdAt: space.created_at,
       updatedAt: space.updated_at,
     };

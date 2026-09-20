@@ -65,6 +65,30 @@ test('MCP session: 同一 run 中认证配置变化会关闭旧连接并重连',
   assert.equal(closed, 2);
 });
 
+test('MCP session: 将运行取消信号传给连接、工具目录和工具调用', async () => {
+  const controller = new AbortController();
+  const signals: Array<AbortSignal | undefined> = [];
+  const session = new McpClientSession(async (_settings, signal) => {
+    signals.push(signal);
+    return {
+      listTools: async (_params, options) => {
+        signals.push(options?.signal);
+        return { tools: [{ name: 'lookup', inputSchema: { type: 'object' as const } }] };
+      },
+      callTool: async (_params, _schema, options) => {
+        signals.push(options?.signal);
+        return { content: [{ type: 'text' as const, text: 'ok' }] };
+      },
+      close: async () => {},
+    };
+  });
+
+  await session.activate({ servers: [server()] }, 'shared', controller.signal);
+  await session.callTool('mcp__shared__lookup', {}, { servers: [server()] }, { abortSignal: controller.signal });
+  assert.deepEqual(signals, [controller.signal, controller.signal, controller.signal]);
+  await session.dispose();
+});
+
 test('renderToolResult: saves MCP image content and returns a markdown image link', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runforge-mcp-image-'));
   try {

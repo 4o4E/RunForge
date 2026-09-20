@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { Activity, ArchiveRestore, Moon, Palette, Plus, RefreshCw, Save, Sun, Trash2 } from 'lucide-react';
 import {
   getThread,
+  deleteThread,
   listThreads,
   updateThread,
   type AgentEvent,
@@ -25,6 +26,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -557,6 +559,8 @@ function ArchivedThreadsSettingsPanel({ onThreadsChanged }: { onThreadsChanged?:
   const [threads, setThreads] = useState<Thread[]>([]);
   const [loading, setLoading] = useState(false);
   const [restoringId, setRestoringId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Thread | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [message, setMessage] = useState('');
 
   const refreshArchivedThreads = () => {
@@ -581,6 +585,22 @@ function ArchivedThreadsSettingsPanel({ onThreadsChanged }: { onThreadsChanged?:
       setMessage(`取消归档失败：${(err as Error).message}`);
     } finally {
       setRestoringId(null);
+    }
+  }
+
+  async function permanentlyDeleteThread() {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    setMessage('');
+    try {
+      await deleteThread(deleteTarget.id);
+      setThreads((current) => current.filter((thread) => thread.id !== deleteTarget.id));
+      setDeleteTarget(null);
+      onThreadsChanged?.();
+    } catch (err) {
+      setMessage(`永久删除失败：${(err as Error).message}`);
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -613,13 +633,32 @@ function ArchivedThreadsSettingsPanel({ onThreadsChanged }: { onThreadsChanged?:
                 归档：{shortTime(thread.archived_at)} · 更新：{shortTime(thread.updated_at)}
               </div>
             </div>
-            <Button variant="outline" size="sm" onClick={() => void restoreThread(thread.id)} disabled={restoringId === thread.id}>
-              {restoringId === thread.id ? <Spinner className="h-4 w-4" /> : <ArchiveRestore className="h-4 w-4" />}
-              取消归档
-            </Button>
+            <div className="flex gap-2">
+              <Button variant="outline" size="sm" onClick={() => void restoreThread(thread.id)} disabled={restoringId === thread.id}>
+                {restoringId === thread.id ? <Spinner className="h-4 w-4" /> : <ArchiveRestore className="h-4 w-4" />}
+                取消归档
+              </Button>
+              <Button variant="destructive" size="sm" onClick={() => setDeleteTarget(thread)}>
+                <Trash2 className="h-4 w-4" />永久删除
+              </Button>
+            </div>
           </CardContent>
         </Card>
       ))}
+      <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>永久删除对话</DialogTitle>
+            <DialogDescription>将永久删除“{deleteTarget ? threadTitle(deleteTarget) : ''}”的消息、运行记录和工作目录。</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>取消</Button>
+            <Button variant="destructive" onClick={() => void permanentlyDeleteThread()} disabled={deleting}>
+              {deleting ? '删除中…' : '永久删除'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </SettingsPanelShell>
   );
 }

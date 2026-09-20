@@ -9,6 +9,7 @@ import type { Store, ThreadRow } from '../store/types.js';
 import { getSystemToolSettings as readSystemToolSettings } from '../settings.js';
 import type { ToolSettings } from '@runforge/contracts';
 import { ensureThreadWorkspaceRoot, resolveWorkspaceRootForThread } from './workspaceRoot.js';
+import { deletionGate } from '../deletion/gate.js';
 
 type TenantIdentity = Extract<IdentityContext, { scope: 'tenant' }>;
 
@@ -48,6 +49,20 @@ export class ThreadWorkspaceAccessService {
     if (!threadId) {
       throw new ThreadWorkspaceAccessError(409, 'THREAD_REQUIRED', '文件工作区需要先创建会话');
     }
+
+    const operation = deletionGate.enter({ tenantId: identity.tenantId, threadId });
+    try {
+      return await this.resolveForWebAccepted(identity, threadId, access);
+    } finally {
+      operation.finish();
+    }
+  }
+
+  private async resolveForWebAccepted(
+    identity: TenantIdentity,
+    threadId: string,
+    access: 'read' | 'write',
+  ): Promise<ThreadWorkspaceResolution> {
 
     let thread = await this.store.getThread(
       { tenantId: identity.tenantId, userId: identity.userId },

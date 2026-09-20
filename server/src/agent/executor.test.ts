@@ -19,6 +19,7 @@ import { BusinessPluginRegistry } from '../businessPlugins/registry.js';
 import { BusinessPluginRuntimeService } from '../businessPlugins/runtime.js';
 import { createBusinessPluginSelection } from '../businessPlugins/cordis.js';
 import { createSpaceRuntimeLock } from '../plugins/lock.js';
+import { abortRunExecution, waitForRunExecution } from './executionControl.js';
 
 const scope: Scope = { tenantId: 'default', userId: 'us_test' };
 
@@ -688,6 +689,54 @@ test('executeRun: 使用独立标题 Provider 生成对话标题并记录观测'
       ['title', 'title-provider', 'title-model'],
     ],
   );
+});
+
+test('executeRun: 删除可中止并等待后台标题模型请求', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, '生成一个后台标题');
+  let titleStartedResolve!: () => void;
+  const titleStarted = new Promise<void>((resolve) => { titleStartedResolve = resolve; });
+  let titleAborted = false;
+
+  await executeRun(run.id, {
+    store,
+    provider: {
+      name: 'agent-provider',
+      async completeStream() {
+        return { content: '任务完成。', toolCalls: [] };
+      },
+    },
+    titleProvider: {
+      name: 'blocking-title-provider',
+      async completeStream(_messages, _tools, _onDelta, options) {
+        const signal = options?.abortSignal;
+        assert.ok(signal);
+        titleStartedResolve();
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener('abort', () => {
+            titleAborted = true;
+            reject(signal.reason);
+          }, { once: true });
+        });
+        throw new Error('标题请求没有被取消');
+      },
+    },
+    publish: () => {},
+    hardStepCap: 3,
+    toolSettings: testToolSettings(),
+    generateThreadTitle: true,
+    providerRunner: new ProviderRunner(new MemoryProviderObservationRepository(), null),
+  });
+
+  await titleStarted;
+  let released = false;
+  const waiting = waitForRunExecution(run.id).then(() => { released = true; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(released, false);
+  assert.equal(abortRunExecution(run.id, '对话已删除'), true);
+  await waiting;
+  assert.equal(titleAborted, true);
 });
 
 test('executeRun: persists streamed text and terminal stream status for replay', async () => {
@@ -2139,8 +2188,11 @@ test('memory store: deleteThread removes dependent run data', async () => {
     waitMode: 'foreground',
   });
   await store.appendShellCommandLog(scope, command.id, 'stdout', 'ok');
+  await store.updateShellCommand(scope, command.id, { status: 'succeeded', ended_at: new Date().toISOString() });
+  await store.setRunStatus(scope, run.id, 'done');
+  await store.updateThread(scope, thread.id, { archived: true });
 
-  assert.equal(await store.deleteThread(scope, thread.id), true);
+  assert.deepEqual(await store.deleteThread(scope, thread.id), { artifactStorageKeys: [] });
   assert.equal(await store.getThread(scope, thread.id), null);
   assert.deepEqual(await store.listRuns(scope, thread.id), []);
   assert.deepEqual(await store.loadThreadMessages(scope, thread.id), []);

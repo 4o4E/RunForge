@@ -12,11 +12,12 @@ export const webSearchTool: Tool = {
     },
     required: ['query'],
   },
-  async run(args) {
+  async run(args, ctx) {
     const query = String(args.query ?? '');
     try {
       const res = await fetch('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query), {
         headers: { 'User-Agent': 'Mozilla/5.0 RunForge/0.1' },
+        signal: ctx?.abortSignal,
       });
       if (!res.ok) return `搜索失败（${res.status}）`;
       const html = await res.text();
@@ -29,6 +30,7 @@ export const webSearchTool: Tool = {
       }
       return results.length ? results.join('\n') : '（没有搜索结果）';
     } catch (err) {
+      ctx?.abortSignal?.throwIfAborted();
       return `搜索错误：${(err as Error).message}`;
     }
   },

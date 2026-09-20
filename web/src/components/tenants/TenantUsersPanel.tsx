@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Pencil, Plus, RefreshCw } from 'lucide-react';
+import { Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import type { TenantUserRole, TenantUserSummary, UpdateUserInput } from '@runforge/contracts';
 import type { TenantUsersControlApi } from '@/tenantUsersControlApi';
 import { Badge } from '@/components/ui/badge';
@@ -28,6 +28,13 @@ function canEditUser(actor: TenantUsersActor, user: TenantUserSummary): boolean 
   return actor.userId === user.id || user.role === 'member';
 }
 
+function canDeleteUser(actor: TenantUsersActor, user: TenantUserSummary, users: readonly TenantUserSummary[]): boolean {
+  if (user.isDefaultAdmin) return false;
+  if (user.role === 'owner' && users.filter((candidate) => candidate.role === 'owner').length === 1) return false;
+  if (actor.kind === 'system' || actor.role === 'owner') return true;
+  return user.role === 'member';
+}
+
 export function TenantUsersPanel({ api, actor }: { api: TenantUsersControlApi; actor: TenantUsersActor }) {
   const [users, setUsers] = useState<TenantUserSummary[]>([]);
   const [loading, setLoading] = useState(false);
@@ -43,6 +50,8 @@ export function TenantUsersPanel({ api, actor }: { api: TenantUsersControlApi; a
   const [editRole, setEditRole] = useState<TenantUserRole>('member');
   const [editStatus, setEditStatus] = useState<'active' | 'disabled'>('active');
   const [editing, setEditing] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<TenantUserSummary | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   async function refresh() {
     setLoading(true);
@@ -108,6 +117,23 @@ export function TenantUsersPanel({ api, actor }: { api: TenantUsersControlApi; a
     }
   }
 
+  async function deleteUser() {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    setMessage('');
+    try {
+      await api.delete(deleteTarget.id);
+      setUsers((current) => current.filter((user) => user.id !== deleteTarget.id));
+      setDeleteTarget(null);
+      setEditingUser(null);
+      setMessage('用户已永久删除');
+    } catch (error) {
+      setMessage(`删除用户失败：${(error as Error).message}`);
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   const privilegedRolesEnabled = canAssignAdminRoles(actor);
 
   return (
@@ -148,6 +174,7 @@ export function TenantUsersPanel({ api, actor }: { api: TenantUsersControlApi; a
                 <TableCell className="font-medium">
                   {user.email}
                   {isCurrentUser(actor, user) && <Badge variant="outline" className="ml-2">我</Badge>}
+                  {user.isDefaultAdmin && <Badge variant="outline" className="ml-2">默认管理员</Badge>}
                 </TableCell>
                 <TableCell><Badge variant="outline">{user.role}</Badge></TableCell>
                 <TableCell>
@@ -231,9 +258,36 @@ export function TenantUsersPanel({ api, actor }: { api: TenantUsersControlApi; a
             </div>
           )}
           <DialogFooter>
+            {editingUser && canDeleteUser(actor, editingUser, users) && (
+              <Button
+                variant="destructive"
+                className="mr-auto"
+                onClick={() => {
+                  setDeleteTarget(editingUser);
+                  setEditingUser(null);
+                }}
+              >
+                <Trash2 className="h-4 w-4" />永久删除
+              </Button>
+            )}
             <Button variant="outline" onClick={() => setEditingUser(null)}>取消</Button>
             <Button onClick={() => void saveUser()} disabled={editing || !editEmail.trim()}>
               {editing ? '保存中…' : '保存'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>永久删除用户</DialogTitle>
+            <DialogDescription>将永久删除 {deleteTarget?.email} 的账号和登录凭证。存在关联对话或执行空间时会拒绝删除。</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>取消</Button>
+            <Button variant="destructive" onClick={() => void deleteUser()} disabled={deleting}>
+              {deleting ? '删除中…' : '永久删除'}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -9,6 +9,7 @@ import type { Scope, ShellActor, ShellCommandRow, ShellLogStream, ShellSessionRo
 import { buildShellSpawnSpec } from '../tools/sandbox.js';
 import { shellBus } from './bus.js';
 import { redactShellOutput } from './redact.js';
+import { deletionGate } from '../deletion/gate.js';
 
 const DEFAULT_WAIT_MS = 60_000;
 const DEFAULT_SOFT_TIMEOUT_MS = 10 * 60_000;
@@ -178,35 +179,40 @@ export class ShellManager {
     owner?: ShellSessionRow['owner'];
     step?: number;
   }): Promise<ShellSessionRow> {
-    const owner = input.owner ?? 'agent';
-    const name = await this.nextSessionName(input.scope, input.threadId, input.settings.workspaceRoot, owner, input.name);
-    const session = await store.createShellSession(input.scope, {
-      threadId: input.threadId,
-      name,
-      owner,
-      workspaceRoot: input.settings.workspaceRoot,
-      backend: input.settings.sandboxBackend,
-      configSnapshot: settingsSnapshot(input.settings),
-    });
-    await store.addShellSessionEvent(input.scope, session.id, 'system', 'opened', { runId: input.runId ?? null });
-    if (input.runId) {
-      await this.emit(input.scope, input.threadId, input.runId, null, {
-        type: 'shell_session_opened',
-        step: input.step ?? 0,
-        sessionId: session.id,
-        backend: session.backend,
-        workspaceRoot: session.workspace_root,
+    const admission = deletionGate.enter({ tenantId: input.scope.tenantId, threadId: input.threadId });
+    try {
+      const owner = input.owner ?? 'agent';
+      const name = await this.nextSessionName(input.scope, input.threadId, input.settings.workspaceRoot, owner, input.name);
+      const session = await store.createShellSession(input.scope, {
+        threadId: input.threadId,
+        name,
+        owner,
+        workspaceRoot: input.settings.workspaceRoot,
+        backend: input.settings.sandboxBackend,
+        configSnapshot: settingsSnapshot(input.settings),
       });
-    } else {
-      shellBus.publish(input.threadId, {
-        type: 'shell_session_opened',
-        step: input.step ?? 0,
-        sessionId: session.id,
-        backend: session.backend,
-        workspaceRoot: session.workspace_root,
-      });
+      await store.addShellSessionEvent(input.scope, session.id, 'system', 'opened', { runId: input.runId ?? null });
+      if (input.runId) {
+        await this.emit(input.scope, input.threadId, input.runId, null, {
+          type: 'shell_session_opened',
+          step: input.step ?? 0,
+          sessionId: session.id,
+          backend: session.backend,
+          workspaceRoot: session.workspace_root,
+        });
+      } else {
+        shellBus.publish(input.threadId, {
+          type: 'shell_session_opened',
+          step: input.step ?? 0,
+          sessionId: session.id,
+          backend: session.backend,
+          workspaceRoot: session.workspace_root,
+        });
+      }
+      return session;
+    } finally {
+      admission.finish();
     }
-    return session;
   }
 
   async ensureDefaultSession(scope: Scope, threadId: string, settings: ToolSettings): Promise<ShellSessionRow> {
@@ -215,20 +221,25 @@ export class ShellManager {
   }
 
   async reuseSession(input: { scope: Scope; threadId: string; settings: ToolSettings; sessionId?: string; runId?: string; step?: number }): Promise<ShellSessionRow> {
-    if (input.sessionId) {
-      const session = await store.getShellSession(input.scope, input.sessionId);
-      if (!session) throw new Error(`shell session 不存在：${input.sessionId}`);
-      if (session.thread_id !== input.threadId) throw new Error('shell session 不属于当前 thread');
-      if (resolve(session.workspace_root) !== resolve(input.settings.workspaceRoot)) {
-        throw new Error('shell session 不属于当前 thread workspace');
+    const admission = deletionGate.enter({ tenantId: input.scope.tenantId, threadId: input.threadId });
+    try {
+      if (input.sessionId) {
+        const session = await store.getShellSession(input.scope, input.sessionId);
+        if (!session) throw new Error(`shell session 不存在：${input.sessionId}`);
+        if (session.thread_id !== input.threadId) throw new Error('shell session 不属于当前 thread');
+        if (resolve(session.workspace_root) !== resolve(input.settings.workspaceRoot)) {
+          throw new Error('shell session 不属于当前 thread workspace');
+        }
+        if (session.deleted_at) throw new Error('shell session 已删除');
+        if (session.status === 'closed' || session.status === 'orphaned') throw new Error(`shell session 当前状态为 ${session.status}`);
+        return session;
       }
-      if (session.deleted_at) throw new Error('shell session 已删除');
-      if (session.status === 'closed' || session.status === 'orphaned') throw new Error(`shell session 当前状态为 ${session.status}`);
-      return session;
+      const sessions = await store.listShellSessions(input.scope, input.threadId, input.settings.workspaceRoot);
+      const existing = scopedSession(sessions);
+      return existing ?? this.ensureDefaultSession(input.scope, input.threadId, input.settings);
+    } finally {
+      admission.finish();
     }
-    const sessions = await store.listShellSessions(input.scope, input.threadId, input.settings.workspaceRoot);
-    const existing = scopedSession(sessions);
-    return existing ?? this.ensureDefaultSession(input.scope, input.threadId, input.settings);
   }
 
   async listSessions(scope: Scope, threadId: string, settings: ToolSettings): Promise<ShellSessionRow[]> {
@@ -250,54 +261,60 @@ export class ShellManager {
     actor?: ShellActor;
     env?: Record<string, string>;
   }): Promise<{ command: ShellCommandRow; timedOutWaiting: boolean; tail: string }> {
-    const commandText = input.command.trim();
-    if (!commandText) throw new Error('command 不能为空');
-    const session = await store.getShellSession(input.scope, input.sessionId);
-    if (!session) throw new Error(`shell session 不存在：${input.sessionId}`);
-    if (session.thread_id !== input.context.threadId) throw new Error('shell session 不属于当前 thread');
-    if (resolve(session.workspace_root) !== resolve(input.settings.workspaceRoot)) {
-      throw new Error('shell session 不属于当前 thread workspace');
-    }
-    if (session.deleted_at) throw new Error('shell session 已删除');
-    const recent = await store.listShellCommandsBySession(input.scope, session.id, 10);
-    const running = recent.find((cmd) => cmd.status === 'queued' || cmd.status === 'running');
-    if (running) throw new Error(`shell session 正在执行命令 ${running.id}，请先 poll 或 kill；需要并发时请打开新的 session。`);
-
+    const admission = deletionGate.enter({ tenantId: input.scope.tenantId, threadId: input.context.threadId });
+    let command!: ShellCommandRow;
+    let active!: ActiveCommand;
     const waitMode = input.waitMode ?? 'foreground';
-    const softTimeoutMs = input.softTimeoutMs ?? DEFAULT_SOFT_TIMEOUT_MS;
-    const hardTimeoutMs = input.hardTimeoutMs ?? DEFAULT_HARD_TIMEOUT_MS;
-    const cwd = resolve(input.cwd || session.cwd || session.workspace_root);
-    if (!isWithin(session.workspace_root, cwd)) throw new Error(`cwd 超出 workspace：${cwd}`);
-    if (session.cwd !== cwd) await store.updateShellSession(input.scope, session.id, { cwd });
-    const command = await store.createShellCommand(input.scope, {
-      sessionId: session.id,
-      runId: input.context.runId ?? null,
-      stepId: input.context.stepId ?? null,
-      actor: input.actor ?? 'agent',
-      command: commandText,
-      cwd,
-      waitMode,
-      softTimeoutMs,
-      hardTimeoutMs,
-      softTimeoutAt: futureIso(softTimeoutMs),
-      hardTimeoutAt: futureIso(hardTimeoutMs),
-    });
-    const cwdFile = resolve(session.workspace_root, `.codex-shell-cwd-${command.id}`);
+    try {
+      const commandText = input.command.trim();
+      if (!commandText) throw new Error('command 不能为空');
+      const session = await store.getShellSession(input.scope, input.sessionId);
+      if (!session) throw new Error(`shell session 不存在：${input.sessionId}`);
+      if (session.thread_id !== input.context.threadId) throw new Error('shell session 不属于当前 thread');
+      if (resolve(session.workspace_root) !== resolve(input.settings.workspaceRoot)) {
+        throw new Error('shell session 不属于当前 thread workspace');
+      }
+      if (session.deleted_at) throw new Error('shell session 已删除');
+      const recent = await store.listShellCommandsBySession(input.scope, session.id, 10);
+      const running = recent.find((cmd) => cmd.status === 'queued' || cmd.status === 'running');
+      if (running) throw new Error(`shell session 正在执行命令 ${running.id}，请先 poll 或 kill；需要并发时请打开新的 session。`);
 
-    await store.updateShellSession(input.scope, session.id, { status: 'busy', lease_actor: input.actor ?? 'agent', lease_run_id: input.context.runId ?? null });
-    await store.addShellSessionEvent(input.scope, session.id, input.actor ?? 'agent', 'command_started', { commandId: command.id, command: commandText });
+      const softTimeoutMs = input.softTimeoutMs ?? DEFAULT_SOFT_TIMEOUT_MS;
+      const hardTimeoutMs = input.hardTimeoutMs ?? DEFAULT_HARD_TIMEOUT_MS;
+      const cwd = resolve(input.cwd || session.cwd || session.workspace_root);
+      if (!isWithin(session.workspace_root, cwd)) throw new Error(`cwd 超出 workspace：${cwd}`);
+      if (session.cwd !== cwd) await store.updateShellSession(input.scope, session.id, { cwd });
+      command = await store.createShellCommand(input.scope, {
+        sessionId: session.id,
+        runId: input.context.runId ?? null,
+        stepId: input.context.stepId ?? null,
+        actor: input.actor ?? 'agent',
+        command: commandText,
+        cwd,
+        waitMode,
+        softTimeoutMs,
+        hardTimeoutMs,
+        softTimeoutAt: futureIso(softTimeoutMs),
+        hardTimeoutAt: futureIso(hardTimeoutMs),
+      });
+      const cwdFile = resolve(session.workspace_root, `.codex-shell-cwd-${command.id}`);
+      await store.updateShellSession(input.scope, session.id, { status: 'busy', lease_actor: input.actor ?? 'agent', lease_run_id: input.context.runId ?? null });
+      await store.addShellSessionEvent(input.scope, session.id, input.actor ?? 'agent', 'command_started', { commandId: command.id, command: commandText });
 
-    const active = await this.spawnCommand({
-      scope: input.scope,
-      command,
-      session,
-      cwdFile,
-      commandText: commandWithCwd(commandWithCwdCapture(commandText, cwdFile), session.workspace_root, cwd),
-      displayCommand: commandText,
-      settings: restoredSettings(session, input.settings),
-      env: input.env,
-      context: input.context,
-    });
+      active = await this.spawnCommand({
+        scope: input.scope,
+        command,
+        session,
+        cwdFile,
+        commandText: commandWithCwd(commandWithCwdCapture(commandText, cwdFile), session.workspace_root, cwd),
+        displayCommand: commandText,
+        settings: restoredSettings(session, input.settings),
+        env: input.env,
+        context: input.context,
+      });
+    } finally {
+      admission.finish();
+    }
     if (waitMode === 'background') {
       return { command: await store.getShellCommand(input.scope, command.id) ?? command, timedOutWaiting: false, tail: '' };
     }
@@ -355,6 +372,12 @@ export class ShellManager {
     for (const command of await store.listRunningShellCommandsByRun(scope, runId)) {
       await this.kill(scope, command.id, reason);
     }
+  }
+
+  async killThreadCommands(threadIds: ReadonlySet<string>, reason = 'resource_deleted'): Promise<void> {
+    const targets = [...this.active.values()].filter((command) => threadIds.has(command.threadId));
+    await Promise.all(targets.map((command) => this.kill(command.scope, command.commandId, reason)));
+    await Promise.all(targets.map((command) => command.done.then(() => undefined)));
   }
 
   async markInterruptedCommandsOrphaned(): Promise<number> {

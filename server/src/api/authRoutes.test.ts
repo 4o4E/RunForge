@@ -8,6 +8,9 @@ import { api } from './http.js';
 import { store } from '../store/index.js';
 import { hashPassword } from '../auth/passwords.js';
 import { signTenantAccessToken } from '../auth/jwt.js';
+import { registerRunExecution, retainRunExecution } from '../agent/executionControl.js';
+import { stopThreadsForDeletion } from '../deletion/runtime.js';
+import { deletionGate } from '../deletion/gate.js';
 
 // STORE=memory(见 package.json test 脚本)让 ./http.js 里的路由触达的单例 store
 // 解析成 MemoryStore，不依赖真实 Postgres。每个用例用独立的 tenant/email，避免
@@ -442,5 +445,124 @@ test('POST /api/threads/:id/runs: 活动 run 冲突返回结构化 RUN_ACTIVE', 
     assert.equal(body.currentStatus, 'pending');
   } finally {
     close();
+  }
+});
+
+test('DELETE /api/threads/:id: 只永久删除已归档对话并主动停止运行资源', async () => {
+  const owner = await seedOwner('tn_delete_threads', 'owner@delete-threads.test', 'pw');
+  const scope = { tenantId: 'tn_delete_threads', userId: owner.id };
+  const jwt = signTenantAccessToken({ id: owner.id, tenantId: scope.tenantId, role: 'owner' });
+  const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` };
+  const deletable = await store.createThread(scope, '可删除对话');
+  const active = await store.createThread(scope, '运行中对话');
+  const activeShell = await store.createThread(scope, 'Shell 运行中对话');
+  await store.createRun(scope, active.id, 'running');
+  await store.updateThread(scope, active.id, { archived: true });
+  await store.updateThread(scope, activeShell.id, { archived: true });
+  const shellSession = await store.createShellSession(scope, {
+    threadId: activeShell.id,
+    name: 'Default',
+    owner: 'user',
+    workspaceRoot: '/tmp/runforge-delete-shell-test',
+    backend: 'none',
+  });
+  await store.createShellCommand(scope, {
+    sessionId: shellSession.id,
+    actor: 'user',
+    command: 'sleep 60',
+    cwd: '/tmp/runforge-delete-shell-test',
+    waitMode: 'background',
+  });
+  const { port, close } = await listen(buildApp());
+  try {
+    const base = `http://127.0.0.1:${port}/api/threads`;
+    const unarchived = await fetch(`${base}/${deletable.id}`, { method: 'DELETE', headers });
+    assert.equal(unarchived.status, 409);
+    assert.equal(((await unarchived.json()) as { code: string }).code, 'THREAD_NOT_ARCHIVED');
+
+    const archived = await fetch(`${base}/${deletable.id}`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ archived: true }),
+    });
+    assert.equal(archived.status, 200);
+    assert.equal((await fetch(`${base}/${deletable.id}`, { method: 'DELETE', headers })).status, 204);
+    assert.equal(await store.getThread(scope, deletable.id), null);
+
+    const activeDelete = await fetch(`${base}/${active.id}`, { method: 'DELETE', headers });
+    assert.equal(activeDelete.status, 204);
+    assert.equal(await store.getThread(scope, active.id), null);
+
+    const activeShellDelete = await fetch(`${base}/${activeShell.id}`, { method: 'DELETE', headers });
+    assert.equal(activeShellDelete.status, 204);
+    assert.equal(await store.getThread(scope, activeShell.id), null);
+  } finally {
+    close();
+  }
+});
+
+test('资源删除会主动中止并等待当前进程中的 executor', async () => {
+  const owner = await seedOwner('tn_delete_executor', 'owner@delete-executor.test', 'pw');
+  const scope = { tenantId: 'tn_delete_executor', userId: owner.id };
+  const thread = await store.createThread(scope, '活动 executor');
+  const run = await store.createRun(scope, thread.id, 'running');
+  const registration = registerRunExecution(run.id);
+
+  const stopping = stopThreadsForDeletion([thread]);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(registration.signal.aborted, true);
+  let stopped = false;
+  void stopping.then(() => { stopped = true; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false);
+
+  registration.finish();
+  await stopping;
+  assert.equal((await store.getRun(scope, run.id))?.status, 'canceled');
+});
+
+test('资源删除会中止并等待终态 run 留下的后台子任务', async () => {
+  const owner = await seedOwner('tn_delete_subagent', 'owner@delete-subagent.test', 'pw');
+  const scope = { tenantId: 'tn_delete_subagent', userId: owner.id };
+  const thread = await store.createThread(scope, '后台子任务');
+  const run = await store.createRun(scope, thread.id, 'done');
+  await store.setRunStatus(scope, run.id, 'done');
+  const executor = registerRunExecution(run.id);
+  executor.bindThread(thread.id);
+  const subagent = retainRunExecution(run.id);
+  executor.finish();
+  const resumedExecutor = registerRunExecution(run.id);
+  resumedExecutor.bindThread(thread.id);
+  resumedExecutor.finish();
+
+  const stopping = stopThreadsForDeletion([thread]);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(subagent.signal.aborted, true);
+  let stopped = false;
+  void stopping.then(() => { stopped = true; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false);
+
+  subagent.finish();
+  await stopping;
+});
+
+test('删除 gate 会等待已经接纳的写入并拒绝同范围的新写入', async () => {
+  const scope = { tenantId: 'tn_delete_gate', spaceId: 'sp_delete_gate', threadId: 'th_delete_gate' };
+  const operation = deletionGate.enter(scope);
+  const deletion = deletionGate.begin({ tenantId: scope.tenantId, spaceId: scope.spaceId });
+  deletion.addThreads([scope.threadId]);
+  try {
+    let waiting = true;
+    const pending = deletion.waitForOperations().then(() => { waiting = false; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(waiting, true);
+    assert.throws(() => deletionGate.enter(scope), /资源正在删除/);
+    operation.finish();
+    await pending;
+    assert.equal(waiting, false);
+  } finally {
+    operation.finish();
+    deletion.finish();
   }
 });

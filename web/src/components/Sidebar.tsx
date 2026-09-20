@@ -1,12 +1,11 @@
-import { useState, type MouseEvent } from 'react';
-import { Archive, Bot, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, PinOff, Search, Settings, ShieldCheck, SquarePen, Trash2 } from 'lucide-react';
+import type { MouseEvent } from 'react';
+import { Archive, Bot, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, PinOff, Search, Settings, ShieldCheck, SquarePen } from 'lucide-react';
 import type { SpaceSummary, Thread } from '../api';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Separator } from '@/components/ui/separator';
@@ -35,7 +34,6 @@ interface Props {
   onRename: (id: string) => void;
   onTogglePin: (id: string) => void;
   onArchive: (id: string) => void;
-  onDelete: (id: string) => void;
 }
 
 function threadLabel(t: Thread): string {
@@ -69,9 +67,7 @@ export function Sidebar({
   onRename,
   onTogglePin,
   onArchive,
-  onDelete,
 }: Props) {
-  const [pendingDeleteThreadId, setPendingDeleteThreadId] = useState<string | null>(null);
   const activeSpace = spaces.find((space) => space.id === activeSpaceId) ?? null;
 
   if (collapsed) {
@@ -231,10 +227,7 @@ export function Sidebar({
       <div className="mt-4 px-4 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">会话</div>
       <nav className="scrollbar-thin mt-1 flex-1 space-y-0.5 overflow-y-auto px-2 pb-4">
         {threads.length === 0 && <div className="px-2 py-3 text-xs text-muted-foreground">还没有会话</div>}
-        {threads.map((t) => {
-          const confirmingDelete = pendingDeleteThreadId === t.id;
-
-          return (
+        {threads.map((t) => (
             <div
               key={t.id}
               className={cn(
@@ -257,11 +250,7 @@ export function Sidebar({
                 {t.pinned_at && <Pin className="size-3 shrink-0 text-muted-foreground" />}
                 <span className="min-w-0 truncate">{threadLabel(t)}</span>
               </a>
-              {!readOnly && <DropdownMenu
-                onOpenChange={(open) => {
-                  if (!open && confirmingDelete) setPendingDeleteThreadId(null);
-                }}
-              >
+              {!readOnly && <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button
                     type="button"
@@ -286,30 +275,10 @@ export function Sidebar({
                     <Archive className="size-4" />
                     归档
                   </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem
-                    className={cn(
-                      'text-destructive focus:text-destructive',
-                      confirmingDelete && 'bg-destructive/10 focus:bg-destructive/15',
-                    )}
-                    onSelect={(event) => {
-                      if (!confirmingDelete) {
-                        event.preventDefault();
-                        setPendingDeleteThreadId(t.id);
-                        return;
-                      }
-                      setPendingDeleteThreadId(null);
-                      onDelete(t.id);
-                    }}
-                  >
-                    <Trash2 className="size-4" />
-                    {confirmingDelete ? '确认删除' : '删除'}
-                  </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>}
             </div>
-          );
-        })}
+          ))}
       </nav>
 
       <div className="mt-auto">

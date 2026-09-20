@@ -156,7 +156,7 @@ async function requireLiveAccess(tx: Transaction, access: ExternalCallerAccess, 
         space_id: access.caller.spaceId,
         status: 'active',
         tenants: { status: 'active' },
-        spaces: { mode: 'external', deleted_at: null },
+        spaces: { mode: 'external' },
       },
     },
     select: {
@@ -297,7 +297,7 @@ export class PrismaExternalRepository implements ExternalRepository {
         external_callers: {
           status: 'active',
           tenants: { status: 'active' },
-          spaces: { mode: 'external', deleted_at: null },
+          spaces: { mode: 'external' },
         },
       },
       data: { last_used_at: now },
@@ -336,7 +336,7 @@ export class PrismaExternalRepository implements ExternalRepository {
   }): Promise<ExternalCallerWithTokens> {
     const result = await prisma.$transaction(async (tx) => {
       const space = await tx.spaces.findFirst({
-        where: { id: input.spaceId, tenant_id: input.tenantId, mode: 'external', deleted_at: null },
+        where: { id: input.spaceId, tenant_id: input.tenantId, mode: 'external' },
         select: { id: true },
       });
       if (!space) throw new ExternalApiError(404, 'SPACE_NOT_FOUND', '外部空间不存在');
@@ -411,7 +411,7 @@ export class PrismaExternalRepository implements ExternalRepository {
         tenant_id: input.tenantId,
         space_id: input.spaceId,
         status: 'active',
-        spaces: { mode: 'external', deleted_at: null },
+        spaces: { mode: 'external' },
       },
       select: { id: true },
     });

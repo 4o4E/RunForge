@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { CreateSpaceInput, SpaceOptions, SpaceSummary, TenantUserSummary, UpdateSpaceInput } from '@runforge/contracts';
-import { ArchiveRestore, FileText, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { FileText, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import type { SpaceControlApi } from '@/spaceControlApi';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { ExternalCallersPanel } from './ExternalCallersPanel';
 import { SpaceEditorDialog } from './SpaceEditorDialog';
@@ -32,10 +34,12 @@ export function SpaceManagementPanel({
   const [editingSpace, setEditingSpace] = useState<SpaceSummary | null>(null);
   const [saving, setSaving] = useState(false);
   const [editorError, setEditorError] = useState('');
-  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<SpaceSummary | null>(null);
+  const [replacementDefaultSpaceId, setReplacementDefaultSpaceId] = useState('');
+  const [deleting, setDeleting] = useState(false);
 
   const selected = useMemo(
-    () => spaces.find((space) => space.id === selectedId) ?? spaces.find((space) => !space.deletedAt) ?? spaces[0] ?? null,
+    () => spaces.find((space) => space.id === selectedId) ?? spaces[0] ?? null,
     [selectedId, spaces],
   );
 
@@ -43,7 +47,7 @@ export function SpaceManagementPanel({
     setLoading(true);
     try {
       const [spaceResult, optionResult, userResult] = await Promise.all([
-        api.listSpaces(true),
+        api.listSpaces(),
         api.getOptions(),
         api.listUsers(),
       ]);
@@ -52,7 +56,7 @@ export function SpaceManagementPanel({
       setUsers(userResult.users);
       setSelectedId(spaceResult.spaces.some((space) => space.id === preferredId)
         ? preferredId
-        : spaceResult.spaces.find((space) => !space.deletedAt)?.id ?? spaceResult.spaces[0]?.id ?? null);
+        : spaceResult.spaces[0]?.id ?? null);
       setMessage('');
     } catch (error) {
       setMessage(`读取空间配置失败：${(error as Error).message}`);
@@ -95,28 +99,30 @@ export function SpaceManagementPanel({
     }
   }
 
-  async function deleteSpace(space: SpaceSummary) {
-    if (pendingDeleteId !== space.id) {
-      setPendingDeleteId(space.id);
-      return;
-    }
-    setPendingDeleteId(null);
-    try {
-      await api.deleteSpace(space.id);
-      await refresh(space.id);
-      setMessage('空间已软删除，关联会话和文件仍保留；全部外部 Token 已吊销。');
-    } catch (error) {
-      setMessage(`删除空间失败：${(error as Error).message}`);
-    }
+  function openDelete(space: SpaceSummary) {
+    setDeleteTarget(space);
+    setReplacementDefaultSpaceId(
+      space.isDefault
+        ? spaces.find((candidate) => candidate.id !== space.id && candidate.mode === 'web')?.id ?? ''
+        : '',
+    );
   }
 
-  async function restoreSpace(space: SpaceSummary) {
+  async function deleteSpace() {
+    if (!deleteTarget) return;
+    setDeleting(true);
     try {
-      await api.restoreSpace(space.id);
-      await refresh(space.id);
-      setMessage('空间已恢复；历史外部 Token 保持吊销，需要重新签发。');
+      await api.deleteSpace(deleteTarget.id, deleteTarget.isDefault
+        ? { replacementDefaultSpaceId }
+        : {});
+      const preferredId = deleteTarget.isDefault ? replacementDefaultSpaceId : null;
+      setDeleteTarget(null);
+      await refresh(preferredId);
+      setMessage('空间及其数据库记录已永久删除，关联文件清理已经执行。');
     } catch (error) {
-      setMessage(`恢复空间失败：${(error as Error).message}`);
+      setMessage(`删除空间失败：${(error as Error).message}`);
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -148,7 +154,6 @@ export function SpaceManagementPanel({
               className={cn(
                 'mb-1 grid w-full gap-1 rounded-md px-3 py-2 text-left transition-colors hover:bg-accent/60',
                 selected?.id === space.id && 'bg-accent ring-1 ring-border',
-                space.deletedAt && 'opacity-60',
               )}
             >
               <span className="flex min-w-0 items-center gap-2">
@@ -156,7 +161,7 @@ export function SpaceManagementPanel({
                 {space.isDefault && <Badge variant="outline">default</Badge>}
                 <Badge variant={space.mode === 'external' ? 'secondary' : 'outline'}>{space.mode}</Badge>
               </span>
-              <span className="truncate text-xs text-muted-foreground">{space.id} · 配置 v{space.configVersion}{space.deletedAt ? ' · 已删除' : ''}</span>
+              <span className="truncate text-xs text-muted-foreground">{space.id} · 配置 v{space.configVersion}</span>
             </button>
           ))}
           {!spaces.length && !loading && <div className="p-4 text-sm text-muted-foreground">当前租户没有空间。</div>}
@@ -170,21 +175,13 @@ export function SpaceManagementPanel({
                   <h2 className="truncate text-lg font-semibold">{selected.name}</h2>
                   <p className="mt-1 text-xs text-muted-foreground">{selected.id} · 创建 {new Date(selected.createdAt).toLocaleString()} · 更新 {new Date(selected.updatedAt).toLocaleString()}</p>
                 </div>
-                {selected.deletedAt ? (
-                  <Button size="sm" onClick={() => void restoreSpace(selected)}><ArchiveRestore className="size-4" />恢复</Button>
-                ) : (
-                  <>
-                    <Button variant="outline" size="sm" onClick={() => onManagePrompt(selected.id)}>
-                      <FileText className="size-4" />提示词
-                    </Button>
-                    <Button variant="outline" size="sm" onClick={() => openEdit(selected)}><Pencil className="size-4" />编辑</Button>
-                    {!selected.isDefault && (
-                      <Button variant="outline" size="sm" onClick={() => void deleteSpace(selected)}>
-                        <Trash2 className="size-4" />{pendingDeleteId === selected.id ? '确认软删除' : '软删除'}
-                      </Button>
-                    )}
-                  </>
-                )}
+                <Button variant="outline" size="sm" onClick={() => onManagePrompt(selected.id)}>
+                  <FileText className="size-4" />提示词
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => openEdit(selected)}><Pencil className="size-4" />编辑</Button>
+                <Button variant="destructive" size="sm" onClick={() => openDelete(selected)}>
+                  <Trash2 className="size-4" />永久删除
+                </Button>
               </div>
 
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -193,7 +190,7 @@ export function SpaceManagementPanel({
                 <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">可见 member</div><div className="mt-1 text-sm font-medium">{selected.visibleUserIds.length} 人</div></div>
               </div>
 
-              {selected.mode === 'external' && !selected.deletedAt && (
+              {selected.mode === 'external' && (
                 <ExternalCallersPanel key={selected.id} api={api} space={selected} />
               )}
             </div>
@@ -216,6 +213,38 @@ export function SpaceManagementPanel({
         }}
         onSave={saveSpace}
       />
+
+      <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>永久删除空间</DialogTitle>
+            <DialogDescription>将永久删除 {deleteTarget?.name} 及其全部会话、运行记录、凭证和文件。</DialogDescription>
+          </DialogHeader>
+          {deleteTarget?.isDefault && (
+            <div className="grid gap-2">
+              <div className="text-sm font-medium">新的默认空间</div>
+              <Select value={replacementDefaultSpaceId} onValueChange={setReplacementDefaultSpaceId}>
+                <SelectTrigger><SelectValue placeholder="选择 Web 空间" /></SelectTrigger>
+                <SelectContent>
+                  {spaces.filter((space) => space.id !== deleteTarget.id && space.mode === 'web').map((space) => (
+                    <SelectItem key={space.id} value={space.id}>{space.name} · {space.id}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>取消</Button>
+            <Button
+              variant="destructive"
+              onClick={() => void deleteSpace()}
+              disabled={deleting || Boolean(deleteTarget?.isDefault && !replacementDefaultSpaceId)}
+            >
+              {deleting ? '删除中…' : '永久删除'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }

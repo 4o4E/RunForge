@@ -1,6 +1,7 @@
 import type { RunRow, Scope, Store, ThreadRow } from '../store/types.js';
 import { SpaceConfigChangedError } from '../store/types.js';
 import { store as defaultStore } from '../store/index.js';
+import { deletionGate } from '../deletion/gate.js';
 import { spaceConfigService as defaultConfigService, type SpaceConfigService } from './config.js';
 
 export interface AdmitWebRunInput {
@@ -20,28 +21,33 @@ export class RunAdmissionService {
   ) {}
 
   async createWebRun(scope: Scope, thread: ThreadRow, input: AdmitWebRunInput): Promise<RunRow> {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const space = await this.store.findSpace(scope.tenantId, thread.space_id);
-      if (!space) throw new Error('space 不存在');
-      const resolved = await this.configService.resolveForRun(
-        scope.tenantId,
-        space,
-        input.requestedModelRef,
-      );
-      try {
-        return await this.store.createRun(scope, thread.id, input.input, {
-          modelRef: resolved.modelRef,
-          parentRunId: input.parentRunId,
-          runtimeCapabilitiesSnapshot: resolved.runtimeCapabilitiesSnapshot as unknown as Record<string, unknown>,
-          spaceConfigSnapshot: resolved.snapshot as unknown as Record<string, unknown>,
-          pluginLock: resolved.pluginLock as unknown as Record<string, unknown>,
-          expectedSpaceConfigVersion: resolved.configVersion,
-        });
-      } catch (error) {
-        if (!(error instanceof SpaceConfigChangedError) || attempt > 0) throw error;
+    const admission = deletionGate.enter({ tenantId: scope.tenantId, spaceId: thread.space_id, threadId: thread.id });
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const space = await this.store.findSpace(scope.tenantId, thread.space_id);
+        if (!space) throw new Error('space 不存在');
+        const resolved = await this.configService.resolveForRun(
+          scope.tenantId,
+          space,
+          input.requestedModelRef,
+        );
+        try {
+          return await this.store.createRun(scope, thread.id, input.input, {
+            modelRef: resolved.modelRef,
+            parentRunId: input.parentRunId,
+            runtimeCapabilitiesSnapshot: resolved.runtimeCapabilitiesSnapshot as unknown as Record<string, unknown>,
+            spaceConfigSnapshot: resolved.snapshot as unknown as Record<string, unknown>,
+            pluginLock: resolved.pluginLock as unknown as Record<string, unknown>,
+            expectedSpaceConfigVersion: resolved.configVersion,
+          });
+        } catch (error) {
+          if (!(error instanceof SpaceConfigChangedError) || attempt > 0) throw error;
+        }
       }
+      throw new SpaceConfigChangedError();
+    } finally {
+      admission.finish();
     }
-    throw new SpaceConfigChangedError();
   }
 }
 

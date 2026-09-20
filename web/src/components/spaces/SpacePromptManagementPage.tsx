@@ -109,12 +109,11 @@ export function SpacePromptManagementPage({ api, spaceId, onBack }: Props) {
             </div>
             <div className="flex items-center gap-2">
               <Button variant="outline" size="sm" onClick={onBack}><ArrowLeft className="size-4" />返回</Button>
-              <Button size="sm" onClick={() => void save()} disabled={!dirty || saving || Boolean(space.deletedAt)}>
+              <Button size="sm" onClick={() => void save()} disabled={!dirty || saving}>
                 <Save className="size-4" />{saving ? '保存中…' : '保存'}
               </Button>
             </div>
           </div>
-          {space.deletedAt && <div className="text-sm text-destructive">空间已经删除，请先恢复空间再修改提示词。</div>}
           {dirty && !saveMessage && <div className="text-sm text-muted-foreground">提示词有未保存的修改。</div>}
           {saveMessage && <div className={saveMessage.startsWith('保存失败') ? 'text-sm text-destructive' : 'text-sm text-muted-foreground'}>{saveMessage}</div>}
         </CardHeader>

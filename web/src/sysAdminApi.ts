@@ -79,6 +79,11 @@ export const updateSystemTenantStatus = (id: string, status: 'active' | 'suspend
     body: JSON.stringify({ status }),
   }).then(json<{ tenant: TenantSummary }>);
 
+export const deleteSystemTenant = async (id: string): Promise<void> => {
+  const response = await sysAdminAuthFetch(`/api/system/tenants/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (!response.ok) await json<never>(response);
+};
+
 export const listSystemTenantUsers = (tenantId: string) =>
   sysAdminAuthFetch(`/api/system/tenants/${encodeURIComponent(tenantId)}/users`)
     .then(json<{ users: TenantUserSummary[] }>);
@@ -96,6 +101,14 @@ export const updateSystemTenantUser = (tenantId: string, userId: string, input: 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   }).then(json<TenantUserSummary>);
+
+export const deleteSystemTenantUser = async (tenantId: string, userId: string): Promise<void> => {
+  const response = await sysAdminAuthFetch(
+    `/api/system/tenants/${encodeURIComponent(tenantId)}/users/${encodeURIComponent(userId)}`,
+    { method: 'DELETE' },
+  );
+  if (!response.ok) await json<never>(response);
+};
 
 export const getTenantResourceAuthorization = (tenantId: string) =>
   sysAdminAuthFetch(`/api/system/tenant-access/${encodeURIComponent(tenantId)}`)
@@ -119,3 +132,8 @@ export const createSystemAdminAccount = (input: CreateSystemAdminInput) =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   }).then(json<SystemAdminSummary>);
+
+export const deleteSystemAdminAccount = async (id: string): Promise<void> => {
+  const response = await sysAdminAuthFetch(`/api/system/admins/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (!response.ok) await json<never>(response);
+};

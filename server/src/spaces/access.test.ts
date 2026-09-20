@@ -93,7 +93,7 @@ test('SpaceAccessService: 管理员始终可见，member 严格按名单可见',
     (error: unknown) => error instanceof SpaceAccessError && error.code === 'SPACE_MANAGE_FORBIDDEN',
   );
 
-  await ctx.store.updateUserStatus(ctx.member.id, 'disabled');
+  await ctx.store.updateUser(ctx.member.id, { status: 'disabled' });
   await assert.rejects(
     ctx.service.list(ctx.memberIdentity),
     (error: unknown) => error instanceof SpaceAccessError && error.code === 'SPACE_ACTOR_DISABLED',
@@ -121,6 +121,18 @@ test('SpaceAccessService: external space 只接受本 tenant 的 active executio
       executionUserId: other.owner.id,
     }),
     (error: unknown) => error instanceof SpaceAccessError && error.code === 'SPACE_EXECUTION_USER_INVALID',
+  );
+  await assert.rejects(
+    ctx.store.createSpace({
+      tenantId: ctx.provisioned.tenant.id,
+      mode: 'web',
+      name: 'Cross Tenant Creator',
+      executionUserId: null,
+      config: {},
+      createdByUserId: other.owner.id,
+      visibleUserIds: [],
+    }),
+    /createdByUserId 不属于当前租户/,
   );
 
   const external = await ctx.service.create(ctx.ownerIdentity, {
@@ -178,15 +190,10 @@ test('SpaceAccessService: 部分配置更新保留已经保存的能力列表', 
   assert.deepEqual(updated.config.capabilities.runtime, created.config.capabilities.runtime);
 });
 
-test('SpaceAccessService: default 可重命名但不可删除，普通空间软删除和恢复保留名单', async () => {
+test('SpaceAccessService: default 可重命名，删除时切换默认空间，普通空间永久删除', async () => {
   const ctx = await fixture();
   const renamedDefault = await ctx.service.update(ctx.ownerIdentity, ctx.provisioned.defaultSpace.id, { name: 'Renamed' });
   assert.equal(renamedDefault.name, 'Renamed');
-  await assert.rejects(
-    ctx.service.delete(ctx.ownerIdentity, ctx.provisioned.defaultSpace.id),
-    (error: unknown) => error instanceof SpaceAccessError && error.code === 'DEFAULT_SPACE_IMMUTABLE',
-  );
-
   const configuredDefault = await ctx.service.update(ctx.ownerIdentity, ctx.provisioned.defaultSpace.id, {
     config: { systemPrompt: 'updated' },
   });
@@ -194,21 +201,24 @@ test('SpaceAccessService: default 可重命名但不可删除，普通空间软�
 
   const space = await ctx.service.create(ctx.ownerIdentity, {
     mode: 'web',
-    name: 'Recoverable',
+    name: 'Replacement',
     visibleUserIds: [ctx.member.id],
   });
-  const deleted = await ctx.service.delete(ctx.ownerIdentity, space.id);
-  assert.ok(deleted.deletedAt);
-  assert.deepEqual(await ctx.service.list(ctx.memberIdentity), []);
-  assert.equal((await ctx.service.list(ctx.ownerIdentity, true)).some((item) => item.id === space.id), true);
-
-  const restored = await ctx.service.restore(ctx.ownerIdentity, space.id);
-  assert.equal(restored.deletedAt, null);
-  assert.deepEqual(restored.visibleUserIds, [ctx.member.id]);
+  await assert.rejects(
+    ctx.service.delete(ctx.ownerIdentity, ctx.provisioned.defaultSpace.id, {}),
+    (error: unknown) => error instanceof SpaceAccessError && error.code === 'DEFAULT_SPACE_REPLACEMENT_REQUIRED',
+  );
+  await ctx.service.delete(ctx.ownerIdentity, ctx.provisioned.defaultSpace.id, { replacementDefaultSpaceId: space.id });
+  assert.equal((await ctx.store.getDefaultSpace(ctx.provisioned.tenant.id))?.id, space.id);
+  assert.equal(await ctx.store.findSpace(ctx.provisioned.tenant.id, ctx.provisioned.defaultSpace.id), null);
   assert.deepEqual((await ctx.service.list(ctx.memberIdentity)).map((item) => item.id), [space.id]);
+
+  const disposable = await ctx.service.create(ctx.ownerIdentity, { mode: 'web', name: 'Disposable' });
+  await ctx.service.delete(ctx.ownerIdentity, disposable.id, {});
+  assert.equal(await ctx.store.findSpace(ctx.provisioned.tenant.id, disposable.id), null);
 });
 
-test('SpaceAccessService: Web 写入只允许可见的未删除 web space', async () => {
+test('SpaceAccessService: Web 写入只允许可见的 web space', async () => {
   const ctx = await fixture();
   const web = await ctx.service.create(ctx.ownerIdentity, {
     mode: 'web',
@@ -227,10 +237,10 @@ test('SpaceAccessService: Web 写入只允许可见的未删除 web space', asyn
     ctx.service.requireWritableWebSpace(ctx.ownerIdentity, external.id),
     (error: unknown) => error instanceof SpaceAccessError && error.code === 'SPACE_READ_ONLY',
   );
-  await ctx.service.delete(ctx.ownerIdentity, web.id);
+  await ctx.service.delete(ctx.ownerIdentity, web.id, {});
   await assert.rejects(
     ctx.service.requireWritableWebSpace(ctx.memberIdentity, web.id),
-    (error: unknown) => error instanceof SpaceAccessError && error.code === 'SPACE_DELETED',
+    (error: unknown) => error instanceof SpaceAccessError && error.code === 'SPACE_NOT_FOUND',
   );
 });
 

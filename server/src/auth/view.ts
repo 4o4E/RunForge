@@ -8,6 +8,7 @@ export function toUserSummary(user: UserRow): TenantUserSummary {
     email: user.email,
     role: user.role,
     status: user.status,
+    isDefaultAdmin: user.is_bootstrap,
     createdAt: user.created_at,
   };
 }
@@ -27,6 +28,7 @@ export function toTenantSummary(tenant: TenantRow): TenantSummary {
     id: tenant.id,
     name: tenant.name,
     status: tenant.status,
+    isDefault: tenant.is_bootstrap,
     createdAt: tenant.created_at,
   };
 }
@@ -36,6 +38,7 @@ export function toSystemAdminSummary(admin: SystemAdminRow): SystemAdminSummary 
     id: admin.id,
     email: admin.email,
     status: admin.status,
+    isDefaultAdmin: admin.is_bootstrap,
     createdAt: admin.created_at,
   };
 }

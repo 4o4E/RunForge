@@ -1,7 +1,8 @@
 import type { CreateUserInput, TenantUserRole, UpdateUserInput } from '@runforge/contracts';
 import { hashPassword } from '../auth/passwords.js';
+import { removeUserWorkspace } from '../files/workspaceRoot.js';
 import { store } from '../store/index.js';
-import type { UserRow } from '../store/types.js';
+import { DeleteConflictError, type UserRow } from '../store/types.js';
 
 export type TenantUserActor =
   | { scope: 'system' }
@@ -93,25 +94,44 @@ export async function updateTenantUser(
     }
   }
 
-  const willLoseOwnerStatus =
-    target.role === 'owner'
-    && target.status === 'active'
-    && ((role !== undefined && role !== 'owner') || (status !== undefined && status !== 'active'));
-  if (willLoseOwnerStatus) {
-    const users = await store.listUsersByTenant(tenantId);
-    const hasOtherActiveOwner = users.some((user) => (
-      user.id !== target.id && user.role === 'owner' && user.status === 'active'
-    ));
-    if (!hasOtherActiveOwner) throw new TenantUserError(409, '不能移除租户唯一的 active owner');
+  let updated: UserRow | null;
+  try {
+    updated = await store.updateUser(target.id, {
+      email,
+      passwordHash: password === undefined ? undefined : hashPassword(password),
+      role,
+      status,
+    });
+  } catch (error) {
+    if (error instanceof DeleteConflictError) throw new TenantUserError(409, error.message);
+    throw error;
   }
-
-  const updated = await store.updateUser(target.id, {
-    email,
-    passwordHash: password === undefined ? undefined : hashPassword(password),
-    role,
-    status,
-  });
   if (!updated) throw new TenantUserError(404, '用户不存在');
   if (password !== undefined) await store.revokeRefreshTokensByUser(target.id);
   return updated;
+}
+
+export async function deleteTenantUser(
+  tenantId: string,
+  userId: string,
+  actor: TenantUserActor,
+): Promise<void> {
+  const target = await store.findUserById(userId);
+  if (!target || target.tenant_id !== tenantId) throw new TenantUserError(404, '用户不存在');
+
+  if (actor.scope === 'tenant') {
+    if (actor.role === 'member') throw new TenantUserError(403, '需要 owner 或 admin 权限');
+    if (actor.role === 'admin' && target.role !== 'member') {
+      throw new TenantUserError(403, 'admin 只能管理 member 账号');
+    }
+  }
+
+  try {
+    const deleted = await store.deleteUser(tenantId, userId);
+    if (!deleted) throw new TenantUserError(404, '用户不存在');
+  } catch (error) {
+    if (error instanceof DeleteConflictError) throw new TenantUserError(409, error.message);
+    throw error;
+  }
+  await removeUserWorkspace(tenantId, userId);
 }

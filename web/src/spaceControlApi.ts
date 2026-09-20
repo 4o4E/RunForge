@@ -2,6 +2,7 @@ import type {
   CreateExternalCallerInput,
   CreateExternalCallerResponse,
   CreateSpaceInput,
+  DeleteSpaceInput,
   ExternalCallerSummary,
   ExternalTokenSummary,
   PromptPlaceholdersView,
@@ -19,15 +20,14 @@ export interface ExternalCallerWithTokens {
 }
 
 export interface SpaceControlApi {
-  listSpaces(includeDeleted?: boolean): Promise<{ spaces: SpaceSummary[] }>;
+  listSpaces(): Promise<{ spaces: SpaceSummary[] }>;
   getSpace(spaceId: string): Promise<SpaceSummary>;
   getOptions(): Promise<SpaceOptions>;
   getPromptPlaceholders(spaceId: string): Promise<PromptPlaceholdersView>;
   listUsers(): Promise<{ users: TenantUserSummary[] }>;
   createSpace(input: CreateSpaceInput): Promise<SpaceSummary>;
   updateSpace(spaceId: string, input: UpdateSpaceInput): Promise<SpaceSummary>;
-  deleteSpace(spaceId: string): Promise<SpaceSummary>;
-  restoreSpace(spaceId: string): Promise<SpaceSummary>;
+  deleteSpace(spaceId: string, input?: DeleteSpaceInput): Promise<void>;
   listCallers(spaceId: string): Promise<{ callers: ExternalCallerWithTokens[] }>;
   createCaller(spaceId: string, input: CreateExternalCallerInput): Promise<CreateExternalCallerResponse>;
   updateCaller(
@@ -58,7 +58,7 @@ async function json<T>(response: Response): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-function body(method: 'POST' | 'PATCH', value?: unknown): RequestInit {
+function body(method: 'POST' | 'PATCH' | 'DELETE', value?: unknown): RequestInit {
   return {
     method,
     ...(value === undefined ? {} : {
@@ -75,7 +75,7 @@ function createSpaceControlApi(
 ): SpaceControlApi {
   const path = (suffix = '') => `${base}${suffix}`;
   return {
-    listSpaces: (includeDeleted = true) => fetcher(path(includeDeleted ? '?includeDeleted=1' : ''))
+    listSpaces: () => fetcher(path())
       .then(json<{ spaces: SpaceSummary[] }>),
     getSpace: (spaceId) => fetcher(path(`/${encodeURIComponent(spaceId)}`)).then(json<SpaceSummary>),
     getOptions: () => fetcher(path('/options')).then(json<SpaceOptions>),
@@ -84,8 +84,10 @@ function createSpaceControlApi(
     listUsers,
     createSpace: (input) => fetcher(path(), body('POST', input)).then(json<SpaceSummary>),
     updateSpace: (spaceId, input) => fetcher(path(`/${encodeURIComponent(spaceId)}`), body('PATCH', input)).then(json<SpaceSummary>),
-    deleteSpace: (spaceId) => fetcher(path(`/${encodeURIComponent(spaceId)}`), { method: 'DELETE' }).then(json<SpaceSummary>),
-    restoreSpace: (spaceId) => fetcher(path(`/${encodeURIComponent(spaceId)}/restore`), body('POST')).then(json<SpaceSummary>),
+    deleteSpace: async (spaceId, input = {}) => {
+      const response = await fetcher(path(`/${encodeURIComponent(spaceId)}`), body('DELETE', input));
+      if (!response.ok) await json<never>(response);
+    },
     listCallers: (spaceId) => fetcher(path(`/${encodeURIComponent(spaceId)}/callers`))
       .then(json<{ callers: ExternalCallerWithTokens[] }>),
     createCaller: (spaceId, input) => fetcher(path(`/${encodeURIComponent(spaceId)}/callers`), body('POST', input))

@@ -97,6 +97,7 @@ export interface LlmDelta {
  * Provider adapter 本身只负责一次协议转换和发送，不拥有重试状态。 */
 export interface ProviderCallOptions {
   fetch?: typeof globalThis.fetch;
+  abortSignal?: AbortSignal;
 }
 
 /** A pluggable LLM backend. */

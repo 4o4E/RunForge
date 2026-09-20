@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { getIdentity, type IdentityContext } from '../auth/context.js';
 import {
   parseCreateSpaceInput,
+  parseDeleteSpaceInput,
   parseUpdateSpaceInput,
   spaceAccess,
   SpaceAccessError,
@@ -9,6 +10,7 @@ import {
 } from '../spaces/access.js';
 import { externalCallers } from '../external/callers.js';
 import { ExternalApiError } from '../external/types.js';
+import { DeleteConflictError } from '../store/types.js';
 
 export const tenantSpacesApi = Router();
 export const systemSpacesApi = Router({ mergeParams: true });
@@ -17,6 +19,10 @@ type TenantIdentity = Extract<IdentityContext, { scope: 'tenant' }>;
 type ResolveActor = (req: Request, res: Response) => SpaceActorContext | null;
 
 export function sendSpaceError(res: Response, error: unknown): void {
+  if (error instanceof DeleteConflictError) {
+    res.status(409).json({ error: error.message, code: error.code });
+    return;
+  }
   if (error instanceof ExternalApiError) {
     res.status(error.status).json({ error: error.message, code: error.code, ...error.details });
     return;
@@ -42,17 +48,13 @@ const resolveSystemActor: ResolveActor = (req) => ({
   tenantId: (req.params as Record<string, string>).tenantId ?? '',
 });
 
-function includeDeleted(value: unknown): boolean {
-  return value === '1' || value === 'true';
-}
-
 /** 身份入口保持分离，但 CRUD 的解析、错误契约和业务调用只维护一份。 */
 function registerSpaceRoutes(router: Router, resolveActor: ResolveActor): void {
   router.get('/', async (req, res) => {
     const actor = resolveActor(req, res);
     if (!actor) return;
     try {
-      res.json({ spaces: await spaceAccess.list(actor, includeDeleted(req.query.includeDeleted)) });
+      res.json({ spaces: await spaceAccess.list(actor) });
     } catch (error) {
       sendSpaceError(res, error);
     }
@@ -187,17 +189,8 @@ function registerSpaceRoutes(router: Router, resolveActor: ResolveActor): void {
     const actor = resolveActor(req, res);
     if (!actor) return;
     try {
-      res.json(await spaceAccess.delete(actor, req.params.spaceId));
-    } catch (error) {
-      sendSpaceError(res, error);
-    }
-  });
-
-  router.post('/:spaceId/restore', async (req, res) => {
-    const actor = resolveActor(req, res);
-    if (!actor) return;
-    try {
-      res.json(await spaceAccess.restore(actor, req.params.spaceId));
+      await spaceAccess.delete(actor, req.params.spaceId, parseDeleteSpaceInput(req.body));
+      res.status(204).send();
     } catch (error) {
       sendSpaceError(res, error);
     }

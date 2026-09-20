@@ -8,7 +8,14 @@ import { formatHexRows, parseByteRange, previewTextLines } from './files.js';
 import { signFileShare, verifyFileShare } from './auth.js';
 import { config } from '../config.js';
 import { isOfficeConvertiblePath, officePdfCacheKey } from '../files/officePreview.js';
-import { ensureThreadWorkspaceRoot, migrateLegacyBootstrapWorkspace, resolveThreadWorkspaceRoot, resolveWorkspaceRoot } from '../files/workspaceRoot.js';
+import {
+  ensureThreadWorkspaceRoot,
+  migrateLegacyBootstrapWorkspace,
+  resolveThreadWorkspaceRoot,
+  resolveWorkspaceRoot,
+  removeTenantWorkspace,
+  removeUserWorkspace,
+} from '../files/workspaceRoot.js';
 import { signTenantAccessToken } from '../auth/jwt.js';
 import { buildApp, listen, seedOwner } from './testHelpers.js';
 import { spaceAccess } from '../spaces/access.js';
@@ -107,6 +114,24 @@ test('旧 thread 工作目录会原子移动到 space/thread 路径', async () =
     assert.equal(target, join(base, 'sp_default', 'th_legacy'));
     assert.equal(await readFile(join(target, 'note.txt'), 'utf8'), 'legacy thread workspace');
     assert.equal(await ensureThreadWorkspaceRoot('sp_default', 'th_legacy', base), target);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('租户和用户旧工作目录支持直接删除', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'runforge-workspace-delete-'));
+  try {
+    const userRoot = join(base, 'tenants', 'tn_delete', 'users', 'us_delete');
+    await mkdir(userRoot, { recursive: true });
+    await writeFile(join(userRoot, 'note.txt'), 'user workspace');
+    await removeUserWorkspace('tn_delete', 'us_delete', base);
+    assert.equal(existsSync(userRoot), false);
+
+    const tenantRoot = join(base, 'tenants', 'tn_delete');
+    await mkdir(tenantRoot, { recursive: true });
+    await removeTenantWorkspace('tn_delete', base);
+    assert.equal(existsSync(join(base, 'tenants', 'tn_delete')), false);
   } finally {
     await rm(base, { recursive: true, force: true });
   }

@@ -21,7 +21,7 @@ function bearer(token: string) {
   return { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
 }
 
-test('space API: 管理权限、可见名单、execution user 和软删除语义完整生效', async () => {
+test('space API: 管理权限、可见名单、execution user 和永久删除语义完整生效', async () => {
   const tenantId = 'tn_spaces_api';
   const owner = await seedOwner(tenantId, 'owner@spaces-api.test', 'pw');
   const member = await store.createUser({ tenantId, email: 'member@spaces-api.test', passwordHash: 'test', role: 'member' });
@@ -248,16 +248,14 @@ test('space API: 管理权限、可见名单、execution user 和软删除语义
     assert.equal(deleteDefault.status, 409);
 
     const deleted = await fetch(`${base}/spaces/${webSpace.id}`, { method: 'DELETE', headers: bearer(ownerToken) });
-    assert.equal(deleted.status, 200);
-    assert.ok(((await deleted.json()) as SpaceSummary).deletedAt);
+    assert.equal(deleted.status, 204);
     const afterDelete = await fetch(`${base}/spaces`, { headers: bearer(memberToken) });
     assert.deepEqual(
       ((await afterDelete.json()) as { spaces: SpaceSummary[] }).spaces.map((space) => space.id),
       [externalSpace.id],
     );
-    const restored = await fetch(`${base}/spaces/${webSpace.id}/restore`, { method: 'POST', headers: bearer(ownerToken) });
-    assert.equal(restored.status, 200);
-    assert.deepEqual(((await restored.json()) as SpaceSummary).visibleUserIds, [member.id]);
+    const deletedDetail = await fetch(`${base}/spaces/${webSpace.id}`, { headers: bearer(ownerToken) });
+    assert.equal(deletedDetail.status, 404);
   } finally {
     close();
   }

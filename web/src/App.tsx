@@ -9,7 +9,6 @@ import {
   cancelRun,
   continueRun,
   createThread,
-  deleteThread,
   forkThreadFromRun,
   getCurrentUser,
   getLlmSettingsOptions,
@@ -1148,30 +1147,6 @@ export function App() {
     navigateSearch();
   }
 
-  async function removeThread(id: string) {
-    if (readOnly) return;
-    stop();
-    await deleteThread(id);
-    setThreads((current) => current.filter((t) => t.id !== id));
-    setThreadPanelStates((current) => {
-      const next = { ...current };
-      delete next[id];
-      threadPanelStatesRef.current = next;
-      return next;
-    });
-    setThreadDrafts((current) => {
-      const next = { ...current };
-      delete next[id];
-      threadDraftsRef.current = next;
-      return next;
-    });
-    if (activeThreadId === id) {
-      setContinuableRunId(null);
-      navigateChatRoute({ draft: '', spaceId: route.spaceId, threadId: null });
-      setMessages([]);
-    }
-  }
-
   async function renameThread(id: string) {
     if (readOnly) return;
     const current = threads.find((thread) => thread.id === id);
@@ -1625,7 +1600,6 @@ export function App() {
           onRename={(id) => void renameThread(id)}
           onTogglePin={(id) => void toggleThreadPin(id)}
           onArchive={(id) => void archiveThread(id)}
-          onDelete={(id) => void removeThread(id)}
         />
       </div>
       <div
@@ -1774,7 +1748,6 @@ export function App() {
               onRename={(id) => void renameThread(id)}
               onTogglePin={(id) => void toggleThreadPin(id)}
               onArchive={(id) => void archiveThread(id)}
-              onDelete={(id) => void removeThread(id)}
             />
           </div>
         </div>

@@ -149,8 +149,8 @@ export async function maybeGenerateThreadTitleAfterFirstRun(scope: Scope, runId:
   return deps.store.setThreadTitleIfEmpty(scope, target.thread.id, title);
 }
 
-export function scheduleThreadTitleGeneration(scope: Scope, runId: string, deps: ThreadTitleDeps): void {
-  void maybeGenerateThreadTitleAfterFirstRun(scope, runId, deps).catch((err) => {
+export function scheduleThreadTitleGeneration(scope: Scope, runId: string, deps: ThreadTitleDeps): Promise<void> {
+  return maybeGenerateThreadTitleAfterFirstRun(scope, runId, deps).then(() => undefined).catch((err) => {
     console.warn(`thread title generation skipped for ${runId}: ${(err as Error).message}`);
   });
 }

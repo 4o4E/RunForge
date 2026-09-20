@@ -28,9 +28,8 @@ export interface TenantScope {
  *  (executor.ts/recovery.ts/api/runtime.ts)统一调用,避免各处重复实现,也避免
  *  各自用 `thread.user_id ?? ''` 悄悄拼出一个谁都匹配不上的空 scope——那样后续
  *  每个 Store 调用都会静默 0 行受影响而不报错(表现为 run 卡住/丢事件,而不是
- *  一个清晰的错误)。`user_id` 为空只发生在用户被删除后(Prisma migration 的
- *  `ON DELETE SET NULL`),按设计这类 thread 之后对所有人都不可查,这里直接
- *  抛错,由调用方决定是跳过(recovery.ts 的批量恢复)还是让请求失败
+ *  一个清晰的错误)。当前用户存在关联 thread 时禁止删除；`user_id` 仍允许为空以
+ *  兼容旧数据和内部恢复场景。这里直接抛错,由调用方决定是跳过(recovery.ts 的批量恢复)还是让请求失败
  *  (executor.ts/runtime.ts 的单个 run)。 */
 export function scopeForThread(thread: { id: string; tenant_id: string; user_id: string | null }): Scope {
   if (thread.user_id == null) {
@@ -282,7 +281,6 @@ export interface SpaceRow {
   config: Record<string, unknown>;
   config_version: number;
   created_by_user_id: string | null;
-  deleted_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -308,14 +306,18 @@ export interface UpdateSpaceRecordInput {
   visibleUserIds?: string[];
 }
 
-/** default space 的生命周期是 tenant 不变量，持久化层必须再次防守。 */
-export class DefaultSpaceImmutableError extends Error {
-  readonly code = 'DEFAULT_SPACE_IMMUTABLE';
-
-  constructor(message: string) {
+export class DeleteConflictError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
     super(message);
-    this.name = 'DefaultSpaceImmutableError';
+    this.name = 'DeleteConflictError';
   }
+}
+
+export interface DeleteResourceResult {
+  artifactStorageKeys: string[];
 }
 
 export class SpaceConfigChangedError extends Error {
@@ -377,6 +379,7 @@ export interface UserRow {
   password_hash: string;
   role: TenantUserRole;
   status: 'active' | 'disabled';
+  is_bootstrap: boolean;
   created_at: string;
 }
 
@@ -385,6 +388,7 @@ export interface SystemAdminRow {
   email: string;
   password_hash: string;
   status: 'active' | 'disabled';
+  is_bootstrap: boolean;
   created_at: string;
 }
 
@@ -438,7 +442,7 @@ export interface Store {
     fields: { title?: string | null; pinned?: boolean; archived?: boolean; activeRunId?: string | null },
   ): Promise<ThreadRow | null>;
   setThreadTitleIfEmpty(scope: Scope, id: string, title: string): Promise<ThreadRow | null>;
-  deleteThread(scope: Scope, id: string): Promise<boolean>;
+  deleteThread(scope: Scope, id: string): Promise<DeleteResourceResult | null>;
   searchThreadMessages(scope: Scope, query: string, limit?: number, options?: { spaceIds?: string[] }): Promise<ThreadSearchResultRow[]>;
   listThreadNotices(scope: Scope, threadId: string): Promise<ThreadNoticeRow[]>;
   addThreadNotice(scope: Scope, input: {
@@ -458,6 +462,8 @@ export interface Store {
   listRuns(scope: Scope, threadId: string): Promise<RunRow[]>;
   /** 跨租户扫描,只给启动期后台任务(recovery.ts)用,禁止在 api/*.ts 路由里调用。 */
   listRunsByStatusUnscoped(statuses: RunStatus[]): Promise<RunRow[]>;
+  /** 永久删除资源前批量取消目标 thread 的全部非终态 run，并释放执行槽。 */
+  cancelRunsForDeletion(threadIds: string[]): Promise<RunRow[]>;
   setRunStatus(scope: Scope, id: string, status: RunStatus, fields?: { output?: string | null; error?: string | null }): Promise<void>;
   /** 在 provider 调用前，把已接纳的 next_step 输入按版本顺序原子转换成 user message。 */
   applyPendingRunInputs(scope: Scope, id: string): Promise<AppliedRunInput[]>;
@@ -495,6 +501,8 @@ export interface Store {
   getRunUnscoped(id: string): Promise<RunRow | null>;
   /** 同上,给 executeRun/recovery.ts/api/runtime.ts 反推 thread 的 tenant_id/user_id 用。 */
   getThreadUnscoped(id: string): Promise<ThreadRow | null>;
+  /** 永久删除协调器使用；始终要求 tenant 作用域，不能作为普通读取接口。 */
+  listThreadsForDeletion(tenantId: string, spaceId?: string): Promise<ThreadRow[]>;
 
   createStep(scope: Scope, runId: string, idx: number): Promise<StepRow>;
   /** 在 Provider 调用前固定该 step 的最终上下文；同一 step 禁止覆盖。 */
@@ -586,6 +594,8 @@ export interface Store {
   listRunningShellCommandsByRun(scope: Scope, runId: string): Promise<ShellCommandRow[]>;
   /** 跨租户扫描,只给启动期 orphan 标记(shell/manager.ts)用。 */
   listRunningShellCommandsUnscoped(): Promise<ShellCommandRow[]>;
+  /** 永久删除资源前终止没有活动进程句柄的 queued/running 命令。 */
+  cancelShellCommandsForDeletion(threadIds: string[]): Promise<void>;
   /** 跨租户更新,只给 markInterruptedCommandsOrphaned 用——启动期一次性扫过所有
    *  租户遗留的 running 命令,这时候不知道也不需要知道每条命令具体属于哪个 scope。 */
   updateShellCommandUnscoped(
@@ -645,24 +655,24 @@ export interface Store {
   migrateBootstrapTenantId(currentId: string, nextId: string): Promise<TenantRow>;
   listTenants(): Promise<TenantRow[]>;
   updateTenantStatus(id: string, status: 'active' | 'suspended'): Promise<TenantRow | null>;
+  deleteTenant(id: string): Promise<DeleteResourceResult | null>;
   getDefaultSpace(tenantId: string): Promise<SpaceRow | null>;
-  listSpaces(tenantId: string, options?: { includeDeleted?: boolean }): Promise<SpaceWithVisibilityRow[]>;
+  listSpaces(tenantId: string): Promise<SpaceWithVisibilityRow[]>;
   findSpace(tenantId: string, id: string): Promise<SpaceWithVisibilityRow | null>;
   createSpace(input: CreateSpaceRecordInput): Promise<SpaceWithVisibilityRow>;
   updateSpace(tenantId: string, id: string, fields: UpdateSpaceRecordInput): Promise<SpaceWithVisibilityRow | null>;
-  softDeleteSpaceAndRevokeTokens(tenantId: string, id: string): Promise<SpaceWithVisibilityRow | null>;
-  restoreSpace(tenantId: string, id: string): Promise<SpaceWithVisibilityRow | null>;
+  deleteSpace(tenantId: string, id: string, replacementDefaultSpaceId?: string): Promise<DeleteResourceResult | null>;
 
-  createUser(input: { tenantId: string; email: string; passwordHash: string; role: TenantUserRole }): Promise<UserRow>;
+  createUser(input: { tenantId: string; email: string; passwordHash: string; role: TenantUserRole; isBootstrap?: boolean }): Promise<UserRow>;
   findUserByEmail(tenantId: string, email: string): Promise<UserRow | null>;
   findUserById(id: string): Promise<UserRow | null>;
   listUsersByTenant(tenantId: string): Promise<UserRow[]>;
-  updateUserRole(id: string, role: TenantUserRole): Promise<UserRow | null>;
-  updateUserStatus(id: string, status: 'active' | 'disabled'): Promise<UserRow | null>;
   updateUser(
     id: string,
     fields: { email?: string; passwordHash?: string; role?: TenantUserRole; status?: 'active' | 'disabled' },
   ): Promise<UserRow | null>;
+  markBootstrapUser(id: string): Promise<UserRow>;
+  deleteUser(tenantId: string, id: string): Promise<boolean>;
   revokeRefreshTokensByUser(userId: string): Promise<void>;
 
   createAuthToken(input: {
@@ -677,10 +687,12 @@ export interface Store {
   revokeAuthToken(id: string): Promise<void>;
   listApiTokensByTenant(tenantId: string): Promise<AuthTokenRow[]>;
 
-  createSystemAdmin(input: { email: string; passwordHash: string }): Promise<SystemAdminRow>;
+  createSystemAdmin(input: { email: string; passwordHash: string; isBootstrap?: boolean }): Promise<SystemAdminRow>;
   findSystemAdminByEmail(email: string): Promise<SystemAdminRow | null>;
   findSystemAdminById(id: string): Promise<SystemAdminRow | null>;
   listSystemAdmins(): Promise<SystemAdminRow[]>;
+  markBootstrapSystemAdmin(id: string): Promise<SystemAdminRow>;
+  deleteSystemAdmin(id: string): Promise<boolean>;
 
   createSystemAdminToken(input: {
     systemAdminId: string;

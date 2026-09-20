@@ -157,6 +157,44 @@ test('ProviderRunner: 已向 runtime 发布流式增量后不重试', async () =
   assert.equal([...repository.invocations.values()][0].status, 'error');
 });
 
+test('ProviderRunner: 业务取消会立即中止当前请求且不会重试', async () => {
+  const repository = new MemoryProviderObservationRepository();
+  const controller = new AbortController();
+  let started!: () => void;
+  const requestStarted = new Promise<void>((resolve) => { started = resolve; });
+  let calls = 0;
+  const provider: Provider = {
+    name: 'fake-cancel',
+    async completeStream(_messages, _tools, _onDelta, options) {
+      calls += 1;
+      const signal = options?.abortSignal;
+      assert.ok(signal);
+      started();
+      return new Promise<LlmResult>((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    },
+  };
+  const runner = new ProviderRunner(
+    repository,
+    null,
+    async () => assert.fail('业务取消后不应重试'),
+    () => 0,
+  );
+  const running = runner.run({
+    provider,
+    context: { ...context, retries: 3 },
+    messages: [{ role: 'user', content: 'hello' }],
+    tools: [],
+    abortSignal: controller.signal,
+  });
+  await requestStarted;
+  controller.abort(new Error('resource deleted'));
+  await assert.rejects(running, /resource deleted/);
+  assert.equal(calls, 1);
+  assert.equal([...repository.invocations.values()][0].status, 'error');
+});
+
 test('ProviderRunner: 保存响应解析错误且不把它当成可重试传输错误', async () => {
   const repository = new MemoryProviderObservationRepository();
   let calls = 0;

@@ -37,6 +37,7 @@ export interface RunProviderInput {
   tools: LlmTool[];
   onDelta?: (delta: LlmDelta) => void;
   onRetry?: (input: { attempt: number; message: string }) => void | Promise<void>;
+  abortSignal?: AbortSignal;
 }
 
 interface AttemptSnapshot {
@@ -60,6 +61,26 @@ class ProviderTransportError extends Error {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function waitForRetry(
+  delay: number,
+  signal: AbortSignal | undefined,
+  sleep: (ms: number) => Promise<void>,
+): Promise<boolean> {
+  if (!signal) {
+    await sleep(delay);
+    return true;
+  }
+  if (signal.aborted) return false;
+  return new Promise<boolean>((resolve) => {
+    const onAbort = () => resolve(false);
+    signal.addEventListener('abort', onAbort, { once: true });
+    void sleep(delay).then(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve(!signal.aborted);
+    });
+  });
 }
 
 function jsonBody(text: string): unknown {
@@ -258,7 +279,7 @@ export class ProviderRunner {
           input.messages,
           input.tools,
           onDelta,
-          { fetch: observingFetch },
+          { fetch: observingFetch, abortSignal: input.abortSignal },
         );
         const endedAt = new Date().toISOString();
         const normalizedResponse = resultForPersistence(result);
@@ -308,7 +329,8 @@ export class ProviderRunner {
         const endedAt = new Date().toISOString();
         const message = errorMessage(error);
         const kind = errorKind(error, snapshot.httpStatus);
-        const shouldRetry = !publishedDelta
+        const shouldRetry = !input.abortSignal?.aborted
+          && !publishedDelta
           && attempt <= input.context.retries
           && retryable(error, snapshot.httpStatus);
         if (snapshot.id) {
@@ -352,7 +374,18 @@ export class ProviderRunner {
           console.warn(
             `[provider] invocation ${invocationId} attempt ${attempt} 失败，将在 ${delay}ms 后重试：${message}`,
           );
-          await this.sleep(delay);
+          if (!await waitForRetry(delay, input.abortSignal, this.sleep)) {
+            const abortError = input.abortSignal?.reason instanceof Error
+              ? input.abortSignal.reason
+              : new Error('Provider 请求已取消');
+            await this.repository.finishInvocation(invocationId, {
+              status: 'error',
+              normalizedResponse: null,
+              error: abortError.message,
+              endedAt: new Date().toISOString(),
+            });
+            throw abortError;
+          }
           continue;
         }
         await this.repository.finishInvocation(invocationId, {

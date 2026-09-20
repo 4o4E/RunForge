@@ -17,7 +17,13 @@ import { systemApi } from './system.js';
 import { sendSpaceError, tenantSpacesApi } from './spaces.js';
 import { requireSystemScope, requireTenantScope } from '../auth/guards.js';
 import { getIdentity, requireScope, type IdentityContext } from '../auth/context.js';
-import type { Scope, ShellSessionRow, StepContextSnapshot } from '../store/types.js';
+import {
+  DeleteConflictError,
+  type DeleteResourceResult,
+  type Scope,
+  type ShellSessionRow,
+  type StepContextSnapshot,
+} from '../store/types.js';
 import { releaseRunLeases } from '../datasources/accountPool.js';
 import type { AskUserAnswer, AskUserOption, AskUserSpec } from '../agent/types.js';
 import { shellManager } from '../shell/manager.js';
@@ -32,7 +38,12 @@ import { SpaceConfigError } from '../spaces/config.js';
 import { runAdmission } from '../spaces/runAdmission.js';
 import { externalApi } from './external.js';
 import { threadWorkspaceAccess, ThreadWorkspaceAccessError } from '../files/threadWorkspace.js';
+import { removeThreadWorkspace } from '../files/workspaceRoot.js';
 import { threadReadAccess, ThreadReadAccessError } from '../threads/readAccess.js';
+import { deletionGate } from '../deletion/gate.js';
+import { stopThreadsForDeletion } from '../deletion/runtime.js';
+import { removeExternalArtifacts } from '../deletion/files.js';
+import { abortRunExecution } from '../agent/executionControl.js';
 
 export const api = Router();
 
@@ -71,6 +82,10 @@ async function checkThreadSpaceAccess(
 }
 
 function sendRunActiveConflict(res: Response, err: unknown): boolean {
+  if (err instanceof DeleteConflictError) {
+    res.status(409).json({ error: err.message, code: err.code });
+    return true;
+  }
   if (!(err instanceof RunActiveError)) return false;
   res.status(409).json({
     error: err.message,
@@ -250,8 +265,13 @@ api.post('/threads', async (req, res) => {
   const title = req.body?.title ? String(req.body.title) : undefined;
   try {
     const space = await spaceAccess.requireWritableWebSpace(identity, optionalText(req.body?.spaceId));
-    const thread = await store.createThread(scope, title, { spaceId: space.id });
-    res.status(201).json(thread);
+    const admission = deletionGate.enter({ tenantId: scope.tenantId, spaceId: space.id });
+    try {
+      const thread = await store.createThread(scope, title, { spaceId: space.id });
+      res.status(201).json(thread);
+    } finally {
+      admission.finish();
+    }
   } catch (error) {
     sendSpaceError(res, error);
   }
@@ -459,7 +479,7 @@ api.get('/threads/:id/subagents', async (req, res) => {
   }
 });
 
-// 删除 thread 及关联 run 数据，级联删除由 PostgreSQL 负责。
+// 归档后的 thread 才能永久删除；活动任务先停止，数据库删除后直接清理文件。
 api.delete('/threads/:id', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
@@ -468,8 +488,26 @@ api.delete('/threads/:id', async (req, res) => {
   const thread = await store.getThread(scope, req.params.id);
   if (!thread) return res.status(404).json({ error: 'thread 不存在' });
   if (!await checkThreadSpaceAccess(res, identity, thread.space_id, true)) return;
-  const deleted = await store.deleteThread(scope, req.params.id);
-  if (!deleted) return res.status(404).json({ error: 'thread 不存在' });
+  if (!thread.archived_at) {
+    return res.status(409).json({ error: '只能永久删除已经归档的对话', code: 'THREAD_NOT_ARCHIVED' });
+  }
+  let deletion: ReturnType<typeof deletionGate.begin> | undefined;
+  try {
+    deletion = deletionGate.begin({ tenantId: scope.tenantId, threadId: thread.id });
+    await deletion.waitForOperations();
+    await stopThreadsForDeletion([thread]);
+    const deleted: DeleteResourceResult | null = await store.deleteThread(scope, req.params.id);
+    if (!deleted) return res.status(404).json({ error: 'thread 不存在' });
+    await removeThreadWorkspace(thread.space_id, thread.id);
+    await removeExternalArtifacts(deleted.artifactStorageKeys);
+  } catch (error) {
+    if (error instanceof DeleteConflictError) {
+      return res.status(409).json({ error: error.message, code: error.code });
+    }
+    throw error;
+  } finally {
+    deletion?.finish();
+  }
   res.status(204).send();
 });
 
@@ -569,7 +607,18 @@ api.post('/runs/:id/fork', async (req, res) => {
   const sourceThread = await store.getThread(scope, source.thread_id);
   if (!sourceThread) return res.status(404).json({ error: 'thread 不存在' });
   if (!await checkThreadSpaceAccess(res, identity, sourceThread.space_id, true)) return;
-  const fork = await store.forkThreadAtRun(scope, req.params.id);
+  let fork: Awaited<ReturnType<typeof store.forkThreadAtRun>>;
+  try {
+    const admission = deletionGate.enter({ tenantId: scope.tenantId, spaceId: sourceThread.space_id, threadId: sourceThread.id });
+    try {
+      fork = await store.forkThreadAtRun(scope, req.params.id);
+    } finally {
+      admission.finish();
+    }
+  } catch (error) {
+    if (sendRunActiveConflict(res, error)) return;
+    throw error;
+  }
   if (!fork) return res.status(404).json({ error: 'run 不存在' });
   res.status(201).json({
     thread: fork.thread,
@@ -599,6 +648,7 @@ api.post('/runs/:id/cancel', async (req, res) => {
   if (run.status === 'pending' || run.status === 'running') {
     await killRunShellCommands(scope, run.id);
     await store.setRunStatus(scope, run.id, 'canceling');
+    abortRunExecution(run.id);
     return res.json({ id: run.id, status: 'canceling' });
   }
   res.json({ id: run.id, status: run.status });
@@ -629,14 +679,19 @@ api.post('/runs/:id/continue', async (req, res) => {
     ? `正在继续生成：从第 ${lastCompletedStep} 个完整 step 后恢复；未完整落库的 step 只保留为事件审计，不进入模型上下文。`
     : '正在继续生成：从最近的持久化检查点恢复。';
   try {
-    const resumed = await store.resumeRun(scope, run.id, ['error', 'pending'], { output: null, error: null });
-    if (!resumed) return res.status(409).json({ error: 'run 状态已变化，不能重复继续生成' });
+    const admission = deletionGate.enter({ tenantId: scope.tenantId, spaceId: thread.space_id, threadId: thread.id });
+    try {
+      const resumed = await store.resumeRun(scope, run.id, ['error', 'pending'], { output: null, error: null });
+      if (!resumed) return res.status(409).json({ error: 'run 状态已变化，不能重复继续生成' });
+      await store.addEvent(scope, run.id, null, { type: 'recovery', step: lastStep + 1, message });
+      void executeRun(run.id, { resume: true, scope });
+    } finally {
+      admission.finish();
+    }
   } catch (err) {
     if (sendRunActiveConflict(res, err)) return;
     return res.status(500).json({ error: (err as Error).message });
   }
-  await store.addEvent(scope, run.id, null, { type: 'recovery', step: lastStep + 1, message });
-  void executeRun(run.id, { resume: true, scope });
   res.json({ id: run.id, threadId: run.thread_id, status: 'running' });
 });
 
@@ -657,21 +712,27 @@ api.post('/runs/:id/answer', async (req, res) => {
   const invalid = validateAnswer(answer, spec);
   if (invalid) return res.status(400).json({ error: invalid });
   const answerContent = `用户回答：\n${formatAnswerForModel(answer)}`;
+  let userMessage: Awaited<ReturnType<typeof store.loadThreadMessageMetadata>>[number] | undefined;
   try {
-    const resumed = await store.resumeRun(scope, run.id, ['waiting_for_user'], { userMessageContent: answerContent });
-    if (!resumed) return res.status(409).json({ error: 'run 状态已变化，不能重复提交回答' });
+    const admission = deletionGate.enter({ tenantId: scope.tenantId, spaceId: thread.space_id, threadId: thread.id });
+    try {
+      const resumed = await store.resumeRun(scope, run.id, ['waiting_for_user'], { userMessageContent: answerContent });
+      if (!resumed) return res.status(409).json({ error: 'run 状态已变化，不能重复提交回答' });
+      userMessage = (await store.loadThreadMessageMetadata(scope, thread.id, { runId: run.id }))
+        .filter((message) => message.run_id === run.id && message.role === 'user')
+        .at(-1);
+      if (!userMessage || userMessage.content == null) {
+        throw new Error(`恢复 run ${run.id} 后缺少持久化用户消息`);
+      }
+      await store.addEvent(scope, run.id, null, { type: 'user_answer', step: (await store.getLastStepIndex(scope, run.id)) + 1, answer });
+      void executeRun(run.id, { resume: true, scope });
+    } finally {
+      admission.finish();
+    }
   } catch (err) {
     if (sendRunActiveConflict(res, err)) return;
     return res.status(500).json({ error: (err as Error).message });
   }
-  const userMessage = (await store.loadThreadMessageMetadata(scope, thread.id, { runId: run.id }))
-    .filter((message) => message.run_id === run.id && message.role === 'user')
-    .at(-1);
-  if (!userMessage || userMessage.content == null) {
-    throw new Error(`恢复 run ${run.id} 后缺少持久化用户消息`);
-  }
-  await store.addEvent(scope, run.id, null, { type: 'user_answer', step: (await store.getLastStepIndex(scope, run.id)) + 1, answer });
-  void executeRun(run.id, { resume: true, scope });
   res.json({
     id: run.id,
     threadId: run.thread_id,
@@ -693,9 +754,12 @@ async function webThreadToolSettings(
 ): Promise<ToolSettings | null> {
   try {
     const workspace = await threadWorkspaceAccess.resolveForWeb(identity, threadId, 'write');
-    await mkdir(workspace.root, { recursive: true });
     return { ...(await getSystemToolSettings()), workspaceRoot: workspace.root };
   } catch (error) {
+    if (error instanceof DeleteConflictError) {
+      res.status(409).json({ error: error.message, code: error.code });
+      return null;
+    }
     if (error instanceof ThreadWorkspaceAccessError) {
       res.status(error.status).json({ error: error.message, code: error.code });
       return null;
@@ -867,47 +931,55 @@ api.post('/shell-commands/:id/mark', async (req, res) => {
   if (!session) return res.status(404).json({ error: 'shell session 不存在' });
   const settings = await webShellSessionSettings(res, identity, session);
   if (!settings) return;
+  let operation: ReturnType<typeof deletionGate.enter> | undefined;
+  try {
+    operation = deletionGate.enter({ tenantId: scope.tenantId, threadId: session.thread_id });
+    const logs = await readAllShellCommandLogs(scope, command.id);
+    const output = renderShellLogs(logs);
+    const maxInline = settings.maxOutput;
+    let outputPath: string | null = null;
+    if (output.length > maxInline) {
+      outputPath = `.tmp/shell-marks/${command.id}.txt`;
+      const absolute = resolve(settings.workspaceRoot, outputPath);
+      await mkdir(dirname(absolute), { recursive: true });
+      await writeFile(absolute, output, 'utf8');
+    }
+    const duration = commandDurationMs(command);
+    const markedText = [
+      `用户从 shell "${session.name}" 标记了一次交互，供 LLM 作为上下文参考。`,
+      '',
+      `Shell 名称/ID: ${session.name} (${session.id})`,
+      `命令 ID / Command ID: ${command.id}`,
+      `执行者 / Actor: ${command.actor}`,
+      `CWD: ${command.cwd}`,
+      `命令 / Command: ${command.command}`,
+      `状态 / Status: ${command.status}`,
+      command.exit_code != null ? `退出码 / Exit code: ${command.exit_code}` : '',
+      command.signal ? `信号 / Signal: ${command.signal}` : '',
+      duration != null ? `耗时毫秒 / Duration ms: ${duration}` : '',
+      outputPath ? `完整输出文件 / Full output file: ${outputPath}` : '',
+      '',
+      '输出 / Output:',
+      output ? headTail(output, maxInline) : '（无输出）',
+    ].filter(Boolean).join('\n');
 
-  const logs = await readAllShellCommandLogs(scope, command.id);
-  const output = renderShellLogs(logs);
-  const maxInline = settings.maxOutput;
-  let outputPath: string | null = null;
-  if (output.length > maxInline) {
-    outputPath = `.tmp/shell-marks/${command.id}.txt`;
-    const absolute = resolve(settings.workspaceRoot, outputPath);
-    await mkdir(dirname(absolute), { recursive: true });
-    await writeFile(absolute, output, 'utf8');
+    res.json({
+      attachment: {
+        kind: 'shell',
+        commandId: command.id,
+        shellName: session.name,
+        name: `${session.name}: ${command.command.slice(0, 40)}`,
+        text: markedText,
+        size: output.length,
+        path: outputPath,
+      },
+    });
+  } catch (error) {
+    if (sendRunActiveConflict(res, error)) return;
+    throw error;
+  } finally {
+    operation?.finish();
   }
-  const duration = commandDurationMs(command);
-  const markedText = [
-    `用户从 shell "${session.name}" 标记了一次交互，供 LLM 作为上下文参考。`,
-    '',
-    `Shell 名称/ID: ${session.name} (${session.id})`,
-    `命令 ID / Command ID: ${command.id}`,
-    `执行者 / Actor: ${command.actor}`,
-    `CWD: ${command.cwd}`,
-    `命令 / Command: ${command.command}`,
-    `状态 / Status: ${command.status}`,
-    command.exit_code != null ? `退出码 / Exit code: ${command.exit_code}` : '',
-    command.signal ? `信号 / Signal: ${command.signal}` : '',
-    duration != null ? `耗时毫秒 / Duration ms: ${duration}` : '',
-    outputPath ? `完整输出文件 / Full output file: ${outputPath}` : '',
-    '',
-    '输出 / Output:',
-    output ? headTail(output, maxInline) : '（无输出）',
-  ].filter(Boolean).join('\n');
-
-  res.json({
-    attachment: {
-      kind: 'shell',
-      commandId: command.id,
-      shellName: session.name,
-      name: `${session.name}: ${command.command.slice(0, 40)}`,
-      text: markedText,
-      size: output.length,
-      path: outputPath,
-    },
-  });
 });
 
 api.post('/shell-commands/:id/kill', async (req, res) => {

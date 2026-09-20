@@ -23,6 +23,9 @@ import {
   type ExternalArtifactStorage,
 } from './artifactStorage.js';
 import { MAX_EXTERNAL_ARTIFACT_BYTES } from './artifactProtocol.js';
+import { deletionGate } from '../deletion/gate.js';
+import { abortRunExecution } from '../agent/executionControl.js';
+import { DeleteConflictError } from '../store/types.js';
 
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
@@ -114,10 +117,36 @@ export class ExternalCommandService {
     if (!isExternalUuidToken(uuidToken)) {
       throw new ExternalApiError(401, 'EXTERNAL_TOKEN_INVALID', '外部访问凭证无效');
     }
-    let access = await this.repository.authenticateToken(hashOpaqueToken(uuidToken));
+    const access = await this.repository.authenticateToken(hashOpaqueToken(uuidToken));
     if (!access) throw new ExternalApiError(401, 'EXTERNAL_TOKEN_INVALID', '外部访问凭证无效');
     const command = parseCommand(value);
+    let admission!: ReturnType<typeof deletionGate.enter>;
+    try {
+      admission = deletionGate.enter({
+        tenantId: access.caller.tenantId,
+        spaceId: access.space.id,
+        threadId: 'threadId' in command ? command.threadId : undefined,
+      });
+    } catch (error) {
+      if (error instanceof DeleteConflictError) {
+        throw new ExternalApiError(409, error.code, error.message);
+      }
+      throw error;
+    }
 
+    try {
+      return await this.executeAccepted(uuidToken, access, command);
+    } finally {
+      admission.finish();
+    }
+  }
+
+  private async executeAccepted(
+    uuidToken: string,
+    initialAccess: ExternalCallerAccess,
+    command: ExternalCommand,
+  ): Promise<unknown> {
+    let access = initialAccess;
     if (command.operation === 'artifact.upload') {
       const requestHash = commandHash(command);
       const replay = await this.repository.findArtifactUploadReplay(access, {
@@ -194,6 +223,7 @@ export class ExternalCommandService {
       if (!canceled.replayed && canceled.response.status === 'canceling') {
         const scope = { tenantId: access.caller.tenantId, userId: canceled.executionUserId };
         await this.cancelRunShells(scope, canceled.response.runId).catch(() => {});
+        abortRunExecution(canceled.response.runId);
       }
       return canceled.response;
     }

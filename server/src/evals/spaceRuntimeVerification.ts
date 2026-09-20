@@ -277,6 +277,10 @@ try {
     artifactId: artifactA.artifact.id,
   }) as ExternalArtifactGetResponse;
   assert.equal(Buffer.from(artifactBeforeRun.contentBase64, 'base64').toString('utf8'), artifactContent.toString('utf8'));
+  assert.equal(
+    (await artifactStorage.read(`${callerA.caller.id}/${artifactA.artifact.id}`)).toString('utf8'),
+    artifactContent.toString('utf8'),
+  );
   await expectExternalError(
     externalCommands.execute(tokenB, { operation: 'artifact.get', artifactId: artifactA.artifact.id }),
     'ARTIFACT_NOT_FOUND',
@@ -337,6 +341,10 @@ try {
   const webThread = await store.createThread(ownerScope, 'default Web 验收');
   const webRun = await store.createRun(ownerScope, webThread.id, 'DEFAULT_WEB_INPUT');
   await executeObservedRun(webRun.id, ownerScope);
+  assert.equal(
+    (await artifactStorage.read(`${callerA.caller.id}/${artifactA.artifact.id}`)).toString('utf8'),
+    artifactContent.toString('utf8'),
+  );
   const concurrentRuns = await Promise.allSettled([
     executeObservedRun(runA.runId, scheduledRuns.get(runA.runId)!),
     executeObservedRun(runB.runId, scheduledRuns.get(runB.runId)!),
@@ -444,12 +452,7 @@ try {
     [],
   );
 
-  await spaceAccess.delete(ownerActor, spaceB.id);
-  await expectExternalError(
-    externalCommands.execute(tokenB, { operation: 'run.get', runId: runB.runId }),
-    'EXTERNAL_TOKEN_INVALID',
-  );
-  await spaceAccess.restore(ownerActor, spaceB.id);
+  await spaceAccess.delete(ownerActor, spaceB.id, {});
   await expectExternalError(
     externalCommands.execute(tokenB, { operation: 'run.get', runId: runB.runId }),
     'EXTERNAL_TOKEN_INVALID',
@@ -485,7 +488,7 @@ try {
     '',
     '通过项：default Web 运行、两个外部调用方隔离、幂等重放、持久化 next_step、Artifact materialize、',
     '配置副本版本隔离、普通用户可见名单、workspace 映射、数据库 event cursor 回放、',
-    'Provider invocation/attempt 关联、URL/请求头密钥不落库、空间软删除后 Token 不恢复。',
+    'Provider invocation/attempt 关联、URL/请求头密钥不落库、空间永久删除后关联凭证失效。',
     '',
   ].join('\n');
   await mkdir(reportDirectory, { recursive: true });

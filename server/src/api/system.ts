@@ -66,10 +66,13 @@ import {
 } from '../businessPlugins/archiveHttp.js';
 import {
   createTenantUser,
+  deleteTenantUser,
   TenantUserError,
   updateTenantUser,
 } from '../tenants/users.js';
 import { spaceConfigService } from '../spaces/config.js';
+import { deleteTenant, TenantDeletionError } from '../tenants/deletion.js';
+import { DeleteConflictError } from '../store/types.js';
 
 export const systemApi = Router();
 
@@ -105,6 +108,9 @@ function handleDatasourceError(res: Response, err: unknown) {
 }
 
 function handleBusinessPluginError(res: Response, error: unknown) {
+  if (error instanceof DeleteConflictError) {
+    return res.status(409).json({ error: error.message, code: error.code });
+  }
   if (error instanceof BusinessPluginError) {
     return res.status(400).json({ error: error.message, code: error.code });
   }
@@ -145,6 +151,17 @@ systemApi.patch('/tenants/:tenantId/users/:userId', async (req, res) => {
   try {
     const user = await updateTenantUser(scope.tenantId, req.params.userId, { scope: 'system' }, req.body);
     res.json(toUserSummary(user));
+  } catch (error) {
+    handleTenantUserError(res, error);
+  }
+});
+
+systemApi.delete('/tenants/:tenantId/users/:userId', async (req, res) => {
+  const scope = await systemTenantScope(req, res);
+  if (!scope) return;
+  try {
+    await deleteTenantUser(scope.tenantId, req.params.userId, { scope: 'system' });
+    res.status(204).send();
   } catch (error) {
     handleTenantUserError(res, error);
   }
@@ -261,6 +278,19 @@ systemApi.patch('/tenants/:id', async (req, res) => {
   res.json({ tenant: toTenantSummary(updated!) });
 });
 
+systemApi.delete('/tenants/:id', async (req, res) => {
+  try {
+    await deleteTenant(req.params.id);
+    res.status(204).send();
+  } catch (error) {
+    if (error instanceof TenantDeletionError) {
+      res.status(error.status).json({ error: error.message, code: error.code });
+      return;
+    }
+    throw error;
+  }
+});
+
 systemApi.get('/admins', async (_req, res) => {
   const rows = await store.listSystemAdmins();
   res.json({ admins: rows.map(toSystemAdminSummary) });
@@ -283,6 +313,23 @@ systemApi.post('/admins', async (req, res) => {
 
   const admin = await store.createSystemAdmin({ email, passwordHash: hashPassword(password) });
   res.status(201).json(toSystemAdminSummary(admin));
+});
+
+systemApi.delete('/admins/:id', async (req, res) => {
+  try {
+    const deleted = await store.deleteSystemAdmin(req.params.id);
+    if (!deleted) {
+      res.status(404).json({ error: '系统管理员不存在' });
+      return;
+    }
+    res.status(204).send();
+  } catch (error) {
+    if (error instanceof DeleteConflictError) {
+      res.status(409).json({ error: error.message, code: error.code });
+      return;
+    }
+    throw error;
+  }
 });
 
 // 系统资源在全系统统一维护，使用 bootstrap tenant 的当前 ID 作为内部存储作用域。

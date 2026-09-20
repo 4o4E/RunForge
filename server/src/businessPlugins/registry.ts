@@ -288,6 +288,25 @@ export class BusinessPluginRegistry {
     }
   }
 
+  async deleteTenant<T>(tenantId: string, deleteRecords: () => Promise<T>): Promise<T> {
+    assertTenantDirectoryName(tenantId);
+    return this.mutateTenant(tenantId, async () => {
+      const result = await deleteRecords();
+      for (const tenantRoot of await tenantSourceRoots(this.roots, tenantId)) {
+        if (!existsSync(tenantRoot)) continue;
+        try {
+          await rm(tenantRoot, { recursive: true, force: true });
+        } catch (error) {
+          console.error(`[deletion] 业务插件目录删除失败，需手动处理：${tenantRoot}：${(error as Error).message}`);
+        }
+      }
+      this.currentByTenant.delete(tenantId);
+      this.deploymentsByTenant.delete(tenantId);
+      this.loadingByTenant.delete(tenantId);
+      return result;
+    });
+  }
+
   async resolveLock(tenantId: string, lock: SpaceRuntimeLock): Promise<BusinessPluginDefinition[]> {
     if (lock.tenantId !== tenantId) {
       throw new BusinessPluginError('BUSINESS_PLUGIN_NOT_READY', '业务插件运行锁不属于当前 tenant');

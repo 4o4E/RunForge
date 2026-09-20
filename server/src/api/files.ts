@@ -5,7 +5,7 @@ import { mkdir, open as openFile, readdir, readFile, rename, rm, stat, writeFile
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Request, Response } from 'express';
-import { ensureThreadWorkspaceRoot, resolveThreadWorkspaceRoot } from '../files/workspaceRoot.js';
+import { resolveThreadWorkspaceRoot } from '../files/workspaceRoot.js';
 import { threadWorkspaceAccess, ThreadWorkspaceAccessError } from '../files/threadWorkspace.js';
 import { ensureOfficePdfPreview, isOfficeConvertiblePath } from '../files/officePreview.js';
 import { mediaTypeFromPath, normalizeRemotePath, streamWorkspaceFile, toRemotePath, workspaceRoot } from '../files/workspace.js';
@@ -13,6 +13,8 @@ import { clampShareTtlSeconds, signFileShare, verifyFileShare } from './auth.js'
 import { resolveIdentityFromAuthorizationHeader } from '../auth/resolve.js';
 import { requireTenantScope } from '../auth/guards.js';
 import { getSystemToolSettings } from '../settings.js';
+import { deletionGate } from '../deletion/gate.js';
+import { DeleteConflictError } from '../store/types.js';
 
 const SMALL_FILE_BYTES = 200 * 1024;
 const MAX_RENDER_FILE_BYTES = 2 * 1024 * 1024;
@@ -85,6 +87,10 @@ function requestedThreadId(req: Request): string | null {
 }
 
 function sendFileError(res: Response, error: unknown): void {
+  if (error instanceof DeleteConflictError) {
+    res.status(409).json({ error: error.message, code: error.code });
+    return;
+  }
   if (error instanceof ThreadWorkspaceAccessError) {
     res.status(error.status).json({ error: error.message, code: error.code });
     return;
@@ -141,7 +147,6 @@ async function resolveFileAccess(
   const file = normalizeRemotePath(requestedPath, root);
   const path = canonicalRemotePath(file, root);
   if (verifyFileShare(path, tenantId, userId, req.query.expires, req.query.sig, spaceId, threadId)) {
-    await ensureThreadWorkspaceRoot(spaceId, threadId, baseRoot);
     return {
       tenantId,
       userId,
@@ -233,9 +238,11 @@ filesApi.get('/list', requireTenantScope, async (req, res) => {
 });
 
 filesApi.post('/upload', requireTenantScope, async (req, res) => {
+  let operation: ReturnType<typeof deletionGate.enter> | undefined;
   try {
     const access = await resolveFileAccess(req, res, req.body?.path, 'write');
     if (!access) return;
+    operation = deletionGate.enter({ tenantId: access.tenantId, spaceId: access.spaceId, threadId: access.threadId });
     const targetPath = access.file;
     const contentBase64 = String(req.body?.contentBase64 ?? '');
     if (!contentBase64) return res.status(400).json({ error: 'contentBase64 为必填' });
@@ -246,6 +253,8 @@ filesApi.post('/upload', requireTenantScope, async (req, res) => {
     res.status(201).json({ path: toRemotePath(targetPath, access.workspaceRoot), size: content.length });
   } catch (err) {
     sendFileError(res, err);
+  } finally {
+    operation?.finish();
   }
 });
 
@@ -269,9 +278,11 @@ filesApi.get('/content', requireTenantScope, async (req, res) => {
 
 filesApi.put('/content', requireTenantScope, async (req, res) => {
   let tempPath = '';
+  let operation: ReturnType<typeof deletionGate.enter> | undefined;
   try {
     const access = await resolveFileAccess(req, res, req.body?.path, 'write');
     if (!access) return;
+    operation = deletionGate.enter({ tenantId: access.tenantId, spaceId: access.spaceId, threadId: access.threadId });
     const { file, workspaceRoot: root } = access;
     const content = typeof req.body?.content === 'string' ? req.body.content : null;
     const baseSha256 = typeof req.body?.baseSha256 === 'string' ? req.body.baseSha256 : '';
@@ -298,6 +309,8 @@ filesApi.put('/content', requireTenantScope, async (req, res) => {
   } catch (err) {
     if (tempPath) await rm(tempPath, { force: true }).catch(() => undefined);
     sendFileError(res, err);
+  } finally {
+    operation?.finish();
   }
 });
 
@@ -425,9 +438,11 @@ filesApi.get('/hex', async (req, res) => {
 });
 
 filesApi.get('/pdf-preview', async (req, res) => {
+  let operation: ReturnType<typeof deletionGate.enter> | undefined;
   try {
     const access = await resolveFileAccess(req, res, req.query.path);
     if (!access) return;
+    operation = deletionGate.enter({ tenantId: access.tenantId, spaceId: access.spaceId, threadId: access.threadId });
     const { file, workspaceRoot: root, tenantId, workspaceKey } = access;
     const info = await stat(file);
     if (!info.isFile()) return res.status(400).json({ error: 'path 不是文件' });
@@ -461,8 +476,14 @@ filesApi.get('/pdf-preview', async (req, res) => {
     res.setHeader('Content-Length', String(pdfInfo.size));
     streamWorkspaceFile(pdfPath).pipe(res);
   } catch (err) {
+    if (err instanceof DeleteConflictError) {
+      sendFileError(res, err);
+      return;
+    }
     const message = (err as Error).name === 'AbortError' ? 'Office 转 PDF 超时' : (err as Error).message;
     res.status(400).json({ error: message });
+  } finally {
+    operation?.finish();
   }
 });
 

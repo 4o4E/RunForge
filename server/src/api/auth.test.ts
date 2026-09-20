@@ -197,7 +197,6 @@ test('external websocket: UUID Token 鉴权后按 events.id 回放并从 cursor 
       config_version: 1,
       created_by_user_id: null,
       visible_user_ids: [],
-      deleted_at: null,
       created_at: new Date(0).toISOString(),
       updated_at: new Date(0).toISOString(),
     },

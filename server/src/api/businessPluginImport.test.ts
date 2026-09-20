@@ -196,7 +196,7 @@ test('业务插件导入 API：租户管理员可以新增和覆盖 ZIP，其他
   }
 });
 
-test('业务插件卸载 API：清理有效空间和普通配置，保留 Secret 与历史空间', async () => {
+test('业务插件卸载 API：清理全部空间配置并保留 Secret', async () => {
   const owner = await testHelpers.seedOwner('tn_plugin_uninstall_api', 'owner@plugin-uninstall.test', 'pw');
   const member = await store.createUser({
     tenantId: owner.tenant_id,
@@ -235,16 +235,15 @@ test('业务插件卸载 API：清理有效空间和普通配置，保留 Secret
       config: selectBusinessPlugins(defaultSpace.config, ['imported-api']),
     });
     assert.ok(selectedDefault);
-    const deletedSpace = await store.createSpace({
+    const secondarySpace = await store.createSpace({
       tenantId: owner.tenant_id,
       mode: 'web',
-      name: 'Deleted plugin space',
+      name: 'Secondary plugin space',
       executionUserId: null,
       config: selectBusinessPlugins(defaultSpace.config, ['imported-api']),
       visibleUserIds: [],
       createdByUserId: owner.id,
     });
-    await store.softDeleteSpaceAndRevokeTokens(owner.tenant_id, deletedSpace.id);
 
     const denied = await fetch(`${base}/imported-api`, {
       method: 'DELETE',
@@ -261,7 +260,10 @@ test('业务插件卸载 API：清理有效空间和普通配置，保留 Secret
       affectedSpaces: Array<{ id: string; name: string }>;
       view: { plugins: unknown[] };
     };
-    assert.deepEqual(removedBody.affectedSpaces, [{ id: defaultSpace.id, name: defaultSpace.name }]);
+    assert.deepEqual(removedBody.affectedSpaces, [
+      { id: defaultSpace.id, name: defaultSpace.name },
+      { id: secondarySpace.id, name: secondarySpace.name },
+    ]);
     assert.deepEqual(removedBody.view.plugins, []);
 
     const updatedDefault = await store.findSpace(owner.tenant_id, defaultSpace.id);
@@ -270,11 +272,11 @@ test('业务插件卸载 API：清理有效空间和普通配置，保留 Secret
       ((updatedDefault?.config as Record<string, unknown>).capabilities as Record<string, unknown>).businessPlugins,
       [],
     );
-    const untouchedDeleted = await store.findSpace(owner.tenant_id, deletedSpace.id);
-    assert.equal(untouchedDeleted?.config_version, deletedSpace.config_version);
+    const updatedSecondary = await store.findSpace(owner.tenant_id, secondarySpace.id);
+    assert.equal(updatedSecondary?.config_version, secondarySpace.config_version + 1);
     assert.deepEqual(
-      ((untouchedDeleted?.config as Record<string, unknown>).capabilities as Record<string, unknown>).businessPlugins,
-      ['imported-api'],
+      ((updatedSecondary?.config as Record<string, unknown>).capabilities as Record<string, unknown>).businessPlugins,
+      [],
     );
     const removedSettings = await getBusinessPluginTenantSettings(owner.tenant_id);
     assert.equal(Object.hasOwn(removedSettings.plugins, 'imported-api'), false);

@@ -46,7 +46,7 @@ test('PATCH /api/tenants/:id/users/:userId: owner 能改 member 角色，admin �
     assert.equal(((await ownerPromotes.json()) as { role: string }).role, 'admin');
 
     // 把 member 改回来，方便后续用例。
-    await store.updateUserRole(member.id, 'member');
+    await store.updateUser(member.id, { role: 'member' });
 
     // admin 试图把 member 提升到 admin：应 403（只有 owner 能授予 admin/owner）。
     const adminPromotes = await fetch(`${base}/${member.id}`, {
@@ -72,7 +72,7 @@ test('PATCH /api/tenants/:id/users/:userId: owner 能改 member 角色，admin �
     });
     assert.equal(ownerTouchesSelf.status, 403);
 
-    // 不能移除租户唯一的 active owner。
+    // admin 权限不足，不能修改 owner。
     const removeLastOwner = await fetch(`${base}/${owner.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminJwt}` },
@@ -89,10 +89,10 @@ test('PATCH /api/tenants/:id/users/:userId: owner 能改 member 角色，admin �
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${secondOwnerJwt}` },
       body: JSON.stringify({ role: 'member' }),
     });
-    // 此时租户有两个 active owner（owner + secondOwner），降级其中一个应该成功。
+    // 此时租户有两个 owner，降级其中一个应该成功。
     assert.equal(demoteOnlyOwner.status, 200);
 
-    // 现在只剩 secondOwner 一个 active owner，尝试降级它应该 409。
+    // 现在只剩 secondOwner 一个 owner，尝试降级它应该 409。
     const demoteLastOwner = await fetch(`${base}/${secondOwner.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ownerJwt}` },
@@ -147,6 +147,76 @@ test('PATCH /api/tenants/:id/users/:userId: 能编辑邮箱和重置密码，并
       body: JSON.stringify({ email: 'member-new@edit.test', password: 'new-pw', tenantId: 'tn_edit_users' }),
     });
     assert.equal(newCredentials.status, 200);
+  } finally {
+    close();
+  }
+});
+
+test('DELETE /api/tenants/:id/users/:userId: 删除无关联用户，拒绝关联对话、执行空间、唯一 owner 和默认管理员', async () => {
+  const tenantId = 'tn_delete_users';
+  const provisioned = await store.createTenantWithOwner({
+    id: tenantId,
+    name: tenantId,
+    ownerEmail: 'owner@delete-users.test',
+    ownerPasswordHash: hashPassword('pw'),
+    settingsTemplate: [],
+  });
+  const owner = provisioned.owner;
+  const ownerJwt = signTenantAccessToken({ id: owner.id, tenantId, role: 'owner' });
+  const removable = await store.createUser({ tenantId, email: 'remove@delete-users.test', passwordHash: 'pw', role: 'member' });
+  const threaded = await store.createUser({ tenantId, email: 'thread@delete-users.test', passwordHash: 'pw', role: 'member' });
+  const execution = await store.createUser({ tenantId, email: 'execution@delete-users.test', passwordHash: 'pw', role: 'member' });
+  await store.updateSpace(tenantId, provisioned.defaultSpace.id, { visibleUserIds: [threaded.id] });
+  await store.createThread({ tenantId, userId: threaded.id }, '关联对话', { spaceId: provisioned.defaultSpace.id });
+  await store.createSpace({
+    tenantId,
+    mode: 'external',
+    name: '执行空间',
+    executionUserId: execution.id,
+    config: {},
+    createdByUserId: owner.id,
+    visibleUserIds: [],
+  });
+
+  const protectedTenant = await store.createTenantWithOwner({
+    id: 'tn_delete_default_admin',
+    name: 'Default',
+    isBootstrap: true,
+    ownerEmail: 'default-admin@delete-users.test',
+    ownerPasswordHash: 'pw',
+    settingsTemplate: [],
+  });
+  const secondOwner = await store.createUser({
+    tenantId: protectedTenant.tenant.id,
+    email: 'second-owner@delete-users.test',
+    passwordHash: 'pw',
+    role: 'owner',
+  });
+  const secondOwnerJwt = signTenantAccessToken({
+    id: secondOwner.id,
+    tenantId: protectedTenant.tenant.id,
+    role: 'owner',
+  });
+
+  const { port, close } = await listen(buildApp());
+  try {
+    const base = `http://127.0.0.1:${port}/api/tenants/${tenantId}/users`;
+    const headers = { Authorization: `Bearer ${ownerJwt}` };
+    assert.equal((await fetch(`${base}/${removable.id}`, { method: 'DELETE', headers })).status, 204);
+    assert.equal(await store.findUserById(removable.id), null);
+    assert.equal((await fetch(`${base}/${threaded.id}`, { method: 'DELETE', headers })).status, 409);
+    assert.equal((await fetch(`${base}/${execution.id}`, { method: 'DELETE', headers })).status, 409);
+    assert.equal((await fetch(`${base}/${owner.id}`, { method: 'DELETE', headers })).status, 409);
+
+    await store.createUser({ tenantId, email: 'second-owner@delete-users.test', passwordHash: 'pw', role: 'owner' });
+    assert.equal((await fetch(`${base}/${owner.id}`, { method: 'DELETE', headers })).status, 204);
+    assert.equal(await store.findUserById(owner.id), null);
+
+    const protectedDelete = await fetch(
+      `http://127.0.0.1:${port}/api/tenants/${protectedTenant.tenant.id}/users/${protectedTenant.owner.id}`,
+      { method: 'DELETE', headers: { Authorization: `Bearer ${secondOwnerJwt}` } },
+    );
+    assert.equal(protectedDelete.status, 409);
   } finally {
     close();
   }

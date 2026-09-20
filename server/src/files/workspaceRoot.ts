@@ -1,5 +1,5 @@
 import { join, resolve } from 'node:path';
-import { access, mkdir, rename } from 'node:fs/promises';
+import { access, mkdir, rename, rm } from 'node:fs/promises';
 import { config } from '../config.js';
 import type { ThreadRow } from '../store/types.js';
 
@@ -58,6 +58,44 @@ export function resolveThreadWorkspaceRoot(
   base: string = config.tools.workspaceRoot,
 ): string {
   return resolve(join(base, safeSegment(spaceId), safeSegment(threadId)));
+}
+
+async function removeWorkspace(target: string): Promise<void> {
+  try {
+    await rm(target, { recursive: true, force: true });
+  } catch (error) {
+    console.error(`[deletion] 目录删除失败，需手动处理：${target}：${(error as Error).message}`);
+  }
+}
+
+export function removeThreadWorkspace(
+  spaceId: string,
+  threadId: string,
+  base: string = config.tools.workspaceRoot,
+): Promise<void> {
+  return removeWorkspace(resolveThreadWorkspaceRoot(spaceId, threadId, base));
+}
+
+export function removeSpaceWorkspace(
+  spaceId: string,
+  base: string = config.tools.workspaceRoot,
+): Promise<void> {
+  return removeWorkspace(resolve(join(base, safeSegment(spaceId))));
+}
+
+export function removeUserWorkspace(
+  tenantId: string,
+  userId: string,
+  base: string = config.tools.workspaceRoot,
+): Promise<void> {
+  return removeWorkspace(resolve(join(tenantBaseRoot(tenantId, base), 'users', safeSegment(userId))));
+}
+
+export function removeTenantWorkspace(
+  tenantId: string,
+  base: string = config.tools.workspaceRoot,
+): Promise<void> {
+  return removeWorkspace(tenantBaseRoot(tenantId, base));
 }
 
 /** 把旧版 `<base>/<threadId>` 工作目录原子移动到空间目录下；已迁移时可重复调用。 */

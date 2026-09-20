@@ -160,7 +160,9 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
     maxOutputTokens: opts.protocol === 'anthropic-messages' ? cfg.maxOutputTokens! : undefined,
     // 重试由 RunForge ProviderRunner 统一管理，确保每次 HTTP attempt 都可观测。
     maxRetries: 0,
-    abortSignal: AbortSignal.timeout(cfg.timeoutMs),
+    abortSignal: callOptions?.abortSignal
+      ? AbortSignal.any([callOptions.abortSignal, AbortSignal.timeout(cfg.timeoutMs)])
+      : AbortSignal.timeout(cfg.timeoutMs),
     // OpenAI Responses 走无状态模式，确保 reasoning item 返回不可解密的
     // encrypted_content，并由 RunForge 自己持久化；其他协议不发送此选项。
     providerOptions: opts.protocol === 'openai-responses' ? { openai: { store: false } } : undefined,

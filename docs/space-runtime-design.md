@@ -71,7 +71,8 @@ Goal 由 `update_plan` 的完整工具结果表达，普通请求不增加 Goal 
 2. 从系统模板复制该 tenant 的独立配置。
 3. 创建 Web 空间，并把它写入 tenant 的 `default_space_id`。
 
-default 空间不可删除，空间 ID 不可修改；名称和其他配置均可更新。创建时会把当时可用的模型、
+default 空间删除时必须同时选择同租户的另一个 Web 空间作为新 default；空间 ID 不可修改，
+名称和其他配置均可更新。创建时会把当时可用的模型、
 工具、MCP 和运行时能力复制成完整配置，之后与创建模板保持独立。业务插件初始为空，由管理员
 明确选择。
 
@@ -139,9 +140,9 @@ Token hash 反查 caller、tenant、space 和权限。
   外部任务；这些限制必须由 API 强制，而不是只隐藏按钮。
 - system admin 查看内容必须走独立、留痕的审计路径，不能进入普通用户会话列表。
 
-普通空间删除采用软删除：设置 `deleted_at`，保留 thread、run、文件、事件和审计。删除时
-吊销该空间全部外部 Token，并禁止创建或追加任务。default 空间不能删除。恢复空间时恢复
-原可见名单，但不恢复已吊销 Token。
+空间删除会永久删除其 thread、run、文件、事件、审计、外部调用方和 Token。删除当前 default
+空间时必须同时选择同一 tenant 下另一个 Web 空间作为新的 default；只剩一个空间时，应通过
+删除 tenant 处理完整生命周期。
 
 ## 5. 外部协议
 
@@ -253,7 +254,7 @@ artifact ID；`run.create` 或 `run.append` 只引用 artifact ID。
 - 请求接纳时校验归属、状态、大小、MIME 和数量限制。
 - materialize 时由服务端选择安全文件名并写入目标 thread workspace。
 - 同一 artifact 默认只能 materialize 到其 caller/space 下的 thread。
-- 上传和 materialize 都必须支持幂等；软删除空间后禁止新 materialize。
+- 上传和 materialize 都必须支持幂等；空间删除后相关 artifact 一并永久删除。
 - 数据库保存元数据和归属，文件内容继续使用受控文件存储，不把大文件写入 JSONB。
 
 Web 现有文件上传接口保持不变；外部 artifact 契约是其上层资源协议，不接受任意 path。
@@ -445,7 +446,7 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
 具体字段名可以在实现时随 Prisma schema 调整，但职责和约束固定：
 
 1. `spaces`
-   - tenant 归属、模式、名称、execution user、配置、配置版本、软删除。
+   - tenant 归属、模式、名称、execution user、配置和配置版本。
    - tenant 通过 `default_space_id` 指向唯一 default 空间。
 2. `space_visible_users`
    - 普通用户可见名单；管理员不需要写入。
@@ -491,7 +492,7 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
 - 增加空间、可见用户、caller/Token、幂等、run input、artifact、插件 registry 和 Provider
   观测实体。
 - 创建 default 空间并回填旧 thread。
-- 实现 execution user、软删除和一个 thread 一个活动 run 的数据库约束。
+- 实现 execution user、永久删除级联关系和一个 thread 一个活动 run 的数据库约束。
 
 ### 阶段 3：配置、权限和内部能力
 
@@ -522,7 +523,7 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
 
 - 统一入口下增加空间选择和来源展示。
 - 空间使用 `/{spaceId}`，具体对话使用 `/{threadId}`。
-- 外部空间只读；增加空间配置、用户可见名单、execution user、软删除和 Token 管理。
+- 外部空间只读；增加空间配置、用户可见名单、execution user、永久删除和 Token 管理。
 
 ### 阶段 8：Provider 观测和本地 trace
 
@@ -534,7 +535,7 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
 ### 阶段 9：端到端验收与文档更新
 
 - ✅ default Web 空间和两个不同外部模拟应用完成同链路验收，两个外部 run 并发执行。
-- ✅ 验证权限、配置副本、execution user、插件/MCP/文件隔离和软删除；插件/MCP 隔离由
+- ✅ 验证权限、配置副本、execution user、插件/MCP/文件隔离和永久删除；插件/MCP 隔离由
   Cordis 并发空间验收覆盖，其余边界由空间运行端到端脚本覆盖。
 - ✅ 验证 `RUN_ACTIVE`、幂等并发、可靠 `next_step`、取消和重启恢复。
 - ✅ 验证外部空间不出现 `ask_user`。
@@ -563,12 +564,12 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
 
 1. 新增 space：使用 `sp_` 雪花 ID，tenant 隐含在登录身份中。
 2. Web 路由：空间使用 `/{spaceId}`，具体对话使用 `/{threadId}`，依靠 `sp_`、`th_` 前缀识别实体。
-3. default space：tenant 创建时复制完整配置并创建；不可删除，名称和配置可以修改，ID 不可修改。
+3. default space：tenant 创建时复制完整配置并创建；名称和配置可以修改，ID 不可修改；删除时必须指定新的 default Web 空间。
 4. 旧 thread：只回填 default space，不迁移对话内容、ID 或用户级 workspace。
 5. 空间配置更新：直接更新；run 创建时保存副本，thread 不固定旧版本。
 6. 外部执行身份：空间选择 execution user，thread 创建后固化，调用方不能冒充。
 7. 查看权限：管理员始终可见，普通用户使用明确名单；外部空间 Web 只读。
-8. 空间删除：普通空间软删除并吊销 Token，default 空间禁止删除。
+8. 空间删除：永久删除全部关联记录和文件；删除当前 default 空间时原子切换新的 default Web 空间。
 9. 外部鉴权：单一 UUID 秘密 URL，Token hash 落库，不在 URL 增加 tenant/space/run。
 10. 外部 HTTP：单端点 command 协议，写操作强制幂等。
 11. 外部 WebSocket：同一 UUID URL upgrade，订阅消息携带 run ID 和数据库 cursor。

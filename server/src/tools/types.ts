@@ -15,6 +15,7 @@ export interface ToolRunContext {
   runId?: string;
   stepId?: string;
   step?: number;
+  abortSignal?: AbortSignal;
 }
 
 export interface Tool {

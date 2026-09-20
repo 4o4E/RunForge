@@ -3,13 +3,14 @@ import type { LlmMessage } from '../llm/types.js';
 import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
 import { sanitizeThreadMessagesForModel } from './messageView.js';
-import { DefaultSpaceImmutableError, isTerminalRunStatus, RunActiveError, SpaceConfigChangedError } from './types.js';
+import { DeleteConflictError, isTerminalRunStatus, RunActiveError, SpaceConfigChangedError } from './types.js';
 import type {
   AppliedRunInput,
   AuthTokenRow,
   CreateRunOptions,
   CreateSpaceRecordInput,
   CreateTenantWithOwnerInput,
+  DeleteResourceResult,
   PushSubscriptionRow,
   RawThreadMessage,
   RunRow,
@@ -168,7 +169,6 @@ export class MemoryStore implements Store {
       config: defaultMemorySpaceConfig(),
       config_version: 1,
       created_by_user_id: null,
-      deleted_at: null,
       created_at: now,
       updated_at: now,
     };
@@ -192,8 +192,8 @@ export class MemoryStore implements Store {
 
   async createThread(scope: Scope, title?: string, options: { spaceId?: string } = {}): Promise<ThreadRow> {
     const space = options.spaceId ? this.spaces.get(options.spaceId) : this.ensureDefaultSpaceForTests(scope);
-    if (!space || space.tenant_id !== scope.tenantId || space.mode !== 'web' || space.deleted_at) {
-      throw new Error('space 不存在、已删除或不允许创建 Web 对话');
+    if (!space || space.tenant_id !== scope.tenantId || space.mode !== 'web') {
+      throw new Error('space 不存在或不允许创建 Web 对话');
     }
     const user = this.users.get(scope.userId);
     if (user) {
@@ -303,7 +303,26 @@ export class MemoryStore implements Store {
   }
   async deleteThread(scope: Scope, id: string) {
     const thread = this.threads.get(id);
-    if (!this.threadOwnedBy(thread, scope)) return false;
+    if (!this.threadOwnedBy(thread, scope)) return null;
+    if (!thread.archived_at) throw new DeleteConflictError('THREAD_NOT_ARCHIVED', '只能永久删除已经归档的对话');
+    const activeRun = [...this.runs.values()].some((run) => run.thread_id === id && !isTerminalRunStatus(run.status));
+    if (activeRun) throw new DeleteConflictError('THREAD_HAS_ACTIVE_RUN', '对话仍有运行中的任务');
+    if (this.hasActiveShellCommand(new Set([id]))) {
+      throw new DeleteConflictError('THREAD_HAS_ACTIVE_SHELL', '对话仍有运行中的 Shell 命令');
+    }
+    this.purgeThread(id);
+    return { artifactStorageKeys: [] };
+  }
+
+  private hasActiveShellCommand(threadIds: ReadonlySet<string>): boolean {
+    return [...this.shellCommands.values()].some((command) => {
+      if (command.status !== 'queued' && command.status !== 'running') return false;
+      const session = this.shellSessions.get(command.session_id);
+      return Boolean(session && threadIds.has(session.thread_id));
+    });
+  }
+
+  private purgeThread(id: string): void {
     this.threads.delete(id);
     const runIds = new Set([...this.runs.values()].filter((r) => r.thread_id === id).map((r) => r.id));
     for (const runId of runIds) {
@@ -323,7 +342,6 @@ export class MemoryStore implements Store {
     this.steps = this.steps.filter((s) => !runIds.has(s.run_id));
     this.messages = this.messages.filter((m) => m.thread_id !== id);
     this.threadNotices.delete(id);
-    return true;
   }
 
   async searchThreadMessages(
@@ -504,7 +522,7 @@ export class MemoryStore implements Store {
     const thread = this.threads.get(threadId);
     if (!this.threadOwnedBy(thread, scope)) throw new Error('threadId 不存在或不属于当前用户');
     const space = this.spaces.get(thread.space_id);
-    if (!space || space.deleted_at) throw new Error('space 已删除，不能创建新 run');
+    if (!space) throw new Error('space 不存在，不能创建新 run');
     if (space.mode !== 'web') throw new Error('外部空间在 Web 中只读');
     if (options.expectedSpaceConfigVersion !== undefined && options.expectedSpaceConfigVersion !== space.config_version) {
       throw new SpaceConfigChangedError();
@@ -604,6 +622,21 @@ export class MemoryStore implements Store {
     const set = new Set(statuses);
     return [...this.runs.values()].filter((r) => set.has(r.status));
   }
+  async cancelRunsForDeletion(threadIds: string[]) {
+    const targets = new Set(threadIds);
+    const canceled: RunRow[] = [];
+    for (const run of this.runs.values()) {
+      if (!targets.has(run.thread_id) || isTerminalRunStatus(run.status)) continue;
+      run.status = 'canceled';
+      run.error = '所属资源已删除，运行已取消。';
+      run.external_input_open = false;
+      run.updated_at = this.now();
+      const thread = this.threads.get(run.thread_id);
+      if (thread?.executing_run_id === run.id) thread.executing_run_id = null;
+      canceled.push(run);
+    }
+    return canceled;
+  }
   async setRunStatus(scope: Scope, id: string, status: RunStatus, fields: { output?: string | null; error?: string | null } = {}) {
     const run = this.runs.get(id);
     if (!this.runOwnedBy(run, scope)) return;
@@ -691,6 +724,12 @@ export class MemoryStore implements Store {
   }
   async getThreadUnscoped(id: string): Promise<ThreadRow | null> {
     return this.threads.get(id) ?? null;
+  }
+
+  async listThreadsForDeletion(tenantId: string, spaceId?: string): Promise<ThreadRow[]> {
+    return [...this.threads.values()]
+      .filter((thread) => thread.tenant_id === tenantId && (spaceId === undefined || thread.space_id === spaceId))
+      .sort((left, right) => left.created_at.localeCompare(right.created_at) || left.id.localeCompare(right.id));
   }
 
   async createStep(scope: Scope, runId: string, idx: number): Promise<StepRow> {
@@ -1083,6 +1122,25 @@ export class MemoryStore implements Store {
     return [...this.shellCommands.values()].filter((cmd) => cmd.status === 'queued' || cmd.status === 'running');
   }
 
+  async cancelShellCommandsForDeletion(threadIds: string[]): Promise<void> {
+    const targets = new Set(threadIds);
+    const now = this.now();
+    for (const command of this.shellCommands.values()) {
+      const session = this.shellSessions.get(command.session_id);
+      if (!session || !targets.has(session.thread_id)) continue;
+      if (command.status !== 'queued' && command.status !== 'running') continue;
+      command.status = 'killed';
+      command.attention = 'resource_deleted';
+      command.signal = 'SIGTERM';
+      command.ended_at = now;
+      command.updated_at = now;
+      session.status = 'idle';
+      session.lease_actor = null;
+      session.lease_run_id = null;
+      session.updated_at = now;
+    }
+  }
+
   async updateShellCommandUnscoped(
     id: string,
     fields: Partial<
@@ -1206,6 +1264,7 @@ export class MemoryStore implements Store {
       password_hash: input.ownerPasswordHash,
       role: 'owner',
       status: 'active',
+      is_bootstrap: input.isBootstrap ?? false,
       created_at: createdAt,
     };
     const defaultSpace: SpaceRow = {
@@ -1217,7 +1276,6 @@ export class MemoryStore implements Store {
       config: structuredClone(input.defaultSpaceConfig ?? defaultMemorySpaceConfig()),
       config_version: 1,
       created_by_user_id: owner.id,
-      deleted_at: null,
       created_at: createdAt,
       updated_at: createdAt,
     };
@@ -1275,14 +1333,41 @@ export class MemoryStore implements Store {
     return row;
   }
 
+  async deleteTenant(id: string): Promise<DeleteResourceResult | null> {
+    const tenant = this.tenants.get(id);
+    if (!tenant) return null;
+    if (tenant.is_bootstrap) throw new DeleteConflictError('DEFAULT_TENANT_PROTECTED', 'default 租户不能删除');
+    const threadIds = [...this.threads.values()].filter((thread) => thread.tenant_id === id).map((thread) => thread.id);
+    const hasActiveRun = [...this.runs.values()].some((run) => (
+      threadIds.includes(run.thread_id) && !isTerminalRunStatus(run.status)
+    ));
+    if (hasActiveRun) throw new DeleteConflictError('TENANT_HAS_ACTIVE_RUNS', '租户仍有运行中的任务');
+    if (this.hasActiveShellCommand(new Set(threadIds))) {
+      throw new DeleteConflictError('TENANT_HAS_ACTIVE_SHELLS', '租户仍有运行中的 Shell 命令');
+    }
+    const spaceIds = [...this.spaces.values()].filter((space) => space.tenant_id === id).map((space) => space.id);
+    for (const threadId of threadIds) this.purgeThread(threadId);
+    for (const spaceId of spaceIds) {
+      this.spaces.delete(spaceId);
+      this.spaceVisibleUsers.delete(spaceId);
+    }
+    for (const [userId, user] of this.users) if (user.tenant_id === id) this.users.delete(userId);
+    for (const [tokenId, token] of this.authTokens) if (token.tenant_id === id) this.authTokens.delete(tokenId);
+    for (const [endpoint, subscription] of this.pushSubscriptions) {
+      if (subscription.tenant_id === id) this.pushSubscriptions.delete(endpoint);
+    }
+    this.tenants.delete(id);
+    return { artifactStorageKeys: [] };
+  }
+
   async getDefaultSpace(tenantId: string): Promise<SpaceRow | null> {
     const id = this.tenants.get(tenantId)?.default_space_id;
     return id ? this.spaces.get(id) ?? null : null;
   }
 
-  async listSpaces(tenantId: string, options: { includeDeleted?: boolean } = {}): Promise<SpaceWithVisibilityRow[]> {
+  async listSpaces(tenantId: string): Promise<SpaceWithVisibilityRow[]> {
     return [...this.spaces.values()]
-      .filter((space) => space.tenant_id === tenantId && (options.includeDeleted || !space.deleted_at))
+      .filter((space) => space.tenant_id === tenantId)
       .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
       .map((space) => this.spaceWithVisibility(space));
   }
@@ -1294,6 +1379,12 @@ export class MemoryStore implements Store {
 
   async createSpace(input: CreateSpaceRecordInput): Promise<SpaceWithVisibilityRow> {
     if (!this.tenants.has(input.tenantId)) throw new Error('tenant 不存在');
+    if (input.createdByUserId) {
+      const creator = this.users.get(input.createdByUserId);
+      if (!creator || creator.tenant_id !== input.tenantId) {
+        throw new Error('createdByUserId 不属于当前租户');
+      }
+    }
     const now = this.now();
     const space: SpaceRow = {
       id: newSpaceId(),
@@ -1304,7 +1395,6 @@ export class MemoryStore implements Store {
       config: structuredClone(input.config),
       config_version: 1,
       created_by_user_id: input.createdByUserId,
-      deleted_at: null,
       created_at: now,
       updated_at: now,
     };
@@ -1331,27 +1421,39 @@ export class MemoryStore implements Store {
     return this.spaceWithVisibility(space);
   }
 
-  async softDeleteSpaceAndRevokeTokens(tenantId: string, id: string): Promise<SpaceWithVisibilityRow | null> {
+  async deleteSpace(
+    tenantId: string,
+    id: string,
+    replacementDefaultSpaceId?: string,
+  ): Promise<DeleteResourceResult | null> {
     const space = this.spaces.get(id);
     if (!space || space.tenant_id !== tenantId) return null;
-    if (this.tenants.get(tenantId)?.default_space_id === id) {
-      throw new DefaultSpaceImmutableError('default 空间不能删除');
+    const threadIds = [...this.threads.values()].filter((thread) => thread.space_id === id).map((thread) => thread.id);
+    const hasActiveRun = [...this.runs.values()].some((run) => (
+      threadIds.includes(run.thread_id) && !isTerminalRunStatus(run.status)
+    ));
+    if (hasActiveRun) throw new DeleteConflictError('SPACE_HAS_ACTIVE_RUNS', '空间仍有运行中的任务');
+    if (this.hasActiveShellCommand(new Set(threadIds))) {
+      throw new DeleteConflictError('SPACE_HAS_ACTIVE_SHELLS', '空间仍有运行中的 Shell 命令');
     }
-    space.deleted_at ??= this.now();
-    space.updated_at = this.now();
-    // MemoryStore 当前没有外部 Token 写入入口；真实 PgStore 在同一事务内完成吊销。
-    return this.spaceWithVisibility(space);
+    const tenant = this.tenants.get(tenantId);
+    if (tenant?.default_space_id === id) {
+      const replacement = replacementDefaultSpaceId ? this.spaces.get(replacementDefaultSpaceId) : null;
+      if (!replacementDefaultSpaceId || replacementDefaultSpaceId === id) {
+        throw new DeleteConflictError('DEFAULT_SPACE_REPLACEMENT_REQUIRED', '删除默认空间前必须选择新的默认空间');
+      }
+      if (!replacement || replacement.tenant_id !== tenantId || replacement.mode !== 'web') {
+        throw new DeleteConflictError('DEFAULT_SPACE_REPLACEMENT_INVALID', '新的默认空间必须是当前租户的 Web 空间');
+      }
+      tenant.default_space_id = replacement.id;
+    }
+    for (const threadId of threadIds) this.purgeThread(threadId);
+    this.spaces.delete(id);
+    this.spaceVisibleUsers.delete(id);
+    return { artifactStorageKeys: [] };
   }
 
-  async restoreSpace(tenantId: string, id: string): Promise<SpaceWithVisibilityRow | null> {
-    const space = this.spaces.get(id);
-    if (!space || space.tenant_id !== tenantId) return null;
-    space.deleted_at = null;
-    space.updated_at = this.now();
-    return this.spaceWithVisibility(space);
-  }
-
-  async createUser(input: { tenantId: string; email: string; passwordHash: string; role: TenantUserRole }): Promise<UserRow> {
+  async createUser(input: { tenantId: string; email: string; passwordHash: string; role: TenantUserRole; isBootstrap?: boolean }): Promise<UserRow> {
     const row: UserRow = {
       id: newUserId(),
       tenant_id: input.tenantId,
@@ -1359,6 +1461,7 @@ export class MemoryStore implements Store {
       password_hash: input.passwordHash,
       role: input.role,
       status: 'active',
+      is_bootstrap: input.isBootstrap ?? false,
       created_at: this.now(),
     };
     this.users.set(row.id, row);
@@ -1377,31 +1480,58 @@ export class MemoryStore implements Store {
     return [...this.users.values()].filter((u) => u.tenant_id === tenantId).sort((a, b) => a.created_at.localeCompare(b.created_at));
   }
 
-  async updateUserRole(id: string, role: TenantUserRole): Promise<UserRow | null> {
-    const row = this.users.get(id);
-    if (!row) return null;
-    row.role = role;
-    return row;
-  }
-
-  async updateUserStatus(id: string, status: 'active' | 'disabled'): Promise<UserRow | null> {
-    const row = this.users.get(id);
-    if (!row) return null;
-    row.status = status;
-    return row;
-  }
-
   async updateUser(
     id: string,
     fields: { email?: string; passwordHash?: string; role?: TenantUserRole; status?: 'active' | 'disabled' },
   ): Promise<UserRow | null> {
     const row = this.users.get(id);
     if (!row) return null;
+    if (row.role === 'owner' && fields.role !== undefined && fields.role !== 'owner') {
+      const hasOtherOwner = [...this.users.values()].some((user) => (
+        user.tenant_id === row.tenant_id && user.id !== row.id && user.role === 'owner'
+      ));
+      if (!hasOtherOwner) throw new DeleteConflictError('LAST_OWNER_PROTECTED', '租户必须至少保留一个 owner');
+    }
     if (fields.email !== undefined) row.email = fields.email;
     if (fields.passwordHash !== undefined) row.password_hash = fields.passwordHash;
     if (fields.role !== undefined) row.role = fields.role;
     if (fields.status !== undefined) row.status = fields.status;
     return row;
+  }
+
+  async deleteUser(tenantId: string, id: string): Promise<boolean> {
+    const target = this.users.get(id);
+    if (!target || target.tenant_id !== tenantId) return false;
+    if (target.is_bootstrap) throw new DeleteConflictError('DEFAULT_ADMIN_PROTECTED', 'default 租户管理员不能删除');
+    if ([...this.threads.values()].some((thread) => thread.tenant_id === tenantId && thread.user_id === id)) {
+      throw new DeleteConflictError('USER_HAS_THREADS', '用户仍有关联对话，不能删除');
+    }
+    if ([...this.spaces.values()].some((space) => space.tenant_id === tenantId && space.execution_user_id === id)) {
+      throw new DeleteConflictError('USER_IS_EXECUTION_USER', '用户仍是空间的执行用户，不能删除');
+    }
+    const otherOwners = [...this.users.values()].some((user) => (
+      user.tenant_id === tenantId && user.id !== id && user.role === 'owner'
+    ));
+    if (target.role === 'owner' && !otherOwners) {
+      throw new DeleteConflictError('LAST_OWNER_PROTECTED', '租户必须至少保留一个 owner');
+    }
+    for (const space of this.spaces.values()) {
+      if (space.tenant_id === tenantId && space.created_by_user_id === id) space.created_by_user_id = null;
+    }
+    for (const visibleUsers of this.spaceVisibleUsers.values()) visibleUsers.delete(id);
+    for (const [tokenId, token] of this.authTokens) if (token.user_id === id) this.authTokens.delete(tokenId);
+    for (const [endpoint, subscription] of this.pushSubscriptions) {
+      if (subscription.user_id === id) this.pushSubscriptions.delete(endpoint);
+    }
+    this.users.delete(id);
+    return true;
+  }
+
+  async markBootstrapUser(id: string): Promise<UserRow> {
+    const user = this.users.get(id);
+    if (!user) throw new Error(`用户 ${id} 不存在`);
+    user.is_bootstrap = true;
+    return user;
   }
 
   async revokeRefreshTokensByUser(userId: string): Promise<void> {
@@ -1449,12 +1579,13 @@ export class MemoryStore implements Store {
       .sort((a, b) => b.created_at.localeCompare(a.created_at));
   }
 
-  async createSystemAdmin(input: { email: string; passwordHash: string }): Promise<SystemAdminRow> {
+  async createSystemAdmin(input: { email: string; passwordHash: string; isBootstrap?: boolean }): Promise<SystemAdminRow> {
     const row: SystemAdminRow = {
       id: newSystemAdminId(),
       email: input.email,
       password_hash: input.passwordHash,
       status: 'active',
+      is_bootstrap: input.isBootstrap ?? false,
       created_at: this.now(),
     };
     this.systemAdmins.set(row.id, row);
@@ -1471,6 +1602,26 @@ export class MemoryStore implements Store {
 
   async listSystemAdmins(): Promise<SystemAdminRow[]> {
     return [...this.systemAdmins.values()].sort((a, b) => a.created_at.localeCompare(b.created_at));
+  }
+
+  async deleteSystemAdmin(id: string): Promise<boolean> {
+    const target = this.systemAdmins.get(id);
+    if (!target) return false;
+    if (target.is_bootstrap) {
+      throw new DeleteConflictError('DEFAULT_SYSTEM_ADMIN_PROTECTED', '默认系统管理员不能删除');
+    }
+    this.systemAdmins.delete(id);
+    for (const [tokenId, token] of this.systemAdminTokens) {
+      if (token.system_admin_id === id) this.systemAdminTokens.delete(tokenId);
+    }
+    return true;
+  }
+
+  async markBootstrapSystemAdmin(id: string): Promise<SystemAdminRow> {
+    const admin = this.systemAdmins.get(id);
+    if (!admin) throw new Error(`系统管理员 ${id} 不存在`);
+    admin.is_bootstrap = true;
+    return admin;
   }
 
   async createSystemAdminToken(input: {

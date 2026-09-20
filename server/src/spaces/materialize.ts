@@ -28,7 +28,7 @@ export async function materializeLegacySpaceConfigs(
 ): Promise<number> {
   let updated = 0;
   for (const tenant of await store.listTenants()) {
-    for (const space of await store.listSpaces(tenant.id, { includeDeleted: true })) {
+    for (const space of await store.listSpaces(tenant.id)) {
       if (!needsMaterialization(space)) continue;
       try {
         const config = await configService.snapshotForCreate(tenant.id, space.mode, space.config, false);

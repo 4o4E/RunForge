@@ -98,6 +98,7 @@ export async function runTool(
     mcpSettings?: McpSettings;
     activeMcpServerIds?: ReadonlySet<string>;
     mcpCallTool?: typeof callMcpTool;
+    abortSignal?: AbortSignal;
   },
 ): Promise<ToolResult> {
   const mcpTool = parseMcpToolName(name);
@@ -127,6 +128,7 @@ export async function runTool(
     const result: ToolResult = typeof raw === 'string' ? { text: raw } : raw;
     return { text: policy.capOutput(result.text) };
   } catch (err) {
+    ctx.abortSignal?.throwIfAborted();
     return { text: `工具 ${name} 抛出异常：${(err as Error).message}` };
   }
 }

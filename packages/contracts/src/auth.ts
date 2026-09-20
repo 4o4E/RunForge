@@ -6,6 +6,7 @@ export interface TenantUserSummary {
   email: string;
   role: TenantUserRole;
   status: 'active' | 'disabled';
+  isDefaultAdmin: boolean;
   createdAt: string;
 }
 
@@ -72,6 +73,7 @@ export interface TenantSummary {
   id: string;
   name: string;
   status: 'active' | 'suspended';
+  isDefault: boolean;
   createdAt: string;
 }
 
@@ -94,6 +96,7 @@ export interface SystemAdminSummary {
   id: string;
   email: string;
   status: 'active' | 'disabled';
+  isDefaultAdmin: boolean;
   createdAt: string;
 }
 

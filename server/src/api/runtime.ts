@@ -7,6 +7,7 @@ import {
   validateWorkloadToken,
 } from '../datasources/accountPool.js';
 import { readAuditedWorkloadSecrets } from '../businessPlugins/secretService.js';
+import { retainRunExecution, type RunExecutionRegistration } from '../agent/executionControl.js';
 
 export const runtimeApi = Router();
 
@@ -25,40 +26,59 @@ function handleError(res: import('express').Response, err: unknown) {
 // Skill 通过统一 Workload SDK 读取当前 tenant Secret。tenant/run 均从现有 WORKLOAD_TOKEN
 // 推导；业务插件的 Secret 声明只用于管理员配置和就绪提示，不作为 key 级授权边界。
 runtimeApi.post('/secrets/get', async (req, res) => {
+  let execution: RunExecutionRegistration | undefined;
   try {
     const rawToken = bearerToken(req.headers.authorization);
+    const validated = await validateWorkloadToken(rawToken);
+    execution = retainRunExecution(validated.token.run_id);
+    execution.signal.throwIfAborted();
     const stepId = typeof req.headers['x-runforge-step-id'] === 'string'
       ? req.headers['x-runforge-step-id'].trim()
       : null;
     const key = typeof req.body?.key === 'string' ? req.body.key.trim() : '';
     if (!key) throw new DatasourceError(400, 'Secret key 为必填');
     const values = await readAuditedWorkloadSecrets(rawToken, 'workload', stepId, [key]);
+    execution.signal.throwIfAborted();
     if (!Object.hasOwn(values, key)) throw new DatasourceError(404, 'tenant Secret 未配置');
     res.json({ key, value: values[key] });
   } catch (err) {
     handleError(res, err);
+  } finally {
+    execution?.finish();
   }
 });
 
 // 容器脚本调用：用 workload token 换当前 run 独占的数据库临时凭证。
 runtimeApi.post('/datasources/:id/credentials', async (req, res) => {
+  let execution: RunExecutionRegistration | undefined;
   try {
     const token = bearerToken(req.headers.authorization);
+    const validated = await validateWorkloadToken(token);
+    execution = retainRunExecution(validated.token.run_id);
+    execution.signal.throwIfAborted();
     const profileName = typeof req.body?.profile === 'string' && req.body.profile.trim() ? req.body.profile.trim() : 'readonly';
     const credential = await acquireCredential(token, req.params.id, profileName);
+    execution.signal.throwIfAborted();
     res.status(201).json(toPublicCredential(credential));
   } catch (err) {
     handleError(res, err);
+  } finally {
+    execution?.finish();
   }
 });
 
 runtimeApi.post('/leases/:id/release', async (req, res) => {
+  let execution: RunExecutionRegistration | undefined;
   try {
     const token = bearerToken(req.headers.authorization);
     const validated = await validateWorkloadToken(token);
+    execution = retainRunExecution(validated.token.run_id);
+    execution.signal.throwIfAborted();
     await releaseLease(req.params.id, validated.token.run_id);
     res.json({ ok: true });
   } catch (err) {
     handleError(res, err);
+  } finally {
+    execution?.finish();
   }
 });

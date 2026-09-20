@@ -35,17 +35,21 @@ export const webFetchTool: Tool = {
     },
     required: ['url'],
   },
-  async run(args) {
+  async run(args, ctx) {
     const url = String(args.url ?? '');
     const maxChars = Number(args.max_chars ?? 8000);
     try {
-      const res = await fetch(url, { headers: { 'User-Agent': 'RunForge/0.1' } });
+      const res = await fetch(url, {
+        headers: { 'User-Agent': 'RunForge/0.1' },
+        signal: ctx?.abortSignal,
+      });
       if (!res.ok) return `抓取失败（${res.status}）：${url}`;
       const ct = res.headers.get('content-type') ?? '';
       const raw = await res.text();
       const text = ct.includes('html') ? htmlToText(raw) : raw;
       return truncateFetchText(text, maxChars);
     } catch (err) {
+      ctx?.abortSignal?.throwIfAborted();
       return `抓取失败 ${url}: ${(err as Error).message}`;
     }
   },
