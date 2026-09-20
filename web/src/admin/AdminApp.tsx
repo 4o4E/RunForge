@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, Layers3, LogOut, Package, Users } from 'lucide-react';
 import { getCurrentUser, logout } from '../api';
-import type { TenantUserSummary } from '@runforge/contracts';
+import type { CurrentTenantUserSummary } from '@runforge/contracts';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
@@ -40,7 +40,7 @@ function adminRoutePath(route: AdminRoute): string {
 }
 
 export function AdminApp() {
-  const [user, setUser] = useState<TenantUserSummary | null>(null);
+  const [user, setUser] = useState<CurrentTenantUserSummary | null>(null);
   const [error, setError] = useState('');
   const [route, setRoute] = useState<AdminRoute>(() => parseAdminRoute(window.location.pathname));
   const spaceControlApi = useMemo(
@@ -96,7 +96,7 @@ export function AdminApp() {
       <div className="flex shrink-0 items-center justify-between gap-3 border-b px-6 py-4">
         <div>
           <h1 className="text-xl font-semibold">{route.page === 'prompt' ? '提示词管理' : '租户设置'}</h1>
-          <p className="mt-1 text-sm text-muted-foreground">{user.email} · {user.role} · 只管理租户 {user.tenantId}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{user.email} · {user.role} · 当前租户：{user.tenantName}（{user.tenantId}）</p>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" asChild>

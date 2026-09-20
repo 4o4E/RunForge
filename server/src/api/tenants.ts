@@ -7,6 +7,7 @@ import { toApiTokenSummary, toUserSummary } from '../auth/view.js';
 import type {
   CreateApiTokenInput,
   CreateApiTokenResponse,
+  CurrentTenantUserSummary,
   UpdateBusinessPluginSettingsInput,
 } from '@runforge/contracts';
 import {
@@ -59,7 +60,10 @@ tenantsApi.get('/me', async (_req, res) => {
     res.status(404).json({ error: '用户不存在' });
     return;
   }
-  res.json(toUserSummary(user));
+  const tenant = await store.findTenant(identity.tenantId);
+  if (!tenant) throw new Error('当前租户不存在');
+  const response: CurrentTenantUserSummary = { ...toUserSummary(user), tenantName: tenant.name };
+  res.json(response);
 });
 
 tenantsApi.get('/:id/business-plugins', requireMatchingTenantParam('id'), requireOwnerOrAdmin, async (req, res) => {

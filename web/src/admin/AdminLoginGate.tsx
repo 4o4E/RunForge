@@ -2,6 +2,7 @@ import React, { FormEvent, useEffect, useState } from 'react';
 import { getCurrentUser, loginWithRoleGuard, onAccessTokenInvalid, restoreSession } from '../api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { TenantLoginSelect } from '@/components/auth/TenantLoginSelect';
 
 // /admin 和 / 是同一套 scope:'tenant' 会话(共用 api.ts 的 token 存储)，只是登录成功后
 // 多一道角色校验(设计决策 1、2，见 /root/.claude/plans/groovy-snuggling-whistle.md)。
@@ -50,7 +51,7 @@ export function AdminLoginGate({ children }: { children: React.ReactNode }) {
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!email.trim() || !password || submitting) return;
+    if (!email.trim() || !password || !tenantId || submitting) return;
     setSubmitting(true);
     setError('');
     try {
@@ -60,7 +61,7 @@ export function AdminLoginGate({ children }: { children: React.ReactNode }) {
       const result = await loginWithRoleGuard(
         email.trim(),
         password,
-        tenantId.trim() || undefined,
+        tenantId,
         (role) => role === 'owner' || role === 'admin',
       );
       if (result.ok) {
@@ -100,9 +101,9 @@ export function AdminLoginGate({ children }: { children: React.ReactNode }) {
         </div>
         <Input autoFocus type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="邮箱" />
         <Input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="密码" />
-        <Input value={tenantId} onChange={(event) => setTenantId(event.target.value)} placeholder="租户 ID（留空使用默认租户）" />
+        <TenantLoginSelect value={tenantId} onChange={setTenantId} />
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
-        <Button type="submit" disabled={!email.trim() || !password || submitting}>
+        <Button type="submit" disabled={!email.trim() || !password || !tenantId || submitting}>
           {submitting ? '登录中…' : '登录'}
         </Button>
       </form>

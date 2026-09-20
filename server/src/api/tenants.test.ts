@@ -11,16 +11,23 @@ test.before(() => {
 });
 
 test('GET /api/tenants/me: 返回当前登录用户自己的信息', async () => {
-  const owner = await seedOwner('tn_me', 'owner@me.test', 'pw');
+  const { owner } = await store.createTenantWithOwner({
+    id: 'tn_me',
+    name: '当前登录租户',
+    ownerEmail: 'owner@me.test',
+    ownerPasswordHash: hashPassword('pw'),
+    settingsTemplate: [],
+  });
   const jwt = signTenantAccessToken({ id: owner.id, tenantId: 'tn_me', role: 'owner' });
   const { port, close } = await listen(buildApp());
   try {
     const res = await fetch(`http://127.0.0.1:${port}/api/tenants/me`, { headers: { Authorization: `Bearer ${jwt}` } });
     assert.equal(res.status, 200);
-    const body = (await res.json()) as { id: string; email: string; role: string };
+    const body = (await res.json()) as { id: string; email: string; role: string; tenantName: string };
     assert.equal(body.id, owner.id);
     assert.equal(body.email, 'owner@me.test');
     assert.equal(body.role, 'owner');
+    assert.equal(body.tenantName, '当前登录租户');
   } finally {
     close();
   }

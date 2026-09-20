@@ -10,6 +10,20 @@ export interface TenantUserSummary {
   createdAt: string;
 }
 
+export interface CurrentTenantUserSummary extends TenantUserSummary {
+  tenantName: string;
+}
+
+export interface LoginTenantSummary {
+  id: string;
+  name: string;
+  isDefault: boolean;
+}
+
+export interface LoginTenantsResponse {
+  tenants: LoginTenantSummary[];
+}
+
 export interface ApiTokenSummary {
   id: string;
   label: string | null;

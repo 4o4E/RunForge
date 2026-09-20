@@ -5,10 +5,22 @@ import { verifyPassword } from '../auth/passwords.js';
 import { generateOpaqueToken, hashOpaqueToken } from '../auth/tokens.js';
 import { signTenantAccessToken } from '../auth/jwt.js';
 import { toUserSummary } from '../auth/view.js';
-import type { LoginRequest, LoginResponse, RefreshRequest, RefreshResponse } from '@runforge/contracts';
+import type { LoginRequest, LoginResponse, LoginTenantsResponse, RefreshRequest, RefreshResponse } from '@runforge/contracts';
 import { getSystemResourceTenantId } from '../systemResourceTenant.js';
 
 export const authApi = Router();
+
+// 登录页尚未建立身份，只公开可登录租户的名称与 ID，不公开成员和租户设置。
+authApi.get('/tenants', async (_req, res) => {
+  const tenants = (await store.listTenants())
+    .filter((tenant) => tenant.status === 'active')
+    .sort((left, right) => Number(right.is_bootstrap) - Number(left.is_bootstrap)
+      || left.name.localeCompare(right.name)
+      || left.id.localeCompare(right.id))
+    .map((tenant) => ({ id: tenant.id, name: tenant.name, isDefault: tenant.is_bootstrap }));
+  const response: LoginTenantsResponse = { tenants };
+  res.json(response);
+});
 
 authApi.post('/login', async (req, res) => {
   const body = req.body as Partial<LoginRequest> | undefined;

@@ -2,6 +2,7 @@ import type {
   AgentEvent,
   AskUserAnswer,
   CreateUserInput,
+  CurrentTenantUserSummary,
   Datasource,
   DatasourceDetailResponse,
   DatasourceInput,
@@ -11,6 +12,7 @@ import type {
   FileTextContent,
   FileTextSaveResponse,
   LlmSettingsOptions,
+  LoginTenantsResponse,
   PageState,
   PermissionProfile,
   PermissionProfileInput,
@@ -127,6 +129,11 @@ export async function login(email: string, password: string, tenantId?: string):
   setAccessToken(body.accessToken);
   writeRefreshToken(body.refreshToken);
   return body.user;
+}
+
+export async function listLoginTenants(): Promise<LoginTenantsResponse> {
+  const response = await globalThis.fetch('/api/auth/tenants');
+  return json<LoginTenantsResponse>(response);
 }
 
 /** 给 /admin 这类"共享租户会话、但登录后要求特定角色"的入口用：只有 isAllowedRole
@@ -456,7 +463,7 @@ export const updatePageState = (state: PageState) =>
 
 // --- Tenant admin (/admin 页面用：本租户用户管理) ---
 
-export const getCurrentUser = () => authFetch('/api/tenants/me').then(json<TenantUserSummary>);
+export const getCurrentUser = () => authFetch('/api/tenants/me').then(json<CurrentTenantUserSummary>);
 
 export const listTenantUsers = (tenantId: string) =>
   authFetch(`/api/tenants/${tenantId}/users`).then(json<{ users: TenantUserSummary[] }>);

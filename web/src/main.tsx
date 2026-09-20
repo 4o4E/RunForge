@@ -6,6 +6,7 @@ import { NotificationProvider } from './components/GlobalNotifications.js';
 import { ShareFileView } from './components/ShareFileView.js';
 import { Button } from './components/ui/button.js';
 import { Input } from './components/ui/input.js';
+import { TenantLoginSelect } from './components/auth/TenantLoginSelect.js';
 import { ThemeProvider } from './theme.js';
 import { AdminLoginGate } from './admin/AdminLoginGate.js';
 import { AdminApp } from './admin/AdminApp.js';
@@ -35,6 +36,7 @@ function LoginGate({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<SessionStatus>(() => (readAccessToken() ? 'authenticated' : 'restoring'));
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [tenantId, setTenantId] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
@@ -57,11 +59,11 @@ function LoginGate({ children }: { children: React.ReactNode }) {
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!email.trim() || !password || submitting) return;
+    if (!email.trim() || !password || !tenantId || submitting) return;
     setSubmitting(true);
     setError('');
     try {
-      await login(email.trim(), password);
+      await login(email.trim(), password, tenantId);
       setStatus('authenticated');
       setPassword('');
     } catch (err) {
@@ -94,8 +96,9 @@ function LoginGate({ children }: { children: React.ReactNode }) {
           onChange={(event) => setPassword(event.target.value)}
           placeholder="密码"
         />
+        <TenantLoginSelect value={tenantId} onChange={setTenantId} />
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
-        <Button type="submit" disabled={!email.trim() || !password || submitting}>
+        <Button type="submit" disabled={!email.trim() || !password || !tenantId || submitting}>
           {submitting ? '登录中…' : '登录'}
         </Button>
       </form>

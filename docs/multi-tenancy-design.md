@@ -429,7 +429,8 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 
 ## 10. 前端
 
-- 新增登录页:邮箱 + 密码提交到 `POST /api/auth/login`,拿到 `{accessToken, refreshToken}`。相比现在"直接在设置里填一个 token"的模型,这是本次改造里前端唯一必须新增交互的部分。
+- 租户登录页（普通入口和 `/admin`）在登录前调用 `GET /api/auth/tenants`，下拉选择可登录租户，默认选中引导租户。匿名接口仅公开状态为 active 的租户名称、ID 和引导标记，不返回用户或配置。邮箱、密码与所选 `tenantId` 一同提交到 `POST /api/auth/login`，拿到 `{accessToken, refreshToken}`。系统管理员使用独立身份，不选择租户。
+- 已登录租户用户调用 `GET /api/tenants/me` 时会得到当前租户名称；租户管理员页面用它显示当前管理的租户。
 - `web/src/api.ts` 里的 `authHeaders` 从"读一个固定 token"变成"读内存里的 access token";access token 只存内存(page 生命周期内的变量),`refreshToken` 存 `localStorage`(与现状"token 存本地"的存储方式保持一致,权衡见下)。
 - 请求拦截逻辑:每次请求前检查 access token 是否临近过期(或收到 401 后),先用 `refreshToken` 调 `POST /api/auth/refresh` 静默换新 token 再重试一次;`refreshToken` 本身也失效(过期/被吊销)则清空本地状态,跳转登录页。
 - WebSocket 连接时用当前 access token 作为 `runforge-token.<base64>` 子协议值;access token 中途过期不会主动断连,但重连时(网络抖动、页面恢复)需要用最新 access token 重建连接。

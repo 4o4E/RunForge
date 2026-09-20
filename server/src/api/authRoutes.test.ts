@@ -48,6 +48,32 @@ test.before(() => {
   config.auth.jwtSecret = config.auth.jwtSecret || 'test-jwt-secret';
 });
 
+test('GET /api/auth/tenants: 匿名登录页只列出可登录租户的名称和 ID', async () => {
+  await store.createTenantWithOwner({
+    id: 'tn_login_directory_active',
+    name: '测试登录租户',
+    ownerEmail: 'owner@login-directory-active.test',
+    ownerPasswordHash: hashPassword('pw'),
+    settingsTemplate: [],
+  });
+  await seedOwner('tn_login_directory_suspended', 'owner@login-directory-suspended.test', 'pw');
+  await store.updateTenantStatus('tn_login_directory_suspended', 'suspended');
+  const { port, close } = await listen(buildApp());
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/auth/tenants`);
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { tenants: Array<{ id: string; name: string; isDefault: boolean }> };
+    assert.deepEqual(body.tenants.find((tenant) => tenant.id === 'tn_login_directory_active'), {
+      id: 'tn_login_directory_active',
+      name: '测试登录租户',
+      isDefault: false,
+    });
+    assert.equal(body.tenants.some((tenant) => tenant.id === 'tn_login_directory_suspended'), false);
+  } finally {
+    close();
+  }
+});
+
 test('POST /api/auth/login: correct password succeeds, wrong password 401', async () => {
   await seedOwner('tn_login', 'owner@login.test', 'correct-password');
   const { port, close } = await listen(buildApp());
