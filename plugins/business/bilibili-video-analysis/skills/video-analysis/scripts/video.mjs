@@ -6,9 +6,9 @@ import { promisify } from 'node:util';
 if (process.platform !== 'linux' || process.arch !== 'x64') {
   throw new Error('视频分析插件只支持 Linux amd64');
 }
-const [operation, input, target, timesArgument] = process.argv.slice(2);
-if (!['metadata', 'comments', 'audio', 'frames'].includes(operation) || !input || !target) {
-  throw new Error('用法: video.mjs metadata|comments|audio|frames <B站视频URL> <工作目录> [关键帧秒数CSV]');
+const [operation, input, target] = process.argv.slice(2);
+if (!['metadata', 'comments', 'audio', 'video'].includes(operation) || !input || !target) {
+  throw new Error('用法: video.mjs metadata|comments|audio|video <B站视频URL> <工作目录>');
 }
 const output = resolve(target);
 const execFileAsync = promisify(execFile);
@@ -44,7 +44,7 @@ async function apiJson(url) {
 }
 
 const video = await videoUrl(input);
-if (operation === 'comments' || operation === 'frames') {
+if (operation === 'comments' || operation === 'video') {
   // 音轨没有有效讲话时，评论与画面不能替代视频内容分析。
   const transcripts = (await readdir(output)).filter((name) =>
     name.startsWith(`${video.bvid}-p${video.page}`) && name.endsWith('.srt'));
@@ -110,26 +110,5 @@ if (operation === 'metadata') {
   if (duration < expected - Math.max(3, expected * 0.02)) {
     throw new Error(`下载内容不完整：实际 ${duration.toFixed(1)} 秒，视频分 P 为 ${expected} 秒`);
   }
-  if (operation === 'audio') console.log(mediaFile);
-  else {
-    const frameDir = join(mediaDir, 'keyframes');
-    await mkdir(frameDir, { recursive: true });
-    const count = Math.min(12, Math.max(3, Math.ceil(duration / 90)), Math.max(1, Math.floor(duration)));
-    const timestamps = timesArgument
-      ? timesArgument.split(',').map((value) => Number(value))
-      : Array.from({ length: count }, (_, index) => Number((duration * (index + 0.5) / count).toFixed(2)));
-    if (timestamps.some((seconds) => !Number.isFinite(seconds) || seconds < 0 || seconds >= duration)) {
-      throw new Error('关键帧秒数必须在视频时长内');
-    }
-    const frames = [];
-    for (const [index, seconds] of timestamps.entries()) {
-      const image = join(frameDir, `${String(index + 1).padStart(2, '0')}-${seconds}s.jpg`);
-      await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-ss', String(seconds), '-i', mediaFile,
-        '-frames:v', '1', '-vf', 'scale=960:-2', '-q:v', '4', '-y', image]);
-      frames.push({ seconds, image });
-    }
-    const manifest = join(frameDir, 'frames.json');
-    await writeFile(manifest, JSON.stringify({ video: mediaFile, frames }, null, 2));
-    console.log(manifest);
-  }
+  console.log(mediaFile);
 }

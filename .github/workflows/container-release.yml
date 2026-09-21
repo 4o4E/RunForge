@@ -104,6 +104,9 @@ jobs:
             deploy/compose.external-postgres.yml \
             deploy/.env.postgres.example \
             deploy/.env.external-postgres.example \
+            deploy/security/README.md \
+            deploy/security/runforge-bwrap.apparmor \
+            deploy/security/runforge-bwrap-seccomp.json \
             --verify-tag \
             --generate-notes \
             --title "RunForge ${GITHUB_REF_NAME}"

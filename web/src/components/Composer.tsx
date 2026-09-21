@@ -34,6 +34,7 @@ export interface ComposerAttachment {
 }
 
 interface Props {
+  readOnly: boolean;
   messages: UIMessage[];
   busy: boolean;
   disabled: boolean;
@@ -154,6 +155,7 @@ function ContextUsageMeter({ usage }: { usage: UsageSnapshot | null }) {
 }
 
 export function Composer({
+  readOnly,
   messages,
   busy,
   disabled,
@@ -180,7 +182,7 @@ export function Composer({
   const promptFrameRef = useRef<HTMLDivElement>(null);
   const dragDepthRef = useRef(0);
   const waitingForAskUser = !!waitingQuestion;
-  const sendingBlocked = disabled || waitingForAskUser;
+  const sendingBlocked = readOnly || disabled || waitingForAskUser;
   const [localDraft, setLocalDraft] = useState(draft);
   const [localFile, setLocalFile] = useState<File | null>(null);
   const [uploadDir, setUploadDir] = useState('uploads');
@@ -326,6 +328,13 @@ export function Composer({
     void uploadInlineFiles(files, 'drop');
   }
 
+  function blockFileTransfer(event: ReactDragEvent<HTMLFormElement>) {
+    if (!hasFileTransfer(event.dataTransfer)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'none';
+  }
+
   async function loadUploadDirs(path = uploadDir || '.') {
     setDirLoading(true);
     setDirError(null);
@@ -352,8 +361,8 @@ export function Composer({
       value={selectedModelRef}
       options={modelOptions}
       onChange={onModelChange}
-      placeholder="选择模型"
-      disabled={waitingForAskUser}
+      placeholder={readOnly ? '尚无运行模型' : '选择模型'}
+      disabled={readOnly || waitingForAskUser}
       variant="ghost"
       focusSearchOnOpen={false}
       className="h-8 w-8 min-w-8 px-0 text-xs text-muted-foreground hover:text-foreground md:w-auto md:min-w-0 md:px-2 [&>span]:hidden md:[&>span]:block [&>svg:last-child]:hidden md:[&>svg:last-child]:block"
@@ -372,9 +381,10 @@ export function Composer({
                   <button
                     key={`${att.kind}:${att.path}`}
                     type="button"
+                    disabled={readOnly}
                     onClick={() => onRemoveAttachment(att.path)}
-                    className="rounded-md border bg-background px-2 py-1 text-left text-xs text-muted-foreground hover:border-destructive hover:text-destructive"
-                    title="点击移除附件"
+                    className="rounded-md border bg-background px-2 py-1 text-left text-xs text-muted-foreground enabled:hover:border-destructive enabled:hover:text-destructive disabled:cursor-not-allowed disabled:opacity-70"
+                    title={readOnly ? '外部任务附件只读' : '点击移除附件'}
                   >
                     {att.kind === 'shell' && <Terminal className="mr-1 inline size-3" />}
                     {att.kind === 'local' ? '本地' : att.kind === 'remote' ? '远程' : 'Shell'} · {att.name}
@@ -389,7 +399,7 @@ export function Composer({
                   <div className="font-medium">正在修改上一条消息</div>
                   <div className="mt-0.5 truncate text-muted-foreground">发送后会基于修改后的内容重新生成当前回复。</div>
                 </div>
-                <Button type="button" variant="ghost" size="icon-sm" onClick={onCancelEdit} title="取消修改">
+                <Button type="button" variant="ghost" size="icon-sm" onClick={onCancelEdit} disabled={readOnly} title="取消修改">
                   <X className="size-4" />
                 </Button>
               </div>
@@ -408,10 +418,10 @@ export function Composer({
                 draggingFiles && 'ring-1 ring-primary/60',
               )}
               disableFileHandling
-              onDragEnterCapture={handleDragEnter}
-              onDragLeaveCapture={handleDragLeave}
-              onDragOverCapture={handleDragOver}
-              onDropCapture={handleDrop}
+              onDragEnterCapture={readOnly ? blockFileTransfer : handleDragEnter}
+              onDragLeaveCapture={readOnly ? blockFileTransfer : handleDragLeave}
+              onDragOverCapture={readOnly ? blockFileTransfer : handleDragOver}
+              onDropCapture={readOnly ? blockFileTransfer : handleDrop}
               onSubmit={handleSubmit}
             >
               {draggingFiles && (
@@ -425,8 +435,8 @@ export function Composer({
                     type="button"
                     variant="ghost"
                     size="icon-sm"
-                    disabled={waitingForAskUser}
-                    title="添加附件"
+                    disabled={readOnly || waitingForAskUser}
+                    title={readOnly ? '外部任务不能添加附件' : '添加附件'}
                     className="composer-attachment-control size-8 shrink-0 text-muted-foreground hover:text-foreground"
                   >
                     <Paperclip className="size-4" />
@@ -445,9 +455,9 @@ export function Composer({
               </DropdownMenu>
               <PromptInputTextarea
                 onChange={(event) => handleDraftChange(event.currentTarget.value, event.currentTarget)}
-                onPaste={handlePasteFiles}
-                disabled={waitingForAskUser}
-                placeholder={waitingForAskUser ? '请先回答问题' : '输入任务…'}
+                onPaste={readOnly ? undefined : handlePasteFiles}
+                disabled={readOnly || waitingForAskUser}
+                placeholder={readOnly ? '外部任务由调用方追加' : waitingForAskUser ? '请先回答问题' : '输入任务…'}
                 value={localDraft}
                 wrap={multilineDraft ? 'soft' : 'off'}
                 className={cn(
@@ -464,7 +474,7 @@ export function Composer({
                   size="icon-sm"
                   className="!size-8 !p-0 shrink-0"
                   status={disabled && !waitingForAskUser ? 'streaming' : undefined}
-                  disabled={waitingForAskUser || (!disabled && !localDraft.trim() && !attachments.length)}
+                  disabled={readOnly || waitingForAskUser || (!disabled && !localDraft.trim() && !attachments.length)}
                   onStop={onCancel}
                 />
               </div>

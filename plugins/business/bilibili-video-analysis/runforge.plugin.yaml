@@ -1,8 +1,8 @@
 schemaVersion: 2
 id: bilibili-video-analysis
-version: 0.2.0
+version: 0.3.0
 displayName: B站视频分析
-description: 下载和解析 B 站视频，提供真实音轨、关键帧和评论资料供 Agent 分析。
+description: 解析 B 站链接并下载目标分 P 的媒体、元数据和评论，供 Agent 分析。
 
 dependencies:
   - id: audio-video-tools
@@ -15,13 +15,7 @@ executables:
   - name: bbdown
     path: bin/linux-amd64/BBDown
 
-secrets:
-  - key: bilibili-video-analysis.speaches-url
-    required: true
-    description: Speaches 服务地址
-  - key: bilibili-video-analysis.speaches-key
-    required: true
-    description: Speaches 服务访问密钥
+secrets: []
 mcpServers: []
 resources: []
 configSchema:

@@ -310,6 +310,10 @@ function liveRunFrom(runs: RunWithEvents[]): RunWithEvents | null {
   return [...runs].reverse().find((r) => r.status === 'pending' || r.status === 'running' || r.status === 'canceling') ?? null;
 }
 
+function latestRunModelRef(runs: RunWithEvents[]): string {
+  return [...runs].reverse().find((run) => run.model_ref?.trim())?.model_ref?.trim() ?? '';
+}
+
 function continuableRunFrom(runs: RunWithEvents[]): RunWithEvents | null {
   const latest = runs[runs.length - 1] ?? null;
   return latest?.status === 'error' ? latest : null;
@@ -452,6 +456,7 @@ export function App() {
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [modelOptions, setModelOptions] = useState<LlmModelOption[]>([]);
   const [selectedModelRef, setSelectedModelRef] = useState(() => readStoredModelRef());
+  const [activeThreadModelRef, setActiveThreadModelRef] = useState('');
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [reattachedRunId, setReattachedRunId] = useState<string | null>(null);
   const [waitingRun, setWaitingRun] = useState<{ id: string; spec: AskUserSpec } | null>(null);
@@ -948,6 +953,7 @@ export function App() {
       reattachedEventsRef.current = [];
       setReattachedRunId(null);
       setContinuableRunId(null);
+      setActiveThreadModelRef('');
       return () => {
         canceled = true;
       };
@@ -976,6 +982,7 @@ export function App() {
             return next;
           });
           const branchRuns = activeBranchRuns(runs, thread.active_run_id);
+          setActiveThreadModelRef(latestRunModelRef(branchRuns));
           setMessages(runsToUiMessages(runs, thread.active_run_id, notices, context_messages, thread.space_id));
           setWaitingRun(readOnly ? null : waitingRunFrom(branchRuns));
           const liveRun = liveRunFrom(branchRuns);
@@ -993,6 +1000,7 @@ export function App() {
           setReattachedRunId(null);
           setActiveRunId(null);
           setContinuableRunId(null);
+          setActiveThreadModelRef('');
           if (route.spaceId === null && spacesLoaded) {
             const fallback = spaces.find((space) => space.isDefault) ?? spaces[0] ?? null;
             const nextRoute: ChatRoute = {
@@ -1026,6 +1034,7 @@ export function App() {
         .then(({ thread, runs, notices, context_messages }) => {
           if (canceled) return;
           const branchRuns = activeBranchRuns(runs, thread.active_run_id);
+          setActiveThreadModelRef(latestRunModelRef(branchRuns));
           setMessages(runsToUiMessages(runs, thread.active_run_id, notices, context_messages, thread.space_id));
           setWaitingRun(readOnly ? null : waitingRunFrom(branchRuns));
           const liveRun = liveRunFrom(branchRuns);
@@ -1039,7 +1048,7 @@ export function App() {
         .catch(() => {});
     };
 
-    const unsubscribe = readOnly ? () => {} : subscribeRun(
+    const unsubscribe = subscribeRun(
       reattachedRunId,
       (event) => {
         reattachedEventsRef.current = [...reattachedEventsRef.current, event];
@@ -1188,6 +1197,7 @@ export function App() {
     if (!activeThreadId) return;
     void getThread(activeThreadId, { debug: debugMode, spaceId: route.spaceId }).then(({ thread, runs, notices, context_messages }) => {
       const branchRuns = activeBranchRuns(runs, thread.active_run_id);
+      setActiveThreadModelRef(latestRunModelRef(branchRuns));
       setMessages(runsToUiMessages(runs, thread.active_run_id, notices, context_messages, thread.space_id));
       setWaitingRun(readOnly ? null : waitingRunFrom(branchRuns));
       const liveRun = liveRunFrom(branchRuns);
@@ -1640,7 +1650,7 @@ export function App() {
           askUserDrafts={askUserDrafts}
           attachments={attachments}
           modelOptions={modelOptions}
-          selectedModelRef={selectedModelRef}
+          selectedModelRef={readOnly ? activeThreadModelRef : selectedModelRef}
           editingRunId={editingRunId}
           canContinueRun={!!continuableRunId}
           continuingRun={!!continuableRunId && resumingRunId === continuableRunId}

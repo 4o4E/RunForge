@@ -250,7 +250,8 @@ export function ChatView({
         />
       </div>
 
-      {!readOnly && <Composer
+      <Composer
+        readOnly={readOnly}
         messages={messages}
         busy={busy}
         disabled={busy || !!waitingQuestion}
@@ -270,7 +271,7 @@ export function ChatView({
         onRemoveAttachment={onRemoveAttachment}
         onOpenRemoteFiles={onOpenRemoteFiles}
         onUploadLocal={onUploadLocal}
-      />}
+      />
     </main>
   );
 }

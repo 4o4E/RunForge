@@ -121,3 +121,44 @@ test('appendPersistedRunUserMessage 在流式恢复时保留前段回答并创�
     createdAt: '2026-09-20T00:00:02.000Z',
   }), messages);
 });
+
+test('runsToUiMessages 保留外部运行的模型状态所需事件', () => {
+  const run: RunWithEvents = {
+    id: 'ru_status',
+    thread_id: 'th_external',
+    parent_run_id: null,
+    status: 'running',
+    input: '分析任务',
+    output: null,
+    error: null,
+    created_at: '2026-09-20T00:00:01.000Z',
+    updated_at: '2026-09-20T00:00:02.000Z',
+    events: [
+      { type: 'step_start', step: 1 },
+      {
+        type: 'plan_update',
+        step: 1,
+        goal: {
+          intent: '分析任务',
+          phase: 'working',
+          plan: [{ text: '读取材料', status: 'doing' }],
+          decisions: [],
+          next: '读取材料',
+        },
+      },
+      {
+        type: 'usage_update',
+        step: 1,
+        inputTokens: 1024,
+        outputTokens: 128,
+        estContextTokens: 2048,
+        contextBudget: 196608,
+      },
+      { type: 'llm_delta', step: 1, text: '处理中' },
+    ],
+  };
+
+  const assistant = runsToUiMessages([run], run.id)[1];
+  assert.equal(assistant?.parts.some((part) => part.type === 'data-plan-state'), true);
+  assert.equal(assistant?.parts.some((part) => part.type === 'data-usage-update'), true);
+});
