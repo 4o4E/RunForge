@@ -1,10 +1,12 @@
-import type { LlmTool } from '../llm/types.js';
+import type { LlmContentPart, LlmTool } from '../llm/types.js';
 import type { ToolSettings } from '../settings.js';
 import type { Scope } from '../store/types.js';
 
 /** 工具返回给 LLM 的标准文本结果。复杂展示应写入 Markdown/HTML artifact，而不是返回 UI JSON。 */
 export interface ToolResult {
   text: string;
+  /** 工具结果附带的模型输入内容；仅由请求前转换为 provider 多模态内容。 */
+  contentParts?: LlmContentPart[];
 }
 
 export interface ToolRunContext {

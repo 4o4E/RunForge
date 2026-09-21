@@ -1,6 +1,6 @@
 {
   "name": "runforge",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "description": "RunForge: Node/TypeScript backend + React web console for general-purpose AI agent runs",
   "type": "module",
@@ -17,7 +17,7 @@
     "stop": "bash scripts/stop.sh",
     "restart": "bash scripts/restart.sh",
     "start:server": "pnpm --filter server start",
-    "test": "pnpm --filter @runforge/contracts typecheck && pnpm --filter @runforge/workload-sdk test && pnpm --filter server test && pnpm --filter web test",
+    "test": "pnpm --filter @runforge/contracts build && pnpm --filter @runforge/workload-sdk test && pnpm --filter server test && pnpm --filter web test",
     "typecheck": "pnpm --filter @runforge/contracts typecheck && pnpm --filter @runforge/workload-sdk typecheck && pnpm --filter server typecheck && pnpm --filter web typecheck"
   },
   "devDependencies": {

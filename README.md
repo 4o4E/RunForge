@@ -51,6 +51,7 @@ Provider 在服务启动后由系统管理员写入系统设置,再授权给租�
 
 业务插件可以直接写入 `runforge-business-plugins` 卷内的 `/app/business-plugins`，也可以在
 Compose 中为该目录增加只读 bind mount。Office 转换服务地址也直接写入 Compose。
+运行镜像内置 `ffmpeg` 和 `ffprobe`，供按空间启用的媒体业务插件处理音频与视频。
 
 已有部署从合并数据目录切换到独立挂载时，参照
 [工作区存储迁移](docs/workspace-storage-migration.md)。

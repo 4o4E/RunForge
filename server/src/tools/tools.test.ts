@@ -34,6 +34,7 @@ before(async () => {
   await writeFile(join(dir, 'sub', 'b.ts'), 'export const b = 2;\n');
   await writeFile(join(dir, '健身', '背景信息.md'), '# 训练背景\n');
   await writeFile(join(dir, 'readme.md'), '# hello\n');
+  await writeFile(join(dir, 'frame.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
 });
 
 after(async () => {
@@ -301,6 +302,17 @@ test('shell blocks direct database CLI even when workload token exists', async (
 test('file_read reads content', async () => {
   const out = text(await fileReadTool.run({ path: join(dir, 'a.ts') }));
   assert.match(out, /export const a = 1/);
+});
+
+test('file_read returns PNG as a model image part', async () => {
+  const out = await fileReadTool.run(
+    { path: 'frame.png' },
+    { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir }) },
+  );
+  assert.equal(typeof out, 'object');
+  const result = out as ToolResult;
+  assert.equal(result.contentParts?.[0]?.type, 'image');
+  assert.equal(result.contentParts?.[0]?.mimeType, 'image/png');
 });
 
 test('file tools resolve relative paths from workspaceRoot', async () => {

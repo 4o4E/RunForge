@@ -126,7 +126,7 @@ export async function runTool(
     if (!tool) return { text: `未知工具：${name}` };
     const raw = await tool.run(args, { ...ctx, settings });
     const result: ToolResult = typeof raw === 'string' ? { text: raw } : raw;
-    return { text: policy.capOutput(result.text) };
+    return { ...result, text: policy.capOutput(result.text) };
   } catch (err) {
     ctx.abortSignal?.throwIfAborted();
     return { text: `工具 ${name} 抛出异常：${(err as Error).message}` };

@@ -87,6 +87,30 @@ test('toModelMessages: maps user image parts', () => {
   assert.equal(parts[1].mediaType, 'image/png');
 });
 
+test('toModelMessages: tool 结果保持文本配对，图片由后续 user 消息承载', () => {
+  const out = toModelMessages([
+    { role: 'assistant', content: null, toolCalls: [{ id: 'read_1', name: 'file_read', arguments: '{"path":"frame.png"}' }] },
+    {
+      role: 'tool',
+      content: '已读取图片：frame.png',
+      toolCallId: 'read_1',
+    },
+    {
+      role: 'user',
+      content: '以下图片来自刚刚读取的文件，请结合图片内容继续分析。',
+      contentParts: [{ type: 'image', data: 'aW1n', mimeType: 'image/png', path: 'frame.png' }],
+    },
+  ]);
+  const tool = out[1] as { role: string; content: Array<{ toolCallId: string; output: { type: string; value: string } }> };
+  assert.equal(tool.content[0].toolCallId, 'read_1');
+  assert.deepEqual(tool.content[0].output, { type: 'text', value: '已读取图片：frame.png' });
+  const imageUser = out[2] as { role: string; content: Array<{ type: string; image?: string; mediaType?: string }> };
+  assert.equal(imageUser.role, 'user');
+  assert.equal(imageUser.content[0].type, 'image');
+  assert.equal(imageUser.content[0].image, 'aW1n');
+  assert.equal(imageUser.content[0].mediaType, 'image/png');
+});
+
 test('toModelMessages: decodes string-wrapped tool-call object args', () => {
   const out = toModelMessages([
     { role: 'assistant', content: null, toolCalls: [{ id: 'x', name: 'shell', arguments: JSON.stringify('{"command":"ls"}') }] },

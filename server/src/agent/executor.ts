@@ -2,8 +2,9 @@ import { agentContextSettings, config, type AgentContextSettings } from '../conf
 import { getConfiguredProvider, getConfiguredSystemTitleProvider } from '../llm/index.js';
 import type { LlmDelta, LlmMessage, LlmUsage, Provider } from '../llm/types.js';
 import { parseToolArguments } from '../llm/toolArgs.js';
-import { hydrateImageAttachments } from '../llm/attachments.js';
+import { appendImageAttachmentTokens, hydrateImageAttachments } from '../llm/attachments.js';
 import { runTool, toolSchemas } from '../tools/registry.js';
+import type { ToolResult } from '../tools/types.js';
 import { createPolicy } from '../tools/policy.js';
 import { ContextManager } from './context.js';
 import {
@@ -1770,7 +1771,7 @@ async function executeRunControlled(
 
         let toolStage: StreamStage = 'tool_running';
         const stopToolHeartbeat = streamStats.startHeartbeat(stepIdx, () => toolStage, () => activeTool);
-        let result = await withSpan(
+        let result: ToolResult = await withSpan(
           'execute_tool',
           { 'gen_ai.tool.name': call.name, 'tool.call_id': call.id },
           async (span) => {
@@ -1875,7 +1876,12 @@ async function executeRunControlled(
           durationMs: trace.durationMs,
         });
 
-        const toolMsg = { role: 'tool' as const, content: result.text, toolCallId: call.id };
+        // 图片内容不直接落库；保存受控引用，下一次请求（包括重启恢复）再从 workspace 重读。
+        const toolMsg = {
+          role: 'tool' as const,
+          content: appendImageAttachmentTokens(result.text, result.contentParts, call.id),
+          toolCallId: call.id,
+        };
         ctx.add(toolMsg);
         ctx.setLastDbId(await store.addMessage(scope, threadId, runId, step.id, toolMsg));
 

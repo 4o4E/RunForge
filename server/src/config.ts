@@ -110,6 +110,8 @@ const DEFAULT_SHELL_ALLOW_COMMANDS = [
   'python3',
   'uv',
   'curl',
+  'ffmpeg',
+  'ffprobe',
   'psql',
 ];
 
