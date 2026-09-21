@@ -46,7 +46,6 @@ RUN apt-get update && apt-get install --yes --no-install-recommends \
       ca-certificates \
       coreutils \
       curl \
-      ffmpeg \
       findutils \
       gawk \
       git \

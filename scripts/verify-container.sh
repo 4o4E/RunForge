@@ -44,10 +44,6 @@ finish() {
 }
 trap finish EXIT
 
-# 视频业务插件依赖运行镜像中的媒体工具，构建检查必须覆盖实际可执行文件。
-docker run --rm --entrypoint ffmpeg runforge:ci -version >/dev/null
-docker run --rm --entrypoint ffprobe runforge:ci -version >/dev/null
-
 wait_http() {
   local url="$1"
   for _ in {1..90}; do

@@ -198,8 +198,6 @@ export function buildBwrapArgs(opts: BwrapOptions): string[] {
       : ['/etc/ld.so.cache'],
   );
   const extraReadOnlyPaths = existing([
-    // Debian 的多媒体库经 /etc/alternatives 软链接定位实现文件；只读挂载后 ffmpeg/ffprobe 才能加载。
-    '/etc/alternatives',
     ...(opts.shareNet ? ['/etc/ssl/certs', '/usr/share/ca-certificates'] : []),
     ...(commands.some((cmd) => cmd.name === 'git') ? ['/usr/share/git-core'] : []),
   ]);

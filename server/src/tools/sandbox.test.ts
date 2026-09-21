@@ -1,6 +1,5 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
 import { chmod, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -116,11 +115,6 @@ test('buildBwrapArgs confines workspace and hides network by default', () => {
   assert.deepEqual(args.slice(args.indexOf('--chdir'), args.indexOf('--chdir') + 2), ['--chdir', workspaceRoot]);
   assert.match(args[args.indexOf('--setenv') + 2] ?? '', /\/bin|\/usr\/bin/);
   assert.deepEqual(args.slice(-3), ['/bin/sh', '-c', 'cat package.json']);
-  if (existsSync('/etc/alternatives')) {
-    assert.ok(args.some((value, index) => value === '--ro-bind'
-      && args[index + 1] === '/etc/alternatives'
-      && args[index + 2] === '/etc/alternatives'));
-  }
 });
 
 test('buildBwrapArgs can explicitly share network namespace', () => {
