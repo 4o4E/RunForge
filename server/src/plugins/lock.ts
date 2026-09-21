@@ -70,8 +70,7 @@ export function createSpaceRuntimeLock(input: SpaceRuntimeConfig): SpaceRuntimeL
       version: plugin.version,
       contentHash: plugin.contentHash,
       config: normalizeJson(plugin.config),
-    }))
-    .sort((left, right) => left.id.localeCompare(right.id));
+    }));
   const normalized: SpaceRuntimeConfig = {
     tenantId: input.tenantId,
     spaceId: input.spaceId,

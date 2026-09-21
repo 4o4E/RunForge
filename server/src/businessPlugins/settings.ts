@@ -147,8 +147,41 @@ export function businessPluginReadiness(
   definitions: readonly BusinessPluginDefinition[],
   settings: BusinessPluginTenantSettings,
 ): BusinessPluginReadiness[] {
+  const byId = new Map(definitions.map((definition) => [definition.manifest.id, definition]));
+  const baseErrors = new Map(definitions.map((definition) => [definition.manifest.id, readinessError(definition, settings)]));
+  const memo = new Map<string, string | undefined>();
+  const visiting = new Set<string>();
+  const resolveError = (id: string): string | undefined => {
+    if (memo.has(id)) return memo.get(id);
+    if (visiting.has(id)) return `业务插件依赖存在循环：${id}`;
+    visiting.add(id);
+    const definition = byId.get(id)!;
+    let error = baseErrors.get(id);
+    if (!error) {
+      for (const dependency of definition.manifest.dependencies ?? []) {
+        if (dependency.optional) continue;
+        const target = byId.get(dependency.id);
+        if (!target) {
+          error = `缺少必需业务插件依赖：${dependency.id}`;
+          break;
+        }
+        if (dependency.version && target.manifest.version !== dependency.version) {
+          error = `依赖 ${dependency.id} 要求版本 ${dependency.version}，实际为 ${target.manifest.version ?? '未声明'}`;
+          break;
+        }
+        const dependencyError = resolveError(dependency.id);
+        if (dependencyError) {
+          error = `依赖 ${dependency.id} 不可用：${dependencyError}`;
+          break;
+        }
+      }
+    }
+    visiting.delete(id);
+    memo.set(id, error);
+    return error;
+  };
   return definitions.map((definition) => {
-    const error = readinessError(definition, settings);
+    const error = resolveError(definition.manifest.id);
     return { definition, ready: !error, ...(error ? { error } : {}) };
   });
 }
@@ -195,6 +228,16 @@ export function businessPluginAdminView(
           maxOutput: server.maxOutput,
         })),
         resources: definition.manifest.resources.map((resource) => ({ type: resource.type })),
+        dependencies: (definition.manifest.dependencies ?? []).map((dependency) => ({
+          id: dependency.id,
+          version: dependency.version ?? null,
+          optional: Boolean(dependency.optional),
+        })),
+        executables: (definition.manifest.executables ?? []).map((executable) => ({
+          name: executable.name,
+          path: executable.path,
+          platform: 'linux/amd64' as const,
+        })),
         secrets: definition.manifest.secrets.map((secret) => ({
           ...secret,
           configured: Boolean(ownValue(settings.secrets, secret.key)?.trim()),
@@ -311,6 +354,7 @@ export async function importBusinessPluginAdminView(
     return {
       pluginId: imported.definition.manifest.id,
       replaced: imported.replaced,
+      warnings: imported.warnings,
       view: businessPluginAdminView(
         await businessPluginRegistry.list(tenantId),
         await getBusinessPluginTenantSettings(tenantId),

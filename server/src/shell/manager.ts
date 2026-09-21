@@ -22,6 +22,7 @@ export interface ShellToolContext {
   runId?: string;
   stepId?: string;
   step?: number;
+  pluginExecutables?: Array<{ name: string; path: string }>;
 }
 
 interface ActiveCommand {
@@ -260,6 +261,7 @@ export class ShellManager {
     cwd?: string;
     actor?: ShellActor;
     env?: Record<string, string>;
+    pluginExecutables?: Array<{ name: string; path: string }>;
   }): Promise<{ command: ShellCommandRow; timedOutWaiting: boolean; tail: string }> {
     const admission = deletionGate.enter({ tenantId: input.scope.tenantId, threadId: input.context.threadId });
     let command!: ShellCommandRow;
@@ -310,6 +312,7 @@ export class ShellManager {
         displayCommand: commandText,
         settings: restoredSettings(session, input.settings),
         env: input.env,
+        pluginExecutables: input.pluginExecutables,
         context: input.context,
       });
     } finally {
@@ -415,6 +418,7 @@ export class ShellManager {
     displayCommand: string;
     settings: ToolSettings;
     env?: Record<string, string>;
+    pluginExecutables?: Array<{ name: string; path: string }>;
     context: ShellToolContext;
   }): Promise<ActiveCommand> {
     const shellCfg = {
@@ -426,6 +430,7 @@ export class ShellManager {
       envPath: shellPathForSettings(input.settings),
       shareNet: input.settings.network === 'enabled',
       env: input.env,
+      pluginExecutables: input.pluginExecutables,
     };
     const spec = buildShellSpawnSpec(input.commandText, shellCfg);
     await store.updateShellCommand(input.scope, input.command.id, { status: 'running' });

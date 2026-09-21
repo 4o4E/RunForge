@@ -15,6 +15,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import { ArrowDown, ArrowUp } from 'lucide-react';
 
 interface Draft {
   name: string;
@@ -82,6 +83,49 @@ function includeUnavailable(
 function unavailableIds(available: readonly string[], selected: readonly string[]): string[] {
   const availableIds = new Set(available);
   return selected.filter((id) => !availableIds.has(id));
+}
+
+function selectBusinessPlugin(
+  selected: readonly string[],
+  id: string,
+  checked: boolean,
+  options: SpaceOptions | null,
+): string[] {
+  if (!checked) {
+    const removed = new Set([id]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const plugin of options?.businessPlugins ?? []) {
+        if (selected.includes(plugin.id) && (plugin.dependencies ?? []).some((dependency) => removed.has(dependency)) && !removed.has(plugin.id)) {
+          removed.add(plugin.id);
+          changed = true;
+        }
+      }
+    }
+    return selected.filter((item) => !removed.has(item));
+  }
+  const byId = new Map((options?.businessPlugins ?? []).map((plugin) => [plugin.id, plugin]));
+  const result = [...selected];
+  const visit = (pluginId: string): void => {
+    const plugin = byId.get(pluginId);
+    for (const dependency of plugin?.dependencies ?? []) visit(dependency);
+    if (!result.includes(pluginId)) result.push(pluginId);
+  };
+  visit(id);
+  return result;
+}
+
+function dependsOn(options: SpaceOptions | null, dependentId: string, dependencyId: string): boolean {
+  const byId = new Map((options?.businessPlugins ?? []).map((plugin) => [plugin.id, plugin]));
+  const visited = new Set<string>();
+  const visit = (id: string): boolean => {
+    if (visited.has(id)) return false;
+    visited.add(id);
+    const plugin = byId.get(id);
+    return (plugin?.dependencies ?? []).some((dependency) => dependency === dependencyId || visit(dependency));
+  };
+  return visit(dependentId);
 }
 
 function OptionGrid({
@@ -344,13 +388,47 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
           <div className="grid gap-2 rounded-md border p-3">
             <div>
               <div className="text-sm font-medium">业务插件</div>
-              <div className="text-xs text-muted-foreground">业务插件包含成组的 Skill、MCP 和运行资源，必须显式启用。</div>
+              <div className="text-xs text-muted-foreground">业务插件包含成组的 Skill、MCP 和运行资源；依赖会自动加入，列表顺序决定同名命令的优先级。</div>
             </div>
-            <OptionGrid
-              values={businessPluginValues}
-              selected={draft.businessPlugins}
-              onChange={(businessPlugins) => setDraft({ ...draft, businessPlugins })}
-            />
+            <div className="grid gap-2 sm:grid-cols-2">
+              {businessPluginValues.map((item) => (
+                <label key={item.id} className="flex min-w-0 items-center gap-2 rounded-md border px-3 py-2 text-sm">
+                  <Checkbox
+                    checked={draft.businessPlugins.includes(item.id)}
+                    onCheckedChange={(checked) => setDraft({
+                      ...draft,
+                      businessPlugins: selectBusinessPlugin(draft.businessPlugins, item.id, checked === true, options),
+                    })}
+                  />
+                  <span className="min-w-0 truncate" title={item.id}>{item.label}</span>
+                </label>
+              ))}
+            </div>
+            {draft.businessPlugins.length > 0 && (
+              <div className="grid gap-1 rounded-md bg-muted/40 p-2">
+                <div className="text-xs font-medium">激活顺序</div>
+                {draft.businessPlugins.map((id, index) => {
+                  const plugin = businessPluginValues.find((item) => item.id === id);
+                  return (
+                    <div key={id} className="flex items-center justify-between gap-2 text-sm">
+                      <span>{index + 1}. {plugin?.label ?? id}</span>
+                      <span className="flex gap-1">
+                        <Button type="button" variant="ghost" size="icon" disabled={index === 0 || dependsOn(options, id, draft.businessPlugins[index - 1]!)} onClick={() => {
+                          const next = [...draft.businessPlugins];
+                          [next[index - 1], next[index]] = [next[index]!, next[index - 1]!];
+                          setDraft({ ...draft, businessPlugins: next });
+                        }}><ArrowUp className="h-4 w-4" /></Button>
+                        <Button type="button" variant="ghost" size="icon" disabled={index === draft.businessPlugins.length - 1 || dependsOn(options, draft.businessPlugins[index + 1]!, id)} onClick={() => {
+                          const next = [...draft.businessPlugins];
+                          [next[index], next[index + 1]] = [next[index + 1]!, next[index]!];
+                          setDraft({ ...draft, businessPlugins: next });
+                        }}><ArrowDown className="h-4 w-4" /></Button>
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
             {unavailableBusinessPlugins.length > 0 && (
               <div className="text-xs text-destructive">当前不可用的业务插件必须取消选择后才能保存空间。</div>
             )}

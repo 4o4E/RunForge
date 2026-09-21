@@ -132,7 +132,9 @@ export function BusinessPluginManagementPanel({ api }: { api: BusinessPluginCont
       notify({
         variant: 'success',
         title: result.replaced ? '业务插件已更新' : '业务插件已导入',
-        description: result.pluginId,
+        description: result.warnings.length
+          ? `${result.pluginId}；${result.warnings.join('；')}`
+          : result.pluginId,
       });
     } catch (reason) {
       const message = (reason as Error).message;

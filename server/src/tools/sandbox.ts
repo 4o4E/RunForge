@@ -18,6 +18,7 @@ export interface ShellSandboxConfig {
   envPath?: string;
   shareNet: boolean;
   env?: Record<string, string>;
+  pluginExecutables?: Array<{ name: string; path: string }>;
 }
 
 export interface ShellExecResult {
@@ -47,6 +48,7 @@ interface BwrapOptions {
   shareNet: boolean;
   envPath?: string;
   env?: Record<string, string>;
+  pluginExecutables?: Array<{ name: string; path: string }>;
 }
 
 const warned = new Set<string>();
@@ -164,19 +166,21 @@ export function resolveAllowedCommands(names: string[], envPath = process.env.PA
 function hostPathForConfig(cfg: ShellSandboxConfig): { envPath: string; cleanupPaths: string[] } {
   const envPath = cfg.envPath ?? process.env.PATH ?? '';
   const commands = resolveAllowedCommands(cfg.allowCommands, envPath);
-  if (!commands.length) return { envPath: '', cleanupPaths: [] };
+  const pluginCommands = cfg.pluginExecutables ?? [];
+  if (!commands.length && !pluginCommands.length) return { envPath: '', cleanupPaths: [] };
 
   const dir = mkdtempSync(join(tmpdir(), 'runforge-shell-path-'));
   const linked = new Set<string>();
+  for (const command of pluginCommands) {
+    if (linked.has(command.name)) continue;
+    linked.add(command.name);
+    symlinkSync(resolve(command.path), join(dir, command.name));
+  }
   for (const command of commands) {
     const linkName = basename(command.dest);
     if (!linkName || linked.has(linkName)) continue;
     linked.add(linkName);
-    try {
-      symlinkSync(command.source, join(dir, linkName));
-    } catch {
-      // 单个命令投射失败时跳过，避免一个坏链接让整个 shell 不可用。
-    }
+    symlinkSync(command.source, join(dir, linkName));
   }
   return { envPath: dir, cleanupPaths: [dir] };
 }
@@ -187,6 +191,11 @@ export function buildBwrapArgs(opts: BwrapOptions): string[] {
   const readonlyWorkspacePaths = existing([resolve(workspaceRoot, 'plugins')]);
   const shell: ResolvedCommand = { name: 'sh', source: realpathSync('/bin/sh'), dest: '/bin/sh' };
   const commands = resolveAllowedCommands(opts.allowCommands, opts.envPath);
+  const pluginCommands = (opts.pluginExecutables ?? []).map((item) => ({
+    name: item.name,
+    source: resolve(item.path),
+    dest: `/runforge/plugin-bin/${item.name}`,
+  }));
   const bindFiles = unique([shell, ...commands].map((cmd) => `${cmd.source}\0${cmd.dest}`)).map((pair) => {
     const [source, dest] = pair.split('\0');
     return { source, dest };
@@ -201,12 +210,16 @@ export function buildBwrapArgs(opts: BwrapOptions): string[] {
     ...(opts.shareNet ? ['/etc/ssl/certs', '/usr/share/ca-certificates'] : []),
     ...(commands.some((cmd) => cmd.name === 'git') ? ['/usr/share/git-core'] : []),
   ]);
-  const pathDirs = unique(commands.map((cmd) => dirname(cmd.dest)));
+  const pathDirs = unique([
+    ...(pluginCommands.length ? ['/runforge/plugin-bin'] : []),
+    ...commands.map((cmd) => dirname(cmd.dest)),
+  ]);
   const mountDirs = unique([
     ...libDirs.flatMap(parentDirs),
     ...etcFiles.flatMap(parentDirs),
     ...extraReadOnlyPaths.flatMap(parentDirs),
     ...bindFiles.flatMap((file) => parentDirs(file.dest)),
+    ...pluginCommands.flatMap((command) => parentDirs(command.dest)),
     ...parentDirs(workspaceRoot),
     ...readonlyWorkspacePaths.flatMap(parentDirs),
   ]);
@@ -221,6 +234,7 @@ export function buildBwrapArgs(opts: BwrapOptions): string[] {
   for (const file of etcFiles) args.push('--ro-bind', file, file);
   for (const path of extraReadOnlyPaths) args.push('--ro-bind', path, path);
   for (const file of bindFiles) args.push('--ro-bind', file.source, file.dest);
+  for (const command of pluginCommands) args.push('--symlink', command.source, command.dest);
 
   args.push('--bind', workspaceRoot, workspaceRoot);
   for (const path of readonlyWorkspacePaths) args.push('--ro-bind', path, path);
@@ -306,6 +320,7 @@ export async function runShellCommand(command: string, timeout: number, cfg: She
     shareNet: cfg.shareNet,
     envPath: cfg.envPath,
     env: cfg.env,
+    pluginExecutables: cfg.pluginExecutables,
   });
   return execFileAsync(selected.bwrapPath, args, { timeout, maxBuffer: 1024 * 1024 * 10 });
 }
@@ -341,6 +356,7 @@ export function buildShellSpawnSpec(command: string, cfg: ShellSandboxConfig): S
     shareNet: cfg.shareNet,
     envPath: cfg.envPath,
     env: cfg.env,
+    pluginExecutables: cfg.pluginExecutables,
   });
   return { file: selected.bwrapPath, args, backend: 'bwrap' };
 }

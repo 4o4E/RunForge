@@ -70,7 +70,7 @@ export interface TenantSpaceCapabilityCatalog {
   mcpServerIds: string[];
   mcpServers: Array<{ id: string; label: string; description?: string }>;
   businessPluginIds: string[];
-  businessPlugins: Array<{ id: string; label: string; description: string; contentHash: string }>;
+  businessPlugins: Array<{ id: string; label: string; description: string; contentHash: string; dependencies?: string[] }>;
   businessPluginDefinitions: BusinessPluginDefinition[];
   businessPluginConfigs: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   runtimeCapabilities: RuntimeCapabilityName[];
@@ -128,6 +128,31 @@ type CatalogLoader = (tenantId: string) => Promise<TenantSpaceCapabilityCatalog>
 
 function unique(values: readonly string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+function expandBusinessPluginSelection(
+  selected: readonly string[],
+  definitions: readonly BusinessPluginDefinition[],
+): string[] {
+  const byId = new Map(definitions.map((definition) => [definition.manifest.id, definition]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const ordered: string[] = [];
+  const visit = (id: string): void => {
+    if (visited.has(id)) return;
+    const definition = byId.get(id);
+    if (!definition) throw new SpaceConfigError(`业务插件不属于当前 tenant 可用目录：${id}`);
+    if (visiting.has(id)) throw new SpaceConfigError(`业务插件依赖存在循环：${id}`);
+    visiting.add(id);
+    for (const dependency of definition.manifest.dependencies ?? []) {
+      if (!dependency.optional) visit(dependency.id);
+    }
+    visiting.delete(id);
+    visited.add(id);
+    ordered.push(id);
+  };
+  for (const id of selected) visit(id);
+  return ordered;
 }
 
 function normalizeParsedConfig(config: SpaceConfig): SpaceConfig {
@@ -293,6 +318,10 @@ async function loadCatalogFromTenant(tenantId: string): Promise<TenantSpaceCapab
       label: definition.manifest.displayName,
       description: definition.manifest.description,
       contentHash: definition.contentHash,
+      // 空间选择只自动加入必需依赖；可选依赖必须由管理员单独选择。
+      dependencies: (definition.manifest.dependencies ?? [])
+        .filter((dependency) => !dependency.optional)
+        .map((dependency) => dependency.id),
     })),
     businessPluginDefinitions: readyPlugins,
     businessPluginConfigs: Object.fromEntries(readyPlugins.map((definition) => [
@@ -379,6 +408,8 @@ export class SpaceConfigService {
       : allowedModelRefs.includes(catalog.defaultModelRef)
         ? catalog.defaultModelRef
         : allowedModelRefs[0] ?? null;
+    const requestedBusinessPlugins = Array.isArray(capabilities.businessPlugins) ? capabilities.businessPlugins : [];
+    const businessPlugins = expandBusinessPluginSelection(requestedBusinessPlugins, catalog.businessPluginDefinitions);
     const config = normalizeSpaceConfig({
       ...body,
       model: {
@@ -390,7 +421,7 @@ export class SpaceConfigService {
         ...capabilities,
         tools: mode === 'external' ? selectedTools.filter((tool) => tool !== 'ask_user') : selectedTools,
         mcpServers: Array.isArray(capabilities.mcpServers) ? capabilities.mcpServers : catalog.mcpServerIds,
-        businessPlugins: Array.isArray(capabilities.businessPlugins) ? capabilities.businessPlugins : [],
+        businessPlugins,
         runtime: Array.isArray(capabilities.runtime) ? capabilities.runtime : catalog.runtimeCapabilities,
       },
     }, mode);
@@ -690,11 +721,12 @@ export class SpaceConfigService {
     const tools = selectValues(config.capabilities.tools, catalog.toolNames, '工具')
       .filter((tool) => mode !== 'external' || tool !== 'ask_user');
     const mcpServers = selectValues(config.capabilities.mcpServers, catalog.mcpServerIds, 'MCP Server');
-    const businessPlugins = selectValues(
+    const selectedBusinessPlugins = selectValues(
       config.capabilities.businessPlugins,
       catalog.businessPluginIds,
       '业务插件',
     );
+    const businessPlugins = expandBusinessPluginSelection(selectedBusinessPlugins, catalog.businessPluginDefinitions);
     const runtime = selectValues(
       config.capabilities.runtime,
       catalog.runtimeCapabilities,

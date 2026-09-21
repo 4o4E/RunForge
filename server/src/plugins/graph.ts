@@ -139,7 +139,8 @@ export function resolvePluginGraph(
     ordered.push(item.definition);
   };
 
-  for (const id of [...selected.keys()].sort()) visit(id);
+  // 保留空间配置中的插件顺序；依赖仍然先于依赖方激活，独立插件按管理员排列顺序激活。
+  for (const id of selected.keys()) visit(id);
   return ordered;
 }
 

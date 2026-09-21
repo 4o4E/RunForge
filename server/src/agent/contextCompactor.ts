@@ -25,6 +25,8 @@ import {
 export interface WorkingMessage {
   msg: LlmMessage;
   dbId: number | null;
+  /** 运行期间重新注入的 Skill 说明，不对应 messages 表中的记录。 */
+  synthetic?: 'active-skill';
 }
 
 /** 一次压缩实际做了什么，用于事件和遥测。 */

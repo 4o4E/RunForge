@@ -1,10 +1,10 @@
 import { raw, type Request } from 'express';
-import type { BusinessPluginArchiveFormat } from './archive.js';
+import { BUSINESS_PLUGIN_MAX_ARCHIVE_BYTES, type BusinessPluginArchiveFormat } from './archive.js';
 import { BusinessPluginError } from './errors.js';
 
 export const businessPluginArchiveBody = raw({
   type: ['application/zip', 'application/gzip', 'application/x-gzip', 'application/octet-stream'],
-  limit: '50mb',
+  limit: BUSINESS_PLUGIN_MAX_ARCHIVE_BYTES,
 });
 
 export function parseBusinessPluginArchiveRequest(req: Request): {

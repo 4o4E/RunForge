@@ -72,7 +72,7 @@ export interface SpaceOptions {
   models: LlmModelOption[];
   tools: string[];
   mcpServers: Array<{ id: string; label: string }>;
-  businessPlugins: Array<{ id: string; label: string; description: string; contentHash: string }>;
+  businessPlugins: Array<{ id: string; label: string; description: string; contentHash: string; dependencies?: string[] }>;
   runtimeCapabilities: RuntimeCapabilityName[];
 }
 

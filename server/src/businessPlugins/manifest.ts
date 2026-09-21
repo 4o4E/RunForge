@@ -6,6 +6,7 @@ import type { BusinessPluginManifest } from './types.js';
 
 const ID_RE = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/;
 const SECRET_KEY_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+const EXECUTABLE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
 
 function relativePath(value: string): string {
   const normalized = value.replace(/\\/g, '/').replace(/^\.\//, '');
@@ -28,6 +29,17 @@ const jsonObjectSchema = z.record(z.string(), z.unknown()).default({});
 
 const skillSchema = z.object({
   id: idSchema,
+  path: z.string().trim().transform(relativePath),
+}).strict();
+
+const dependencySchema = z.object({
+  id: idSchema,
+  version: z.string().trim().min(1).optional(),
+  optional: z.boolean().default(false),
+}).strict();
+
+const executableSchema = z.object({
+  name: z.string().trim().regex(EXECUTABLE_NAME_RE, '可执行文件名称只能包含字母、数字、点、下划线、加号和短横线'),
   path: z.string().trim().transform(relativePath),
 }).strict();
 
@@ -112,7 +124,7 @@ const resourceSchema = z.object({
 }).strict();
 
 const manifestSchema = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.union([z.literal(1), z.literal(2)]),
   id: idSchema,
   version: z.string().trim().min(1).optional(),
   displayName: z.string().trim().min(1).optional(),
@@ -122,6 +134,8 @@ const manifestSchema = z.object({
   secrets: z.array(secretSchema).default([]),
   resources: z.array(resourceSchema).default([]),
   configSchema: jsonObjectSchema,
+  dependencies: z.array(dependencySchema).default([]),
+  executables: z.array(executableSchema).default([]),
 }).strict();
 
 function duplicate(values: readonly string[]): string | undefined {
@@ -152,11 +166,19 @@ export function parseBusinessPluginManifest(content: string, file: string): Busi
   }
 
   const value = parsed.data;
+  if (value.schemaVersion === 1 && (value.dependencies.length > 0 || value.executables.length > 0)) {
+    throw new BusinessPluginError(
+      'BUSINESS_PLUGIN_MANIFEST_INVALID',
+      `${file} 使用 dependencies 或 executables 时必须声明 schemaVersion: 2`,
+    );
+  }
   const duplicates = [
     ['Skill', duplicate(value.skills.map((item) => item.id))],
     ['MCP', duplicate(value.mcpServers.map((item) => item.id))],
     ['Secret', duplicate(value.secrets.map((item) => item.key))],
     ['运行资源', duplicate(value.resources.map((item) => item.type))],
+    ['依赖', duplicate(value.dependencies.map((item) => item.id))],
+    ['可执行文件', duplicate(value.executables.map((item) => item.name))],
   ] as const;
   const duplicateItem = duplicates.find(([, id]) => id);
   if (duplicateItem) {

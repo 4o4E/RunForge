@@ -1,0 +1,21 @@
+schemaVersion: 2
+id: audio-video-tools
+version: 0.1.0
+displayName: 通用音视频文件解析
+description: 提供 ffmpeg 和 ffprobe，用于音视频文件转码、抽帧、探测和时长读取。
+
+skills:
+  - id: audio-video-tools
+    path: skills/audio-video-tools
+
+executables:
+  - name: ffmpeg
+    path: bin/linux-amd64/ffmpeg
+  - name: ffprobe
+    path: bin/linux-amd64/ffprobe
+
+secrets: []
+mcpServers: []
+resources: []
+configSchema:
+  type: object

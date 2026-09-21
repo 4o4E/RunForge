@@ -959,9 +959,8 @@ test('executeRun: activates a skill while native tools remain loaded', async () 
   assert.match(firstSystemText, /user:sample-skill: Use when a test needs a tiny skill/);
   assert.equal(firstUserText, 'use a skill');
   assert.match(secondSystemText, /user:sample-skill/);
-  assert.doesNotMatch(secondSystemText, /当前 run 已激活能力|root=/);
-  assert.doesNotMatch(secondSystemText, /# Sample Skill/);
-  assert.match(secondToolText, /# Sample Skill/);
+  assert.match(secondSystemText, /当前 run 的 Skill 激活结果/);
+  assert.match(secondSystemText, /# Sample Skill/);
   assert.ok(toolNamesByTurn[0].includes('shell'));
   assert.ok(toolNamesByTurn[0].includes('skill_activate'));
   assert.ok(toolNamesByTurn[1].includes('file_read'));
@@ -978,7 +977,7 @@ test('executeRun: activates a skill while native tools remain loaded', async () 
   assert.doesNotMatch(msgs[2].content ?? '', /# Sample Skill/);
   assert.equal(msgs[3].toolCallId, 'read_1');
   assert.equal(msgs.some((m) => m.role === 'system' && (m.content ?? '').includes('已激活 Skill')), false);
-  assert.equal(published.some((event) => event.type === 'compaction' && event.reason === 'skill-activation-consumed'), true);
+  assert.equal(published.some((event) => event.type === 'compaction'), false);
   assert.equal((await store.getRun(scope, run.id))?.status, 'done');
 });
 
@@ -1724,7 +1723,7 @@ test('executeRun: 新 run 切换模型后在首次请求前按新模型阈值压
     });
 
     assert.equal(firstRequestToolContent, maskPlaceholder('x'.repeat(4_000)));
-    assert.ok(published.some((event) => event.type === 'compaction' && event.reason?.includes('model-compaction-threshold')));
+    assert.equal(published.some((event) => event.type === 'compaction'), false);
   } finally {
     config.agent.keepRecentMessages = previousKeepRecent;
   }
@@ -1765,7 +1764,7 @@ test('executeRun: compacts bulky old history when finishing a run', async () => 
     assert.equal(placeholder.not_executable, true);
     assert.equal(placeholder.tool_name, 'file_write');
     assert.equal(oldTool?.content, maskPlaceholder('x'.repeat(4000)));
-    assert.ok(published.some((e) => e.type === 'compaction' && e.reason === 'post-run-history'));
+    assert.equal(published.some((e) => e.type === 'compaction' && e.reason === 'post-run-history'), false);
   } finally {
     config.agent.keepRecentMessages = keepRecentMessages;
   }

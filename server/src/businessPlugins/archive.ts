@@ -8,9 +8,11 @@ import { BusinessPluginError } from './errors.js';
 
 export type BusinessPluginArchiveFormat = 'zip' | 'tgz';
 
-const MAX_ARCHIVE_BYTES = 50 * 1024 * 1024;
-const MAX_EXTRACTED_BYTES = 200 * 1024 * 1024;
-const MAX_ENTRY_BYTES = 50 * 1024 * 1024;
+// Linux amd64 FFmpeg 发布包约 143 MiB，插件外层归档和解压后的两个命令
+// 需要高于旧的通用业务包限制；仍保留单文件和总条目上限，避免把归档限制放大为无限制。
+export const BUSINESS_PLUGIN_MAX_ARCHIVE_BYTES = 150 * 1024 * 1024;
+const MAX_EXTRACTED_BYTES = 500 * 1024 * 1024;
+const MAX_ENTRY_BYTES = 300 * 1024 * 1024;
 const MAX_ENTRIES = 10_000;
 const MAX_PATH_DEPTH = 32;
 const MANIFEST_FILE = 'runforge.plugin.yaml';
@@ -234,8 +236,8 @@ export async function extractBusinessPluginArchive(
   parentDirectory: string,
 ): Promise<{ temporaryRoot: string; pluginRoot: string }> {
   if (!archive.length) throw archiveError('压缩包内容为空');
-  if (archive.length > MAX_ARCHIVE_BYTES) {
-    throw archiveTooLarge(`压缩包大小超过 ${MAX_ARCHIVE_BYTES / 1024 / 1024} MiB`);
+  if (archive.length > BUSINESS_PLUGIN_MAX_ARCHIVE_BYTES) {
+    throw archiveTooLarge(`压缩包大小超过 ${BUSINESS_PLUGIN_MAX_ARCHIVE_BYTES / 1024 / 1024} MiB`);
   }
   await mkdir(parentDirectory, { recursive: true });
   const temporaryRoot = await mkdtemp(join(parentDirectory, '.runforge-archive-'));

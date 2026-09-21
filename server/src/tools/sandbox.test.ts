@@ -1,6 +1,8 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -10,10 +12,12 @@ import {
   findExecutable,
   parentDirs,
   resolveAllowedCommands,
+  runShellCommand,
   scanExecutableNames,
 } from './sandbox.js';
 
 const tempDirs: string[] = [];
+const execFileAsync = promisify(execFile);
 
 after(async () => {
   await Promise.all(tempDirs.map((dir) => rm(dir, { recursive: true, force: true })));
@@ -100,6 +104,30 @@ test('buildShellSpawnSpec limits host PATH to selected commands', async () => {
   await Promise.all((hostSpec.cleanupPaths ?? []).map((path) => rm(path, { recursive: true, force: true })));
 });
 
+test('业务插件命令门面按声明顺序优先于系统命令，并且只暴露声明名称', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'runforge-plugin-path-'));
+  tempDirs.push(workspace);
+  const pluginDir = join(workspace, 'plugins', 'first', 'bin');
+  await mkdir(pluginDir, { recursive: true });
+  const command = join(pluginDir, 'ffmpeg');
+  await writeFile(command, '#!/bin/sh\nprintf plugin\n');
+  await chmod(command, 0o755);
+  const spec = buildShellSpawnSpec('ffmpeg', {
+    policyMode: 'off',
+    backend: 'none',
+    workspaceRoot: workspace,
+    allowCommands: [],
+    useHostPath: false,
+    envPath: '',
+    shareNet: false,
+    pluginExecutables: [{ name: 'ffmpeg', path: command }],
+  });
+  assert.equal(spec.backend, 'host');
+  const { stdout } = await execFileAsync(spec.file, spec.args, { env: spec.env });
+  assert.equal(stdout, 'plugin');
+  await Promise.all((spec.cleanupPaths ?? []).map((path) => rm(path, { recursive: true, force: true })));
+});
+
 test('buildBwrapArgs confines workspace and hides network by default', () => {
   const workspaceRoot = resolve('/workspace/app');
   const args = buildBwrapArgs({
@@ -128,6 +156,44 @@ test('buildBwrapArgs can explicitly share network namespace', () => {
   assert.ok(args.includes('--share-net'));
   assert.ok(args.includes('/etc/resolv.conf'));
   assert.ok(args.includes('/etc/ssl/certs') || args.includes('/usr/share/ca-certificates'));
+});
+
+test('bwrap 只为业务插件声明命令建立 symlink 门面', () => {
+  const args = buildBwrapArgs({
+    workspaceRoot: resolve('/workspace/app'),
+    command: 'ffmpeg -version',
+    allowCommands: [],
+    shareNet: false,
+    pluginExecutables: [{ name: 'ffmpeg', path: '/workspace/app/plugins/media/bin/ffmpeg' }],
+  });
+  const symlinkIndex = args.indexOf('--symlink');
+  assert.deepEqual(args.slice(symlinkIndex, symlinkIndex + 3), [
+    '--symlink',
+    '/workspace/app/plugins/media/bin/ffmpeg',
+    '/runforge/plugin-bin/ffmpeg',
+  ]);
+  assert.equal(args[args.indexOf('--setenv') + 2], '/runforge/plugin-bin');
+});
+
+test('真实 bwrap 可以通过命令门面执行插件文件', async () => {
+  if (process.platform !== 'linux') return;
+  const workspace = await mkdtemp(join(tmpdir(), 'runforge-plugin-bwrap-'));
+  tempDirs.push(workspace);
+  const pluginDir = join(workspace, 'plugins', 'media', 'bin');
+  await mkdir(pluginDir, { recursive: true });
+  const command = join(pluginDir, 'helper');
+  await writeFile(command, '#!/bin/sh\nprintf bwrap-plugin\n');
+  await chmod(command, 0o755);
+  const result = await runShellCommand('helper', 10_000, {
+    policyMode: 'enforce',
+    backend: 'bwrap',
+    workspaceRoot: workspace,
+    allowCommands: [],
+    useHostPath: false,
+    shareNet: false,
+    pluginExecutables: [{ name: 'helper', path: command }],
+  });
+  assert.equal(result.stdout.trim(), 'bwrap-plugin');
 });
 
 test('buildBwrapArgs mounts git templates when git is allowed', () => {

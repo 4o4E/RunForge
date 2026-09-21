@@ -21,6 +21,8 @@ Issue 中的 v0.2 草案是协议基线；本文记录仓库当前已经实现�
           scripts/
           references/
           assets/
+      bin/
+        linux-amd64/
 ```
 
 业务插件有两种交付方式：
@@ -31,8 +33,9 @@ Issue 中的 v0.2 草案是协议基线；本文记录仓库当前已经实现�
 手动导入使用第一个配置根目录；未配置环境变量时使用仓库下的 `business-plugins`。压缩包
 可以直接以 `runforge.plugin.yaml` 为根，也可以只包含一个顶层插件目录。RunForge 会先在
 临时目录解压和校验，再按 manifest ID 安装；ID 已存在时原子替换当前目录并重新加载索引，
-tenant 非敏感配置和 Secret 继续按相同插件 ID 保留。压缩包限制为 50 MiB，解压后限制为
-200 MiB、10000 个条目和 32 层目录；路径穿越、符号链接、硬链接和特殊文件都会被拒绝。
+tenant 非敏感配置和 Secret 继续按相同插件 ID 保留。压缩包限制为 150 MiB，解压后限制为
+500 MiB、单文件 300 MiB、10000 个条目和 32 层目录；路径穿越、符号链接、硬链接和特殊文件
+都会被拒绝。该上限允许包含 Linux amd64 FFmpeg 可执行文件的插件包直接安装。
 
 管理员可以从业务插件管理页卸载当前部署。卸载会从该 tenant 的全部空间中移除插件，
 每个受影响空间各保存一个新的配置版本，并删除该插件的 tenant 非敏感配置。tenant Secret
@@ -48,15 +51,22 @@ RunForge 不拉取 Git，也不建设业务插件发布仓库。活动 run 在�
 入口固定为 `runforge.plugin.yaml`：
 
 ```yaml
-schemaVersion: 1
+schemaVersion: 2
 id: crm
 version: 1.0.0
 displayName: CRM 查询
 description: 查询经过审核的 CRM 业务接口。
 
+dependencies:
+  - id: shared-media-tools
+
 skills:
   - id: customer-query
     path: skills/customer-query
+
+executables:
+  - name: helper
+    path: bin/linux-amd64/helper
 
 configSchema:
   type: object
@@ -82,6 +92,18 @@ resources:
 `dist/index.js` 服务端入口都会被拒绝。MCP 当前支持 `streamable-http`，URL 只允许
 HTTP/HTTPS，并且 `url` 与 `urlConfigKey` 必须二选一。
 
+当前可执行资源只支持 Linux amd64。`executables` 只声明插件目录内的普通文件，RunForge
+在插件安装的暂存目录中把 `skills/**/scripts` 和声明的可执行文件设置为 `0755`，随后才计算
+内容 hash 并写入部署目录；重新加载、创建快照和恢复旧 run 都不修改已部署文件权限。插件包中
+必须直接包含可执行文件，不能把它再次放入 ZIP、TGZ 或其他嵌套归档。Skill 通过声明的命令名
+调用它们，运行时只把声明命令映射到当前 run 的精确命令目录，不会把同目录的其他文件加入
+`PATH`。
+
+业务插件的 `dependencies` 使用业务插件 ID。空间选择一个插件时，必需依赖会自动加入空间配置和
+运行锁，并按“依赖在前、依赖方在后”的顺序激活；可选依赖不会自动加入。空间管理界面显示传递
+依赖和插件顺序，顺序决定声明同名命令的优先级。租户安装阶段如果发现不同插件声明同名命令，
+只返回提示，不阻止安装；运行时按空间顺序使用靠前插件的命令，不会因为冲突终止任务。
+
 ## 配置和运行语义
 
 - tenant owner/admin 和 system admin 可在管理页配置插件的非敏感 JSON 与 tenant Secret。
@@ -92,6 +114,7 @@ HTTP/HTTPS，并且 `url` 与 `urlConfigKey` 必须二选一。
   文档说明，不是插件级权限名单。
 - 空间必须显式选择业务插件；新部署插件不会自动进入已有空间。
 - run 接纳时在已有 `runs.plugin_lock` 固定业务插件 ID、内容 hash 和非敏感 tenant 配置。
+- `plugin_lock.plugins` 保留空间中的插件顺序；同名可执行命令按该顺序选择第一个插件。
 - Secret 不进入 `plugin_lock`。业务 MCP 在激活和实际调用前读取 tenant 当前值；值变化时
   run 级 MCP session 会关闭旧连接并按新连接签名重连。
 - run 第一次启动时按内容 hash 保存一个不可变插件快照，并把快照通过写时复制克隆到当前

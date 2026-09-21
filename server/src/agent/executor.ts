@@ -772,14 +772,19 @@ async function executeRunControlled(
     if (maskedIds.length) {
       await store.markMessagesCollapsed(scope, maskedIds, 'masked');
     }
-    await emit(stepId, {
-      type: 'compaction',
-      step: currentStepIdx,
-      occurredAt: new Date().toISOString(),
-      ...compaction.info,
-      affected: compaction.affected,
-      summary: compaction.summaryMessage?.content ?? undefined,
-    });
+    // 只有真正生成并持久化 L3 摘要时才向前端展示“已压缩上下文”。
+    // masking、窗口移除、显示参数裁剪和 Skill 入口整理都属于模型视图维护，
+    // 不应伪装成用户可见的压缩过程。
+    if (compaction.summarizedIds.length > 0 && compaction.summaryMessage) {
+      await emit(stepId, {
+        type: 'compaction',
+        step: currentStepIdx,
+        occurredAt: new Date().toISOString(),
+        ...compaction.info,
+        affected: compaction.affected,
+        summary: compaction.summaryMessage?.content ?? undefined,
+      });
+    }
   };
 
   let currentCtx: ContextManager | null = null;
@@ -963,13 +968,17 @@ async function executeRunControlled(
     };
     const runEvents = await store.getEvents(scope, runId);
     const activeSkills: SkillIndexItem[] = [];
+    const activeSkillActivations = new Map<string, SkillActivation>();
     const activeMcp = new Map<string, McpActivation>();
 
     // 激活状态以 run 事件恢复：同一 run 重启后继续生效，新 run 没有这些事件，天然清空。
     for (const event of runEvents) {
       if (event.type === 'skill_activated' && !activeSkills.some((skill) => skill.id === event.skillId)) {
         const skill = skillIndex.find((item) => item.id === event.skillId);
-        if (skill) activeSkills.push(skill);
+        if (skill) {
+          activeSkills.push(skill);
+          activeSkillActivations.set(skill.id, await activateSkillItem(skill, toolSettings.workspaceRoot));
+        }
       }
       if (event.type === 'mcp_activated' && !activeMcp.has(event.serverId)) {
         try {
@@ -1000,6 +1009,7 @@ async function executeRunControlled(
       systemPrompt: prompt,
       contextSettings: deps.contextSettings,
     });
+    ctx.setActiveSkillInstructions([...activeSkillActivations.values()].map((activation) => activation.systemMessage));
     currentCtx = ctx;
     if (!hasPersistedMessages) {
       // 新 run 或尚未写入任何消息的 pending run，必须先落用户输入。
@@ -1230,6 +1240,7 @@ async function executeRunControlled(
                   scope,
                   settings: toolSettings,
                   env: envForStep(stepId),
+                  pluginExecutables: runtimeResources.businessPluginHandle?.executables,
                   threadId,
                   runId,
                   stepId,
@@ -1546,9 +1557,9 @@ async function executeRunControlled(
       };
       ctx.add(assistantMsg);
       ctx.setLastDbId(await store.addMessage(scope, threadId, runId, step.id, assistantMsg));
-      // Skill 入口已经被本次 LLM 请求完整消费；立即折叠其工具结果，保留原始落库内容与配对。
+      // Skill 原始入口继续保留在 messages；模型视图只保留占位符，完整正文由
+      // run 级 active Skill 说明重新注入，避免同一正文在上下文中重复占用。
       await persistCompaction(step.id, ctx.collapseConsumedToolResults(['skill_activate'], 'skill-activation-consumed'));
-
       if (toolCalls.length && result.finishReason && result.finishReason !== 'tool-calls') {
         const message = renderAbnormalFinishMessage(result.finishReason, result.rawFinishReason, Boolean(content?.trim()));
         console.warn(
@@ -1655,6 +1666,8 @@ async function executeRunControlled(
         const alreadyActive = activeSkills.some((skill) => skill.id === activation.skill.id);
         if (!alreadyActive) {
           activeSkills.push(activation.skill);
+          activeSkillActivations.set(activation.skill.id, activation);
+          ctx.setActiveSkillInstructions([...activeSkillActivations.values()].map((item) => item.systemMessage));
           await emit(step.id, {
             type: 'skill_activated',
             step: stepIdx,
@@ -1828,6 +1841,7 @@ async function executeRunControlled(
                 scope,
                 settings: toolSettings,
                 env: envForStep(step.id),
+                pluginExecutables: runtimeResources.businessPluginHandle?.executables,
                 threadId,
                 runId,
                 stepId: step.id,

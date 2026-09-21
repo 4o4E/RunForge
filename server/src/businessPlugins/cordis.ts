@@ -11,6 +11,10 @@ function internalPluginId(definition: BusinessPluginDefinition): string {
   return `business.${definition.manifest.id}`;
 }
 
+function internalPluginIdByBusinessId(id: string): string {
+  return `business.${id}`;
+}
+
 function skillContributionId(definition: BusinessPluginDefinition, skillId: string): string {
   return `business:${definition.manifest.id}/skill/${skillId}`;
 }
@@ -49,6 +53,10 @@ export function createBusinessPluginCordisDefinition(
       id: internalPluginId(definition),
       version: definition.manifest.version ?? `local-${definition.contentHash.slice(0, 12)}`,
       contentHash: definition.contentHash,
+      dependencies: (definition.manifest.dependencies ?? []).map((dependency) => ({
+        ...dependency,
+        id: internalPluginIdByBusinessId(dependency.id),
+      })),
       contributions,
     },
     // JSON Schema 已在 tenant 配置边界校验；Cordis 这里只保证配置是普通 JSON 对象。

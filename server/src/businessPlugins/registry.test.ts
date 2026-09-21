@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, readdir, rename, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, readdir, rename, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
 import { create as createTar } from 'tar';
@@ -107,6 +107,28 @@ test('业务插件协议：发现多文件 Skill、MCP、Secret 和运行资源�
   assert.notEqual(second.contentHash, first.contentHash);
 });
 
+test('业务插件安装：自动赋予 Skill 脚本和声明命令执行权限', async () => {
+  const sourceRoot = await mkdtemp(join(tmpdir(), 'runforge-business-permission-source-'));
+  const importRoot = await mkdtemp(join(tmpdir(), 'runforge-business-permission-target-'));
+  const pluginRoot = await createPlugin(sourceRoot, 'permission-plugin');
+  const script = join(pluginRoot, 'skills', 'customer-query', 'scripts', 'run.mjs');
+  await mkdir(dirname(script), { recursive: true });
+  await writeFile(script, 'console.log("ok")');
+  const executable = join(pluginRoot, 'bin');
+  await mkdir(executable, { recursive: true });
+  const command = join(executable, 'helper');
+  await writeFile(command, '#!/bin/sh\nprintf helper\n');
+  await chmod(script, 0o644);
+  await chmod(command, 0o644);
+  await writeFile(join(pluginRoot, 'runforge.plugin.yaml'), (await readFile(join(pluginRoot, 'runforge.plugin.yaml'), 'utf8'))
+    .replace('schemaVersion: 1', 'schemaVersion: 2')
+    .replace('secrets:', 'executables:\n  - name: helper\n    path: bin/helper\nsecrets:'));
+  const registry = new BusinessPluginRegistry([importRoot]);
+  const installed = await registry.importArchive('tn_permission', await tgzDirectory(pluginRoot), 'tgz');
+  assert.equal((await stat(join(installed.definition.root, 'skills', 'customer-query', 'scripts', 'run.mjs'))).mode & 0o111, 0o111);
+  assert.equal((await stat(join(installed.definition.root, 'bin', 'helper'))).mode & 0o111, 0o111);
+});
+
 test('业务插件导入：支持 ZIP 新增和 TGZ 原子覆盖', async () => {
   const sourceRoot = await mkdtemp(join(tmpdir(), 'runforge-business-import-source-'));
   const importRoot = await mkdtemp(join(tmpdir(), 'runforge-business-import-target-'));
@@ -128,6 +150,28 @@ test('业务插件导入：支持 ZIP 新增和 TGZ 原子覆盖', async () => {
     '# Imported v2',
   );
   assert.deepEqual((await registry.list('tn_import')).map((definition) => definition.manifest.id), ['crm']);
+});
+
+test('业务插件安装：同名命令只提示，不阻止安装', async () => {
+  const sourceRoot = await mkdtemp(join(tmpdir(), 'runforge-business-command-conflict-source-'));
+  const importRoot = await mkdtemp(join(tmpdir(), 'runforge-business-command-conflict-target-'));
+  const first = await createPlugin(sourceRoot, 'first-command', { id: 'first-command' });
+  const second = await createPlugin(sourceRoot, 'second-command', { id: 'second-command' });
+  for (const root of [first, second]) {
+    const bin = join(root, 'bin');
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, 'helper'), '#!/bin/sh\nprintf helper\n');
+    await chmod(join(bin, 'helper'), 0o755);
+    await writeFile(join(root, 'runforge.plugin.yaml'), (await readFile(join(root, 'runforge.plugin.yaml'), 'utf8'))
+      .replace('schemaVersion: 1', 'schemaVersion: 2')
+      .replace('secrets:', 'executables:\n  - name: helper\n    path: bin/helper\nsecrets:'));
+  }
+  const registry = new BusinessPluginRegistry([importRoot]);
+  await registry.importArchive('tn_command_conflict', await tgzDirectory(first), 'tgz');
+  const installed = await registry.importArchive('tn_command_conflict', await tgzDirectory(second), 'tgz');
+  assert.equal(installed.replaced, false);
+  assert.deepEqual(installed.warnings, ['命令 helper 同时由业务插件 first-command 和 second-command 提供']);
+  assert.equal((await registry.list('tn_command_conflict')).length, 2);
 });
 
 test('业务插件卸载：删除当前部署并保留可恢复旧运行的不可变快照', async () => {
@@ -299,6 +343,11 @@ test('业务插件协议：拒绝未声明 Secret、symlink、服务端入口和
   await writeFile(join(runtimePlugin, 'dist', 'index.js'), 'export default {}');
   await assert.rejects(loadBusinessPlugin(runtimePlugin), /不能包含 RunForge\/Cordis 运行时入口/);
 
+  const legacyExecutable = await createPlugin(sourceRoot, 'legacy-executable');
+  await writeFile(join(legacyExecutable, 'runforge.plugin.yaml'), (await readFile(join(legacyExecutable, 'runforge.plugin.yaml'), 'utf8'))
+    .replace('secrets:', 'executables:\n  - name: helper\n    path: bin/helper\nsecrets:'));
+  await assert.rejects(loadBusinessPlugin(legacyExecutable), /必须声明 schemaVersion: 2/);
+
   await createPlugin(sourceRoot, 'duplicate-a', { id: 'duplicate' });
   await createPlugin(sourceRoot, 'duplicate-b', { id: 'duplicate' });
   await assert.rejects(
@@ -349,6 +398,22 @@ test('业务插件协议：敏感 MCP header 只能引用 tenant Secret，且 he
     '    url: https://user:password@mcp.example.test/api',
   ].join('\n'));
   await assert.rejects(loadBusinessPlugin(credentialUrl), /不能包含用户名或密码/);
+});
+
+test('业务插件可用性：必需依赖缺失或版本不符时直接显示不可用', async () => {
+  const sourceRoot = await mkdtemp(join(tmpdir(), 'runforge-business-readiness-source-'));
+  const base = await createPlugin(sourceRoot, 'base', { id: 'base' });
+  await writeFile(join(base, 'runforge.plugin.yaml'), (await readFile(join(base, 'runforge.plugin.yaml'), 'utf8'))
+    .replace('schemaVersion: 1', 'schemaVersion: 2')
+    .replace('secrets:', 'version: 1.0.0\nsecrets:'));
+  const dependent = await createPlugin(sourceRoot, 'dependent', { id: 'dependent' });
+  await writeFile(join(dependent, 'runforge.plugin.yaml'), (await readFile(join(dependent, 'runforge.plugin.yaml'), 'utf8'))
+    .replace('schemaVersion: 1', 'schemaVersion: 2')
+    .replace('secrets:', 'dependencies:\n  - id: base\n    version: 2.0.0\nsecrets:'));
+  const definitions = [await loadBusinessPlugin(base), await loadBusinessPlugin(dependent)];
+  const readiness = businessPluginReadiness(definitions, normalizeBusinessPluginTenantSettings({ secrets: { 'crm.api-key': 'x' } }));
+  assert.equal(readiness.find((item) => item.definition.manifest.id === 'dependent')?.ready, false);
+  assert.match(readiness.find((item) => item.definition.manifest.id === 'dependent')?.error ?? '', /版本/);
 });
 
 test('业务插件协议：由 RunForge 通用 Cordis definition 注册声明能力，不加载业务代码', async () => {

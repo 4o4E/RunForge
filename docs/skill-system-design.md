@@ -34,8 +34,8 @@
 2. **初始上下文只做路由。**
    初始注入只包含 `id` 和 `description`。路径、hash、版本都不进入初始列表。
 
-3. **激活后最小注入。**
-   激活工具结果只注入这个 skill 独有的信息：`id`、`name`、运行时根目录和去掉 frontmatter 后的 `SKILL.md` 正文。下一次 LLM 请求完整消费后立即折叠结果，每轮只保留轻量 run 锚点。
+3. **激活后保持到 run 结束。**
+   激活工具结果注入这个 skill 独有的信息：`id`、`name`、运行时根目录和去掉 frontmatter 后的 `SKILL.md` 正文。后续每次模型请求都保留已激活 Skill 的入口说明；它是当前 run 的执行上下文，不能因为一次请求结束而卸载。原始工具结果可以只在模型视图中折叠，完整正文由 run 级激活状态重新注入。
 
 4. **资源直接走 bash / 文件工具。**
    skill 中的模板、数据、文档和脚本都是普通文件。模型可以用 `sed`、`rg`、`node`、`python` 等命令查看和执行，但所有调用必须经过现有工具策略和沙箱。
@@ -43,8 +43,8 @@
 5. **Skill 不承担工具准入。**
    主 agent 的原生工具默认加载；Skill 只提供方法、入口和资源。安全边界仍由路径策略、shell 沙箱、网络开关和具体工具约束执行。
 
-6. **长任务中保留轻量锚点。**
-   skill 的大正文和工具结果可以被上下文压缩；每轮只需要保留已激活 skill 的短锚点，必要时重新读取 `SKILL.md` 或附属文件。
+6. **长任务中保持激活说明。**
+   references、assets、scripts 等附属内容仍然按需读取；已激活 Skill 的入口说明保持在当前 run 的模型上下文中。普通工具结果可以进行上下文裁剪，但不能因此卸载已激活 Skill。
 
 ## 目录结构
 
@@ -209,7 +209,7 @@ LLM 看到初始 skill 列表
 -> 读取并解析 SKILL.md
 -> 通过工具结果注入 id + name + root + 正文
 -> 记录 skill_activated 事件
--> 下一次 LLM 请求消费入口后折叠该工具结果，并保留 run 级短锚点
+-> 后续每次 LLM 请求继续保留该 Skill 的入口说明，直到 run 结束
 ```
 
 激活后只注入最小内容：
@@ -335,11 +335,11 @@ user:code-review
 - 超预算时裁剪低相关 skill。
 - 被裁剪的 skill 不代表不可用；后续可以通过搜索或设置页选择。
 
-第二层：active skill 内容裁剪。
+第二层：active skill 附属内容按需读取。
 
-- 激活工具结果只注入 `id`、`name`、`root` 和 `SKILL.md` 正文。
+- 激活工具结果注入 `id`、`name`、`root` 和 `SKILL.md` 正文；后端可以折叠其重复的工具结果，但必须在当前 run 的后续请求中继续注入完整入口说明。
 - `references/`、`assets/`、`scripts/` 不提前全文注入。
-- 下一次 LLM 请求完整消费入口后立即折叠激活工具结果，不让正文长期占用上下文。
+- 普通历史消息可以按照上下文策略裁剪；Skill 入口说明不参与动态卸载。
 
 第三层：长任务锚点。
 
@@ -356,7 +356,7 @@ user:code-review
 sed -n '1,220p' /workspace/.skills/data-query/SKILL.md
 ```
 
-这样既不丢任务方向，又不会让 skill 正文永久占上下文。
+这样既不丢任务方向，也能保证 Agent 在同一 run 的后续步骤中持续遵循已激活 Skill。
 
 ## 事件和审计
 
@@ -480,7 +480,7 @@ sed -n '1,220p' /workspace/.skills/data-query/SKILL.md
 - 内置 skill materialize 后不可被 file 写工具或 shell 修改。
 - 用户 skill 同名覆盖内置 skill 时有明确 warning。
 - Skill 激活前后原生工具集合不变。
-- 长任务压缩后仍保留 active skill 锚点，必要时可重新读取 `SKILL.md`。
+- 长任务进行上下文整理后仍保留 active skill 的完整入口说明；run 结束后清空，下一 run 需要重新激活。
 
 安全验收：
 

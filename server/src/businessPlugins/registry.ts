@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { cp, lstat, mkdir, readdir, readFile, realpath, rename, rm } from 'node:fs/promises';
+import { chmod, cp, lstat, mkdir, readdir, readFile, realpath, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { config } from '../config.js';
@@ -103,6 +103,55 @@ async function loadSkillEntries(
   return entries;
 }
 
+export async function prepareBusinessPluginPermissions(
+  pluginRoot: string,
+  manifest: BusinessPluginManifest,
+): Promise<void> {
+  for (const skill of manifest.skills) {
+    const scriptsRoot = resolve(pluginRoot, skill.path, 'scripts');
+    if (!existsSync(scriptsRoot)) continue;
+    const walk = async (directory: string): Promise<void> => {
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) await walk(path);
+        else if (entry.isFile()) await chmod(path, 0o755);
+      }
+    };
+    await walk(scriptsRoot);
+  }
+  for (const executable of manifest.executables ?? []) {
+    await chmod(resolve(pluginRoot, executable.path), 0o755);
+  }
+}
+
+async function validateExecutables(
+  pluginRoot: string,
+  manifest: BusinessPluginManifest,
+): Promise<void> {
+  for (const executable of manifest.executables ?? []) {
+    const path = resolve(pluginRoot, executable.path);
+    if (!isWithin(pluginRoot, path)) {
+      throw new BusinessPluginError(
+        'BUSINESS_PLUGIN_PATH_INVALID',
+        `业务插件 ${manifest.id} 的可执行文件路径越界：${executable.path}`,
+      );
+    }
+    const stats = await lstat(path).catch((error) => {
+      throw new BusinessPluginError(
+        'BUSINESS_PLUGIN_PATH_INVALID',
+        `业务插件 ${manifest.id} 的可执行文件不存在：${executable.path}`,
+        { cause: error },
+      );
+    });
+    if (!stats.isFile() || stats.isSymbolicLink()) {
+      throw new BusinessPluginError(
+        'BUSINESS_PLUGIN_PATH_INVALID',
+        `业务插件 ${manifest.id} 的可执行文件必须是普通文件：${executable.path}`,
+      );
+    }
+  }
+}
+
 export async function loadBusinessPlugin(root: string): Promise<BusinessPluginDefinition> {
   const resolved = resolve(root);
   const canonical = await realpath(resolved).catch((error) => {
@@ -124,8 +173,9 @@ export async function loadBusinessPlugin(root: string): Promise<BusinessPluginDe
       `业务插件不能包含 RunForge/Cordis 运行时入口：${join(canonical, 'dist', 'index.js')}`,
     );
   }
-  const contentHash = await hashTree(canonical);
   const manifest = parseBusinessPluginManifest(await readFile(manifestPath, 'utf8'), manifestPath);
+  await validateExecutables(canonical, manifest);
+  const contentHash = await hashTree(canonical);
   const skillEntries = await loadSkillEntries(canonical, manifest);
   if (await hashTree(canonical) !== contentHash) {
     throw new BusinessPluginError(
@@ -206,6 +256,25 @@ function deploymentKey(definition: BusinessPluginDefinition): string {
 export interface BusinessPluginImportResult {
   definition: BusinessPluginDefinition;
   replaced: boolean;
+  warnings: string[];
+}
+
+export function businessPluginExecutableConflicts(
+  definitions: readonly BusinessPluginDefinition[],
+): string[] {
+  const owners = new Map<string, string>();
+  const conflicts: string[] = [];
+  for (const definition of definitions) {
+    for (const executable of definition.manifest.executables ?? []) {
+      const owner = owners.get(executable.name);
+      if (owner && owner !== definition.manifest.id) {
+        conflicts.push(`命令 ${executable.name} 同时由业务插件 ${owner} 和 ${definition.manifest.id} 提供`);
+      } else {
+        owners.set(executable.name, definition.manifest.id);
+      }
+    }
+  }
+  return [...new Set(conflicts)];
 }
 
 /**
@@ -370,11 +439,22 @@ export class BusinessPluginRegistry {
     }
     const extracted = await extractBusinessPluginArchive(archive, format, tmpdir());
     try {
+      const extractedManifest = parseBusinessPluginManifest(
+        await readFile(join(extracted.pluginRoot, MANIFEST_FILE), 'utf8'),
+        join(extracted.pluginRoot, MANIFEST_FILE),
+      );
+      // 仅在安装暂存目录中统一赋予 Skill 脚本和声明命令的执行权限；部署目录、快照和 run
+      // 恢复过程只读取已经固定的权限，不修改插件源文件。
+      await prepareBusinessPluginPermissions(extracted.pluginRoot, extractedManifest);
       const candidate = await loadBusinessPlugin(extracted.pluginRoot);
       const current = await this.reloadIndex(tenantId);
       const existing = current.find((definition) => definition.manifest.id === candidate.manifest.id);
       if (existing?.contentHash === candidate.contentHash) {
-        return { definition: existing, replaced: true };
+        return {
+          definition: existing,
+          replaced: true,
+          warnings: businessPluginExecutableConflicts(current),
+        };
       }
 
       const target = existing?.root ?? join(resolve(managedRoot), tenantId, candidate.manifest.id);
@@ -413,7 +493,11 @@ export class BusinessPluginRegistry {
         deployments.set(deploymentKey(definition), definition);
         this.deploymentsByTenant.set(tenantId, deployments);
         this.currentByTenant.set(tenantId, next);
-        return { definition, replaced: Boolean(existing) };
+        return {
+          definition,
+          replaced: Boolean(existing),
+          warnings: businessPluginExecutableConflicts(next),
+        };
       } catch (error) {
         if (installed) await rm(target, { recursive: true, force: true });
         if (movedExisting) await rename(backup, target);

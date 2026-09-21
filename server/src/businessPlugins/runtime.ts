@@ -12,6 +12,7 @@ import { BusinessPluginError } from './errors.js';
 import { loadBusinessPlugin } from './registry.js';
 import type {
   BusinessMcpServerDeclaration,
+  BusinessPluginExecutable,
   BusinessPluginDefinition,
 } from './types.js';
 
@@ -37,6 +38,7 @@ export interface BusinessPluginRuntimeInput {
 
 export interface BusinessPluginRunHandle {
   skills: SkillIndexItem[];
+  executables: BusinessPluginExecutable[];
   mcpServers: McpServerSettings[];
   refreshMcpServers(stepId?: string | null): Promise<McpServerSettings[]>;
   dispose(): Promise<void>;
@@ -335,6 +337,19 @@ export class BusinessPluginRuntimeService {
 
     try {
       const definitionsById = new Map(definitions.map((item) => [item.manifest.id, item]));
+      const executables: BusinessPluginExecutable[] = [];
+      const commandNames = new Set<string>();
+      for (const plugin of definitions) {
+        for (const executable of plugin.manifest.executables ?? []) {
+          if (commandNames.has(executable.name)) continue;
+          commandNames.add(executable.name);
+          executables.push({
+            pluginId: plugin.manifest.id,
+            name: executable.name,
+            path: resolve(plugin.root, executable.path),
+          });
+        }
+      }
       const skills = await Promise.all(runtime.catalog.skills.map(async (contribution) => {
         const value = contribution.value as SkillContributionValue;
         const plugin = definitionsById.get(value.businessPluginId);
@@ -380,6 +395,7 @@ export class BusinessPluginRuntimeService {
       let disposed = false;
       return {
         skills,
+        executables,
         mcpServers,
         refreshMcpServers,
         dispose: async () => {

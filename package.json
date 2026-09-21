@@ -1,6 +1,6 @@
 {
   "name": "runforge",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "description": "RunForge: Node/TypeScript backend + React web console for general-purpose AI agent runs",
   "type": "module",

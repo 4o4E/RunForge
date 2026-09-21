@@ -274,6 +274,49 @@ test('space config: run 接纳解析显式能力并从 external 空间双重移�
   assert.deepEqual(resolved.runtimeCapabilitiesSnapshot.image.models, [{ id: 'image-main', label: 'Image Main' }]);
 });
 
+test('space config: 自动加入必需业务插件依赖但不自动加入可选依赖', async () => {
+  const required = structuredClone(businessPlugin);
+  required.manifest.id = 'required';
+  required.manifest.displayName = 'Required';
+  required.contentHash = 'b'.repeat(64);
+  const optional = structuredClone(businessPlugin);
+  optional.manifest.id = 'optional';
+  optional.manifest.displayName = 'Optional';
+  optional.contentHash = 'c'.repeat(64);
+  const dependent = structuredClone(businessPlugin);
+  dependent.manifest.schemaVersion = 2;
+  dependent.manifest.id = 'dependent';
+  dependent.manifest.displayName = 'Dependent';
+  dependent.contentHash = 'd'.repeat(64);
+  dependent.manifest.dependencies = [
+    { id: 'required' },
+    { id: 'optional', optional: true },
+  ];
+  const definitions = [required, optional, dependent];
+  const service = new SpaceConfigService(async () => ({
+    ...structuredClone(catalog),
+    businessPluginIds: definitions.map((definition) => definition.manifest.id),
+    businessPlugins: definitions.map((definition) => ({
+      id: definition.manifest.id,
+      label: definition.manifest.displayName,
+      description: definition.manifest.description,
+      contentHash: definition.contentHash,
+      dependencies: (definition.manifest.dependencies ?? [])
+        .filter((dependency) => !dependency.optional)
+        .map((dependency) => dependency.id),
+    })),
+    businessPluginDefinitions: definitions,
+    businessPluginConfigs: Object.fromEntries(definitions.map((definition) => [definition.manifest.id, {}])),
+  }));
+
+  const options = await service.options('tn_config');
+  assert.deepEqual(options.businessPlugins.find((plugin) => plugin.id === 'dependent')?.dependencies, ['required']);
+  const saved = await service.snapshotForCreate('tn_config', 'web', {
+    capabilities: { businessPlugins: ['dependent'] },
+  });
+  assert.deepEqual(saved.capabilities.businessPlugins, ['required', 'dependent']);
+});
+
 test('space config: 空间预算只有进一步收紧模型阈值时才成为有效来源', async () => {
   const service = configService();
   const space = {

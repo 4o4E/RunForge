@@ -82,6 +82,28 @@ export class ContextManager {
     this.pruneSupersededGoalUpdates();
   }
 
+  /**
+   * 保持当前 run 已激活的 Skill 说明在每次模型请求中可见。
+   *
+   * Skill 说明是运行时派生内容，不写入 messages；它们被放在首个用户消息之前，
+   * 因此不会被滑动窗口移除，也不会被旧消息摘要折叠。run 恢复时由事件重新读取。
+   */
+  setActiveSkillInstructions(instructions: readonly string[]): void {
+    const base = this.items.filter((item) => item.synthetic !== 'active-skill');
+    const firstNonSystem = base.findIndex((item) => item.msg.role !== 'system');
+    const insertAt = firstNonSystem >= 0 ? firstNonSystem : base.length;
+    const active = instructions.map((content) => ({
+      msg: { role: 'system' as const, content },
+      dbId: null,
+      synthetic: 'active-skill' as const,
+    }));
+    this.items = [
+      ...base.slice(0, insertAt),
+      ...active,
+      ...base.slice(insertAt),
+    ];
+  }
+
   /** 给最近追加的消息补上落库后的 DB id。 */
   setLastDbId(dbId: number): void {
     if (this.items.length) this.items[this.items.length - 1].dbId = dbId;

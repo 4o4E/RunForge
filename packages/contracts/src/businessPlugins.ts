@@ -58,6 +58,8 @@ export interface BusinessPluginAdminItem {
   mcpServers: BusinessPluginMcpView[];
   resources: BusinessPluginResourceView[];
   secrets: BusinessPluginSecretView[];
+  dependencies: Array<{ id: string; version: string | null; optional: boolean }>;
+  executables: Array<{ name: string; path: string; platform: 'linux/amd64' }>;
   ready: boolean;
   error: string | null;
 }
@@ -69,6 +71,7 @@ export interface BusinessPluginAdminView {
 export interface BusinessPluginImportResponse {
   pluginId: string;
   replaced: boolean;
+  warnings: string[];
   view: BusinessPluginAdminView;
 }
 

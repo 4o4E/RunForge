@@ -54,6 +54,7 @@ export const shellTool: Tool = {
           softTimeoutMs: Math.max(timeout, 10 * 60_000),
           hardTimeoutMs: Math.max(timeout * 3, 30 * 60_000),
           env: ctx.env,
+          pluginExecutables: ctx.pluginExecutables,
         });
         return formatCommandResult(result);
       }
@@ -66,6 +67,7 @@ export const shellTool: Tool = {
         envPath: shellPathForSettings(settings),
         shareNet: settings.network === 'enabled',
         env: ctx?.env,
+        pluginExecutables: ctx?.pluginExecutables,
       });
       const output = [stdout, stderr && `[stderr]\n${stderr}`].filter(Boolean).join('\n').trim();
       return output ? redactShellOutput(output) : '（无输出）';

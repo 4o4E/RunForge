@@ -13,6 +13,8 @@ export interface ToolRunContext {
   settings: ToolSettings;
   scope: Scope;
   env?: Record<string, string>;
+  /** 当前 run 由业务插件声明的命令；按空间插件顺序提供名称和绝对路径。 */
+  pluginExecutables?: Array<{ name: string; path: string }>;
   threadId?: string;
   runId?: string;
   stepId?: string;

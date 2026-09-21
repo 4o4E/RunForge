@@ -180,7 +180,7 @@ ALTER TABLE messages ADD COLUMN summary_of INT[];      -- 若本行是摘要，�
 - **masking（L1）**：决策持久化为 `collapsed='masked'`。原始 `content` 保留在库，占位符由长度在 `loadThreadMessages` 时派生（`maskPlaceholder(len)`）。重启后视图一致、不丢、不重算。
 - **滑动窗口 drop（L2）**：**仅内存安全阀**，不落库——因为 drop 会丢信息。重启后从全量日志按相同逻辑重新派生，DB 数据从不销毁。
 - **summarized（L3）**：折叠行标 `collapsed='summarized'`，`loadThreadMessages` 跳过、只留摘要行。
-- **压缩事件**：`events.type='compaction'` 保存发生时间、token 前后值、受影响消息 id、动作和压缩后替代内容；前端按事件顺序显示时间点。
+- **压缩事件**：只有真正生成并持久化 L3 摘要时才写入 `events.type='compaction'`，保存发生时间、token 前后值、受影响消息 id、动作和压缩后替代内容；前端按事件顺序显示时间点。L1 masking、L2 内存窗口移除、显示参数裁剪和 run 结束后的历史整理只更新模型视图或持久化标记，不显示为压缩事件。
 - **Debug 原始视图**：`GET /api/threads/:id?debug=1` 才返回原始 `content/tool_calls.arguments`；默认详情只返回长度、工具名和 `collapsed` 状态。
 - **加密推理状态**：OpenAI Responses 的 `encrypted_content` 以不透明 `provider_state` 保存并回放，应用不可解密；消息被 mask、summarize 或窗口移除后，不再把对应旧推理状态发给模型。
 
