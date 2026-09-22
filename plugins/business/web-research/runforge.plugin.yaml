@@ -1,0 +1,22 @@
+schemaVersion: 2
+id: web-research
+version: 0.1.0
+displayName: 互联网检索与核验
+description: 使用 Exa MCP 搜索、读取和核对具有时效性的外部资料。
+
+skills:
+  - id: web-research
+    path: skills/web-research
+
+executables: []
+secrets:
+  - key: exa.api-key
+    required: true
+    description: Exa API Key
+mcpServers:
+  - id: exa
+    url: https://mcp.exa.ai/mcp?tools=web_search_exa,web_fetch_exa,web_search_advanced_exa
+    bearerSecretKey: exa.api-key
+resources: []
+configSchema:
+  type: object

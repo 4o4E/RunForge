@@ -1,0 +1,16 @@
+schemaVersion: 2
+id: a-share-market-data
+version: 0.1.0
+displayName: A股行情数据
+description: 从东方财富公开行情接口采集 A 股、板块和主要指数的实时与历史数据。
+
+skills:
+  - id: a-share-market-data
+    path: skills/a-share-market-data
+
+executables: []
+secrets: []
+mcpServers: []
+resources: []
+configSchema:
+  type: object

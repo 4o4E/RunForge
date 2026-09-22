@@ -1,5 +1,8 @@
 node_modules/
 dist/
+build/
+__pycache__/
+*.pyc
 .run/
 logs/
 .env

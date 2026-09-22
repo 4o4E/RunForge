@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { chmod, mkdtemp, mkdir, readFile, readdir, rename, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, relative } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { create as createTar } from 'tar';
 import { ZipFile } from 'yazl';
 import { CordisRuntimeManager } from '../plugins/runtime.js';
@@ -23,6 +23,21 @@ function runLock(definition: Awaited<ReturnType<typeof loadBusinessPlugin>>) {
     plugins: [createBusinessPluginSelection(definition)],
   });
 }
+
+test('仓库业务插件：AI 绘图、A 股行情、搜索与每日新闻插件符合当前协议', async () => {
+  const image = await loadBusinessPlugin(resolve('..', 'plugins/business/ai-image-generation'));
+  const stock = await loadBusinessPlugin(resolve('..', 'plugins/business/a-share-market-data'));
+  const research = await loadBusinessPlugin(resolve('..', 'plugins/business/web-research'));
+  const news = await loadBusinessPlugin(resolve('..', 'plugins/business/daily-news-research'));
+  assert.equal(image.manifest.resources[0]?.type, 'image.proxy');
+  assert.equal(image.manifest.skills[0]?.id, 'ai-image-generation');
+  assert.equal(stock.manifest.resources.length, 0);
+  assert.equal(stock.manifest.skills[0]?.id, 'a-share-market-data');
+  assert.equal(research.manifest.mcpServers[0]?.id, 'exa');
+  assert.equal(research.manifest.mcpServers[0]?.bearerSecretKey, 'exa.api-key');
+  assert.equal(news.manifest.dependencies?.[0]?.id, 'web-research');
+  assert.equal(news.manifest.skills[0]?.id, 'daily-news-research');
+});
 
 async function createPlugin(
   sourceRoot: string,

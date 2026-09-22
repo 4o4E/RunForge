@@ -1,0 +1,17 @@
+schemaVersion: 2
+id: ai-image-generation
+version: 0.1.1
+displayName: AI 绘图
+description: 使用 RunForge 授权的图片模型生成图片或按参考图编辑图片。
+
+skills:
+  - id: ai-image-generation
+    path: skills/ai-image-generation
+
+executables: []
+secrets: []
+mcpServers: []
+resources:
+  - type: image.proxy
+configSchema:
+  type: object

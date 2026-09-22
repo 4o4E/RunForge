@@ -1,0 +1,19 @@
+schemaVersion: 2
+id: daily-news-research
+version: 0.1.0
+displayName: 每日新闻研究
+description: 由 Agent 组合 RSS 与互联网搜索，采集、去重、核验并整理指定时间窗口的新闻。
+
+dependencies:
+  - id: web-research
+
+skills:
+  - id: daily-news-research
+    path: skills/daily-news-research
+
+executables: []
+secrets: []
+mcpServers: []
+resources: []
+configSchema:
+  type: object
