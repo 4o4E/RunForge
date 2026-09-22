@@ -11,7 +11,8 @@ test('Workload SDK 只发送统一 token、step 和资源参数，不接受 tena
     if (url.includes('/datasources/')) {
       return Response.json({ leaseId: 'dl_test', type: 'postgres', username: 'reader', password: 'short-lived', expiresAt: new Date(0).toISOString(), connection: {} });
     }
-    return Response.json({ capability: 'llm', baseUrl: 'http://runtime.test', headers: {}, expiresAt: new Date(0).toISOString(), endpoints: {}, defaults: {}, models: [] });
+    const capability = JSON.parse(String(init?.body)).capability as 'llm' | 'image';
+    return Response.json({ capability, baseUrl: 'http://runtime.test', headers: {}, expiresAt: new Date(0).toISOString(), endpoints: {}, defaults: {}, models: [] });
   };
   const client = new RunForgeWorkloadClient({
     token: 'wlt_test',
@@ -23,10 +24,12 @@ test('Workload SDK 只发送统一 token、step 和资源参数，不接受 tena
   assert.equal(await client.secrets.get('crm.api-key'), 'current-value');
   assert.equal((await client.resources.acquire('database.readonly', { datasourceId: 'ds_reports', profile: 'reports-readonly' })).username, 'reader');
   assert.equal((await client.resources.acquire('llm.proxy')).capability, 'llm');
+  assert.equal((await client.resources.acquire('image.proxy')).capability, 'image');
 
   assert.deepEqual(requests.map((request) => request.url), [
     'http://runforge.test/api/runtime/secrets/get',
     'http://runforge.test/api/runtime/datasources/ds_reports/credentials',
+    'http://runforge.test/api/runtime-capabilities/credentials',
     'http://runforge.test/api/runtime-capabilities/credentials',
   ]);
   for (const request of requests) {

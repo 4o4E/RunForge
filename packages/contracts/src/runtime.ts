@@ -24,4 +24,4 @@ export interface WorkloadSecretResponse {
   value: string;
 }
 
-export type WorkloadResourceType = 'database.readonly' | 'llm.proxy';
+export type WorkloadResourceType = 'database.readonly' | 'llm.proxy' | 'image.proxy';

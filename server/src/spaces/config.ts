@@ -740,6 +740,7 @@ export class SpaceConfigService {
       for (const resource of definition.manifest.resources) {
         if (resource.type === 'database.readonly') requiredRuntime.add('datasource.credentials');
         if (resource.type === 'llm.proxy') requiredRuntime.add('llm');
+        if (resource.type === 'image.proxy') requiredRuntime.add('image');
       }
     }
     const missingRuntime = [...requiredRuntime].filter((capability) => !runtime.includes(capability));

@@ -365,6 +365,18 @@ test('space config: 业务插件声明的系统资源必须由空间统一 WORKL
     capabilities: { businessPlugins: ['crm'], runtime: ['llm'] },
   });
   assert.deepEqual(accepted.capabilities.runtime, ['llm']);
+
+  resourcePlugin.manifest.resources = [{ type: 'image.proxy' }];
+  await assert.rejects(
+    service.snapshotForCreate('tn_config', 'web', {
+      capabilities: { businessPlugins: ['crm'], runtime: ['llm'] },
+    }),
+    /业务插件所需运行资源未被空间授权：image/,
+  );
+  const imageAccepted = await service.snapshotForCreate('tn_config', 'web', {
+    capabilities: { businessPlugins: ['crm'], runtime: ['image'] },
+  });
+  assert.deepEqual(imageAccepted.capabilities.runtime, ['image']);
 });
 
 test('space config: 系统 instance 预算不能超过模型窗口', async () => {

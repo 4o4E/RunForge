@@ -112,6 +112,12 @@ export class RunForgeWorkloadClient {
           { capability: 'llm' },
         ) as Promise<WorkloadResourceResult<T>>;
       }
+      if (type === 'image.proxy') {
+        return this.post<RuntimeCapabilityCredential>(
+          `${capabilityBase(this.runtimeApiBase)}/api/runtime-capabilities/credentials`,
+          { capability: 'image' },
+        ) as Promise<WorkloadResourceResult<T>>;
+      }
       throw new Error(`不支持的 Workload 资源：${String(type)}`);
     },
   };

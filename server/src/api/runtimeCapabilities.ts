@@ -16,8 +16,13 @@ import { store } from '../store/index.js';
 import { scopeForThread, type Scope } from '../store/types.js';
 import { providerRunner } from '../llm/providerRunner.js';
 import { retainRunExecution, type RunExecutionRegistration } from '../agent/executionControl.js';
+import { EnvHttpProxyAgent } from 'undici';
 
 export const runtimeCapabilitiesApi = Router();
+
+// 图片供应商属于外部网络资源。服务端统一遵循 HTTP_PROXY/HTTPS_PROXY/NO_PROXY，
+// 避免容器或 WSL 中只有代理出口时由原生 fetch 绕过代理直接连接失败。
+const imageHttpDispatcher = new EnvHttpProxyAgent();
 
 type CallStatus = 'success' | 'error';
 
@@ -374,17 +379,40 @@ async function proxyPackyImage(
   const body = jsonObject(req.body);
   const image = selectImageModel(settings, body);
   if (!image.apiKey.trim()) throw new DatasourceError(400, `图片生成能力未配置 apiKey：${image.id}`);
-  const { model: _modelSelector, modelId: _modelId, ...passthrough } = body;
+  const { model: _modelSelector, modelId: _modelId, images: rawImages, ...passthrough } = body;
   const payload: Record<string, unknown> = { ...passthrough, model: image.model };
   if (typeof payload.n === 'number' && payload.n !== 1) throw new DatasourceError(400, 'gpt-image-2 当前只支持 n=1');
   const endpoint = mode === 'generate' ? '/v1/images/generations' : '/v1/images/edits';
   const headers: Record<string, string> = { Authorization: `Bearer ${image.apiKey}` };
-  let upstreamBody: string;
-  if (mode === 'edit' && req.is('multipart/form-data')) {
-    throw new DatasourceError(400, 'image edit multipart 代理暂未启用，请使用 JSON/base64 输入或后续接入文件转发');
+  let upstreamBody: string | FormData;
+  if (mode === 'edit') {
+    if (!Array.isArray(rawImages) || rawImages.length === 0) {
+      throw new DatasourceError(400, '图片编辑必须提供 images');
+    }
+    const form = new FormData();
+    rawImages.forEach((value, index) => {
+      const item = jsonObject(value);
+      const contentBase64 = typeof item.contentBase64 === 'string' ? item.contentBase64 : '';
+      if (!contentBase64) throw new DatasourceError(400, `images[${index}].contentBase64 不能为空`);
+      const bytes = Buffer.from(contentBase64, 'base64');
+      if (bytes.length === 0 || bytes.length > 25 * 1024 * 1024) {
+        throw new DatasourceError(400, `images[${index}] 必须在 1 字节到 25 MiB 之间`);
+      }
+      const mimeType = typeof item.mimeType === 'string' && item.mimeType.startsWith('image/')
+        ? item.mimeType
+        : 'image/png';
+      const name = typeof item.name === 'string' && item.name.trim() ? item.name.trim() : `image-${index + 1}.png`;
+      form.append('image[]', new Blob([bytes], { type: mimeType }), name);
+    });
+    Object.entries(payload).forEach(([key, value]) => {
+      if (value === undefined || value === null) return;
+      form.append(key, typeof value === 'string' ? value : JSON.stringify(value));
+    });
+    upstreamBody = form;
+  } else {
+    headers['Content-Type'] = 'application/json';
+    upstreamBody = JSON.stringify(payload);
   }
-  headers['Content-Type'] = 'application/json';
-  upstreamBody = JSON.stringify(payload);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), image.timeoutMs);
   try {
@@ -393,7 +421,8 @@ async function proxyPackyImage(
       headers,
       body: upstreamBody,
       signal: AbortSignal.any([abortSignal, ctrl.signal]),
-    });
+      dispatcher: imageHttpDispatcher,
+    } as RequestInit & { dispatcher: typeof imageHttpDispatcher });
     const text = await response.text();
     let parsed: unknown = text;
     try {

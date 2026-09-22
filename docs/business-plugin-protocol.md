@@ -128,16 +128,16 @@ HTTP/HTTPS，并且 `url` 与 `urlConfigKey` 必须二选一。
 - MCP Client 按 run 隔离并在 run 完成、失败、取消或等待用户时释放，不按 server ID 在
   进程全局共享。
 - 每个 run 沿用一个 `WORKLOAD_TOKEN` 作为统一系统资源凭证。Skill 脚本通过
-  `@runforge/workload-sdk` 的 `secrets.get(key)`、`resources.acquire("database.readonly")`
-  和 `resources.acquire("llm.proxy")` 获取资源；SDK 不接受 tenant、space 或插件 ID。同一
+  `@runforge/workload-sdk` 的 `secrets.get(key)`、`resources.acquire("database.readonly")`、
+  `resources.acquire("llm.proxy")` 和 `resources.acquire("image.proxy")` 获取资源；SDK 不接受 tenant、space 或插件 ID。同一
   run 同时只有一个活动 token，等待后恢复执行时轮换，不按 Skill 或插件补签。
 - RunForge 会把 SDK 入口复制到当前 workspace 的 `.agents/runforge-workload-sdk/index.mjs`，
   并通过 `RUNFORGE_WORKLOAD_SDK` 暴露路径，因此调用方维护的业务插件不需要在部署目录中
   安装 RunForge 依赖。该目录与 Skill、业务插件运行副本一样受工具写保护。
 - Secret SDK 根据 `WORKLOAD_TOKEN` 反查 run 和 tenant，再按 key 读取当前值。一个 run 中
   的可信脚本共享同一 token；插件声明不限制某个脚本只能读取自己的 key。
-- `database.readonly` 映射现有数据源账号池，只签发只读权限档位；`llm.proxy` 映射现有
-  runtime capability 代理。空间必须授权插件声明所需的系统资源，否则配置保存失败。
+- `database.readonly` 映射现有数据源账号池，只签发只读权限档位；`llm.proxy` 和
+  `image.proxy` 分别映射语言模型与图片生成 runtime capability 代理。空间必须授权插件声明所需的系统资源，否则配置保存失败。
 - Secret 每次成功、缺失或异常读取都写入 `workload_secret_access_logs`，记录 tenant、run、
   step、token、调用路径和 key，不保存 Secret 值。读取和审计在同一事务提交，审计失败不
   返回明文。
@@ -148,5 +148,5 @@ HTTP/HTTPS，并且 `url` 与 `urlConfigKey` 必须二选一。
 
 - 首版 SDK 提供 ESM/Node 客户端和稳定 HTTP 协议；其他语言客户端按真实业务插件需要再补，
   不提前维护没有调用方的包装库。
-- 标准资源目前只有 `database.readonly` 和 `llm.proxy`。新增类型必须先证明可跨业务复用，
+- 标准资源目前有 `database.readonly`、`llm.proxy` 和 `image.proxy`。新增类型必须先证明可跨业务复用，
   再由 RunForge 增加对应的 Cordis 运行资源实现。

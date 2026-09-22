@@ -120,7 +120,7 @@ const secretSchema = z.object({
 // 业务插件只能声明 RunForge 已实现的标准资源；未知类型必须在部署检查阶段失败，不能到
 // Skill 真正执行时才静默缺能力。
 const resourceSchema = z.object({
-  type: z.enum(['database.readonly', 'llm.proxy']),
+  type: z.enum(['database.readonly', 'llm.proxy', 'image.proxy']),
 }).strict();
 
 const manifestSchema = z.object({
