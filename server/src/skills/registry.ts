@@ -2,8 +2,9 @@ import { cp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
+import { ensureManagedDirectory, ensureManagedLink } from '../files/managedResources.js';
 
-export type SkillSource = 'builtin' | 'user' | 'business';
+export type SkillSource = 'builtin' | 'business';
 
 export interface SkillIndexItem {
   id: string;
@@ -118,7 +119,7 @@ async function hashDir(root: string): Promise<string> {
         await walk(path);
       } else if (entry.isFile()) {
         const rel = path.slice(root.length + 1);
-        parts.push(`${rel}\0${await readFile(path, 'utf8').catch(() => '')}`);
+        parts.push(`${rel}\0${createHash('sha256').update(await readFile(path)).digest('hex')}`);
       }
     }
   }
@@ -192,20 +193,31 @@ export async function loadBuiltinSkillDocuments(
   }));
 }
 
-export async function loadSkillIndex(workspaceRoot: string, builtinSourceRoot = BUILTIN_SOURCE_ROOT): Promise<SkillIndexItem[]> {
-  const materializedBuiltinRoot = resolve(workspaceRoot, '.agents/skills');
-  await mkdir(materializedBuiltinRoot, { recursive: true });
+export async function loadSkillIndex(
+  workspaceRoot: string,
+  builtinSourceRoot = BUILTIN_SOURCE_ROOT,
+  spaceRoot = workspaceRoot,
+): Promise<SkillIndexItem[]> {
+  const linkedBuiltinRoot = resolve(workspaceRoot, '.agents/skills');
+  const materializedBuiltinRoot = resolve(spaceRoot, '.skills/builtin');
+  await mkdir(linkedBuiltinRoot, { recursive: true });
 
   const builtinItems: SkillIndexItem[] = [];
+  const linkedNames = new Set<string>();
   for (const sourceDir of await listSkillDirs(builtinSourceRoot)) {
-    const targetDir = join(materializedBuiltinRoot, basename(sourceDir));
-    await sanitizeSkillDir(sourceDir, targetDir);
-    builtinItems.push(await readSkillIndexItem(targetDir, 'builtin', true));
+    const name = basename(sourceDir);
+    linkedNames.add(name);
+    const version = (await hashDir(sourceDir)).slice('sha256:'.length);
+    const targetDir = join(materializedBuiltinRoot, name, version);
+    await ensureManagedDirectory(targetDir, (staging) => sanitizeSkillDir(sourceDir, staging));
+    const linkedDir = join(linkedBuiltinRoot, name);
+    await ensureManagedLink(targetDir, linkedDir);
+    builtinItems.push(await readSkillIndexItem(linkedDir, 'builtin', true));
   }
-
-  const userRoot = resolve(workspaceRoot, '.skills');
-  const userItems = await Promise.all((await listSkillDirs(userRoot)).map((dir) => readSkillIndexItem(dir, 'user', false)));
-  return [...userItems, ...builtinItems].sort((a, b) => a.name.localeCompare(b.name) || a.source.localeCompare(b.source));
+  for (const entry of await readdir(linkedBuiltinRoot, { withFileTypes: true })) {
+    if (!linkedNames.has(entry.name)) await rm(join(linkedBuiltinRoot, entry.name), { recursive: true, force: true });
+  }
+  return builtinItems.sort((a, b) => a.name.localeCompare(b.name) || a.source.localeCompare(b.source));
 }
 
 export function renderSkillCatalog(
@@ -228,8 +240,8 @@ export function renderSkillSystemRules(): string {
 - Resolve relative paths in skill instructions against that skill root.
 - references、assets、scripts 都是 root 下的普通文件，可用文件工具或 shell 按需读取。
 - references, assets, and scripts are normal files under root; inspect them with file tools or shell when needed.
-- 不要修改 skill 目录本身；输出文件写到 workspace 的普通工作目录，除非用户明确要求编辑某个用户 skill。
-- Do not modify skill directories; write outputs to normal workspace locations unless the user explicitly asks to edit a user skill.
+- 不要修改 skill 目录本身；输出文件写到会话的普通工作目录。Skill 由管理员发布，当前会话不能创建或修改。
+- Do not modify skill directories; write outputs to normal thread files. Skills are published by administrators, not by this thread.
 - 脚本执行必须遵守工具策略、沙箱、网络开关和输出截断。
 - Script execution must follow tool policy, sandboxing, network settings, and output limits.`;
 }
@@ -240,7 +252,7 @@ export function selectSkill(skills: SkillIndexItem[], nameOrId: string): SkillIn
   const exactId = skills.find((skill) => skill.id === wanted);
   if (exactId) return exactId;
   const matches = skills.filter((skill) => skill.name === wanted);
-  return matches.find((skill) => skill.source === 'user') ?? matches[0];
+  return matches[0];
 }
 
 export async function activateSkillItem(skill: SkillIndexItem, workspaceRoot?: string): Promise<SkillActivation> {

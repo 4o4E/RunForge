@@ -3,6 +3,7 @@ import type { Dirent } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import type { Tool } from './types.js';
 import { resolveToolRoot } from './path.js';
+import { isWithin } from './policy.js';
 
 // Convert a simple glob (supports **, *, ?) to a RegExp.
 // `**/` matches zero or more leading directory segments (so "**/*.ts" also
@@ -47,6 +48,7 @@ async function walkMatches(dir: string, root: string, re: RegExp, out: string[],
   }
   for (const e of sortEntries(entries)) {
     if (out.length >= limit) return;
+    if (e.isSymbolicLink()) continue;
     if (IGNORE.has(e.name)) continue;
     const full = join(dir, e.name);
     if (e.isDirectory()) {
@@ -60,7 +62,7 @@ async function walkMatches(dir: string, root: string, re: RegExp, out: string[],
 
 export const globTool: Tool = {
   name: 'glob',
-  description: '按 glob 模式查找文件（支持 **、*、?），返回相对于搜索目录的匹配路径。',
+  description: '按 glob 模式查找文件（支持 **、*、?）；用户目录中的结果返回绝对路径。',
   parameters: {
     type: 'object',
     properties: {
@@ -71,10 +73,13 @@ export const globTool: Tool = {
   },
   async run(args, ctx) {
     const pattern = String(args.pattern ?? '');
-    const root = resolveToolRoot(args.path, ctx);
+    const root = await resolveToolRoot(args.path, ctx);
     const re = globToRegExp(pattern);
     const matches: string[] = [];
     await walkMatches(root, root, re, matches, 200);
-    return matches.length ? matches.join('\n') : '（没有匹配项）';
+    const userDirectory = ctx?.userFiles && isWithin(ctx.userFiles.source, root);
+    return matches.length
+      ? matches.map((match) => userDirectory ? join(root, match).split(sep).join('/') : match).join('\n')
+      : '（没有匹配项）';
   },
 };

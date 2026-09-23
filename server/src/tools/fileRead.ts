@@ -2,6 +2,7 @@ import { readFile, stat } from 'node:fs/promises';
 import type { Tool } from './types.js';
 import { resolveToolPath } from './path.js';
 import { isImageMediaType, mediaTypeFromPath, toRemotePath } from '../files/workspace.js';
+import { isWithin } from './policy.js';
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
@@ -17,7 +18,7 @@ export const fileReadTool: Tool = {
   },
   async run(args, ctx) {
     const inputPath = String(args.path ?? '');
-    const path = resolveToolPath(inputPath, ctx);
+    const path = await resolveToolPath(inputPath, ctx, 'read');
     try {
       const info = await stat(path);
       const mediaType = mediaTypeFromPath(path);
@@ -30,7 +31,9 @@ export const fileReadTool: Tool = {
             type: 'image',
             data: data.toString('base64'),
             mimeType: mediaType,
-            path: toRemotePath(path, ctx?.settings?.workspaceRoot ?? path),
+            path: ctx?.userFiles && isWithin(ctx.userFiles.source, path)
+              ? path
+              : toRemotePath(path, ctx?.settings?.workspaceRoot ?? path),
             name: inputPath,
           }],
         };

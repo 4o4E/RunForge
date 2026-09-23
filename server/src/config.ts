@@ -48,7 +48,7 @@ export interface AgentContextSettings {
   contextBudgetSource: string;
 }
 
-/** 每个模型使用目录中的压缩阈值；环境变量只能进一步收紧实例上限。 */
+/** 每个模型使用已保存的压缩阈值；环境变量只能进一步收紧实例上限。 */
 export function agentContextSettings(modelWindow: number, modelCompactionThreshold: number): AgentContextSettings {
   if (!Number.isFinite(modelWindow) || modelWindow <= 0) throw new Error('模型上下文长度无效');
   const safeWindow = Math.floor(modelWindow);
@@ -85,34 +85,6 @@ function contextStrategy(v: string | undefined): 'current' | 'langchain-trim' {
 }
 
 const DEFAULT_DATABASE_URL = 'postgres://postgres:postgres@localhost:5432/runforge';
-const DEFAULT_SHELL_ALLOW_COMMANDS = [
-  'cat',
-  'ls',
-  'pwd',
-  'printf',
-  'sed',
-  'awk',
-  'grep',
-  'find',
-  'head',
-  'tail',
-  'wc',
-  'sort',
-  'uniq',
-  'xargs',
-  'rm',
-  'env',
-  'git',
-  'rg',
-  'node',
-  'npm',
-  'python',
-  'python3',
-  'uv',
-  'curl',
-  'psql',
-];
-
 export const config = {
   host: process.env.HOST ?? '::',
   port: Number(process.env.PORT ?? 8080),
@@ -168,15 +140,12 @@ export const config = {
     // Filesystem tools are confined under this root in enforce mode. thread 工作目录固定派生为
     // `<root>/<spaceId>/<threadId>`；该实例路径只由启动环境配置。
     workspaceRoot: resolve(process.env.TOOL_WORKSPACE_ROOT ?? '/w'),
+    userFilesRoot: resolve(process.env.RUNFORGE_USER_FILES_ROOT ?? '/u'),
     shellEnabled: (process.env.SHELL_ENABLED ?? 'true') !== 'false',
-    // true 时 shell 直接使用宿主机 PATH 和 cwd=workspaceRoot，避免 bwrap 白名单漏投射 CLI。
+    // true 时 shell 直接使用容器 PATH 和 cwd=workspaceRoot，不经过 bwrap 文件隔离。
     shellUseHostPath: (process.env.SHELL_USE_HOST_PATH ?? 'true') !== 'false',
     shellPathMode: (process.env.SHELL_PATH ? 'custom' : 'system') as 'system' | 'custom',
     shellPath: process.env.SHELL_PATH ?? process.env.PATH ?? '',
-    // bwrap 模式只投射这些外部命令; shell 内建命令不需要配置。
-    shellAllowCommands: list(process.env.SHELL_ALLOW_COMMANDS).length
-      ? list(process.env.SHELL_ALLOW_COMMANDS)
-      : DEFAULT_SHELL_ALLOW_COMMANDS,
     // 网络总开关:enabled=不限制网络,disabled=阻断网络。
     network: networkMode(process.env.TOOL_NETWORK),
     // Command patterns blocked in enforce mode (regex, case-insensitive).

@@ -25,8 +25,8 @@
 - 前端提供 React 聊天控制台，可查看 reasoning、工具调用、工具结果和最终输出。
 - 支持上下文压缩、持久 Goal 状态、取消 run、服务启动恢复、工具输出截断和工具策略。
 - 支持托管 shell session，长耗时命令可以后台运行、轮询、终止，并在右侧 Shell 面板中持续观察。
-- 支持 skill 文件协议，启动后索引内置和用户 skill，按需用 `skill_activate` 加载正文和资源。
-- 支持 workflow 文件协议，LLM 可按需列出和读取稳定流程。
+- 支持 Skill 文件协议，按空间准备只读内置资源，并按需用 `skill_activate` 加载正文和资源；普通会话不能创建或修改 Skill。
+- 支持 Workflow 文件协议，LLM 可按需列出和读取空间中已启用的只读流程；普通会话不能创建或修改 Workflow。
 - 支持异步只读 subagent，主 agent 可派发子任务、轮询结果，并在前端资源栏查看。
 - 服务端统一聚合 Token 与存储占用，支持租户、用户、空间和时间维度；统计口径见[用量与存储分析](usage-and-storage-analysis.md)。
 
@@ -145,8 +145,8 @@ Web 创建 thread
 - `observability/repository.ts`：Provider 观测的 Prisma/内存持久化边界。
 - `observability/trace.ts`：按日追加本地 JSONL attempt trace，并保留最近 7 个自然日。
 - `providers/aiSdk.ts`：通过 AI SDK 创建三种受支持协议的模型，并统一转换中立消息、工具调用和响应。
-- `updateModelCatalog.ts`、`model-catalog.json`、`modelCatalog.ts`：从 models.dev 自动生成的全量
-  模型能力目录、最长名称前缀匹配、每模型压缩阈值和资料来源校验。
+- `packages/contracts/src/modelCatalog.ts`：浏览器和仓库目录更新脚本共用的模型资料解析、别名匹配规则。
+- `updateModelCatalog.ts`、`model-catalog.json`、`modelCatalog.ts`：初始配置和旧配置升级使用的打包目录，不参与新模型的自动填写或已保存能力的运行时更新。
 
 `server/src/tools/`
 
@@ -234,12 +234,11 @@ AI SDK 的 `maxRetries` 固定为 `0`，重试只由 `ProviderRunner` 决定，�
 - `anthropic-messages`：使用 `@ai-sdk/anthropic` 的 Messages API。
 
 三种协议的请求都固定使用流式传输。OpenAI Responses 和 OpenAI Chat 不发送输出 token 上限。
-Anthropic Messages 使用模型目录记录的最大输出长度填写协议必填的 `max_tokens`；缺少该目录
-数据时立即拒绝创建 Provider。管理员配置中不提供输出 token 上限或流式开关。
+Anthropic Messages 使用该模型已保存的最大输出长度填写协议必填的 `max_tokens`；缺少该参数
+时立即拒绝创建 Provider。管理员仅在 Anthropic 协议下需要填写最大输出长度，不提供流式开关。
 
-LLM 配置保存在系统 `app_settings` 中,租户授权保存可用 provider ID,空间再保存可用模型子集。管理界面直接选择协议。模型列表接口只发现模型
-名称。上下文窗口、压缩阈值和输入类型由本地目录按规范化后的完整名称或明确别名匹配；未
-匹配的模型必须由管理员填写。目录中的每项能力都保存资料链接、检查日期和资料覆盖字段。
+LLM 配置保存在系统 `app_settings` 中，租户授权保存可用 provider ID，空间再保存可用模型子集。管理界面直接选择协议。供应商 `/models` 接口只发现模型
+名称；每次成功拉取都会替换该供应商上次保存的候选名单。已启用模型单独保存在 `models` 中，即使供应商暂时未列出也会保留，未启用且不再返回的候选会移除。管理员选择模型时，浏览器直接读取 models.dev 的 `models.json` 和 `api.json`，按完整名称和明确别名匹配，自动填写上下文长度、压缩阈值、输入类型及最大输出长度；未匹配的模型由管理员填写。只有选择模型或明确点击刷新模型能力时才更新配置，打开页面不会覆盖人工修改。系统只保存已选择模型的能力快照及资料链接，不保存整份目录；运行时使用已保存的能力，不依赖管理员浏览器或 models.dev。打包目录仅用于初始默认配置及补齐升级前缺少的字段。
 运行时遇到缺失能力会立即拒绝创建 Provider。
 
 模型 reasoning 只读取协议返回的独立字段。正文中的 `<think>` 标签按普通正文处理。
@@ -359,7 +358,7 @@ shell 沙箱后端：
 - `TOOL_SANDBOX_BACKEND=auto`：Linux 且 bwrap 可用时使用 bwrap，否则回落宿主执行并告警。
 - `TOOL_SANDBOX_BACKEND=bwrap`：强制使用 bwrap，不可用则失败。
 
-bwrap 模式会只读投射动态库和白名单命令，可写投射工作区，默认不共享网络命名空间。
+bwrap 模式会只读投射容器系统目录和 PATH 目录，可写投射当前会话工作区，默认不共享网络命名空间。危险命令正则只防误操作，不承担隔离职责。
 
 ## 当前边界
 

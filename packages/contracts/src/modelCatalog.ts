@@ -1,4 +1,4 @@
-import type { LlmInputModality } from '@runforge/contracts';
+import type { LlmInputModality } from './settings.js';
 
 export const MODELS_DEV_SOURCE_URL = 'https://models.dev/models.json';
 export const MODELS_DEV_ALIAS_SOURCE_URL = 'https://models.dev/api.json';
@@ -92,9 +92,9 @@ function modelBasename(model: string): string {
 
 function huggingFaceAlias(url: string | undefined): string | null {
   if (!url) return null;
-  const parsed = new URL(url);
-  if (parsed.hostname !== 'huggingface.co') return null;
-  const parts = parsed.pathname.split('/').filter(Boolean);
+  const match = /^https:\/\/huggingface\.co\/([^/?#]+)\/([^/?#]+)/.exec(url);
+  if (!match) return null;
+  const parts = [match[1]!, match[2]!];
   if (parts.length < 2 || parts[0] === 'datasets' || parts[0] === 'spaces') return null;
   return `${decodeURIComponent(parts[0]!)}\/${decodeURIComponent(parts[1]!)}`;
 }
@@ -168,15 +168,14 @@ function addProviderAliases(
   }
 }
 
-/** 将 models.dev 的供应商无关目录转换为 RunForge 运行时目录。 */
-export function generateModelCatalog(
+/** 浏览器只需解析当前资料并匹配模型，不必为整份目录生成持久化版本。 */
+export function generateModelCatalogEntries(
   input: unknown,
   aliasInput: unknown,
-  source: { revision: string; checkedAt: string },
-): ModelCatalogDocument {
+  checkedAt: string,
+): Pick<ModelCatalogDocument['source'], 'totalModels' | 'includedModels' | 'aliases' | 'excludedModels'> & { models: ModelCatalogEntry[] } {
   if (!isRecord(input)) throw new Error('models.dev models.json 顶层必须是对象');
-  if (!/^sha256:[0-9a-f]{64}$/.test(source.revision)) throw new Error('models.dev 数据摘要无效');
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(source.checkedAt)) throw new Error('models.dev 检查日期无效');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(checkedAt)) throw new Error('models.dev 检查日期无效');
 
   const excludedModels: ModelCatalogDocument['source']['excludedModels'] = [];
   const rows: Array<{ entry: ModelCatalogEntry; source: ModelsDevModel }> = [];
@@ -208,7 +207,7 @@ export function generateModelCatalog(
         references: [{
           title: `${item.name} · models.dev`,
           url: `https://models.dev/models/${model}`,
-          checkedAt: source.checkedAt,
+          checkedAt,
           fields: ['contextWindow', 'inputModalities'],
         }],
       },
@@ -242,17 +241,43 @@ export function generateModelCatalog(
   addProviderAliases(aliasInput, rows, owners);
 
   return {
+    totalModels: Object.keys(input).length,
+    includedModels: rows.length,
+    aliases: rows.reduce((total, row) => total + row.entry.aliases.length, 0),
+    excludedModels,
+    models: rows.map(({ entry }) => entry),
+  };
+}
+
+/** 构建仓库内的初始目录，保留版本摘要供发布检查使用。 */
+export function generateModelCatalog(
+  input: unknown,
+  aliasInput: unknown,
+  source: { revision: string; checkedAt: string },
+): ModelCatalogDocument {
+  if (!/^sha256:[0-9a-f]{64}$/.test(source.revision)) throw new Error('models.dev 数据摘要无效');
+  const entries = generateModelCatalogEntries(input, aliasInput, source.checkedAt);
+  const { models, ...counts } = entries;
+  return {
     source: {
       name: 'models.dev',
       url: MODELS_DEV_SOURCE_URL,
       aliasUrl: MODELS_DEV_ALIAS_SOURCE_URL,
       revision: source.revision,
       checkedAt: source.checkedAt,
-      totalModels: Object.keys(input).length,
-      includedModels: rows.length,
-      aliases: rows.reduce((total, row) => total + row.entry.aliases.length, 0),
-      excludedModels,
+      ...counts,
     },
-    models: rows.map(({ entry }) => entry),
+    models,
   };
+}
+
+export function findModelCatalogEntry(entries: readonly ModelCatalogEntry[], model: string): ModelCatalogEntry | undefined {
+  const normalized = normalizeCatalogName(model);
+  if (!normalized) return undefined;
+  const names = entries.flatMap((entry) => [entry.model, ...entry.aliases].map((name) => ({
+    name: normalizeCatalogName(name), entry,
+  })));
+  return names.find(({ name }) => name === normalized)?.entry
+    ?? names.filter(({ name }) => normalized.startsWith(`${name}-`))
+      .sort((left, right) => right.name.length - left.name.length)[0]?.entry;
 }

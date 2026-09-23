@@ -31,6 +31,7 @@ interface Draft {
   runtime: RuntimeCapabilityName[];
   allowTrustedPrompt: boolean;
   allowNextStep: boolean;
+  allowUserFiles: boolean;
 }
 
 interface Props {
@@ -60,6 +61,7 @@ function initialDraft(space: SpaceSummary | null, options: SpaceOptions | null):
     runtime: config?.capabilities.runtime ?? options?.runtimeCapabilities ?? [],
     allowTrustedPrompt: config?.external.allowTrustedPrompt ?? false,
     allowNextStep: config?.external.allowNextStep ?? false,
+    allowUserFiles: config?.external.allowUserFiles ?? false,
   };
 }
 
@@ -241,6 +243,7 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
       external: {
         allowTrustedPrompt: draft.mode === 'external' && draft.allowTrustedPrompt,
         allowNextStep: draft.mode === 'external' && draft.allowNextStep,
+        allowUserFiles: draft.mode === 'external' && draft.allowUserFiles,
       },
     };
   }
@@ -454,6 +457,10 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
               <div className="flex items-center justify-between gap-3">
                 <div><div className="text-sm font-medium">next_step</div><div className="text-xs text-muted-foreground">允许在当前 run 的完整 step 边界追加。</div></div>
                 <Switch checked={draft.allowNextStep} onCheckedChange={(allowNextStep) => setDraft({ ...draft, allowNextStep })} />
+              </div>
+              <div className="flex items-center justify-between gap-3 sm:col-span-2">
+                <div><div className="text-sm font-medium">执行用户文件目录</div><div className="text-xs text-muted-foreground">允许此空间的外部调用方在新运行中读写执行用户的跨会话文件；需要启用 bwrap 沙箱，默认关闭。</div></div>
+                <Switch checked={draft.allowUserFiles} onCheckedChange={(allowUserFiles) => setDraft({ ...draft, allowUserFiles })} />
               </div>
             </div>
           )}

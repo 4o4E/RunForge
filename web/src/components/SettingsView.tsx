@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Activity, ArchiveRestore, Moon, Palette, Plus, RefreshCw, Save, Sun, Trash2 } from 'lucide-react';
 import {
@@ -23,7 +23,6 @@ import type { SettingsControlApi } from '../controlApi';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -64,13 +63,6 @@ function pathToList(value: string): string[] {
 
 function listToPath(items: string[]): string {
   return items.map((item) => item.trim()).filter(Boolean).join(':');
-}
-
-function toggleListValue(items: string[], value: string, checked: boolean): string[] {
-  const next = new Set(items);
-  if (checked) next.add(value);
-  else next.delete(value);
-  return [...next].sort();
 }
 
 export function Field({ label, children }: { label: string; children: ReactNode }) {
@@ -171,65 +163,6 @@ function PathListField({
         </div>
       </ScrollArea>
     </div>
-  );
-}
-
-function OptionList({
-  empty,
-  fill = false,
-  items,
-  selected,
-  renderMeta,
-  onToggle,
-}: {
-  empty: string;
-  fill?: boolean;
-  items: Array<{ name: string; description?: string }>;
-  selected: (name: string) => boolean;
-  renderMeta?: (item: { name: string; description?: string }) => ReactNode;
-  onToggle: (name: string, checked: boolean) => void;
-}) {
-  const optionId = useId();
-
-  return (
-    <ScrollArea className={cn('min-w-0', fill && 'min-h-0 flex-1')} viewportClassName={fill ? 'h-full' : 'max-h-64 !h-auto'}>
-      <div className={cn('grid min-w-0 divide-y rounded-md border', fill && 'min-h-full content-start')}>
-        {items.length === 0 && <div className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">{empty}</div>}
-        {items.map((item, index) => {
-          const id = `${optionId}-${index}`;
-          const checked = selected(item.name);
-          return (
-            <div
-              key={item.name}
-              className="grid min-w-0 cursor-pointer grid-cols-[auto,minmax(0,1fr)] items-start gap-3 px-3 py-2 text-sm transition-colors hover:bg-accent/60"
-              onClick={() => onToggle(item.name, !checked)}
-            >
-              <Checkbox
-                id={id}
-                checked={checked}
-                onCheckedChange={(checked) => onToggle(item.name, checked === true)}
-                onClick={(event) => event.stopPropagation()}
-                className="mt-0.5"
-                aria-label={item.name}
-              />
-              <div className="min-w-0 space-y-1">
-                <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-                  <span className="min-w-0 max-w-full break-all font-medium leading-5 [overflow-wrap:anywhere]">
-                    {item.name}
-                  </span>
-                  {renderMeta && <span className="shrink-0">{renderMeta(item)}</span>}
-                </div>
-                {item.description && (
-                  <p className="m-0 min-w-0 max-w-full whitespace-normal break-all text-xs leading-5 text-muted-foreground [overflow-wrap:anywhere]">
-                    {item.description}
-                  </p>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </ScrollArea>
   );
 }
 
@@ -445,9 +378,7 @@ export function ToolsSettingsPanel({
   const [settings, setSettings] = useState<ToolSettings | null>(null);
   const [options, setOptions] = useState<ToolSettingsOptions | null>(null);
   const [shellDenyText, setShellDenyText] = useState('');
-  const [shellCommandQuery, setShellCommandQuery] = useState('');
   const [saving, setSaving] = useState(false);
-  const [scanning, setScanning] = useState(false);
   const [message, setMessage] = useState('');
 
   useEffect(() => {
@@ -476,41 +407,6 @@ export function ToolsSettingsPanel({
     };
   }, [settings, shellDenyText]);
 
-  const shellCommandOptions = options?.shellCommands ?? [];
-  const filteredShellCommandOptions = useMemo(() => {
-    const query = shellCommandQuery.trim().toLowerCase();
-    if (!query) return shellCommandOptions;
-    return shellCommandOptions.filter((command) => {
-      const path = command.path ?? '';
-      return command.name.toLowerCase().includes(query) || path.toLowerCase().includes(query);
-    });
-  }, [shellCommandOptions, shellCommandQuery]);
-  const shellCommandSet = useMemo(() => new Set(settings?.shellAllowCommands ?? []), [settings?.shellAllowCommands]);
-
-  function setShellCommand(name: string, checked: boolean) {
-    if (!settings) return;
-    setSettings({ ...settings, shellAllowCommands: toggleListValue(settings.shellAllowCommands, name, checked) });
-  }
-
-  async function scanShellCommands() {
-    if (!settings || !options) return;
-    setScanning(true);
-    setMessage('');
-    try {
-      const result = await controlApi.scanShellCommandOptions({
-        shellPathMode: settings.shellPathMode,
-        shellPath: settings.shellPath,
-        include: settings.shellAllowCommands,
-      });
-      setOptions({ ...options, shellCommands: result.shellCommands });
-      setMessage(`已扫描 PATH：发现 ${result.shellCommands.length} 个候选指令`);
-    } catch (err) {
-      setMessage(`扫描失败：${(err as Error).message}`);
-    } finally {
-      setScanning(false);
-    }
-  }
-
   async function save() {
     if (!prepared) return;
     setSaving(true);
@@ -534,7 +430,7 @@ export function ToolsSettingsPanel({
   return (
     <SettingsPanelShell
       title="Shell / 沙箱"
-      description="原生工具默认加载；这里仅配置 Shell 执行方式、bwrap 后端、PATH 和可见指令"
+      description="原生工具默认加载；Shell 使用容器 PATH 中的指令，文件与网络访问由沙箱控制"
       contentClassName="grid content-start gap-4"
       actions={
         <>
@@ -555,8 +451,8 @@ export function ToolsSettingsPanel({
               >
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="host">宿主执行</SelectItem>
-                  <SelectItem value="sandbox">沙箱投射</SelectItem>
+                  <SelectItem value="host">容器直接执行</SelectItem>
+                  <SelectItem value="sandbox">bwrap 沙箱执行</SelectItem>
                 </SelectContent>
               </Select>
             </Field>
@@ -620,59 +516,9 @@ export function ToolsSettingsPanel({
                 onChange={(value) => setSettings({ ...settings, shellPath: value })}
               />
             </div>
-            <Field label="Shell deny 正则">
+            <Field label="危险命令规则（正则，仅防误操作）">
               <Textarea rows={10} value={shellDenyText} onChange={(event) => setShellDenyText(event.target.value)} />
             </Field>
-          </div>
-          <div className="grid gap-2">
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-sm font-medium">可见指令</div>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    const next = new Set(settings.shellAllowCommands);
-                    for (const command of filteredShellCommandOptions) next.add(command.name);
-                    setSettings({ ...settings, shellAllowCommands: [...next].sort() });
-                  }}
-                >
-                  全选当前
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    const visible = new Set(filteredShellCommandOptions.map((command) => command.name));
-                    setSettings({ ...settings, shellAllowCommands: settings.shellAllowCommands.filter((name) => !visible.has(name)) });
-                  }}
-                >
-                  清空当前
-                </Button>
-                <Button variant="outline" size="sm" onClick={() => void scanShellCommands()} disabled={scanning}>
-                  <RefreshCw className={cn('h-4 w-4', scanning && 'animate-spin')} />
-                  {scanning ? '扫描中' : '扫描'}
-                </Button>
-              </div>
-            </div>
-            <Input
-              value={shellCommandQuery}
-              onChange={(event) => setShellCommandQuery(event.target.value)}
-              placeholder={`搜索命令或路径，当前 ${filteredShellCommandOptions.length} / ${shellCommandOptions.length}`}
-            />
-            <OptionList
-              empty={shellCommandQuery.trim() ? '没有匹配的可见指令' : '后端没有下发可见指令候选'}
-              items={filteredShellCommandOptions.map((command) => ({
-                name: command.name,
-                description: command.path ?? '当前 PATH 未找到，保存后也不会被 bwrap 投射',
-              }))}
-              selected={(name) => shellCommandSet.has(name)}
-              renderMeta={(item) => {
-                const command = shellCommandOptions.find((option) => option.name === item.name);
-                return command?.available ? null : <Badge variant="outline">未找到</Badge>;
-              }}
-              onToggle={setShellCommand}
-            />
           </div>
       </div>
     </SettingsPanelShell>

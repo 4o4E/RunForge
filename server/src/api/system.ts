@@ -23,15 +23,12 @@ import {
   saveMcpSettings,
   saveRuntimeCapabilitiesSettings,
   saveToolSettings,
-  shellPathForSettings,
   tenantSettingsTemplateEntries,
 } from '../settings.js';
-import { getMcpSettingsOptions, getToolSettingsOptions, shellCommandOptions } from './settings.js';
+import { getMcpSettingsOptions, getToolSettingsOptions } from './settings.js';
 import { pingLlmProvider, probeLlmProviderModels, testLlmProviderChat } from '../llm/probe.js';
-import { catalogCapability } from '../llm/modelCatalog.js';
 import { probeMcpServer } from '../mcp/client.js';
-import { scanExecutableNames } from '../tools/sandbox.js';
-import type { Datasource, LlmProviderSettings, McpServerProbeResult, ShellCommandScanInput } from '@runforge/contracts';
+import type { Datasource, LlmProviderSettings, McpServerProbeResult } from '@runforge/contracts';
 import type { TenantScope } from '../store/types.js';
 import { newTenantId } from '../id.js';
 import { getSystemResourceTenantId } from '../systemResourceTenant.js';
@@ -387,12 +384,6 @@ systemApi.post('/settings/llm/provider/models', async (req, res) => {
   }
 });
 
-systemApi.post('/settings/llm/model-capability', async (req, res) => {
-  const model = typeof req.body?.model === 'string' ? req.body.model.trim() : '';
-  if (!model) return res.status(400).json({ error: '缺少模型名称' });
-  res.json(catalogCapability(model));
-});
-
 systemApi.post('/settings/llm/provider/ping', async (req, res) => {
   res.json(await pingLlmProvider(llmProviderFromBody(req.body)));
 });
@@ -476,16 +467,6 @@ systemApi.put('/settings/tools', async (req, res) => {
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }
-});
-
-systemApi.post('/settings/tools/shell-commands/scan', async (req, res) => {
-  const current = await getSystemToolSettings();
-  const body = (req.body ?? {}) as Partial<ShellCommandScanInput>;
-  const shellPathMode = body.shellPathMode === 'custom' ? 'custom' : 'system';
-  const shellPath = typeof body.shellPath === 'string' ? body.shellPath : current.shellPath;
-  const include = Array.isArray(body.include) ? body.include.map(String) : current.shellAllowCommands;
-  const envPath = shellPathMode === 'custom' ? shellPath : shellPathForSettings({ ...current, shellPathMode: 'system' });
-  res.json({ path: envPath, shellCommands: shellCommandOptions([...include, ...scanExecutableNames(envPath)], envPath) });
 });
 
 systemApi.get('/datasources', async (_req, res) => {

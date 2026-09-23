@@ -10,9 +10,10 @@ type PromptPlaceholderDefinition = Omit<PromptPlaceholder, 'token' | 'content'>;
 
 const PLACEHOLDER_DEFINITIONS: PromptPlaceholderDefinition[] = [
   { key: 'workspace.root', label: '工作区路径', description: '本次运行分配的持久工作区根目录。', runtime: true },
+  { key: 'user.filesRoot', label: '用户文件目录', description: '当前用户的跨会话文件目录；未授权时为已禁用。', runtime: true },
   { key: 'sandbox.mode', label: '沙箱模式', description: '系统当前配置的工具沙箱模式。', runtime: false },
   { key: 'sandbox.backend', label: '沙箱后端', description: '系统当前配置的 shell 沙箱后端。', runtime: false },
-  { key: 'shell.hostPath', label: '宿主机 PATH', description: 'shell 是否使用宿主机 PATH。', runtime: false },
+  { key: 'shell.hostPath', label: '容器直接执行', description: 'shell 是否绕过 bwrap，直接在 RunForge 容器中执行。', runtime: false },
   { key: 'network.mode', label: '网络模式', description: '工具运行环境是否允许网络访问。', runtime: false },
   { key: 'workflow.catalog', label: 'Workflow 目录', description: 'Workflow 使用规则和运行时可用目录。', runtime: true },
   { key: 'skills.catalog', label: 'Skill 目录', description: 'Skill 使用规则和运行时可用目录。', runtime: true },
@@ -47,10 +48,11 @@ const DATABASE_ACCESS_PROMPT = '- 涉及数据库、数据源、schema、库表�
 const EXTERNAL_MODE_PROMPT = '当前 run 来自 external 空间：不能向 Web 用户提问或进入 waiting_for_user；信息不足时采用合理假设，或在最终结果中明确说明缺失信息。';
 const WORKSPACE_RUNTIME_PROMPT = `运行时文件系统上下文:
 - 持久工作区根目录: {{workspace.root}}
-- 这是当前会话唯一允许写入的工作目录。所有新建、下载、克隆、解压、转换、生成和需要保留的文件，都必须放在这个目录下。
-- 不要把需要保留的文件写到 /home/user、/tmp、应用仓库根目录或 workspace 之外的路径，除非用户明确要求且工具策略允许。
+- 用户跨会话文件目录: {{user.filesRoot}}
+- 临时产物和当前会话文件写入工作区；仅需跨会话保留的个人数据写入已启用的用户文件目录。用户目录为“已禁用”时不得尝试访问。
+- 不要把需要保留的文件写到当前会话工作区和已启用用户目录之外的路径，例如 /home/user、/tmp 或应用仓库根目录，除非用户明确要求且工具策略允许。
 - Python 依赖必须安装在虚拟环境中；优先在工作区创建 .venv 并使用 uv 管理依赖，不要全局安装 pip 包。
-- 工具沙箱: {{sandbox.mode}}；shell 后端: {{sandbox.backend}}；shell 使用宿主机 PATH: {{shell.hostPath}}；网络: {{network.mode}}。
+- 工具沙箱: {{sandbox.mode}}；shell 后端: {{sandbox.backend}}；shell 绕过 bwrap 直接执行: {{shell.hostPath}}；网络: {{network.mode}}。容器 PATH 中已安装的命令默认可用，危险命令规则仅防误操作。
 - shell 是托管资源：优先用 shell_session_reuse/open 获取 session，再用 shell_exec 执行命令；短命令用 wait=foreground，长命令用 wait=background 后用 shell_poll 观察，必要时用 shell_kill 终止。
 - shell session 会长期记住当前目录；需要切换目录时直接执行 cd。`;
 const RUNTIME_RESOURCES_PROMPT = `运行时内部能力:

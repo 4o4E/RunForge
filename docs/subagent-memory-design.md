@@ -41,18 +41,7 @@ skill 决定这类事通常怎么做，runtime profile 决定能用什么资源�
 
 Workflow stage 定义稳定流程中的阶段边界，不承载具体实现经验。
 
-当前实现采用本地文件协议：
-
-```text
-server/src/workflows/builtin/<name>/WORKFLOW.md
-<workspaceRoot>/.agents/workflows/<name>/WORKFLOW.md
-<workspaceRoot>/.workflows/<name>/WORKFLOW.md
-```
-
-- `server/src/workflows/builtin` 是内置 workflow 源文件。
-- 服务运行时会把内置 workflow 物化到 `<workspaceRoot>/.agents/workflows`，该目录只读。
-- 用户 workflow 放在 `<workspaceRoot>/.workflows`，同名时优先于内置 workflow。
-- 未来多用户支持时，只要把 `workspaceRoot` 或用户资源根切到对应用户目录，就能自然读取各自的 `.workflows` 和 `.skills`。
+当前实现采用本地文件协议。`server/src/workflows/builtin` 是内置 Workflow 源文件；服务按内容版本把它们准备到 `/w/<spaceId>/.workflows/builtin`，并在当前会话 `.agents/workflows` 建立只读相对链接。普通用户的会话不能创建或修改 Workflow，也不会扫描会话内的 `.workflows`。管理员在对话中发布 Workflow 的功能需要和业务插件发布权限共同设计，当前尚未提供。
 - LLM 通过 `workflow_list` 查看可用 workflow，通过 `workflow_read` 按需读取正文。
 
 应包含：

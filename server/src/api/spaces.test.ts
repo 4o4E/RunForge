@@ -70,7 +70,7 @@ test('space API: 管理权限、可见名单、execution user 和永久删除语
     );
     assert.equal(ownerPlaceholdersResponse.status, 200);
     const ownerPlaceholders = (await ownerPlaceholdersResponse.json()) as PromptPlaceholdersView;
-    assert.equal(ownerPlaceholders.placeholders.length, 12);
+    assert.equal(ownerPlaceholders.placeholders.length, 13);
     assert.ok(ownerPlaceholders.placeholders.some((item) => (
       item.key === 'skills.catalog'
       && item.token === '{{skills.catalog}}'
@@ -291,7 +291,7 @@ test('system space API: system admin 可管理指定 tenant，但 createdByUserI
       { headers: bearer(token) },
     );
     assert.equal(placeholdersResponse.status, 200);
-    assert.equal(((await placeholdersResponse.json()) as PromptPlaceholdersView).placeholders.length, 12);
+    assert.equal(((await placeholdersResponse.json()) as PromptPlaceholdersView).placeholders.length, 13);
   } finally {
     close();
   }

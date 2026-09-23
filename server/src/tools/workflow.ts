@@ -10,13 +10,13 @@ function requireWorkspaceRoot(ctx?: Parameters<Tool['run']>[1]): string {
 
 export const workflowListTool: Tool = {
   name: 'workflow_list',
-  description: '列出当前 workspace 可用 workflow，包括用户 .workflows 和内置 .agents/workflows。用于选择任务阶段和 subagent 分工。',
+  description: '列出当前空间已启用的只读 Workflow，用于选择任务阶段和 subagent 分工。',
   parameters: {
     type: 'object',
     properties: {},
   },
   async run(_args, ctx) {
-    const workflows = await loadWorkflowIndex(requireWorkspaceRoot(ctx));
+    const workflows = await loadWorkflowIndex(requireWorkspaceRoot(ctx), undefined, ctx?.spaceRoot);
     if (!workflows.length) return '当前 workspace 没有可用 workflow。';
     return workflows
       .map((workflow) => [
@@ -33,7 +33,7 @@ export const workflowListTool: Tool = {
 
 export const workflowReadTool: Tool = {
   name: 'workflow_read',
-  description: '读取 RunForge workspace workflow 的 WORKFLOW.md 正文，只适用于 .workflows 和 .agents/workflows。注意：skill 内部 workflows/*.md 不是 RunForge workflow；先激活对应 skill，再按 skill root 用文件工具读取。',
+  description: '读取当前空间已启用的 Workflow 正文。Skill 内部的 workflows/*.md 是 Skill 文件，需激活 Skill 后读取。',
   parameters: {
     type: 'object',
     properties: {
@@ -47,9 +47,10 @@ export const workflowReadTool: Tool = {
     const workspaceRoot = requireWorkspaceRoot(ctx);
     let loaded;
     try {
-      loaded = await readWorkflow(workspaceRoot, name);
+      loaded = await readWorkflow(workspaceRoot, name, undefined, ctx?.spaceRoot);
     } catch (err) {
-      const skills = await loadSkillIndex(workspaceRoot);
+      if (!(err instanceof Error) || !err.message.startsWith('未找到 workflow:')) throw err;
+      const skills = await loadSkillIndex(workspaceRoot, undefined, ctx?.spaceRoot);
       const skill = selectSkill(skills, name);
       if (skill) {
         return [
@@ -57,7 +58,7 @@ export const workflowReadTool: Tool = {
           `但找到了同名 skill: ${skill.name}`,
           `skill root: ${skill.root}`,
           '',
-          '说明：RunForge workflow 只来自 workspace 的 .workflows 或 .agents/workflows。',
+          '说明：RunForge Workflow 只来自当前空间已启用的托管资源。',
           '说明：skill 内部的 workflows/*.md 属于该 skill 的普通资源，不会被 workflow_read 读取。',
           '下一步：请先使用 skill_activate 激活该 skill，然后用 file_read 或 shell 读取 skill root 下的 SKILL.md、workflows/index.md 或具体 workflows/*.md。',
         ].join('\n');

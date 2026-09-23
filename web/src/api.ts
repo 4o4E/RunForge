@@ -340,8 +340,13 @@ export const updateThread = (id: string, input: ThreadUpdateInput) =>
 
 function fileQuery(path: string, threadId?: string | null): URLSearchParams {
   const params = new URLSearchParams({ path });
-  if (threadId) params.set('threadId', threadId);
+  if (threadId === '@user') params.set('location', 'user');
+  else if (threadId) params.set('threadId', threadId);
   return params;
+}
+
+function fileBodyLocation(threadId?: string | null): { threadId?: string; location?: 'user' } {
+  return threadId === '@user' ? { location: 'user' } : { threadId: threadId ?? undefined };
 }
 
 export const listRemoteFiles = (path = '.', threadId?: string | null) =>
@@ -360,7 +365,8 @@ export const previewRemoteFile = (path: string, startLine = 1, limit = 200, opti
     startLine: String(startLine),
     limit: String(limit),
   });
-  if (options.threadId) params.set('threadId', options.threadId);
+  if (options.threadId === '@user') params.set('location', 'user');
+  else if (options.threadId) params.set('threadId', options.threadId);
   if (options.render) params.set('render', '1');
   if (options.share) {
     params.set('tenant', options.share.tenant);
@@ -379,7 +385,8 @@ export const previewRemoteFileHex = (path: string, offset = 0, limit = 4096, opt
     offset: String(offset),
     limit: String(limit),
   });
-  if (options.threadId) params.set('threadId', options.threadId);
+  if (options.threadId === '@user') params.set('location', 'user');
+  else if (options.threadId) params.set('threadId', options.threadId);
   if (options.share) {
     params.set('tenant', options.share.tenant);
     params.set('user', options.share.user);
@@ -395,7 +402,8 @@ export const remoteFileRawUrl = (path: string, threadId?: string | null) => `/ap
 
 export const remoteFilePdfPreviewUrl = (path: string, share?: FileShareAccess, threadId?: string | null) => {
   const params = new URLSearchParams({ path });
-  if (threadId) params.set('threadId', threadId);
+  if (threadId === '@user') params.set('location', 'user');
+  else if (threadId) params.set('threadId', threadId);
   if (share) {
     params.set('tenant', share.tenant);
     params.set('user', share.user);
@@ -425,7 +433,7 @@ export const createRemoteFileShareLink = (path: string, ttlSeconds: number, thre
   authFetch('/api/files/share-link', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path, ttlSeconds, threadId: threadId ?? undefined }),
+    body: JSON.stringify({ path, ttlSeconds, ...fileBodyLocation(threadId) }),
   }).then(json<FileShareLink>);
 
 export const signedRemoteFileRawUrl = (path: string, ttlSeconds = 24 * 60 * 60, threadId?: string | null) =>
@@ -440,14 +448,14 @@ export const saveRemoteFileContent = (path: string, content: string, baseSha256:
   authFetch('/api/files/content', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path, content, baseSha256, force: options.force === true, threadId: options.threadId ?? undefined }),
+    body: JSON.stringify({ path, content, baseSha256, force: options.force === true, ...fileBodyLocation(options.threadId) }),
   }).then(json<FileTextSaveResponse>);
 
 export const uploadLocalFile = (path: string, contentBase64: string, threadId?: string | null) =>
   authFetch('/api/files/upload', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path, contentBase64, threadId: threadId ?? undefined }),
+    body: JSON.stringify({ path, contentBase64, ...fileBodyLocation(threadId) }),
   }).then(json<{ path: string; size: number }>);
 
 export const getLlmSettingsOptions = () => authFetch('/api/settings/llm/options').then(json<LlmSettingsOptions>);

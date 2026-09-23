@@ -42,7 +42,6 @@ function testToolSettings(overrides: Partial<ToolSettings> = {}): ToolSettings {
     shellUseHostPath: true,
     shellPathMode: 'system',
     shellPath: process.env.PATH ?? '',
-    shellAllowCommands: ['git', 'ls', 'sed', 'python', 'node'],
     network: 'enabled',
     shellDeny: [],
     maxOutput: 40000,
@@ -830,7 +829,8 @@ test('executeRun: injects the current workspace root into the LLM context', asyn
   assert.match(systemText, new RegExp(testWorkspace.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(systemText, /\/home\/user/);
   assert.match(systemText, /\/tmp/);
-  assert.match(systemText, /所有新建、下载、克隆、解压、转换、生成和需要保留的文件，都必须放在这个目录下/);
+  assert.match(systemText, /临时产物和当前会话文件写入工作区/);
+  assert.match(systemText, /用户跨会话文件目录: 已禁用/);
 });
 
 test('executeRun: injects the unified workload token at run startup', async () => {
@@ -899,22 +899,7 @@ test('executeRun: injects the unified workload token at run startup', async () =
 });
 
 test('executeRun: activates a skill while native tools remain loaded', async () => {
-  const skillRoot = join(testWorkspace, '.skills', 'sample-skill');
-  await mkdir(skillRoot, { recursive: true });
-  await writeFile(
-    join(skillRoot, 'SKILL.md'),
-    [
-      '---',
-      'name: sample-skill',
-      'description: Use when a test needs a tiny skill.',
-      '---',
-      '',
-      '# Sample Skill',
-      '',
-      'Read `references/details.md` only when needed.',
-    ].join('\n'),
-    'utf8',
-  );
+  const skillRoot = join(testWorkspace, '.agents', 'skills', 'data-analysis');
 
   const store = new MemoryStore();
   const thread = await store.createThread(scope);
@@ -941,7 +926,7 @@ test('executeRun: activates a skill while native tools remain loaded', async () 
           return {
             content: null,
             toolCalls: [
-              { id: 'skill_1', name: 'skill_activate', arguments: '{"id":"user:sample-skill"}' },
+              { id: 'skill_1', name: 'skill_activate', arguments: '{"id":"builtin:data-analysis"}' },
               { id: 'read_1', name: 'file_read', arguments: JSON.stringify({ path: join(skillRoot, 'SKILL.md') }) },
             ],
           };
@@ -956,11 +941,11 @@ test('executeRun: activates a skill while native tools remain loaded', async () 
     toolSettings: testToolSettings(),
   });
 
-  assert.match(firstSystemText, /user:sample-skill: Use when a test needs a tiny skill/);
+  assert.match(firstSystemText, /builtin:data-analysis:/);
   assert.equal(firstUserText, 'use a skill');
-  assert.match(secondSystemText, /user:sample-skill/);
+  assert.match(secondSystemText, /builtin:data-analysis/);
   assert.match(secondSystemText, /当前 run 的 Skill 激活结果/);
-  assert.match(secondSystemText, /# Sample Skill/);
+  assert.match(secondSystemText, /# Data Analysis/);
   assert.ok(toolNamesByTurn[0].includes('shell'));
   assert.ok(toolNamesByTurn[0].includes('skill_activate'));
   assert.ok(toolNamesByTurn[1].includes('file_read'));
@@ -968,38 +953,20 @@ test('executeRun: activates a skill while native tools remain loaded', async () 
   assert.ok(toolNamesByTurn[1].includes('shell'));
   const activated = published.find((e) => e.type === 'skill_activated');
   assert.equal(activated?.type, 'skill_activated');
-  assert.equal(activated?.type === 'skill_activated' ? activated.name : '', 'sample-skill');
+  assert.equal(activated?.type === 'skill_activated' ? activated.name : '', 'data-analysis');
   const msgs = await store.loadThreadMessages(scope, thread.id);
   assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'tool', 'tool', 'assistant']);
   assert.equal(msgs[0].content, 'use a skill');
   assert.equal(msgs[2].toolCallId, 'skill_1');
   assert.equal(msgs[2].collapsed, 'masked');
-  assert.doesNotMatch(msgs[2].content ?? '', /# Sample Skill/);
+  assert.doesNotMatch(msgs[2].content ?? '', /# Data Analysis/);
   assert.equal(msgs[3].toolCallId, 'read_1');
   assert.equal(msgs.some((m) => m.role === 'system' && (m.content ?? '').includes('已激活 Skill')), false);
   assert.equal(published.some((event) => event.type === 'compaction'), false);
   assert.equal((await store.getRun(scope, run.id))?.status, 'done');
 });
 
-test('executeRun: skill catalog uses folded YAML descriptions in system prompt without changing user input', async () => {
-  const skillRoot = join(testWorkspace, '.skills', 'ppt-master');
-  await mkdir(skillRoot, { recursive: true });
-  await writeFile(
-    join(skillRoot, 'SKILL.md'),
-    [
-      '---',
-      'name: ppt-master',
-      'description: >',
-      '  AI-driven multi-format SVG content generation system.',
-      '  Use when user asks to "create PPT", "make presentation",',
-      '  "生成PPT", "做PPT", or mentions "ppt-master".',
-      '---',
-      '',
-      '# PPT Master Skill',
-    ].join('\n'),
-    'utf8',
-  );
-
+test('executeRun: managed skill catalog does not alter user input', async () => {
   const store = new MemoryStore();
   const thread = await store.createThread(scope);
   const run = await store.createRun(scope, thread.id, '测试：做一个example ppt');
@@ -1021,23 +988,14 @@ test('executeRun: skill catalog uses folded YAML descriptions in system prompt w
     toolSettings: testToolSettings(),
   });
 
-  assert.match(systemText, /user:ppt-master: AI-driven multi-format SVG content generation system\. Use when user asks/);
-  assert.match(systemText, /生成PPT/);
-  assert.doesNotMatch(systemText, /ppt-master: >/);
+  assert.match(systemText, /builtin:data-analysis:/);
+  assert.doesNotMatch(systemText, /user:ppt-master/);
   assert.equal(userText, '测试：做一个example ppt');
   const msgs = await store.loadThreadMessages(scope, thread.id);
   assert.equal(msgs[0].content, '测试：做一个example ppt');
 });
 
 test('executeRun: resumed runs expose the skill catalog in system prompt and preserve persisted user input', async () => {
-  const skillRoot = join(testWorkspace, '.skills', 'resume-skill');
-  await mkdir(skillRoot, { recursive: true });
-  await writeFile(
-    join(skillRoot, 'SKILL.md'),
-    ['---', 'name: resume-skill', 'description: Use when checking resumed prompt context.', '---', '', '# Resume Skill'].join('\n'),
-    'utf8',
-  );
-
   const store = new MemoryStore();
   const thread = await store.createThread(scope);
   const run = await store.createRun(scope, thread.id, 'resume needs skill list');
@@ -1060,21 +1018,13 @@ test('executeRun: resumed runs expose the skill catalog in system prompt and pre
     toolSettings: testToolSettings(),
   });
 
-  assert.match(systemText, /user:resume-skill: Use when checking resumed prompt context/);
+  assert.match(systemText, /builtin:data-analysis:/);
   assert.equal(userText, 'resume needs skill list');
   const msgs = await store.loadThreadMessages(scope, thread.id);
   assert.equal(msgs[0].content, 'resume needs skill list');
 });
 
 test('executeRun: skill activation instructions do not leak into the next run history', async () => {
-  const skillRoot = join(testWorkspace, '.skills', 'leaky-skill');
-  await mkdir(skillRoot, { recursive: true });
-  await writeFile(
-    join(skillRoot, 'SKILL.md'),
-    ['---', 'name: leaky-skill', 'description: Use in leakage tests.', '---', '', '# Leaky Skill'].join('\n'),
-    'utf8',
-  );
-
   const store = new MemoryStore();
   const thread = await store.createThread(scope);
   const run1 = await store.createRun(scope, thread.id, 'activate skill');
@@ -1085,7 +1035,7 @@ test('executeRun: skill activation instructions do not leak into the next run hi
       name: 'activate-then-finish',
       async completeStream() {
         turn += 1;
-        if (turn === 1) return { content: null, toolCalls: [{ id: 'skill_1', name: 'skill_activate', arguments: '{"id":"user:leaky-skill"}' }] };
+        if (turn === 1) return { content: null, toolCalls: [{ id: 'skill_1', name: 'skill_activate', arguments: '{"id":"builtin:data-analysis"}' }] };
         return { content: 'done', toolCalls: [] };
       },
     },
@@ -1112,9 +1062,9 @@ test('executeRun: skill activation instructions do not leak into the next run hi
     toolSettings: testToolSettings(),
   });
 
-  assert.match(secondRunSystemText, /user:leaky-skill: Use in leakage tests/);
-  assert.equal(secondRunSystemText.includes('# Leaky Skill'), false);
-  assert.equal(secondRunContext.includes('# Leaky Skill'), false);
+  assert.match(secondRunSystemText, /builtin:data-analysis:/);
+  assert.equal(secondRunSystemText.includes('# Data Analysis'), false);
+  assert.equal(secondRunContext.includes('# Data Analysis'), false);
 });
 
 test('executeRun: MCP tools load only after current-run activation and unload in the next run', async () => {
@@ -1217,14 +1167,6 @@ test('executeRun: MCP tools load only after current-run activation and unload in
 });
 
 test('executeRun: starts async subagents and allows cross-run polling', async () => {
-  const skillRoot = join(testWorkspace, '.skills', 'review-skill');
-  await mkdir(skillRoot, { recursive: true });
-  await writeFile(
-    join(skillRoot, 'SKILL.md'),
-    ['---', 'name: review-skill', 'description: Review a focused change.', '---', '', '# Review Skill', '', 'Only report concrete risks.'].join('\n'),
-    'utf8',
-  );
-
   const store = new MemoryStore();
   const observations = new MemoryProviderObservationRepository();
   const thread = await store.createThread(scope);
@@ -1256,7 +1198,7 @@ test('executeRun: starts async subagents and allows cross-run polling', async ()
                   stageId: 'review',
                   stageGoal: '确认变更是否有阻塞问题。',
                   runtimeProfileId: 'readonly',
-                  skillNames: ['review-skill'],
+                  skillNames: ['data-analysis'],
                   task: '审查 executor 的 subagent 分支。',
                   expectedOutput: '只输出风险和证据。',
                 }),
@@ -1287,7 +1229,7 @@ test('executeRun: starts async subagents and allows cross-run polling', async ()
   const started = published.find((e) => e.type === 'subagent_started');
   assert.equal(started?.type, 'subagent_started');
   assert.equal(started?.type === 'subagent_started' ? started.stageId : '', 'review');
-  assert.deepEqual(started?.type === 'subagent_started' ? started.skillNames : [], ['review-skill']);
+  assert.deepEqual(started?.type === 'subagent_started' ? started.skillNames : [], ['data-analysis']);
   assert.equal((await store.getRun(scope, run.id))?.status, 'done');
 
   let msgs = await store.loadThreadMessages(scope, thread.id);
@@ -1297,7 +1239,7 @@ test('executeRun: starts async subagents and allows cross-run polling', async ()
   assert.doesNotMatch(subagentStartResult, /没有发现阻塞风险/);
 
   await waitUntil(() => published.filter((e) => e.type === 'subagent_finished').length === 2);
-  assert.match(subagentPrompts.join('\n'), /# Review Skill/);
+  assert.match(subagentPrompts.join('\n'), /# Data Analysis/);
   const rows = await store.listSubagentRunsByThread(scope, thread.id);
   assert.equal(rows.length, 2);
   assert.equal(rows.every((row) => row.status === 'done'), true);

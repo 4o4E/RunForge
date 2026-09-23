@@ -4,7 +4,6 @@ import type {
   DatasourceInput,
   DatasourceTestResult,
   LlmProviderChatTestResult,
-  LlmModelCapabilitySettings,
   LlmProviderPingResult,
   LlmProviderProbeResult,
   LlmProviderSettings,
@@ -17,8 +16,6 @@ import type {
   PermissionProfile,
   PermissionProfileInput,
   RuntimeCapabilitiesSettings,
-  ShellCommandScanInput,
-  ShellCommandScanResult,
   ToolSettings,
   ToolSettingsOptions,
 } from './api';
@@ -27,7 +24,6 @@ import { sysAdminAuthFetch } from './sysAdminApi';
 export interface SettingsControlApi {
   getToolSettings(): Promise<ToolSettings>;
   getToolSettingsOptions(): Promise<ToolSettingsOptions>;
-  scanShellCommandOptions(input: ShellCommandScanInput): Promise<ShellCommandScanResult>;
   updateToolSettings(settings: ToolSettings): Promise<ToolSettings>;
   getMcpSettings(): Promise<McpSettings>;
   getMcpSettingsOptions(): Promise<McpSettingsOptions>;
@@ -37,7 +33,6 @@ export interface SettingsControlApi {
   getLlmSettingsOptions(): Promise<LlmSettingsOptions>;
   updateLlmSettings(settings: LlmSettings): Promise<LlmSettings>;
   probeLlmProviderModels(provider: LlmProviderSettings): Promise<LlmProviderProbeResult>;
-  resolveLlmModelCapability(model: string): Promise<LlmModelCapabilitySettings>;
   pingLlmProvider(provider: LlmProviderSettings): Promise<LlmProviderPingResult>;
   testLlmProviderChat(provider: LlmProviderSettings, model: string, input: string): Promise<LlmProviderChatTestResult>;
   getRuntimeCapabilitiesSettings(): Promise<RuntimeCapabilitiesSettings>;
@@ -82,7 +77,6 @@ export function createSystemSettingsControlApi(): SettingsControlApi {
   return {
     getToolSettings: () => systemJson(`${base}/tools`),
     getToolSettingsOptions: () => systemJson(`${base}/tools/options`),
-    scanShellCommandOptions: (input) => systemJson(`${base}/tools/shell-commands/scan`, jsonBody('POST', input)),
     updateToolSettings: (settings) => systemJson(`${base}/tools`, jsonBody('PUT', settings)),
     getMcpSettings: () => systemJson(`${base}/mcp`),
     getMcpSettingsOptions: () => systemJson(`${base}/mcp/options`),
@@ -92,7 +86,6 @@ export function createSystemSettingsControlApi(): SettingsControlApi {
     getLlmSettingsOptions: () => systemJson(`${base}/llm/options`),
     updateLlmSettings: (settings) => systemJson(`${base}/llm`, jsonBody('PUT', settings)),
     probeLlmProviderModels: (provider) => systemJson(`${base}/llm/provider/models`, jsonBody('POST', { provider })),
-    resolveLlmModelCapability: (model) => systemJson(`${base}/llm/model-capability`, jsonBody('POST', { model })),
     pingLlmProvider: (provider) => systemJson(`${base}/llm/provider/ping`, jsonBody('POST', { provider })),
     testLlmProviderChat: (provider, model, input) => systemJson(`${base}/llm/provider/chat-test`, jsonBody('POST', { provider, model, input })),
     getRuntimeCapabilitiesSettings: () => systemJson(`${base}/runtime-capabilities`),

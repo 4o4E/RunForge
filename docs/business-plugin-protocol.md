@@ -145,6 +145,19 @@ HTTP/HTTPS，并且 `url` 与 `urlConfigKey` 必须二选一。
 - run 完成、失败、取消或进入等待时主动撤销 token 并释放数据库租约；后台 reconciler
   只处理异常退出等兜底场景。
 
+## 历史 thread 插件副本迁移
+
+新 run 会自动使用上述相对符号链接；旧 thread 中尚未重新运行的实体插件副本可由维护脚本一次性转换。脚本只枚举数据库登记的 thread，在同租户的 `runs.plugin_lock` 中查找该插件最近使用的内容 hash，要求正式快照存在且插件声明文件一致；没有锁定记录或快照的目录保留原样。内置 `.agents/skills`、`.agents/workflows` 和 `.agents/runforge-workload-sdk` 仍由运行时复制，不属于此脚本范围。
+
+脚本默认只预览。先预览迁移范围，再按运行环境的部署命令停止 RunForge；保持数据库可访问，执行迁移后再启动服务：
+
+```bash
+pnpm migrate:legacy-plugin-links
+pnpm migrate:legacy-plugin-links --apply
+```
+
+生产镜像内同一脚本位于 `/app/server/dist/maintenance/migrateLegacyPluginLinks.js`，可在停止服务容器后，以挂载相同工作区和业务插件卷、连接相同数据库的一次性容器运行。使用 `--apply` 才会写入。脚本用 `du` 分别统计工作区和业务插件库的迁移前后占用，并报告总减少量；符号链接不跟随目标重复计算。转换时先把旧目录暂移到同级临时路径，验证相对链接能解析到共享快照后再清理旧目录；中途失败会恢复尚未完成的目标，已经完成的目标可重复运行脚本安全跳过。
+
 ## 当前未完成
 
 - 首版 SDK 提供 ESM/Node 客户端和稳定 HTTP 协议；其他语言客户端按真实业务插件需要再补，

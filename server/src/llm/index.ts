@@ -3,7 +3,6 @@ import { createAiSdkProvider } from './providers/aiSdk.js';
 import { getLlmSettings, getSystemLlmSettings, type LlmProviderSettings, type LlmSettings } from '../settings.js';
 import type { TenantScope } from '../store/types.js';
 import type { ProviderDescriptor } from './providerRunner.js';
-import { catalogMaxOutputTokens } from './modelCatalog.js';
 
 function parseModelRef(ref: string): { providerId: string; model: string } | null {
   const idx = ref.indexOf(':');
@@ -12,11 +11,12 @@ function parseModelRef(ref: string): { providerId: string; model: string } | nul
 }
 
 function configFromProvider(provider: LlmProviderSettings, model: string): LlmConfig {
+  const capability = provider.modelCapabilities.find((item) => item.model === model);
   return {
     baseUrl: provider.baseUrl,
     apiKey: provider.apiKey,
     model,
-    maxOutputTokens: catalogMaxOutputTokens(model),
+    maxOutputTokens: capability?.maxOutputTokens ?? null,
     timeoutMs: provider.timeoutMs,
     retries: provider.retries,
   };

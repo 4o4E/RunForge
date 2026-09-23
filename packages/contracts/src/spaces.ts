@@ -40,7 +40,8 @@ export const spaceConfigSchema = z.object({
   external: z.object({
     allowTrustedPrompt: z.boolean().default(false),
     allowNextStep: z.boolean().default(false),
-  }).strict().default({ allowTrustedPrompt: false, allowNextStep: false }),
+    allowUserFiles: z.boolean().default(false),
+  }).strict().default({ allowTrustedPrompt: false, allowNextStep: false, allowUserFiles: false }),
 }).strict();
 
 export type SpaceConfig = z.output<typeof spaceConfigSchema>;

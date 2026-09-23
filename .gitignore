@@ -4,6 +4,7 @@ build/
 __pycache__/
 *.pyc
 .run/
+/ref/
 .workspace/
 logs/
 .env

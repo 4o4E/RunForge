@@ -1,4 +1,6 @@
 import { agentContextSettings, config, type AgentContextSettings } from '../config.js';
+import { resolve } from 'node:path';
+import { mkdir } from 'node:fs/promises';
 import { getConfiguredProvider, getConfiguredSystemTitleProvider } from '../llm/index.js';
 import type { LlmDelta, LlmMessage, LlmUsage, Provider } from '../llm/types.js';
 import { parseToolArguments } from '../llm/toolArgs.js';
@@ -56,7 +58,7 @@ import {
   runtimeCapabilityPromptValues,
   validatePromptTemplate,
 } from '../spaces/prompt.js';
-import { ensureThreadWorkspaceRoot, resolveWorkspaceRootForThread } from '../files/workspaceRoot.js';
+import { ensureThreadWorkspaceRoot, resolveSpaceWorkspaceRoot, resolveUserFilesRoot, resolveWorkspaceRootForThread } from '../files/workspaceRoot.js';
 import { externalArtifactMaterializer } from '../external/artifactMaterializer.js';
 import { attachExternalArtifactTokens, type ExternalArtifactTokenSource } from '../external/artifactProtocol.js';
 import {
@@ -474,6 +476,7 @@ function runSpaceConfigSnapshot(value: unknown): RunSpaceConfigSnapshot | null {
       // 兼容业务插件协议接入前已经接纳、但尚未执行完的 run。
       businessPlugins: raw.capabilities.businessPlugins ?? [],
     },
+    external: { ...raw.external, allowUserFiles: raw.external.allowUserFiles === true },
   } as RunSpaceConfigSnapshot;
 }
 
@@ -866,11 +869,29 @@ async function executeRunControlled(
     let goal = initialRun.goal_state ?? initGoal(userInput);
     if (!initialRun.goal_state) await store.setGoalState(scope, runId, goal);
     let toolSettings = deps.toolSettings ?? (await getSystemToolSettings());
+    let userFiles: { source: string; mountPath: string } | undefined;
+    // 显式注入的工具工作目录用于测试和验证，托管资源放在其独立子目录；正式运行按 space ID 派生。
+    let spaceRoot = resolve(toolSettings.workspaceRoot, '.runforge-managed-space');
     if (!deps.toolSettings) {
       const workspaceBase = toolSettings.workspaceRoot;
       const workspace = resolveWorkspaceRootForThread(initialThread, workspaceBase);
+      spaceRoot = resolveSpaceWorkspaceRoot(initialThread.space_id, workspaceBase);
       await ensureThreadWorkspaceRoot(initialThread.space_id, initialThread.id, workspaceBase);
       toolSettings = { ...toolSettings, workspaceRoot: workspace.root };
+      const allowedBySpace = spaceConfig?.mode === 'web'
+        || (!spaceConfig && initialThread.source_type === 'web')
+        || (spaceConfig?.mode === 'external' && spaceConfig.external.allowUserFiles === true);
+      const hasBwrapMapping = toolSettings.sandbox === 'enforce'
+        && toolSettings.sandboxBackend === 'bwrap'
+        && !toolSettings.shellUseHostPath;
+      const selectedExecutionUser = spaceConfig?.mode === 'external'
+        ? spaceConfig.external.userFilesUserId === scope.userId
+        : initialThread.source_type === 'web';
+      if (allowedBySpace && hasBwrapMapping && selectedExecutionUser) {
+        const source = resolveUserFilesRoot(scope.userId);
+        await mkdir(source, { recursive: true });
+        userFiles = { source, mountPath: source };
+      }
     }
     const materializeRunArtifacts = deps.materializeRunArtifacts
       ?? (store === defaultStore
@@ -899,6 +920,7 @@ async function executeRunControlled(
       runtimeResources.businessPluginHandle = await deps.businessPluginRuntime.startRun({
         runId,
         workspaceRoot: toolSettings.workspaceRoot,
+        spaceRoot,
         definitions,
         lock: pluginLock,
         tenantConfig: businessPluginConfigFromLock(pluginLock),
@@ -938,7 +960,7 @@ async function executeRunControlled(
       : null;
     const capabilitySnapshot = await loadRuntimeCapabilitiesSnapshot(store, scope, runId);
     const toolEnv: Record<string, string> = {};
-    toolEnv.RUNFORGE_WORKLOAD_SDK = await materializeWorkloadSdk(toolSettings.workspaceRoot);
+    toolEnv.RUNFORGE_WORKLOAD_SDK = await materializeWorkloadSdk(toolSettings.workspaceRoot, spaceRoot);
     const workloadRuntimeEnvProvider = deps.workloadRuntimeEnv ?? (deps.store === defaultStore ? createDefaultWorkloadRuntimeEnv : null);
     let workloadRuntimeSummary = '';
     if (workloadRuntimeEnvProvider) {
@@ -949,7 +971,7 @@ async function executeRunControlled(
       workloadRuntimeSummary = runtime.summary;
     }
     const skillIndex = [
-      ...await loadSkillIndex(toolSettings.workspaceRoot),
+      ...await loadSkillIndex(toolSettings.workspaceRoot, undefined, spaceRoot),
       ...(runtimeResources.businessPluginHandle?.skills ?? []),
     ].sort((a, b) => a.name.localeCompare(b.name) || a.source.localeCompare(b.source));
     const activateIndexedSkill = async (nameOrId: string): Promise<SkillActivation> => {
@@ -957,7 +979,12 @@ async function executeRunControlled(
       if (!skill) throw new Error(`未找到 skill: ${nameOrId}`);
       return activateSkillItem(skill, toolSettings.workspaceRoot);
     };
-    const workflowIndex = await loadWorkflowIndex(toolSettings.workspaceRoot);
+    const workflowIndex = await loadWorkflowIndex(toolSettings.workspaceRoot, undefined, spaceRoot);
+    const managedReadRoots = [
+      ...skillIndex.filter((skill) => skill.source === 'builtin').map((skill) => skill.root),
+      ...workflowIndex.map((workflow) => workflow.root),
+      resolve(toolSettings.workspaceRoot, '.agents/runforge-workload-sdk'),
+    ];
     const mcpToolLoader = async (settings: McpSettings, serverId: string, stepId?: string | null): Promise<McpActivation> => {
       if (runtimeResources.businessPluginHandle?.mcpServers.some((server) => server.id === serverId)) {
         await refreshBusinessMcpServers(stepId);
@@ -992,6 +1019,7 @@ async function executeRunControlled(
     const runtimeCapabilityValues = runtimeCapabilityPromptValues(capabilitySnapshot);
     const prompt = renderPromptTemplate(spaceConfig?.promptTemplate ?? defaultPromptTemplate(spaceConfig?.mode ?? 'web'), {
       'workspace.root': toolSettings.workspaceRoot,
+      'user.filesRoot': userFiles?.mountPath ?? '已禁用',
       'sandbox.mode': toolSettings.sandbox,
       'sandbox.backend': toolSettings.sandboxBackend,
       'shell.hostPath': toolSettings.shellUseHostPath ? '是' : '否',
@@ -1169,6 +1197,7 @@ async function executeRunControlled(
                 ? 'You may use the provided tools to read/write workspace files and run shell commands; only claim actions actually performed.'
                 : 'Use only the provided read-only tools for evidence; do not modify files or claim that you created files.',
               '不要调用 subagent_*、ask_user、update_plan 或 skill_activate；需要额外 skill 时由主 agent 调度。',
+              `用户跨会话文件目录：${userFiles?.mountPath ?? '已禁用'}。仅在任务需要持久保存个人数据时使用。`,
               'Do not call subagent_*, ask_user, update_plan, or skill_activate; the main agent schedules extra skills.',
             ].join('\n'),
           },
@@ -1242,6 +1271,9 @@ async function executeRunControlled(
                   env: envForStep(stepId),
                   pluginExecutables: runtimeResources.businessPluginHandle?.executables,
                   pluginRoots: runtimeResources.businessPluginHandle?.pluginRoots,
+                  managedReadRoots,
+                  spaceRoot,
+                  userFiles,
                   threadId,
                   runId,
                   stepId,
@@ -1451,7 +1483,7 @@ async function executeRunControlled(
           : undefined;
         const tools = await toolSchemas(selectedToolNames, activeMcpTools, !spaceConfig);
         requestAllowedToolNames = new Set(tools.map((tool) => tool.name));
-        const modelMessages = await hydrateImageAttachments(ctx.all(), toolSettings.workspaceRoot);
+        const modelMessages = await hydrateImageAttachments(ctx.all(), toolSettings.workspaceRoot, userFiles?.source);
         await store.saveStepContext(scope, step.id, {
           messages: modelMessages,
           tools,
@@ -1844,6 +1876,9 @@ async function executeRunControlled(
                 env: envForStep(step.id),
                 pluginExecutables: runtimeResources.businessPluginHandle?.executables,
                 pluginRoots: runtimeResources.businessPluginHandle?.pluginRoots,
+                managedReadRoots,
+                spaceRoot,
+                userFiles,
                 threadId,
                 runId,
                 stepId: step.id,

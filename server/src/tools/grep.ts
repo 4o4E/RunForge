@@ -3,6 +3,7 @@ import type { Dirent } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import type { Tool } from './types.js';
 import { resolveToolRoot } from './path.js';
+import { isWithin } from './policy.js';
 
 const IGNORE = new Set(['node_modules', '.git', 'dist', '.cache', '.agents', '.skills', '.venv', '.npm', '.rustup']);
 
@@ -22,6 +23,7 @@ async function* walkFiles(dir: string): AsyncGenerator<string> {
     return;
   }
   for (const e of sortEntries(entries)) {
+    if (e.isSymbolicLink()) continue;
     if (IGNORE.has(e.name)) continue;
     const full = join(dir, e.name);
     if (e.isDirectory()) yield* walkFiles(full);
@@ -42,7 +44,8 @@ export const grepTool: Tool = {
     required: ['pattern'],
   },
   async run(args, ctx) {
-    const root = resolveToolRoot(args.path, ctx);
+    const root = await resolveToolRoot(args.path, ctx);
+    const userDirectory = ctx?.userFiles && isWithin(ctx.userFiles.source, root);
     let re: RegExp;
     try {
       re = new RegExp(String(args.pattern ?? ''), args.ignore_case ? 'i' : undefined);
@@ -62,7 +65,7 @@ export const grepTool: Tool = {
       const lines = content.split('\n');
       for (let i = 0; i < lines.length; i++) {
         if (re.test(lines[i])) {
-          results.push(`${rel}:${i + 1}: ${lines[i].trim().slice(0, 200)}`);
+          results.push(`${userDirectory ? file.split(sep).join('/') : rel}:${i + 1}: ${lines[i].trim().slice(0, 200)}`);
           if (results.length >= 200) break;
         }
       }

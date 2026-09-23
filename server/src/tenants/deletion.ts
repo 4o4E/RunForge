@@ -2,6 +2,7 @@ import { businessPluginRegistry } from '../businessPlugins/registry.js';
 import {
   removeSpaceWorkspace,
   removeTenantWorkspace,
+  removeUserFiles,
 } from '../files/workspaceRoot.js';
 import { store } from '../store/index.js';
 import { DeleteConflictError } from '../store/types.js';
@@ -32,6 +33,7 @@ export async function deleteTenant(tenantId: string): Promise<void> {
       tenantId,
       async () => {
         const spaces = await store.listSpaces(tenantId);
+        const users = await store.listUsersByTenant(tenantId);
         const threads = await store.listThreadsForDeletion(tenantId);
         deletion.addThreads(threads.map((thread) => thread.id));
         await deletion.waitForOperations();
@@ -40,6 +42,7 @@ export async function deleteTenant(tenantId: string): Promise<void> {
         if (!deleted) throw new TenantDeletionError(404, 'TENANT_NOT_FOUND', '租户不存在');
         await Promise.all([
           removeTenantWorkspace(tenantId),
+          ...users.map((user) => removeUserFiles(user.id)),
           ...spaces.map((space) => removeSpaceWorkspace(space.id)),
         ]);
         return deleted;

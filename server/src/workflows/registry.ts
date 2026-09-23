@@ -2,8 +2,9 @@ import { cp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
+import { ensureManagedDirectory, ensureManagedLink } from '../files/managedResources.js';
 
-export type WorkflowSource = 'builtin' | 'user';
+export type WorkflowSource = 'builtin';
 
 export interface WorkflowIndexItem {
   id: string;
@@ -60,7 +61,7 @@ async function hashDir(root: string): Promise<string> {
         await walk(path);
       } else if (entry.isFile()) {
         const rel = path.slice(root.length + 1);
-        parts.push(`${rel}\0${await readFile(path, 'utf8').catch(() => '')}`);
+        parts.push(`${rel}\0${createHash('sha256').update(await readFile(path)).digest('hex')}`);
       }
     }
   }
@@ -116,20 +117,31 @@ async function listWorkflowDirs(root: string): Promise<string[]> {
   return dirs.sort();
 }
 
-export async function loadWorkflowIndex(workspaceRoot: string, builtinSourceRoot = BUILTIN_SOURCE_ROOT): Promise<WorkflowIndexItem[]> {
-  const materializedBuiltinRoot = resolve(workspaceRoot, '.agents/workflows');
-  await mkdir(materializedBuiltinRoot, { recursive: true });
+export async function loadWorkflowIndex(
+  workspaceRoot: string,
+  builtinSourceRoot = BUILTIN_SOURCE_ROOT,
+  spaceRoot = workspaceRoot,
+): Promise<WorkflowIndexItem[]> {
+  const linkedBuiltinRoot = resolve(workspaceRoot, '.agents/workflows');
+  const materializedBuiltinRoot = resolve(spaceRoot, '.workflows/builtin');
+  await mkdir(linkedBuiltinRoot, { recursive: true });
 
   const builtinItems: WorkflowIndexItem[] = [];
+  const linkedNames = new Set<string>();
   for (const sourceDir of await listWorkflowDirs(builtinSourceRoot)) {
-    const targetDir = join(materializedBuiltinRoot, basename(sourceDir));
-    await sanitizeWorkflowDir(sourceDir, targetDir);
-    builtinItems.push(await readWorkflowIndexItem(targetDir, 'builtin', true));
+    const name = basename(sourceDir);
+    linkedNames.add(name);
+    const version = (await hashDir(sourceDir)).slice('sha256:'.length);
+    const targetDir = join(materializedBuiltinRoot, name, version);
+    await ensureManagedDirectory(targetDir, (staging) => sanitizeWorkflowDir(sourceDir, staging));
+    const linkedDir = join(linkedBuiltinRoot, name);
+    await ensureManagedLink(targetDir, linkedDir);
+    builtinItems.push(await readWorkflowIndexItem(linkedDir, 'builtin', true));
   }
-
-  const userRoot = resolve(workspaceRoot, '.workflows');
-  const userItems = await Promise.all((await listWorkflowDirs(userRoot)).map((dir) => readWorkflowIndexItem(dir, 'user', false)));
-  return [...userItems, ...builtinItems].sort((a, b) => a.name.localeCompare(b.name) || a.source.localeCompare(b.source));
+  for (const entry of await readdir(linkedBuiltinRoot, { withFileTypes: true })) {
+    if (!linkedNames.has(entry.name)) await rm(join(linkedBuiltinRoot, entry.name), { recursive: true, force: true });
+  }
+  return builtinItems.sort((a, b) => a.name.localeCompare(b.name) || a.source.localeCompare(b.source));
 }
 
 /** 管理页预览只读取内置目录，不物化文件，也不创建 workspace。 */
@@ -145,11 +157,16 @@ export function selectWorkflow(workflows: WorkflowIndexItem[], nameOrId: string)
   const exactId = workflows.find((workflow) => workflow.id === wanted);
   if (exactId) return exactId;
   const matches = workflows.filter((workflow) => workflow.name === wanted);
-  return matches.find((workflow) => workflow.source === 'user') ?? matches[0];
+  return matches[0];
 }
 
-export async function readWorkflow(workspaceRoot: string, nameOrId: string, builtinSourceRoot = BUILTIN_SOURCE_ROOT): Promise<WorkflowReadResult> {
-  const workflows = await loadWorkflowIndex(workspaceRoot, builtinSourceRoot);
+export async function readWorkflow(
+  workspaceRoot: string,
+  nameOrId: string,
+  builtinSourceRoot = BUILTIN_SOURCE_ROOT,
+  spaceRoot = workspaceRoot,
+): Promise<WorkflowReadResult> {
+  const workflows = await loadWorkflowIndex(workspaceRoot, builtinSourceRoot, spaceRoot);
   const workflow = selectWorkflow(workflows, nameOrId);
   if (!workflow) throw new Error(`未找到 workflow: ${nameOrId}`);
   const workflowPath = join(workflow.root, 'WORKFLOW.md');
@@ -171,8 +188,6 @@ export function renderWorkflowSystemRules(): string {
 - The initial workflow list is for routing and stage selection; call workflow_read for details.
 - Workflow 是阶段协议，说明阶段目标、输入输出、gate、默认 skill 和 subagent 分工。
 - A workflow is a stage protocol: stage goals, inputs, outputs, gates, default skills, and subagent delegation.
-- 用户 workflow 放在 workspace 的 .workflows/<name>/WORKFLOW.md；内置 workflow 会物化到 .agents/workflows。
-- User workflows live under .workflows/<name>/WORKFLOW.md; built-in workflows are materialized under .agents/workflows.
-- 不要修改 .agents/workflows；如果用户要求新增或调整 workflow，写入 .workflows。
-- Do not modify .agents/workflows; create or edit .workflows when the user asks for workflow changes.`;
+- Workflow 由管理员发布；当前会话只能读取已启用的 Workflow，不能创建或修改。
+- Workflows are published by administrators; this thread can only read enabled workflows.`;
 }

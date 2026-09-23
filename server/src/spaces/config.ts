@@ -98,6 +98,8 @@ export interface RunSpaceConfigSnapshot {
   external: {
     allowTrustedPrompt: boolean;
     allowNextStep: boolean;
+    allowUserFiles?: boolean;
+    userFilesUserId?: string | null;
     trustedPrompt?: string;
   };
 }
@@ -445,6 +447,7 @@ export class SpaceConfigService {
     tenantId: string,
     mode: SpaceMode,
     value: unknown,
+    userId?: string | null,
   ): Promise<PromptPlaceholdersView> {
     const config = normalizeSpaceConfig(value, mode);
     const [catalog, toolSettings, workflows, builtinSkills] = await Promise.all([
@@ -513,10 +516,16 @@ export class SpaceConfigService {
     const capabilitySnapshot = runtimeSnapshot(catalog, selectedRuntimeCapabilities);
     const runtimeValues = runtimeCapabilityPromptValues(capabilitySnapshot);
     const allowedCapabilities = capabilitySnapshot.allowedCapabilities.join(', ') || '无';
+    const userFilesMapped = toolSettings.sandbox === 'enforce'
+      && toolSettings.sandboxBackend === 'bwrap'
+      && !toolSettings.shellUseHostPath;
 
     return {
       placeholders: buildPromptPlaceholders({
         'workspace.root': '[运行时分配的持久工作区路径]',
+        'user.filesRoot': (mode === 'web' || config.external.allowUserFiles) && userFilesMapped
+          ? (userId ? `/u/${userId}` : '/u/<运行时用户ID>')
+          : '已禁用',
         'sandbox.mode': toolSettings.sandbox,
         'sandbox.backend': toolSettings.sandboxBackend,
         'shell.hostPath': toolSettings.shellUseHostPath ? '是' : '否',
@@ -685,6 +694,10 @@ export class SpaceConfigService {
       snapshot: {
         ...resolved,
         spaceId: space.id,
+        external: {
+          ...resolved.external,
+          userFilesUserId: space.mode === 'external' ? space.execution_user_id : null,
+        },
       },
       runtimeCapabilitiesSnapshot: runtimeSnapshot(catalog, resolved.capabilities.runtime),
       pluginLock,

@@ -24,6 +24,9 @@ export interface ShellToolContext {
   step?: number;
   pluginExecutables?: Array<{ name: string; path: string }>;
   pluginRoots?: string[];
+  managedReadRoots?: string[];
+  spaceRoot?: string;
+  userFiles?: { source: string; mountPath: string };
 }
 
 interface ActiveCommand {
@@ -141,7 +144,6 @@ function settingsSnapshot(settings: ToolSettings): Record<string, unknown> {
     shellUseHostPath: settings.shellUseHostPath,
     shellPathMode: settings.shellPathMode,
     shellPath: settings.shellPath,
-    shellAllowCommands: settings.shellAllowCommands,
     network: settings.network,
   };
 }
@@ -159,7 +161,6 @@ function restoredSettings(session: ShellSessionRow, current: ToolSettings): Tool
     shellUseHostPath: typeof snap.shellUseHostPath === 'boolean' ? snap.shellUseHostPath : current.shellUseHostPath,
     shellPathMode: snap.shellPathMode === 'system' || snap.shellPathMode === 'custom' ? snap.shellPathMode : current.shellPathMode,
     shellPath: typeof snap.shellPath === 'string' ? snap.shellPath : current.shellPath,
-    shellAllowCommands: Array.isArray(snap.shellAllowCommands) ? snap.shellAllowCommands.map(String) : current.shellAllowCommands,
     network: snap.network === 'enabled' || snap.network === 'disabled' ? snap.network : current.network,
   };
 }
@@ -264,6 +265,7 @@ export class ShellManager {
     env?: Record<string, string>;
     pluginExecutables?: Array<{ name: string; path: string }>;
     pluginRoots?: string[];
+    managedReadRoots?: string[];
   }): Promise<{ command: ShellCommandRow; timedOutWaiting: boolean; tail: string }> {
     const admission = deletionGate.enter({ tenantId: input.scope.tenantId, threadId: input.context.threadId });
     let command!: ShellCommandRow;
@@ -316,6 +318,7 @@ export class ShellManager {
         env: input.env,
         pluginExecutables: input.pluginExecutables,
         pluginRoots: input.pluginRoots,
+        managedReadRoots: input.managedReadRoots,
         context: input.context,
       });
     } finally {
@@ -423,19 +426,22 @@ export class ShellManager {
     env?: Record<string, string>;
     pluginExecutables?: Array<{ name: string; path: string }>;
     pluginRoots?: string[];
+    managedReadRoots?: string[];
     context: ShellToolContext;
   }): Promise<ActiveCommand> {
     const shellCfg = {
       policyMode: input.settings.sandbox,
       backend: input.settings.sandboxBackend,
       workspaceRoot: input.session.workspace_root,
-      allowCommands: input.settings.shellAllowCommands,
       useHostPath: input.settings.shellUseHostPath,
       envPath: shellPathForSettings(input.settings),
       shareNet: input.settings.network === 'enabled',
       env: input.env,
       pluginExecutables: input.pluginExecutables,
       pluginRoots: input.pluginRoots,
+      managedReadRoots: input.managedReadRoots,
+      spaceRoot: input.context.spaceRoot,
+      userFiles: input.context.userFiles,
     };
     const spec = buildShellSpawnSpec(input.commandText, shellCfg);
     await store.updateShellCommand(input.scope, input.command.id, { status: 'running' });

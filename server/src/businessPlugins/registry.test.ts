@@ -475,9 +475,11 @@ test('业务插件运行时：materialize 多文件 Skill，并通过 tenant res
   assert.equal(handle.skills[0]?.root, join(workspaceRoot, 'plugins', 'crm', 'skills', 'customer-query'));
   assert.equal(existsSync(join(handle.skills[0]!.root, 'references', 'schema.md')), true);
   const workspacePluginRoot = join(workspaceRoot, 'plugins', 'crm');
+  const spacePluginRoot = join(workspaceRoot, '.plugins', 'crm', definition.contentHash);
   const snapshotRoot = join(sourceRoot, '.runforge-snapshots', 'crm', definition.contentHash, 'plugin');
   assert.equal((await lstat(workspacePluginRoot)).isSymbolicLink(), true);
-  assert.equal(resolve(dirname(workspacePluginRoot), await readlink(workspacePluginRoot)), snapshotRoot);
+  assert.equal(resolve(dirname(workspacePluginRoot), await readlink(workspacePluginRoot)), spacePluginRoot);
+  assert.equal(resolve(dirname(spacePluginRoot), await readlink(spacePluginRoot)), snapshotRoot);
   assert.equal(await realpath(workspacePluginRoot), await realpath(snapshotRoot));
   assert.equal(await readFile(join(handle.skills[0]!.root, 'references', 'schema.md'), 'utf8'), '# Customer schema');
   assert.equal(handle.mcpServers[0]?.bearerToken, '');

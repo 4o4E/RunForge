@@ -38,7 +38,7 @@ import { SpaceConfigError } from '../spaces/config.js';
 import { runAdmission } from '../spaces/runAdmission.js';
 import { externalApi } from './external.js';
 import { threadWorkspaceAccess, ThreadWorkspaceAccessError } from '../files/threadWorkspace.js';
-import { removeThreadWorkspace } from '../files/workspaceRoot.js';
+import { removeThreadWorkspace, resolveUserFilesRoot } from '../files/workspaceRoot.js';
 import { threadReadAccess, ThreadReadAccessError } from '../threads/readAccess.js';
 import { deletionGate } from '../deletion/gate.js';
 import { stopThreadsForDeletion } from '../deletion/runtime.js';
@@ -784,6 +784,13 @@ async function webShellSessionSettings(
   return settings;
 }
 
+async function webUserFiles(identity: Extract<IdentityContext, { scope: 'tenant' }>, settings: ToolSettings) {
+  if (settings.sandbox !== 'enforce' || settings.sandboxBackend !== 'bwrap' || settings.shellUseHostPath) return undefined;
+  const root = resolveUserFilesRoot(identity.userId);
+  await mkdir(root, { recursive: true });
+  return { source: root, mountPath: root };
+}
+
 api.get('/shell-sessions', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
@@ -899,7 +906,7 @@ api.post('/shell-sessions/:id/commands', async (req, res) => {
     sessionId: session.id,
     command,
     settings,
-    context: { threadId: session.thread_id },
+    context: { threadId: session.thread_id, userFiles: await webUserFiles(identity, settings) },
     waitMode: req.body?.wait === 'foreground' ? 'foreground' : 'background',
     waitTimeoutMs: Number(req.body?.timeout_ms ?? 1000),
     softTimeoutMs: typeof req.body?.soft_timeout_ms === 'number' ? req.body.soft_timeout_ms : null,

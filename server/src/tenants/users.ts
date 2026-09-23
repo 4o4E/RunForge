@@ -1,6 +1,6 @@
 import type { CreateUserInput, TenantUserRole, UpdateUserInput } from '@runforge/contracts';
 import { hashPassword } from '../auth/passwords.js';
-import { removeUserWorkspace } from '../files/workspaceRoot.js';
+import { removeUserFiles, removeUserWorkspace } from '../files/workspaceRoot.js';
 import { store } from '../store/index.js';
 import { DeleteConflictError, type UserRow } from '../store/types.js';
 
@@ -134,4 +134,5 @@ export async function deleteTenantUser(
     throw error;
   }
   await removeUserWorkspace(tenantId, userId);
+  await removeUserFiles(userId);
 }

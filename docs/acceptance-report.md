@@ -60,7 +60,7 @@
 
 ### Skill、Workflow 与 Subagent
 
-- 支持 skill 文件协议：内置 skill 从 `server/src/skills/builtin` 物化到 `.agents/skills`，用户 skill 从 `.skills` 读取。
+- 支持 Skill 文件协议：内置 Skill 按内容版本准备在空间 `.skills` 中，会话通过 `.agents/skills` 的只读相对链接访问；普通会话不读取自建 Skill。
 - 初始上下文只注入 Skill `id` 和描述；需要正文时通过 `skill_activate(id)` 按需加载，并记录 `skill_activated` 事件。
 - Skill 入口通过工具结果进入上下文，下一次 LLM 请求完整消费后立即折叠；run 内保留短锚点，同一 run 恢复可从事件重建，新 run 自动取消激活。
 - 初始上下文只注入 MCP Server `id` 和描述；通过 `mcp_activate(id)` 后才加载该 Server 的全部工具 schema，且只在当前 run 生效。

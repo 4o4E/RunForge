@@ -50,6 +50,7 @@ test('model catalog: 只继承已登记名称的后缀，未知名称保持待�
       contextWindowSource: 'manual',
       compactionThreshold: null,
       compactionThresholdSource: 'manual',
+      maxOutputTokens: null,
       inputModalities: [],
       inputModalitiesSource: 'manual',
       references: [],

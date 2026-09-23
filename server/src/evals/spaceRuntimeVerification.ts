@@ -129,7 +129,6 @@ function toolSettings(workspaceRoot: string): ToolSettings {
     shellUseHostPath: true,
     shellPathMode: 'system',
     shellPath: process.env.PATH ?? '',
-    shellAllowCommands: [],
     network: 'disabled',
     shellDeny: [],
     maxOutput: 40_000,

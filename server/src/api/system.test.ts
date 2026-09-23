@@ -352,14 +352,6 @@ test('系统设置与租户授权接口: system admin 可管理，租户身份�
       [owner.id],
     );
 
-    const resolvedCapability = await fetch(`${base}/system/settings/llm/model-capability`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-      body: JSON.stringify({ model: 'glm-5-2-260617' }),
-    });
-    assert.equal(resolvedCapability.status, 200);
-    assert.equal(((await resolvedCapability.json()) as { contextWindow: number }).contextWindow, 1_000_000);
-
     const tenantEscalation = await fetch(`${base}/system/settings/llm`, {
       headers: { Authorization: `Bearer ${ownerJwt}` },
     });

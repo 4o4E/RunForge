@@ -77,12 +77,16 @@ export interface ToolPolicy {
   capOutput(output: string): string;
 }
 
-export function createPolicy(cfg: ToolPolicyConfig): ToolPolicy {
+export function createPolicy(cfg: ToolPolicyConfig, userFilesMountPath?: string): ToolPolicy {
   const shellDenyRes = cfg.shellDeny.map((p) => new RegExp(p, 'i'));
 
   function check(name: string, args: Record<string, unknown>): PolicyDecision {
     const meta = META[name] ?? { kind: 'safe' as const };
     const readonlyAgentRoots = [
+      resolve(cfg.workspaceRoot, '.agents'),
+      resolve(cfg.workspaceRoot, '.skills'),
+      resolve(cfg.workspaceRoot, '.workflows'),
+      resolve(cfg.workspaceRoot, '.plugins'),
       resolve(cfg.workspaceRoot, '.agents/skills'),
       resolve(cfg.workspaceRoot, '.agents/workflows'),
       resolve(cfg.workspaceRoot, '.agents/runforge-workload-sdk'),
@@ -119,7 +123,7 @@ export function createPolicy(cfg: ToolPolicyConfig): ToolPolicy {
         const raw = args[key];
         if (raw == null || raw === '') continue; // optional path (e.g. glob/grep default cwd)
         const target = resolveFromWorkspace(cfg.workspaceRoot, String(raw));
-        if (!isWithin(cfg.workspaceRoot, target)) {
+        if (!isWithin(cfg.workspaceRoot, target) && !(userFilesMountPath && isWithin(userFilesMountPath, target))) {
           return { ok: false, reason: `路径 '${String(raw)}' 超出 workspace (${cfg.workspaceRoot})` };
         }
       }

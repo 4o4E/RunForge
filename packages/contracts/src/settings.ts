@@ -8,20 +8,12 @@ export interface ToolSettings {
   shellUseHostPath: boolean;
   shellPathMode: 'system' | 'custom';
   shellPath: string;
-  shellAllowCommands: string[];
   network: 'enabled' | 'disabled';
   shellDeny: string[];
   maxOutput: number;
 }
 
-export interface ShellCommandOptionItem {
-  name: string;
-  path: string | null;
-  available: boolean;
-}
-
 export interface ToolSettingsOptions {
-  shellCommands: ShellCommandOptionItem[];
   systemPath: string;
 }
 
@@ -83,6 +75,7 @@ export interface LlmModelCapabilitySettings {
   contextWindowSource: LlmModelCapabilitySource;
   compactionThreshold: number | null;
   compactionThresholdSource: LlmModelCapabilitySource;
+  maxOutputTokens: number | null;
   inputModalities: LlmInputModality[];
   inputModalitiesSource: LlmModelCapabilitySource;
   references: LlmModelCapabilityReference[];
@@ -227,17 +220,6 @@ export interface LlmProviderChatTestResult {
   output: string;
   inputTokens?: number;
   outputTokens?: number;
-}
-
-export interface ShellCommandScanInput {
-  shellPathMode: ToolSettings['shellPathMode'];
-  shellPath: string;
-  include: string[];
-}
-
-export interface ShellCommandScanResult {
-  shellCommands: ShellCommandOptionItem[];
-  path: string;
 }
 
 export type PageState = Record<string, unknown>;

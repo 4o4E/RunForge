@@ -249,7 +249,10 @@ export class SpaceAccessService {
   ): Promise<PromptPlaceholdersView> {
     const space = await this.requireManagedSpace(actorContext, spaceId);
     try {
-      return await this.configService.promptPlaceholders(space.tenantId, space.mode, space.config);
+      const userId = space.mode === 'external'
+        ? space.executionUserId
+        : actorContext.scope === 'tenant' ? actorContext.userId : null;
+      return await this.configService.promptPlaceholders(space.tenantId, space.mode, space.config, userId);
     } catch (error) {
       if (error instanceof SpaceConfigError) throw new SpaceAccessError(409, error.code, error.message);
       throw error;

@@ -45,8 +45,8 @@ docker compose --env-file .env.docker -f deploy/compose.external-postgres.yml up
 两套 Compose 都在 `http://localhost:8080` 提供 Web 控制台、REST API 和 WebSocket。
 `.env.docker` 只保存当前 Compose 实际使用的数据库密钥、签名密钥和初始账号密码。LLM
 Provider 在服务启动后由系统管理员写入系统设置,再授权给租户使用。镜像版本、端口、工具参数及外部服务地址直接在
-对应 Compose 文件中修改。`runforge-workspaces`、`runforge-business-plugins` 和
-`runforge-provider-traces` 分别保存会话文件、业务插件和 Provider 观测记录；自带 PostgreSQL
+对应 Compose 文件中修改。`runforge-workspaces`、`runforge-user-files`、`runforge-business-plugins` 和
+`runforge-provider-traces` 分别保存会话文件、用户跨会话文件、业务插件和 Provider 观测记录；自带 PostgreSQL
 的版本额外使用 `runforge-postgres` 卷保存数据库。
 
 业务插件可以直接写入 `runforge-business-plugins` 卷内的 `/app/business-plugins`，也可以在
@@ -170,7 +170,8 @@ psql "$DATABASE_URL" -c "\dt"
 首次启动后,服务会把工具策略默认配置补进系统 `app_settings`，包括 `tools.sandbox`、
 `tools.sandboxBackend`、`tools.network` 和 `tools.maxOutput` 等。工作区基础目录只读取
 `TOOL_WORKSPACE_ROOT`，不会写入数据库；所有空间统一派生为
-`<TOOL_WORKSPACE_ROOT>/<spaceId>/<threadId>`。生产 Compose 直接把工作区卷挂载到 `/w`。
+`<TOOL_WORKSPACE_ROOT>/<spaceId>/c/<threadId>`。生产 Compose 把会话工作区挂载到 `/w`，
+把用户跨会话文件单独挂载到 `/u`；用户文件路径为 `/u/<userId>`，不从旧目录迁移。
 
 ```bash
 psql "$DATABASE_URL" -c "select key, value from app_settings order by key;"
@@ -178,19 +179,7 @@ psql "$DATABASE_URL" -c "select key, value from app_settings order by key;"
 
 ### 5. 启动服务
 
-开发模式：
-
-```bash
-pnpm dev
-```
-
-Linux 开发机也可用脚本管理前后端进程：
-
-```bash
-pnpm run start
-pnpm run stop
-pnpm run restart
-```
+本机开发服务在 Docker 容器中运行；`pnpm` 只负责构建、数据库迁移和测试，不控制容器。开发容器使用不入库的 `ref/` 配置；当前机器的准备条件、启动和停止命令记录在 `AGENTS.local.md`。生产环境使用 `deploy/` 下的 Compose 配置。
 
 访问入口：
 
@@ -228,7 +217,7 @@ pnpm --filter server typecheck
 - [长任务设计](docs/long-task-design.md)：Goal 锚点、上下文压缩、token 预算、取消与长任务验证链路。
 - [托管 Shell 资源设计](docs/background-shell-design.md)：shell session、前台/后台命令、轮询、接管和跨 run 生命周期。
 - [工具沙箱设计](docs/tool-sandbox.md)：工具权限、bwrap 沙箱选型、读写范围与命令限制。
-- [Skill 系统设计](docs/skill-system-design.md)：当前 skill 文件协议、内置/用户 skill、bash 资源暴露、run 级激活生命周期和安全边界。
+- [Skill 系统设计](docs/skill-system-design.md)：当前 Skill 文件协议、空间只读资源、运行级激活生命周期和安全边界。
 - [Subagent 与 Gene Memory 设计](docs/subagent-memory-design.md)：当前 subagent v1 协作语义，以及后续 runtime profile、gene 读写、RAG 召回、经验提升和退化流程。
 - [题面验收报告](docs/acceptance-report.md)：当前完成范围、未实现边界和后续平台化设计。
 - [架构改造方案](docs/refactor-plan.md)：AI SDK、AI Elements、Streamdown、HTML artifact、可观测和沙箱路线。

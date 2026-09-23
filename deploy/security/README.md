@@ -48,8 +48,8 @@ sudo docker compose logs --tail=100 runforge
 ```
 
 RunForge 启动日志必须显示 `Tool sandbox: enforce` 和 `shell: bwrap`。在系统设置中保存
-`enforce + bwrap + 沙箱投射` 后，新建一个执行 `pwd` 的任务；工具调用成功且路径位于
-`/w/<spaceId>/<threadId>` 才表示实际会话沙箱验收完成。容器健康只证明服务启动，不证明
+`enforce + bwrap` 并关闭容器直通执行后，新建一个执行 `pwd` 的任务；工具调用成功且路径位于
+`/w/<spaceId>/c/<threadId>` 才表示实际会话沙箱验收完成。容器健康只证明服务启动，不证明
 `bwrap` 可执行。
 
 仓库中的 `generate-runforge-bwrap-seccomp.sh` 只用于维护已纳入版本控制的 seccomp 文件，

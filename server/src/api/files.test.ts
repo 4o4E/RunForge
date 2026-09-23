@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { formatHexRows, parseByteRange, previewTextLines } from './files.js';
@@ -12,7 +12,9 @@ import {
   ensureThreadWorkspaceRoot,
   migrateLegacyBootstrapWorkspace,
   resolveThreadWorkspaceRoot,
+  resolveSpaceWorkspaceRoot,
   resolveWorkspaceRoot,
+  resolveUserFilesRoot,
   removeTenantWorkspace,
   removeUserWorkspace,
 } from '../files/workspaceRoot.js';
@@ -79,11 +81,65 @@ test('workspace root is isolated by space and thread', () => {
   assert.equal(resolveWorkspaceRoot({ tenantId: 'default', userId: 'us_b' }, base), '/srv/runforge/workspace/tenants/default/users/us_b/workspace');
   assert.equal(resolveWorkspaceRoot({ tenantId: 'tn_a', userId: 'us_a' }, base), '/srv/runforge/workspace/tenants/tn_a/users/us_a/workspace');
   assert.notEqual(resolveWorkspaceRoot({ tenantId: 'tn_a', userId: 'us_a' }, base), resolveWorkspaceRoot({ tenantId: 'tn_a', userId: 'us_b' }, base));
-  assert.equal(resolveThreadWorkspaceRoot('sp_default', 'th_abc123', base), '/srv/runforge/workspace/sp_default/th_abc123');
+  assert.equal(resolveSpaceWorkspaceRoot('sp_default', base), '/srv/runforge/workspace/sp_default');
+  assert.equal(resolveThreadWorkspaceRoot('sp_default', 'th_abc123', base), '/srv/runforge/workspace/sp_default/c/th_abc123');
   assert.notEqual(
     resolveThreadWorkspaceRoot('sp_a', 'th_abc123', base),
     resolveThreadWorkspaceRoot('sp_b', 'th_abc123', base),
   );
+  assert.equal(resolveUserFilesRoot('us_a', '/srv/runforge/users'), '/srv/runforge/users/us_a');
+});
+
+test('用户文件接口只访问登录用户目录并拒绝目录逃逸', async () => {
+  const previousUserFilesRoot = config.tools.userFilesRoot;
+  const base = await mkdtemp(join(tmpdir(), 'runforge-user-files-'));
+  config.tools.userFilesRoot = base;
+  try {
+    const tenantId = 'tn_user_files_api';
+    const owner = await seedOwner(tenantId, 'owner@user-files.test', 'pw');
+    const other = await store.createUser({ tenantId, email: 'other@user-files.test', passwordHash: 'test', role: 'member' });
+    const ownerToken = signTenantAccessToken({ id: owner.id, tenantId, role: 'owner' });
+    const otherToken = signTenantAccessToken({ id: other.id, tenantId, role: 'member' });
+    const { port, close } = await listen(buildApp());
+    const apiBase = `http://127.0.0.1:${port}/api/files`;
+    try {
+      const ownerHeaders = { Authorization: `Bearer ${ownerToken}`, 'Content-Type': 'application/json' };
+      const upload = await fetch(`${apiBase}/upload`, {
+        method: 'POST', headers: ownerHeaders,
+        body: JSON.stringify({ location: 'user', path: 'notes.txt', contentBase64: Buffer.from('个人资料').toString('base64') }),
+      });
+      assert.equal(upload.status, 201);
+      assert.equal(await readFile(join(base, owner.id, 'notes.txt'), 'utf8'), '个人资料');
+      const ownerRead = await fetch(`${apiBase}/content?location=user&path=notes.txt`, { headers: ownerHeaders });
+      assert.equal(ownerRead.status, 200);
+      const share = await fetch(`${apiBase}/share-link`, {
+        method: 'POST', headers: ownerHeaders,
+        body: JSON.stringify({ location: 'user', path: 'notes.txt', ttlSeconds: 300 }),
+      });
+      assert.equal(share.status, 201);
+      const shareBody = await share.json() as { rawUrl: string };
+      const sharedRead = await fetch(`http://127.0.0.1:${port}${shareBody.rawUrl}`);
+      assert.equal(sharedRead.status, 200);
+      assert.equal(await sharedRead.text(), '个人资料');
+      const otherHeaders = { Authorization: `Bearer ${otherToken}` };
+      const altered = new URL(shareBody.rawUrl, `http://127.0.0.1:${port}`);
+      altered.searchParams.set('user', other.id);
+      assert.equal((await fetch(altered)).status, 403);
+      const otherList = await fetch(`${apiBase}/list?location=user&path=.`, { headers: otherHeaders });
+      assert.equal(otherList.status, 200);
+      assert.deepEqual((await otherList.json() as { entries: unknown[] }).entries, []);
+      const escaped = await fetch(`${apiBase}/content?location=user&path=${encodeURIComponent(`../${owner.id}/notes.txt`)}`, { headers: otherHeaders });
+      assert.equal(escaped.status, 400);
+      await symlink(join(base, owner.id, 'notes.txt'), join(base, other.id, 'linked.txt'));
+      const linked = await fetch(`${apiBase}/content?location=user&path=linked.txt`, { headers: otherHeaders });
+      assert.equal(linked.status, 403);
+    } finally {
+      close();
+    }
+  } finally {
+    config.tools.userFilesRoot = previousUserFilesRoot;
+    await rm(base, { recursive: true, force: true });
+  }
 });
 
 test('旧默认租户 workspace 会移动到新租户目录且可以重复执行', async () => {
@@ -104,15 +160,16 @@ test('旧默认租户 workspace 会移动到新租户目录且可以重复执行
   }
 });
 
-test('旧 thread 工作目录会原子移动到 space/thread 路径', async () => {
+test('旧 thread 文件不自动搬入新目录', async () => {
   const base = await mkdtemp(join(tmpdir(), 'runforge-thread-workspace-migration-'));
   try {
-    const legacy = join(base, 'th_legacy');
+    const legacy = join(base, 'sp_default', 'th_legacy');
     await mkdir(legacy, { recursive: true });
     await writeFile(join(legacy, 'note.txt'), 'legacy thread workspace');
     const target = await ensureThreadWorkspaceRoot('sp_default', 'th_legacy', base);
-    assert.equal(target, join(base, 'sp_default', 'th_legacy'));
-    assert.equal(await readFile(join(target, 'note.txt'), 'utf8'), 'legacy thread workspace');
+    assert.equal(target, join(base, 'sp_default', 'c', 'th_legacy'));
+    assert.equal(existsSync(join(target, 'note.txt')), false);
+    assert.equal(await readFile(join(legacy, 'note.txt'), 'utf8'), 'legacy thread workspace');
     assert.equal(await ensureThreadWorkspaceRoot('sp_default', 'th_legacy', base), target);
   } finally {
     await rm(base, { recursive: true, force: true });
@@ -195,15 +252,14 @@ test('file content API saves text with version conflict protection', async () =>
       assert.equal(await readFile(join(root, 'src/demo.ts'), 'utf8'), 'export const value = 3;\n');
 
       const managed = await fetch(`http://127.0.0.1:${port}/api/files/content?path=plugins%2Fcrm%2Freadme.md&threadId=${thread.id}`, { headers });
-      assert.equal(managed.status, 200);
-      const managedBody = (await managed.json()) as { version: { sha256: string } };
+      assert.equal(managed.status, 403);
       const managedWrite = await fetch(`http://127.0.0.1:${port}/api/files/content`, {
         method: 'PUT',
         headers: { ...headers, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           path: 'plugins/crm/readme.md',
           content: '# changed\n',
-          baseSha256: managedBody.version.sha256,
+          baseSha256: 'irrelevant',
           threadId: thread.id,
         }),
       });

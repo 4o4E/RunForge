@@ -7,6 +7,7 @@ import {
 } from './settings.js';
 import { renderPromptTemplate, runtimeCapabilityPromptValues } from './spaces/prompt.js';
 import { agentContextSettings } from './config.js';
+import { createProviderFromSettings } from './llm/index.js';
 
 test('agent context settings: 使用模型压缩阈值，环境变量只能进一步收紧', () => {
   const original = process.env.LLM_CONTEXT_BUDGET;
@@ -71,13 +72,14 @@ test('llm settings: 目录模型自动补齐能力，人工配置保持原值', 
     contextWindowSource: 'manual',
     compactionThreshold: 24_000,
     compactionThresholdSource: 'manual',
+    maxOutputTokens: null,
     inputModalities: ['text', 'audio'],
     inputModalitiesSource: 'manual',
     references: [],
   });
 });
 
-test('llm settings: 已保存的目录值按完整别名刷新', () => {
+test('llm settings: 已保存的模型能力不会被打包目录覆盖', () => {
   const settings = normalizeLlmSettings({
     providers: [{
       id: 'deepseek',
@@ -87,6 +89,9 @@ test('llm settings: 已保存的目录值按完整别名刷新', () => {
         model: 'deepseek-v4-flash-260425',
         contextWindow: 128_000,
         contextWindowSource: 'catalog',
+        compactionThreshold: 96_000,
+        compactionThresholdSource: 'catalog',
+        maxOutputTokens: 16_000,
         inputModalities: ['text'],
         inputModalitiesSource: 'catalog',
       }],
@@ -94,10 +99,56 @@ test('llm settings: 已保存的目录值按完整别名刷新', () => {
   });
 
   const capability = settings.providers[0].modelCapabilities[0];
-  assert.equal(capability.contextWindow, 1_000_000);
+  assert.equal(capability.contextWindow, 128_000);
   assert.equal(capability.contextWindowSource, 'catalog');
-  assert.equal(capability.compactionThreshold, 750_000);
+  assert.equal(capability.compactionThreshold, 96_000);
   assert.equal(capability.compactionThresholdSource, 'catalog');
+  assert.equal(capability.maxOutputTokens, 16_000);
+});
+
+test('llm settings: 旧 Anthropic 配置补齐输出长度，新配置使用已保存数值', () => {
+  const legacy = normalizeLlmSettings({ providers: [{
+    id: 'anthropic',
+    protocol: 'anthropic-messages',
+    models: ['claude-sonnet-4-6'],
+  }] }).providers[0];
+  assert.equal(legacy.modelCapabilities[0]?.maxOutputTokens, 64_000);
+
+  const saved = normalizeLlmSettings({ providers: [{
+    id: 'anthropic',
+    protocol: 'anthropic-messages',
+    models: ['custom-claude'],
+    modelCapabilities: [{
+      model: 'custom-claude',
+      contextWindow: 200_000,
+      contextWindowSource: 'catalog',
+      compactionThreshold: 150_000,
+      compactionThresholdSource: 'catalog',
+      maxOutputTokens: 32_000,
+      inputModalities: ['text', 'image'],
+      inputModalitiesSource: 'catalog',
+      references: [],
+    }],
+  }] }).providers[0];
+  assert.equal(saved.modelCapabilities[0]?.maxOutputTokens, 32_000);
+  assert.doesNotThrow(() => createProviderFromSettings(saved, 'custom-claude'));
+});
+
+test('llm settings: 新候选集合移除旧条目并保留已启用模型', () => {
+  const previous = normalizeLlmSettings({
+    providers: [{
+      id: 'provider',
+      discoveredModels: ['old-unselected-model', 'selected-legacy-model'],
+      models: ['selected-legacy-model'],
+    }],
+  });
+  const settings = normalizeLlmSettings({
+    ...previous,
+    providers: [{ ...previous.providers[0], discoveredModels: ['new-model'] }],
+  });
+
+  assert.deepEqual(settings.providers[0].discoveredModels, ['new-model', 'selected-legacy-model']);
+  assert.deepEqual(settings.providers[0].models, ['selected-legacy-model']);
 });
 
 test('llm settings: 管理员可以覆盖目录生成的压缩阈值', () => {
@@ -118,6 +169,22 @@ test('llm settings: 管理员可以覆盖目录生成的压缩阈值', () => {
   assert.equal(capability.contextWindow, 1_050_000);
   assert.equal(capability.compactionThreshold, 200_000);
   assert.equal(capability.compactionThresholdSource, 'manual');
+});
+
+test('llm settings: 人工字段缺失时不会从打包目录静默补值', () => {
+  const capability = normalizeLlmSettings({ providers: [{
+    id: 'openai',
+    models: ['gpt-4.1-mini'],
+    modelCapabilities: [{
+      model: 'gpt-4.1-mini',
+      contextWindowSource: 'manual',
+      compactionThresholdSource: 'manual',
+      inputModalitiesSource: 'manual',
+    }],
+  }] }).providers[0].modelCapabilities[0];
+  assert.equal(capability.contextWindow, null);
+  assert.equal(capability.compactionThreshold, null);
+  assert.deepEqual(capability.inputModalities, []);
 });
 
 test('llm settings: 旧 AI SDK 配置转换为明确协议并删除旧字段', () => {
@@ -154,6 +221,7 @@ test('llm settings: 未登记模型不会生成默认能力', () => {
     contextWindowSource: 'manual',
     compactionThreshold: null,
     compactionThresholdSource: 'manual',
+    maxOutputTokens: null,
     inputModalities: [],
     inputModalitiesSource: 'manual',
     references: [],

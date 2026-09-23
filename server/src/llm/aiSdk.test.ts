@@ -130,7 +130,7 @@ test('toModelMessages: malformed tool-call args stay visible to the model', () =
   assert.deepEqual((parts[0].input as Record<string, unknown>)._invalidToolArguments, true);
 });
 
-test('AI SDK provider: Anthropic 缺少目录最大输出长度时立即拒绝创建', () => {
+test('AI SDK provider: Anthropic 缺少已保存的最大输出长度时立即拒绝创建', () => {
   assert.throws(() => createAiSdkProvider({
     baseUrl: 'https://example.invalid/v1',
     apiKey: 'test-key',

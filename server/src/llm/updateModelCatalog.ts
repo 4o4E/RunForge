@@ -5,7 +5,7 @@ import {
   MODELS_DEV_ALIAS_SOURCE_URL,
   MODELS_DEV_SOURCE_URL,
   type ModelCatalogDocument,
-} from './modelCatalogGenerator.js';
+} from '@runforge/contracts';
 
 const outputUrl = new URL('./model-catalog.json', import.meta.url);
 const checkOnly = process.argv.slice(2).includes('--check');

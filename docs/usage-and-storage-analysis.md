@@ -19,12 +19,15 @@ Token 以 `provider_attempts.usage` 为事实来源，通过 `provider_invocatio
 
 文件统计包括：
 
-- thread 工作目录，按 tenant、thread 用户和 space 归属；
+- 空间托管资源 `/w/{spaceId}/.{skills,workflows,plugins,agents}`，按 space 归属并只扫描一次；
+- thread 可写目录 `/w/{spaceId}/c/{threadId}`，按 tenant、thread 用户和 space 归属；
+- 用户跨会话文件 `/u/{userId}`，按用户和所属 tenant 归属，`space_id` 为空，扫描时只计数一次；
+- 尚未清理的旧会话目录 `/w/{spaceId}/{threadId}` 以及仍关联数据库会话的更早 `/w/{threadId}`，作为历史工作文件继续计入当前占用；已删除会话的空间内遗留目录归属空间，不再推断用户；
 - 外部调用 artifact，按数据库记录的 caller、space、thread 归属；
 - 租户业务插件当前版本和内容寻址历史快照；
 - thread/run/message/event/step、Provider 观测等核心数据库记录的逻辑大小。
 
-符号链接只计算链接本身，不跟随目标。业务插件共享快照只在租户插件目录计算一次，不会在每个 thread 中重复计入。数据库逻辑大小用于维度分析，不等同于 PostgreSQL 数据文件、索引、WAL 和空闲页的物理大小。Provider JSONL 故障日志、Office 缓存和 PostgreSQL 运维文件不具备稳定的 tenant/user/space 归属，不进入本接口。
+符号链接只计算链接本身，不跟随目标。会话对空间托管资源的链接只计入线程目录中的链接大小；实际资源由空间目录计数。租户业务插件当前版本和内容寻址历史快照仍只在租户插件目录计算一次，不会在每个 space 或 thread 中重复计入。数据库逻辑大小用于维度分析，不等同于 PostgreSQL 数据文件、索引、WAL 和空闲页的物理大小。Provider JSONL 故障日志、Office 缓存和 PostgreSQL 运维文件不具备稳定的 tenant/user/space 归属，不进入本接口。
 
 ## 权限与接口
 
@@ -36,4 +39,6 @@ Token 以 `provider_attempts.usage` 为事实来源，通过 `provider_invocatio
 
 ## 文件隔离
 
-分析功能不改变工作目录模型。所有会话继续使用 `/w/{spaceId}/{threadId}` 独立可写目录，不增加空间共享目录，也不允许会话自动读取同空间其他会话的文件。需要再次使用旧内容时，由新的 Chat 明确重新获取或重新上传。
+服务端管理的 Skill、Workflow、业务插件和 Agent 资源存放在 `/w/{spaceId}/.{skills,workflows,plugins,agents}`，按空间管理且只读；业务插件目录引用插件版本快照。会话只在 `/w/{spaceId}/c/{threadId}` 拥有独立可写目录，并只挂接当前选中的托管资源。不同会话不能读取彼此文件。用户需要跨会话保存个人数据时，明确写入 `/u/{userId}`；新会话不会自动读取用户目录内容。文件接口和文件工具按真实路径检查读写权限；Shell 在隔离沙箱中只挂载当前会话、当前用户目录（如获准）与选中的资源。需要再次使用旧会话文件时，由新会话明确重新获取或重新上传。
+
+切换到新布局时，存储采样同时统计尚未清理的旧会话目录，清理后当前占用才下降。生产清理只涉及旧会话工作目录，不删除数据库中的会话、消息、运行记录、Token 用量或历史存储样本；历史消息仍可查看，但引用旧文件的路径和分享链接会失效。迁移步骤与运行保护条件见[工作区存储迁移](workspace-storage-migration.md)。

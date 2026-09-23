@@ -1,14 +1,14 @@
 import { Router } from 'express';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, open as openFile, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open as openFile, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Request, Response } from 'express';
-import { resolveThreadWorkspaceRoot } from '../files/workspaceRoot.js';
+import { resolveThreadWorkspaceRoot, resolveUserFilesRoot } from '../files/workspaceRoot.js';
 import { threadWorkspaceAccess, ThreadWorkspaceAccessError } from '../files/threadWorkspace.js';
 import { ensureOfficePdfPreview, isOfficeConvertiblePath } from '../files/officePreview.js';
-import { mediaTypeFromPath, normalizeRemotePath, streamWorkspaceFile, toRemotePath, workspaceRoot } from '../files/workspace.js';
+import { mediaTypeFromPath, normalizeRemotePath, resolveWebWorkspaceFilePath, streamWorkspaceFile, toRemotePath, workspaceRoot, WorkspacePathAccessError } from '../files/workspace.js';
 import { clampShareTtlSeconds, signFileShare, verifyFileShare } from './auth.js';
 import { resolveIdentityFromAuthorizationHeader } from '../auth/resolve.js';
 import { requireTenantScope } from '../auth/guards.js';
@@ -86,6 +86,10 @@ function requestedThreadId(req: Request): string | null {
   return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
 }
 
+function requestedUserFiles(req: Request): boolean {
+  return (req.method === 'GET' ? req.query.location : req.body?.location) === 'user';
+}
+
 function sendFileError(res: Response, error: unknown): void {
   if (error instanceof DeleteConflictError) {
     res.status(409).json({ error: error.message, code: error.code });
@@ -93,6 +97,10 @@ function sendFileError(res: Response, error: unknown): void {
   }
   if (error instanceof ThreadWorkspaceAccessError) {
     res.status(error.status).json({ error: error.message, code: error.code });
+    return;
+  }
+  if (error instanceof WorkspacePathAccessError) {
+    res.status(403).json({ error: error.message, code: 'WORKSPACE_PATH_FORBIDDEN' });
     return;
   }
   res.status(400).json({ error: (error as Error).message });
@@ -113,13 +121,24 @@ async function resolveFileAccess(
   if (identity?.scope === 'tenant') {
     try {
       // 系统管理员不能借这条普通文件路径绕过审计；这里只有租户身份可以进入。
+      if (requestedUserFiles(req)) {
+        const root = resolveUserFilesRoot(identity.userId);
+        await mkdir(root, { recursive: true });
+        const file = await resolveWebWorkspaceFilePath(root, requestedPath);
+        return {
+          tenantId: identity.tenantId,
+          userId: identity.userId,
+          spaceId: 'user-files',
+          threadId: identity.userId,
+          workspaceRoot: root,
+          workspaceKey: `user:${identity.userId}`,
+          file,
+        };
+      }
       const workspace = await threadWorkspaceAccess.resolveForWeb(identity, requestedThreadId(req), mode);
       await mkdir(workspace.root, { recursive: true });
-      const file = normalizeRemotePath(requestedPath, workspace.root);
+      const file = await resolveWebWorkspaceFilePath(workspace.root, requestedPath);
       const remotePath = toRemotePath(file, workspace.root);
-      if (mode === 'write' && (remotePath === 'plugins' || remotePath.startsWith('plugins/'))) {
-        throw new ThreadWorkspaceAccessError(403, 'MANAGED_RESOURCE_READ_ONLY', '业务插件目录只读');
-      }
       return {
         tenantId: identity.tenantId,
         userId: identity.userId,
@@ -143,10 +162,17 @@ async function resolveFileAccess(
     return null;
   }
   const { workspaceRoot: baseRoot } = await getSystemToolSettings();
-  const root = resolveThreadWorkspaceRoot(spaceId, threadId, baseRoot);
+  if (spaceId === 'user-files' && threadId !== userId) {
+    res.status(403).json({ error: '文件分享身份无效' });
+    return null;
+  }
+  const root = spaceId === 'user-files'
+    ? resolveUserFilesRoot(userId)
+    : resolveThreadWorkspaceRoot(spaceId, threadId, baseRoot);
   const file = normalizeRemotePath(requestedPath, root);
   const path = canonicalRemotePath(file, root);
   if (verifyFileShare(path, tenantId, userId, req.query.expires, req.query.sig, spaceId, threadId)) {
+    await resolveWebWorkspaceFilePath(root, requestedPath);
     return {
       tenantId,
       userId,
@@ -216,9 +242,12 @@ filesApi.get('/list', requireTenantScope, async (req, res) => {
     const info = await stat(dir);
     if (!info.isDirectory()) return res.status(400).json({ error: 'path 不是目录' });
 
+    const rootListing = resolve(dir) === resolve(access.workspaceRoot);
     const entries = await Promise.all(
-      (await readdir(dir)).map(async (name) => {
+      (await readdir(dir)).filter((name) => !(rootListing && ['.agents', '.skills', '.workflows', '.plugins', 'plugins'].includes(name.toLowerCase()))).map(async (name) => {
         const abs = join(dir, name);
+        const linkInfo = await lstat(abs);
+        if (linkInfo.isSymbolicLink()) return null;
         const s = await stat(abs);
         return {
           name,
@@ -230,8 +259,9 @@ filesApi.get('/list', requireTenantScope, async (req, res) => {
       }),
     );
 
-    entries.sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1));
-    res.json({ path: toRemotePath(dir, access.workspaceRoot), parent: parentRemotePath(dir, access.workspaceRoot), entries });
+    const visibleEntries = entries.filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+    visibleEntries.sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1));
+    res.json({ path: toRemotePath(dir, access.workspaceRoot), parent: parentRemotePath(dir, access.workspaceRoot), entries: visibleEntries });
   } catch (err) {
     sendFileError(res, err);
   }

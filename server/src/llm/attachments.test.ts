@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { appendImageAttachmentTokens, hydrateImageAttachments } from './attachments.js';
@@ -25,6 +25,26 @@ test('hydrateImageAttachments: turns file tokens into image parts', async () => 
     });
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('hydrateImageAttachments: 用户目录中的图片在工具结果持久化后仍可识别', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'runforge-user-images-'));
+  try {
+    const threadRoot = join(base, 'thread');
+    const userRoot = join(base, 'user');
+    await Promise.all([mkdir(threadRoot), mkdir(userRoot)]);
+    const imagePath = join(userRoot, 'photo.png');
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    await writeFile(imagePath, bytes);
+    const toolText = appendImageAttachmentTokens('已读取图片', [{ type: 'image', data: bytes.toString('base64'), mimeType: 'image/png', path: imagePath }], 'read_user');
+    const hydrated = await hydrateImageAttachments([
+      { role: 'assistant', content: null, toolCalls: [{ id: 'read_user', name: 'file_read', arguments: JSON.stringify({ path: imagePath }) }] },
+      { role: 'tool', content: toolText, toolCallId: 'read_user' },
+    ], threadRoot, userRoot);
+    assert.equal(hydrated.at(-1)?.contentParts?.[0]?.type, 'image');
+  } finally {
+    await rm(base, { recursive: true, force: true });
   }
 });
 

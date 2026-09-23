@@ -5,7 +5,7 @@ import type {
   LlmModelCapabilityReference,
   LlmModelCapabilitySettings,
 } from '@runforge/contracts';
-import type { ModelCatalogDocument, ModelCatalogEntry as CatalogEntry } from './modelCatalogGenerator.js';
+import type { ModelCatalogDocument, ModelCatalogEntry as CatalogEntry } from '@runforge/contracts';
 
 const KNOWN_MODALITIES = new Set<LlmInputModality>(['text', 'image', 'audio', 'video', 'document']);
 const KNOWN_FIELDS = new Set<LlmModelCapabilityField>(['contextWindow', 'inputModalities']);
@@ -117,6 +117,7 @@ export function catalogCapability(model: string): LlmModelCapabilitySettings {
       contextWindowSource: 'manual',
       compactionThreshold: null,
       compactionThresholdSource: 'manual',
+      maxOutputTokens: null,
       inputModalities: [],
       inputModalitiesSource: 'manual',
       references: [],
@@ -128,6 +129,7 @@ export function catalogCapability(model: string): LlmModelCapabilitySettings {
     contextWindowSource: 'catalog',
     compactionThreshold: matched.compactionThreshold,
     compactionThresholdSource: 'catalog',
+    maxOutputTokens: matched.maxOutputTokens,
     inputModalities: [...matched.inputModalities],
     inputModalitiesSource: 'catalog',
     references: cloneReferences(matched.references),

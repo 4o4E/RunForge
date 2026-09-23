@@ -106,12 +106,12 @@ queued -> running -> succeeded | failed | killed | timed_out | orphaned
 - `server/src/tools/managedShell.ts`：托管 shell 工具定义。
 - `server/src/shell/manager.ts`：session/command 生命周期、日志写入、软/硬超时和进程终止。
 - `server/src/shell/bus.ts`：thread 级 shell 事件推送，驱动右侧 Shell 面板刷新。
-- `server/src/tools/sandbox.ts`：复用 host/bwrap 后端选择、挂载、网络、env、命令白名单逻辑。
+- `server/src/tools/sandbox.ts`：复用 host/bwrap 后端选择、挂载、网络和环境变量逻辑。
 
 bwrap 启动方式：
 
 - 用 `spawn(...)` 执行 command，不再用 `execFileAsync`。
-- 复用现有 `buildBwrapArgs` 的挂载、网络、env、命令白名单逻辑。
+- 复用现有 `buildBwrapArgs` 的挂载、网络和环境变量逻辑。
 - 保留 `--new-session` 和 `--die-with-parent`，终止时杀 bwrap 进程组。
 - `TOOL_NETWORK=enabled` 时才 `--share-net`，否则后台 `git clone` 应明确失败。
 
@@ -252,7 +252,7 @@ PTY 模式需要新增：
 
 - 后台 shell 仍走 `createPolicy(settings)`，不能绕过工具 allow/deny。
 - bwrap 只约束 shell 子进程；进程内 file tools 仍靠应用层路径策略。
-- `shellUseHostPath=true` 时无法获得 bwrap 命令白名单隔离，应在 UI/事件里显式标注。
+- `shellUseHostPath=true` 时无法获得 bwrap 文件隔离，应在 UI/事件里显式标注。
 - shell command 默认不继承后端密钥；数据库 CLI 仍必须走 workload token。
 - 输出继续走脱敏和大小限制；完整日志也要做 secret redaction。
 - 用户和 LLM 共享同一个 shell 时必须有命令写入锁；同一时刻只能一个 actor 启动命令。

@@ -93,6 +93,9 @@ export async function runTool(
     env?: Record<string, string>;
     pluginExecutables?: Array<{ name: string; path: string }>;
     pluginRoots?: string[];
+    managedReadRoots?: string[];
+    spaceRoot?: string;
+    userFiles?: { source: string; mountPath: string };
     threadId?: string;
     runId?: string;
     stepId?: string;
@@ -108,7 +111,7 @@ export async function runTool(
   if (!tool && !mcpTool) return { text: `未知工具：${name}` };
   // 所有工具调用先经过沙箱/权限策略。
   const settings = ctx.settings ?? (await getToolSettings(ctx.scope));
-  const policy = createPolicy(settings);
+  const policy = createPolicy(settings, ctx.userFiles?.mountPath);
   const decision = policy.check(name, args);
   if (!decision.ok) return { text: `工具策略已阻止：${decision.reason}` };
   try {

@@ -3,6 +3,7 @@ import { mkdir } from 'node:fs/promises';
 import type {
   LlmInputModality,
   LlmModelCapabilitySettings,
+  LlmModelCapabilityReference,
   LlmModelCapabilitySource,
   LlmModelOption,
   LlmProviderSettings,
@@ -42,7 +43,6 @@ const TOOL_SETTING_KEYS = [
   'tools.shellUseHostPath',
   'tools.shellPathMode',
   'tools.shellPath',
-  'tools.shellAllowCommands',
   'tools.network',
   'tools.shellDeny',
   'tools.maxOutput',
@@ -143,6 +143,19 @@ function llmModalities(value: unknown, fallback: LlmInputModality[]): LlmInputMo
   return [...new Set<LlmInputModality>(normalized)];
 }
 
+function capabilityReferences(value: unknown, fallback: LlmModelCapabilityReference[]): LlmModelCapabilityReference[] {
+  if (!Array.isArray(value)) return fallback;
+  return value.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const row = item as Record<string, unknown>;
+    if (typeof row.title !== 'string' || typeof row.url !== 'string' || typeof row.checkedAt !== 'string') return [];
+    const fields = Array.isArray(row.fields)
+      ? row.fields.filter((field): field is 'contextWindow' | 'inputModalities' => field === 'contextWindow' || field === 'inputModalities')
+      : [];
+    return [{ title: row.title, url: row.url, checkedAt: row.checkedAt, fields }];
+  });
+}
+
 function normalizeLlmModelCapabilities(
   value: unknown,
   models: string[],
@@ -162,31 +175,47 @@ function normalizeLlmModelCapabilities(
     const contextSource = llmCapabilitySource(row?.contextWindowSource ?? inherited?.contextWindowSource);
     const compactionSource = llmCapabilitySource(row?.compactionThresholdSource ?? inherited?.compactionThresholdSource);
     const modalitiesSource = llmCapabilitySource(row?.inputModalitiesSource ?? inherited?.inputModalitiesSource);
-    const manualContext = contextSource === 'manual'
-      ? optionalPositiveIntValue(row?.contextWindow ?? inherited?.contextWindow, null, 1, 10_000_000)
-      : null;
-    const manualCompactionThreshold = compactionSource === 'manual'
-      ? optionalPositiveIntValue(row?.compactionThreshold ?? inherited?.compactionThreshold, null, 1, 10_000_000)
-      : null;
-    const manualModalities = modalitiesSource === 'manual'
-      ? llmModalities(row?.inputModalities ?? inherited?.inputModalities, [])
-      : [];
-    const contextWindowSource = manualContext !== null ? 'manual' : catalog.contextWindowSource;
-    const compactionThresholdSource = manualCompactionThreshold !== null ? 'manual' : catalog.compactionThresholdSource;
-    const inputModalitiesSource = manualModalities.length ? 'manual' : catalog.inputModalitiesSource;
+    // 已选择模型的能力是保存时的快照。打包目录只补齐升级前缺少的字段和初始配置。
+    const contextWindow = optionalPositiveIntValue(
+      row?.contextWindow !== undefined ? row.contextWindow : inherited?.contextWindow,
+      contextSource === 'manual' ? null : catalog.contextWindow,
+      1,
+      10_000_000,
+    );
+    const compactionThreshold = optionalPositiveIntValue(
+      row?.compactionThreshold !== undefined ? row.compactionThreshold : inherited?.compactionThreshold,
+      compactionSource === 'manual' ? null : catalog.compactionThreshold,
+      1,
+      10_000_000,
+    );
+    const inputModalities = llmModalities(
+      row?.inputModalities ?? inherited?.inputModalities,
+      modalitiesSource === 'manual' ? [] : catalog.inputModalities,
+    );
+    const maxOutputTokens = optionalPositiveIntValue(
+      row?.maxOutputTokens !== undefined ? row.maxOutputTokens : inherited?.maxOutputTokens,
+      catalog.maxOutputTokens,
+      1,
+      10_000_000,
+    );
+    const contextWindowSource = contextSource ?? catalog.contextWindowSource;
+    const compactionThresholdSource = compactionSource ?? catalog.compactionThresholdSource;
+    const inputModalitiesSource = modalitiesSource ?? catalog.inputModalitiesSource;
     const catalogFields = new Set([
       ...(contextWindowSource === 'catalog' ? ['contextWindow' as const] : []),
       ...(inputModalitiesSource === 'catalog' ? ['inputModalities' as const] : []),
     ]);
+    const references = capabilityReferences(row?.references ?? inherited?.references, catalog.references);
     return {
       model,
-      contextWindow: manualContext ?? catalog.contextWindow,
+      contextWindow,
       contextWindowSource,
-      compactionThreshold: manualCompactionThreshold ?? catalog.compactionThreshold,
+      compactionThreshold,
       compactionThresholdSource,
-      inputModalities: manualModalities.length ? manualModalities : catalog.inputModalities,
+      maxOutputTokens,
+      inputModalities,
       inputModalitiesSource,
-      references: catalog.references.flatMap((reference) => {
+      references: references.flatMap((reference) => {
         const fields = reference.fields.filter((field) => catalogFields.has(field));
         return fields.length ? [{ ...reference, fields }] : [];
       }),
@@ -234,7 +263,6 @@ function defaultToolSettings(): ToolSettings {
     shellUseHostPath: config.tools.shellUseHostPath,
     shellPathMode: config.tools.shellPathMode,
     shellPath: config.tools.shellPath,
-    shellAllowCommands: config.tools.shellAllowCommands,
     network: config.tools.network,
     shellDeny: config.tools.shellDeny,
     maxOutput: config.tools.maxOutput,
@@ -315,7 +343,6 @@ function mergeToolSettings(values: Map<string, unknown>, workspaceRoot = config.
     shellUseHostPath: boolValue(values.get('tools.shellUseHostPath'), defaults.shellUseHostPath),
     shellPathMode: shellPathModeValue(values.get('tools.shellPathMode'), defaults.shellPathMode),
     shellPath: stringValue(values.get('tools.shellPath'), defaults.shellPath),
-    shellAllowCommands: stringList(values.get('tools.shellAllowCommands'), defaults.shellAllowCommands),
     network: networkValue(values.get('tools.network'), defaults.network),
     shellDeny: stringList(values.get('tools.shellDeny'), defaults.shellDeny),
     maxOutput: outputLimitValue(values.get('tools.maxOutput'), defaults.maxOutput),
@@ -369,7 +396,6 @@ function toolSettingsToEntries(settings: ToolSettings): Array<[string, unknown]>
     ['tools.shellUseHostPath', settings.shellUseHostPath],
     ['tools.shellPathMode', settings.shellPathMode],
     ['tools.shellPath', settings.shellPath],
-    ['tools.shellAllowCommands', settings.shellAllowCommands],
     ['tools.network', settings.network],
     ['tools.shellDeny', settings.shellDeny],
     ['tools.maxOutput', settings.maxOutput],
@@ -605,6 +631,9 @@ export async function saveLlmSettings(scope: TenantScope, input: unknown): Promi
       }
       if (!capability.inputModalities.length) {
         throw new Error(`模型 ${provider.id}:${capability.model} 未选择输入类型`);
+      }
+      if (provider.protocol === 'anthropic-messages' && capability.maxOutputTokens === null) {
+        throw new Error(`Anthropic 模型 ${provider.id}:${capability.model} 未填写最大输出长度`);
       }
     }
   }

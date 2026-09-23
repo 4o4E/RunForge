@@ -46,7 +46,6 @@ export const toolSettingsSchema = z.object({
   shellUseHostPath: z.boolean(),
   shellPathMode: z.enum(['system', 'custom']),
   shellPath: z.string(),
-  shellAllowCommands: z.array(z.string()),
   network: z.enum(['enabled', 'disabled']),
   shellDeny: z.array(z.string()),
   maxOutput: z.number(),

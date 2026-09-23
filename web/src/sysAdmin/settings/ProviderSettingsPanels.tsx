@@ -28,6 +28,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
+import { resolveModelCapability } from './modelCapabilityLookup';
 
 export function PanelShell({ actions, children, description, title }: { actions?: ReactNode; children: ReactNode; description: string; title: string }) {
   return (
@@ -368,6 +369,7 @@ function fallbackCapability(model: string): LlmModelCapabilitySettings {
     contextWindowSource: 'manual',
     compactionThreshold: null,
     compactionThresholdSource: 'manual',
+    maxOutputTokens: null,
     inputModalities: [],
     inputModalitiesSource: 'manual',
     references: [],
@@ -461,17 +463,19 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
 
   async function beginCreate() {
     setBusyAction('create');
+    let capability: LlmModelCapabilitySettings;
     try {
-      const capability = await controlApi.resolveLlmModelCapability('gpt-4o-mini');
-      setEditIndex(currentSettings.providers.length);
-      setDraft(defaultProvider(currentSettings.providers.length, capability));
-      setPendingDelete(null);
-      setCustomModel('');
+      capability = await resolveModelCapability('gpt-4o-mini');
     } catch (err) {
-      notify({ variant: 'error', title: '默认模型能力读取失败', description: (err as Error).message });
+      capability = fallbackCapability('gpt-4o-mini');
+      notify({ variant: 'error', title: '默认模型资料读取失败，请手动填写能力', description: (err as Error).message });
     } finally {
       setBusyAction('');
     }
+    setEditIndex(currentSettings.providers.length);
+    setDraft(defaultProvider(currentSettings.providers.length, capability));
+    setPendingDelete(null);
+    setCustomModel('');
   }
 
   function beginEdit() {
@@ -565,9 +569,8 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
     setBusyAction('probe');
     try {
       const result = await controlApi.probeLlmProviderModels(draft);
-      setProviderDraft((current) => ({
-        discoveredModels: [...new Set([...current.discoveredModels, ...result.models])].sort(),
-      }));
+      // 一次成功探测代表供应商当前的完整候选集合；已启用和手动选择的模型由 models 单独保留。
+      setProviderDraft({ discoveredModels: result.models });
       notify({ variant: 'success', title: '模型列表拉取成功', description: `发现 ${result.models.length} 个候选模型` });
     } catch (err) {
       notify({ variant: 'error', title: '模型列表拉取失败', description: (err as Error).message });
@@ -612,10 +615,10 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
     if (checked && !draft.modelCapabilities.some((item) => item.model === model)) {
       setBusyAction(`catalog:${model}`);
       try {
-        resolvedCapability = await controlApi.resolveLlmModelCapability(model);
+        resolvedCapability = await resolveModelCapability(model);
       } catch (err) {
-        notify({ variant: 'error', title: '模型能力匹配失败', description: (err as Error).message });
-        return;
+        resolvedCapability = fallbackCapability(model);
+        notify({ variant: 'error', title: '模型资料读取失败，请手动填写能力', description: (err as Error).message });
       } finally {
         setBusyAction('');
       }
@@ -676,12 +679,32 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
     updateModelCapability(model, { inputModalities: [...modalities] });
   }
 
+  async function refreshModelCapability(model: string) {
+    if (!draft) return;
+    setBusyAction(`catalog:${model}`);
+    try {
+      const capability = await resolveModelCapability(model, true);
+      if (capability.contextWindow === null) {
+        notify({ variant: 'error', title: '未在 models.dev 匹配到该模型，原配置保持不变' });
+        return;
+      }
+      setProviderDraft((current) => ({
+        modelCapabilities: current.modelCapabilities.map((item) => item.model === model ? capability : item),
+      }));
+      notify({ variant: 'success', title: '模型能力已更新' });
+    } catch (err) {
+      notify({ variant: 'error', title: '模型能力更新失败', description: (err as Error).message });
+    } finally {
+      setBusyAction('');
+    }
+  }
+
   async function addCustomModel() {
     if (!draft || !customModel.trim()) return;
     const model = customModel.trim();
     setBusyAction('catalog');
     try {
-      const capability = await controlApi.resolveLlmModelCapability(model);
+      const capability = await resolveModelCapability(model);
       setProviderDraft((current) => {
         const selectedCapabilities = new Map(current.modelCapabilities.map((item) => [item.model, item]));
         if (!selectedCapabilities.has(model)) selectedCapabilities.set(model, capability);
@@ -693,7 +716,17 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
       });
       setCustomModel('');
     } catch (err) {
-      notify({ variant: 'error', title: '模型能力匹配失败', description: (err as Error).message });
+      setProviderDraft((current) => {
+        const selectedCapabilities = new Map(current.modelCapabilities.map((item) => [item.model, item]));
+        if (!selectedCapabilities.has(model)) selectedCapabilities.set(model, fallbackCapability(model));
+        return {
+          discoveredModels: [...new Set([...current.discoveredModels, model])].sort(),
+          models: [...new Set([...current.models, model])].sort(),
+          modelCapabilities: [...selectedCapabilities.values()].sort((a, b) => a.model.localeCompare(b.model)),
+        };
+      });
+      setCustomModel('');
+      notify({ variant: 'error', title: '模型资料读取失败，请手动填写能力', description: (err as Error).message });
     } finally {
       setBusyAction('');
     }
@@ -768,7 +801,7 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
                   <Field label="重试次数"><Input type="number" min={0} value={draft.retries} onChange={(event) => setProviderDraft({ retries: Number(event.target.value) })} /></Field>
                 </div>
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div><div className="text-sm font-medium">候选模型</div><div className="text-xs text-muted-foreground">供应商接口只发现名称；选择模型时使用本地能力目录自动填写</div></div>
+                  <div><div className="text-sm font-medium">候选模型</div><div className="text-xs text-muted-foreground">供应商接口只发现名称；选择模型时从 models.dev 读取能力并自动填写</div></div>
                   <div className="flex items-center gap-2">
                     <Button type="button" variant="ghost" size="sm" onClick={() => setModelGroupsOpen(Object.fromEntries(groupedCandidates.map((group) => [`${draft.id}:${group.prefix}`, true])))}>展开全部</Button>
                     <Button type="button" variant="ghost" size="sm" onClick={() => setModelGroupsOpen(Object.fromEntries(groupedCandidates.map((group) => [`${draft.id}:${group.prefix}`, false])))}>收起全部</Button>
@@ -801,18 +834,19 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
                 </ScrollArea>
                 <Field label="添加自定义模型"><div className="flex gap-2"><Input value={customModel} onChange={(event) => setCustomModel(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void addCustomModel(); } }} /><Button variant="outline" onClick={() => void addCustomModel()} disabled={Boolean(busyAction)}>{busyAction === 'catalog' ? <Spinner className="h-4 w-4" /> : <Plus className="h-4 w-4" />}添加并选择</Button></div></Field>
                 <div className="grid gap-3">
-                  <div><div className="text-sm font-medium">已选择模型</div><div className="text-xs text-muted-foreground">匹配本地目录时自动填写；未匹配时必须人工填写上下文长度、压缩阈值并选择输入类型</div></div>
+                  <div><div className="text-sm font-medium">已选择模型</div><div className="text-xs text-muted-foreground">匹配 models.dev 时自动填写；未匹配时必须人工填写模型能力</div></div>
                   {!draft.models.length && <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">尚未选择模型</div>}
                   {draft.models.map((model) => {
                     const capability = draft.modelCapabilities.find((item) => item.model === model)
                       ?? fallbackCapability(model);
                     const incomplete = capability.contextWindow === null
                       || capability.compactionThreshold === null
-                      || capability.inputModalities.length === 0;
+                      || capability.inputModalities.length === 0
+                      || (draft.protocol === 'anthropic-messages' && capability.maxOutputTokens === null);
                     return (
                       <Card key={model} className="rounded-md shadow-none">
                         <CardContent className="grid gap-3 p-4">
-                          <div className="flex flex-wrap items-center justify-between gap-2"><div className="break-all text-sm font-medium">{model}</div>{model === draft.defaultModel && <Badge>默认模型</Badge>}</div>
+                          <div className="flex flex-wrap items-center justify-between gap-2"><div className="break-all text-sm font-medium">{model}</div><div className="flex items-center gap-2">{model === draft.defaultModel && <Badge>默认模型</Badge>}<Button type="button" variant="outline" size="sm" onClick={() => void refreshModelCapability(model)} disabled={Boolean(busyAction)}>{busyAction === `catalog:${model}` ? <Spinner className="h-4 w-4" /> : <RefreshCw className="h-4 w-4" />}刷新模型能力</Button></div></div>
                           <div className="grid gap-3 xl:grid-cols-3">
                             <Field label="上下文长度（tokens）">
                               <div className="flex gap-2">
@@ -834,6 +868,7 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
                                 {INPUT_MODALITY_OPTIONS.map((option) => <label key={option.value} className="flex items-center gap-2 text-sm"><Checkbox checked={capability.inputModalities.includes(option.value)} onCheckedChange={(checked) => toggleModality(model, option.value, checked === true)} />{option.label}</label>)}
                               </div>
                             </Field>
+                            {draft.protocol === 'anthropic-messages' && <Field label="最大输出长度（tokens）"><Input type="number" min={1} max={10000000} value={capability.maxOutputTokens ?? ''} placeholder="Anthropic 协议必填" onChange={(event) => updateModelCapability(model, { maxOutputTokens: event.target.value === '' ? null : Number(event.target.value) })} /></Field>}
                           </div>
                           {(incomplete || capability.references.length > 0) && <div className="grid gap-2 rounded-md bg-muted/30 p-3 text-xs text-muted-foreground">
                             {incomplete && <div className="text-destructive">该模型的能力配置尚未完成，保存会被拒绝。</div>}
@@ -872,7 +907,7 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
                   {!selected.models.length && <span className="text-sm text-muted-foreground">未启用模型</span>}
                   {selected.models.map((model) => {
                     const capability = selected.modelCapabilities.find((item) => item.model === model) ?? fallbackCapability(model);
-                    return <div key={model} className="flex flex-wrap items-center gap-2 rounded-md border p-3"><span className="mr-auto break-all text-sm font-medium">{model}</span><Badge variant="outline">{capability.contextWindow === null ? '待填写上下文' : `${capability.contextWindow.toLocaleString()} tokens`}</Badge><Badge variant="outline">{capability.compactionThreshold === null ? '待填写压缩阈值' : `压缩 ${capability.compactionThreshold.toLocaleString()}`}</Badge>{capability.inputModalities.map((modality) => <Badge key={modality} variant="secondary">{modality}</Badge>)}</div>;
+                    return <div key={model} className="flex flex-wrap items-center gap-2 rounded-md border p-3"><span className="mr-auto break-all text-sm font-medium">{model}</span><Badge variant="outline">{capability.contextWindow === null ? '待填写上下文' : `${capability.contextWindow.toLocaleString()} tokens`}</Badge><Badge variant="outline">{capability.compactionThreshold === null ? '待填写压缩阈值' : `压缩 ${capability.compactionThreshold.toLocaleString()}`}</Badge>{selected.protocol === 'anthropic-messages' && <Badge variant="outline">{capability.maxOutputTokens === null ? '待填写最大输出' : `最大输出 ${capability.maxOutputTokens.toLocaleString()}`}</Badge>}{capability.inputModalities.map((modality) => <Badge key={modality} variant="secondary">{modality}</Badge>)}</div>;
                   })}
                 </div>
               </CardContent>

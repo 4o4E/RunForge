@@ -1,8 +1,6 @@
 import { Router } from 'express';
-import type { LlmSettingsOptions, McpSettingsOptions, ShellCommandOptionItem, ToolSettingsOptions } from '@runforge/contracts';
-import { getLlmSettings, getPageState, getSystemMcpSettings, getSystemToolSettings, llmModelOptions, savePageState, shellPathForSettings } from '../settings.js';
-import { findExecutable } from '../tools/sandbox.js';
-import { config } from '../config.js';
+import type { LlmSettingsOptions, McpSettingsOptions, ToolSettingsOptions } from '@runforge/contracts';
+import { getLlmSettings, getPageState, getSystemMcpSettings, llmModelOptions, savePageState } from '../settings.js';
 import { listMcpTools } from '../mcp/client.js';
 import { requireScope } from '../auth/context.js';
 import type { TenantScope } from '../store/types.js';
@@ -20,24 +18,8 @@ function scopeOrReject(res: Response): TenantScope | null {
   return scope;
 }
 
-function uniq(items: string[]): string[] {
-  return [...new Set(items.map((item) => item.trim()).filter(Boolean))];
-}
-
-export function shellCommandOptions(names: string[], envPath = process.env.PATH ?? ''): ShellCommandOptionItem[] {
-  return uniq(names)
-    .map((name) => {
-      const path = findExecutable(name, envPath) ?? null;
-      return { name, path, available: Boolean(path) };
-    })
-    .sort((a, b) => Number(b.available) - Number(a.available) || a.name.localeCompare(b.name));
-}
-
 export async function getToolSettingsOptions(): Promise<ToolSettingsOptions> {
-  const settings = await getSystemToolSettings();
-  const envPath = shellPathForSettings(settings);
   return {
-    shellCommands: shellCommandOptions([...config.tools.shellAllowCommands, ...settings.shellAllowCommands], envPath),
     systemPath: process.env.PATH ?? '',
   };
 }

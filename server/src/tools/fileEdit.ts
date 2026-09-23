@@ -16,7 +16,7 @@ export const fileEditTool: Tool = {
   },
   async run(args, ctx) {
     const inputPath = String(args.path ?? '');
-    const path = resolveToolPath(inputPath, ctx);
+    const path = await resolveToolPath(inputPath, ctx, 'write');
     const oldStr = String(args.old_string ?? '');
     const newStr = String(args.new_string ?? '');
     try {

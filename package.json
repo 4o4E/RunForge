@@ -1,21 +1,18 @@
 {
   "name": "runforge",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "private": true,
   "description": "RunForge: Node/TypeScript backend + React web console for general-purpose AI agent runs",
   "type": "module",
   "packageManager": "pnpm@11.5.3",
   "scripts": {
-    "dev": "pnpm --filter @runforge/contracts build && concurrently -n contracts,server,web -c yellow,blue,green \"pnpm --filter @runforge/contracts dev\" \"pnpm --filter server dev\" \"pnpm --filter web dev\"",
     "dev:server": "pnpm --filter server dev",
     "dev:web": "pnpm --filter web dev",
     "build": "pnpm --filter @runforge/contracts build && pnpm --filter @runforge/workload-sdk build && pnpm --filter server prisma:generate && concurrently --kill-others-on-fail -n server,web -c blue,green \"pnpm --filter server build:compile\" \"pnpm --filter web build\"",
     "model-catalog:update": "pnpm --filter server model-catalog:update",
     "model-catalog:check": "pnpm --filter server model-catalog:check",
+    "migrate:legacy-plugin-links": "pnpm --filter server migrate:legacy-plugin-links",
     "db:migrate": "pnpm --filter server db:migrate",
-    "start": "bash scripts/start.sh",
-    "stop": "bash scripts/stop.sh",
-    "restart": "bash scripts/restart.sh",
     "start:server": "pnpm --filter server start",
     "test": "pnpm --filter @runforge/contracts build && pnpm --filter @runforge/workload-sdk test && pnpm --filter server test && pnpm --filter web test",
     "typecheck": "pnpm --filter @runforge/contracts typecheck && pnpm --filter @runforge/workload-sdk typecheck && pnpm --filter server typecheck && pnpm --filter web typecheck"

@@ -51,13 +51,23 @@ export function resolveWorkspaceRoot(scope: WorkspaceScope | string, base: strin
   return resolve(join(tenantRoot, 'users', safeSegment(userId), 'workspace'));
 }
 
-/** 每个 thread 使用空间隔离的固定工作目录。space/thread ID 均由服务端生成且不可修改。 */
+/** 用户跨会话数据存放在独立的 `/u` 持久卷；用户 ID 是全局唯一数据库主键。 */
+export function resolveUserFilesRoot(userId: string, base = config.tools.userFilesRoot): string {
+  return resolve(join(base, safeSegment(userId)));
+}
+
+/** 空间根目录只承载服务端管理的只读资源，不作为 Agent 的可写工作目录。 */
+export function resolveSpaceWorkspaceRoot(spaceId: string, base: string = config.tools.workspaceRoot): string {
+  return resolve(join(base, safeSegment(spaceId)));
+}
+
+/** 每个 thread 使用空间内独立的可写工作目录。space/thread ID 均由服务端生成且不可修改。 */
 export function resolveThreadWorkspaceRoot(
   spaceId: string,
   threadId: string,
   base: string = config.tools.workspaceRoot,
 ): string {
-  return resolve(join(base, safeSegment(spaceId), safeSegment(threadId)));
+  return resolve(join(resolveSpaceWorkspaceRoot(spaceId, base), 'c', safeSegment(threadId)));
 }
 
 async function removeWorkspace(target: string): Promise<void> {
@@ -80,7 +90,7 @@ export function removeSpaceWorkspace(
   spaceId: string,
   base: string = config.tools.workspaceRoot,
 ): Promise<void> {
-  return removeWorkspace(resolve(join(base, safeSegment(spaceId))));
+  return removeWorkspace(resolveSpaceWorkspaceRoot(spaceId, base));
 }
 
 export function removeUserWorkspace(
@@ -91,6 +101,10 @@ export function removeUserWorkspace(
   return removeWorkspace(resolve(join(tenantBaseRoot(tenantId, base), 'users', safeSegment(userId))));
 }
 
+export function removeUserFiles(userId: string): Promise<void> {
+  return removeWorkspace(resolveUserFilesRoot(userId));
+}
+
 export function removeTenantWorkspace(
   tenantId: string,
   base: string = config.tools.workspaceRoot,
@@ -98,29 +112,18 @@ export function removeTenantWorkspace(
   return removeWorkspace(tenantBaseRoot(tenantId, base));
 }
 
-/** 把旧版 `<base>/<threadId>` 工作目录原子移动到空间目录下；已迁移时可重复调用。 */
+/** 新会话目录总是在 `c` 下创建；旧会话文件不自动搬入，历史消息和用量保持原样。 */
 export async function ensureThreadWorkspaceRoot(
   spaceId: string,
   threadId: string,
   base: string = config.tools.workspaceRoot,
 ): Promise<string> {
   const target = resolveThreadWorkspaceRoot(spaceId, threadId, base);
-  if (await pathExists(target)) return target;
-  const legacy = resolve(join(base, safeSegment(threadId)));
-  await mkdir(resolve(target, '..'), { recursive: true });
-  if (await pathExists(legacy)) {
-    try {
-      await rename(legacy, target);
-      return target;
-    } catch (error) {
-      if (!await pathExists(target)) throw error;
-    }
-  }
   await mkdir(target, { recursive: true });
   return target;
 }
 
-/** 所有空间统一按 `/w/{spaceId}/{threadId}` 派生工作目录。
+/** 所有空间统一按 `/w/{spaceId}/c/{threadId}` 派生工作目录。
  * thread 创建后 space 不可迁移，因此这个映射在整个 thread 生命周期内稳定。 */
 export function resolveWorkspaceRootForThread(
   thread: ThreadRow,

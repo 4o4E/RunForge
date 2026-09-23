@@ -74,6 +74,7 @@ interface Props {
   showAttach?: boolean;
   showShare?: boolean;
   showBrowser?: boolean;
+  fileScope?: 'thread' | 'user';
   onClose: () => void;
   onAttach: (entry: { kind: 'remote'; path: string; name: string; size?: number }) => void;
   onOpenFile?: (path: string) => void;
@@ -280,12 +281,13 @@ export function RemoteFilesPanel({
   showAttach = true,
   showShare = true,
   showBrowser = true,
+  fileScope = 'thread',
   onClose,
   onAttach,
   onOpenFile,
 }: Props) {
   const workspaceContext = useWorkspaceFileContext();
-  const threadId = shareAccess?.threadId ?? workspaceContext.threadId;
+  const threadId = shareAccess?.threadId ?? (fileScope === 'user' ? '@user' : workspaceContext.threadId);
   const { notify } = useNotifications();
   const [currentPath, setCurrentPath] = useState('.');
   const [treeWidth, setTreeWidth] = useState(270);
@@ -759,7 +761,7 @@ export function RemoteFilesPanel({
         >
           <ChevronRight className={cn('size-3.5 shrink-0 text-muted-foreground transition-transform', expanded.has('.') && 'rotate-90')} />
           {expanded.has('.') ? <FolderOpen className="size-4 shrink-0 text-foreground" /> : <Folder className="size-4 shrink-0 text-muted-foreground" />}
-          <span className="min-w-0 flex-1 truncate">工作区</span>
+        <span className="min-w-0 flex-1 truncate">{fileScope === 'user' ? '我的文件' : '工作区'}</span>
         </button>
         {expanded.has('.') && renderRows(treeEntries['.'], 1)}
       </div>

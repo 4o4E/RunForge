@@ -16,7 +16,7 @@ export const fileWriteTool: Tool = {
   },
   async run(args, ctx) {
     const inputPath = String(args.path ?? '');
-    const path = resolveToolPath(inputPath, ctx);
+    const path = await resolveToolPath(inputPath, ctx, 'write');
     const content = String(args.content ?? '');
     try {
       await mkdir(dirname(path), { recursive: true });

@@ -1,6 +1,9 @@
 import { readFile, stat } from 'node:fs/promises';
 import type { LlmContentPart, LlmMessage } from './types.js';
 import { isImageMediaType, mediaTypeFromPath, normalizeRemotePath, toRemotePath } from '../files/workspace.js';
+import { resolveWorkspaceFilePath } from '../files/workspace.js';
+import { isWithin } from '../tools/policy.js';
+import { isAbsolute, resolve } from 'node:path';
 
 const FILE_TOKEN_RE = /\[\[file:({.*?})\]\]/g;
 const TOOL_IMAGE_KIND = 'tool-image';
@@ -62,8 +65,17 @@ function cleanAttachmentText(text: string, images: LlmContentPart[]): string {
   return cleaned;
 }
 
-async function loadImageToken(token: FileToken, workspaceRoot: string): Promise<LlmContentPart | null> {
-  const absolute = normalizeRemotePath(token.path, workspaceRoot);
+function attachmentPath(path: string, workspaceRoot: string, userFilesRoot?: string): string {
+  return userFilesRoot && isAbsolute(path) && isWithin(userFilesRoot, path)
+    ? resolve(path)
+    : normalizeRemotePath(path, workspaceRoot);
+}
+
+async function loadImageToken(token: FileToken, workspaceRoot: string, userFilesRoot?: string): Promise<LlmContentPart | null> {
+  const absolute = attachmentPath(token.path, workspaceRoot, userFilesRoot);
+  if (userFilesRoot && isWithin(userFilesRoot, absolute)) {
+    await resolveWorkspaceFilePath(userFilesRoot, absolute, { access: 'read' });
+  }
   const mediaType = token.mimeType?.trim() || mediaTypeFromPath(absolute);
   if (!isImageMediaType(mediaType)) return null;
 
@@ -78,12 +90,12 @@ async function loadImageToken(token: FileToken, workspaceRoot: string): Promise<
     type: 'image',
     data: data.toString('base64'),
     mimeType: mediaType,
-    path: toRemotePath(absolute, workspaceRoot),
+    path: userFilesRoot && isWithin(userFilesRoot, absolute) ? absolute : toRemotePath(absolute, workspaceRoot),
     name: token.name,
   };
 }
 
-export async function hydrateImageAttachments(messages: LlmMessage[], workspaceRoot: string): Promise<LlmMessage[]> {
+export async function hydrateImageAttachments(messages: LlmMessage[], workspaceRoot: string, userFilesRoot?: string): Promise<LlmMessage[]> {
   // 工具图片只属于最近一轮 tool_call：模型已经消费过的旧帧不重复装载，避免每轮把全部关键帧重新塞回上下文。
   let latestToolRoundStart = -1;
   const fileReadCalls = new Map<string, string>();
@@ -126,7 +138,9 @@ export async function hydrateImageAttachments(messages: LlmMessage[], workspaceR
       if (message.toolCallId !== token.callId) return false;
       const requestedPath = fileReadCalls.get(token.callId);
       if (!requestedPath) return false;
-      return toRemotePath(normalizeRemotePath(requestedPath, workspaceRoot), workspaceRoot) === token.path;
+      const absolute = attachmentPath(requestedPath, workspaceRoot, userFilesRoot);
+      const expected = userFilesRoot && isWithin(userFilesRoot, absolute) ? absolute : toRemotePath(absolute, workspaceRoot);
+      return expected === token.path;
     });
     if (!tokens.length) {
       flushToolImages();
@@ -136,7 +150,7 @@ export async function hydrateImageAttachments(messages: LlmMessage[], workspaceR
 
     const imageParts: LlmContentPart[] = [];
     for (const token of tokens) {
-      const part = await loadImageToken(token, workspaceRoot);
+      const part = await loadImageToken(token, workspaceRoot, userFilesRoot);
       if (part) imageParts.push(part);
     }
 

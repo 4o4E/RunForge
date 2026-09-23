@@ -279,18 +279,19 @@ Provider 调用前 materialize。文件写入和状态更新都可重试，进�
 
 ## 7. Workspace
 
-- default 空间继续使用现有按 tenant + user 派生的统一用户级 workspace，不迁移旧文件。
-- 其他空间的新 thread 使用 `{workspaceBase}/{threadId}`。
+- 所有空间的 thread 使用 `/w/<spaceId>/c/<threadId>` 独立可写目录。旧会话目录中的文件不自动迁移，消息和用量记录保持原样。
+- 用户跨会话文件直接存放在独立持久卷 `/u/<userId>`，不移动旧用户 workspace 或会话文件。Web run 使用所属用户目录；external 空间由管理员通过 `external.allowUserFiles` 决定是否让新 run 读写其 execution user 的目录，默认关闭。空间配置在 run 接纳时固化，修改开关不改变已经接纳的 run；切换 execution user 后，旧 thread 的新 run 不再挂载旧用户目录。
+- 提示词占位符 `{{user.filesRoot}}` 在本次 run 已通过 bwrap 挂载用户目录时为绝对路径 `/u/<userId>`，否则为“已禁用”。文件工具与 shell 仅能访问当前用户目录，不自动访问其他会话；Web 文件入口独立按登录用户授权。
+- 空间根目录中的 `.skills`、`.workflows`、`.plugins`、`.agents` 只保存服务端管理的只读资源。thread 中的受控相对链接只指向当前运行选定的版本，不开放其他 thread 的文件。
 - 调用方不能提交或修改真实 workspace 路径。
 - thread 创建后不能迁移到其他 space。
 - 文件 API、shell、Office 预览、artifact 和签名分享都先从数据库校验 thread 归属，再由
   服务端计算路径。
-- 文件工具路径围栏和 bwrap 只挂载当前执行 workspace。
+- 文件工具按真实路径检查读写边界；bwrap 只挂载当前 thread、已选托管资源与锁定的业务插件快照。
 - 空间允许的 skill/workflow/plugin 由空间配置装配，不从其他 thread 的工作目录发现。
 
 当前实现约定：Web 文件接口使用 `threadId` 作为逻辑上下文参数，而不是接收真实目录。
-服务端先校验当前用户是否能访问该 thread/space，再按上述规则计算 workspace；不带
-`threadId` 的请求只兼容 default 空间的历史用户级 workspace。Web 空间的文件写入仍要求
+服务端先校验当前用户是否能访问该 thread/space，再按上述规则计算 workspace。Web 空间的文件写入仍要求
 thread 属于当前用户，空间可见不代表能查看其他用户的 Web thread；external 空间允许可见
 用户读取产物，但拒绝文件写入和 Web shell。签名分享在非 default 空间会把 `threadId`
 纳入 HMAC，防止同一路径的链接被换到另一个 thread 重放。
@@ -517,8 +518,7 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
 
 ### 阶段 6：Workspace 与文件能力
 
-- ✅ default 空间保持用户级 workspace。
-- ✅ 其他空间使用 `{workspaceBase}/{threadId}`。
+- 所有空间统一使用 `/w/<spaceId>/c/<threadId>` 独立可写目录，空间托管资源只读。
 - ✅ 文件、shell、预览、artifact 和分享统一走 thread 归属校验。
 
 ### 阶段 7：Web 页面
@@ -579,7 +579,7 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
 13. `next_step`：使用持久化 `run_inputs`，支持幂等、终态竞态和重启恢复。
 14. 外部问答：外部空间从 schema 和执行入口双重禁用 `ask_user`。
 15. Artifact：外部输入只引用 artifact ID，不接收宿主机路径。
-16. Workspace：default 保留用户级目录，其他空间使用 `{workspaceBase}/{threadId}`。
+16. Workspace：所有空间统一使用 `/w/<spaceId>/c/<threadId>`，空间托管资源按内容版本只读共享。
 17. Cordis：仅负责可信业务插件依赖和生命周期，不建立第二套 Agent runtime。
 18. 动态能力：内置能力保持强类型，插件能力使用 registry 管理 namespaced ID。
 19. Secret：长期 secret 按 tenant + key 只保存当前值，run 不保存明文或版本；一个 run

@@ -31,7 +31,6 @@ function testToolSettings(): ToolSettings {
     shellUseHostPath: true,
     shellPathMode: 'system',
     shellPath: process.env.PATH ?? '',
-    shellAllowCommands: ['git', 'ls', 'sed', 'python', 'node'],
     network: 'enabled',
     shellDeny: [],
     maxOutput: 40000,

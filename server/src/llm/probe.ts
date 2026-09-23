@@ -45,7 +45,7 @@ export function parseLlmModelList(body: unknown): string[] {
   return [...new Set(candidates.flatMap((item) => modelNameFromItem(item) ?? []))].sort((a, b) => a.localeCompare(b));
 }
 
-/** 供应商接口只用于发现模型名称，能力统一由本地目录或管理员配置提供。 */
+/** 供应商接口只用于发现模型名称，模型能力由管理员选择时单独获取并保存。 */
 export async function probeLlmProviderModels(provider: LlmProviderSettings): Promise<LlmProviderProbeResult> {
   const url = modelsUrl(provider);
   const ctrl = new AbortController();

@@ -29,6 +29,8 @@ export type TenantSecretResolver = (
 export interface BusinessPluginRuntimeInput {
   runId: string;
   workspaceRoot: string;
+  /** 空间内按版本保存链接；不包含会话文件。 */
+  spaceRoot?: string;
   definitions: readonly BusinessPluginDefinition[];
   lock: SpaceRuntimeLock;
   /** tenant 级非敏感配置；空间不能覆盖。 */
@@ -93,6 +95,9 @@ async function ensureWorkspaceLink(source: string, target: string): Promise<void
   if (await isSymbolicLinkTo(target, source)) return;
   const parent = dirname(target);
   await mkdir(parent, { recursive: true });
+  if (await realpath(parent) !== resolve(parent)) {
+    throw new BusinessPluginError('BUSINESS_PLUGIN_PATH_INVALID', `业务插件链接上级目录经过符号链接：${target}`);
+  }
   const staging = `${target}.tmp-${process.pid}-${randomUUID()}`;
   const backup = `${target}.old-${process.pid}-${randomUUID()}`;
   let movedExisting = false;
@@ -156,16 +161,22 @@ async function removeUnselectedPluginLinks(workspaceRoot: string, selectedIds: R
 
 async function materializePlugin(
   workspaceRoot: string,
+  spaceRoot: string,
   pluginId: string,
   contentHash: string,
   candidate?: BusinessPluginDefinition,
 ): Promise<BusinessPluginDefinition> {
   const target = linkedPluginRoot(workspaceRoot, pluginId);
   const existing = await expectedPlugin(target, pluginId, contentHash);
+  const spaceLink = resolve(spaceRoot, '.plugins', pluginId, contentHash);
+  const linkedVersion = await expectedPlugin(spaceLink, pluginId, contentHash);
 
   if (!candidate || candidate.manifest.id !== pluginId) {
-    // 旧版本曾把完整插件保存在 thread；对应的内容哈希快照丢失时继续使用该副本，
-    // 避免清理前创建的 run 无法恢复。存在正式快照时会在下方自动替换为链接。
+    // 部署目录更新后，已接纳 run 仍可通过空间内的版本化链接使用锁定的旧快照。
+    if (linkedVersion) {
+      await ensureWorkspaceLink(spaceLink, target);
+      return { ...linkedVersion, root: target, manifestPath: resolve(target, relative(linkedVersion.root, linkedVersion.manifestPath)) };
+    }
     if (existing && !(await lstat(target)).isSymbolicLink()) return existing;
     throw new BusinessPluginError(
       'BUSINESS_PLUGIN_NOT_READY',
@@ -192,12 +203,13 @@ async function materializePlugin(
     throw new BusinessPluginError('BUSINESS_PLUGIN_NOT_READY', `业务插件快照创建失败：${pluginId} (${contentHash})`);
   }
 
-  await ensureWorkspaceLink(snapshot.root, target);
-  if (!(await isSymbolicLinkTo(target, snapshot.root))) {
+  await ensureWorkspaceLink(snapshot.root, spaceLink);
+  await ensureWorkspaceLink(spaceLink, target);
+  if (!(await isSymbolicLinkTo(spaceLink, snapshot.root)) || !(await isSymbolicLinkTo(target, snapshot.root))) {
     await rm(target, { recursive: true, force: true });
     throw new BusinessPluginError(
       'BUSINESS_PLUGIN_NOT_READY',
-      `业务插件 ${pluginId} 的 thread 链接创建失败，拒绝启动 run`,
+      `业务插件 ${pluginId} 的空间或会话链接创建失败，拒绝启动 run`,
     );
   }
   // 校验使用快照真实路径；提供给 Skill、脚本和工具的仍是 thread 内稳定逻辑路径。
@@ -350,6 +362,7 @@ export class BusinessPluginRuntimeService {
     await this.syncWorkspace(input.workspaceRoot, new Set(selections.map((selection) => selection.id)));
     const definitions = await Promise.all(selections.map((selection) => materializePlugin(
       input.workspaceRoot,
+      input.spaceRoot ?? input.workspaceRoot,
       selection.id,
       selection.contentHash,
       candidates.get(selection.id),

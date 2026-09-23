@@ -16,7 +16,6 @@ import { shellExecTool } from './managedShell.js';
 import { requiresDatabaseAccess } from './databaseAccessGuard.js';
 import type { ToolResult, ToolRunContext } from './types.js';
 import { normalizeMcpSettings, normalizeToolSettings } from '../settings.js';
-import { shellCommandOptions } from '../api/settings.js';
 import { mcpToolName, parseMcpToolName } from '../mcp/client.js';
 import type { Scope } from '../store/types.js';
 
@@ -58,13 +57,6 @@ test('registry exposes neutral tool schemas and dispatches by name', async () =>
   assert.ok((await toolSchemas(['datasource_list'])).some((s) => s.name === 'datasource_list'));
   assert.ok(getTool('glob'));
   assert.match((await runTool('does_not_exist', {}, { scope: TEST_SCOPE })).text, /未知工具/);
-});
-
-test('shell command settings options come from command resolution', () => {
-  const commands = shellCommandOptions(['sh', 'definitely_missing_command_for_test', 'sh']);
-  assert.deepEqual(commands.map((command) => command.name).sort(), ['definitely_missing_command_for_test', 'sh']);
-  assert.equal(commands.find((command) => command.name === 'sh')?.available, true);
-  assert.equal(commands.find((command) => command.name === 'definitely_missing_command_for_test')?.available, false);
 });
 
 test('mcp tool names are mapped into a separate namespace', () => {
@@ -194,7 +186,7 @@ test('registry forwards run context to tool implementations', async () => {
   }
 });
 
-test('workflow_read explains same-name skill instead of reading skill workflows as RunForge workflows', async () => {
+test('workflow_read ignores thread-authored skills and workflows', async () => {
   const skillRoot = join(dir, '.skills', 'ppt-master');
   await mkdir(join(skillRoot, 'workflows'), { recursive: true });
   await writeFile(
@@ -219,11 +211,8 @@ test('workflow_read explains same-name skill instead of reading skill workflows 
     { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir }) },
   );
 
-  assert.match(out.text, /未找到 RunForge workflow: ppt-master/);
-  assert.match(out.text, /但找到了同名 skill: ppt-master/);
-  assert.match(out.text, /skill root:/);
-  assert.match(out.text, /skill_activate/);
-  assert.match(out.text, /skill 内部的 workflows\/\*\.md 属于该 skill 的普通资源/);
+  assert.match(out.text, /未找到 workflow: ppt-master/);
+  assert.doesNotMatch(out.text, /# Internal skill workflow/);
 });
 
 test('shell runs a command (PowerShell on Windows, sh elsewhere)', async () => {
@@ -333,6 +322,22 @@ test('file tools resolve relative paths from workspaceRoot', async () => {
 
   const grepOut = text(await grepTool.run({ pattern: 'TODO' }, ctx));
   assert.match(grepOut, /a\.ts:2/);
+});
+
+test('文件工具只在授权运行中读写当前用户目录', async () => {
+  const threadRoot = join(dir, 'thread-user-files');
+  const userRoot = join(dir, 'users', 'us_test');
+  const otherRoot = join(dir, 'users', 'us_other');
+  await Promise.all([mkdir(threadRoot, { recursive: true }), mkdir(userRoot, { recursive: true }), mkdir(otherRoot, { recursive: true })]);
+  const settings = normalizeToolSettings({ workspaceRoot: threadRoot, sandbox: 'enforce' });
+  const ownPath = join(userRoot, 'notes.md');
+  const context = { scope: TEST_SCOPE, settings, userFiles: { source: userRoot, mountPath: userRoot } };
+  assert.match((await runTool('file_write', { path: ownPath, content: '个人记录' }, context)).text, /已写入/);
+  assert.equal((await runTool('file_read', { path: ownPath }, context)).text, '个人记录');
+  assert.match((await runTool('glob', { path: userRoot, pattern: '*.md' }, context)).text, /\/users\/us_test\/notes\.md/);
+  assert.match((await runTool('grep', { path: userRoot, pattern: '个人记录' }, context)).text, /\/users\/us_test\/notes\.md:1/);
+  assert.match((await runTool('file_read', { path: ownPath }, { scope: TEST_SCOPE, settings })).text, /工具策略已阻止/);
+  assert.match((await runTool('file_read', { path: join(otherRoot, 'notes.md') }, context)).text, /工具策略已阻止/);
 });
 
 test('file_write creates file and parent dirs', async () => {

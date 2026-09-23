@@ -32,8 +32,10 @@ services:
       TOOL_NETWORK: disabled
       # 单条工具结果的最大字符数，可选范围：1000 至 40000。
       TOOL_MAX_OUTPUT: "40000"
-      # 会话工作区基础目录；所有空间按 /w/{spaceId}/{threadId} 隔离。
+      # 会话工作区基础目录；会话位于 /w/{spaceId}/c/{threadId}。
       TOOL_WORKSPACE_ROOT: /w
+      # 用户跨会话文件目录，与会话工作区分开挂载。
+      RUNFORGE_USER_FILES_ROOT: /u
       # Provider 调用观测记录目录。
       RUNFORGE_PROVIDER_TRACE_DIR: /app/provider-traces
       # 租户业务插件部署和历史运行快照目录；多个目录时使用逗号分隔。
@@ -46,6 +48,7 @@ services:
       OFFICE_PREVIEW_CACHE_VERSION: ""
     volumes:
       - runforge-workspaces:/w
+      - runforge-user-files:/u
       - runforge-business-plugins:/app/business-plugins
       - runforge-provider-traces:/app/provider-traces
     healthcheck:
@@ -57,5 +60,6 @@ services:
 
 volumes:
   runforge-workspaces:
+  runforge-user-files:
   runforge-business-plugins:
   runforge-provider-traces:

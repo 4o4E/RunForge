@@ -13,6 +13,7 @@ import type {
 import { config } from '../config.js';
 import { pool, query } from '../db/pool.js';
 import { getSystemToolSettings } from '../settings.js';
+import { resolveUserFilesRoot } from '../files/workspaceRoot.js';
 
 export interface UsageFilter {
   tenantId?: string | null;
@@ -166,7 +167,61 @@ async function scanThreadWorkspaces(map: Map<string, StorageBucket>, workspaceRo
     'SELECT id, tenant_id, user_id, space_id FROM threads ORDER BY space_id, id',
   );
   for (const thread of result.rows) {
-    const root = resolve(workspaceRoot, thread.space_id, thread.id);
+    for (const [root, legacy] of [
+      [resolve(workspaceRoot, thread.space_id, 'c', thread.id), false],
+      [resolve(workspaceRoot, thread.space_id, thread.id), true],
+      [resolve(workspaceRoot, thread.id), true],
+    ] as const) {
+      let entries;
+      try {
+        entries = await readdir(root, { withFileTypes: true });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+      for (const entry of entries) {
+        const category = legacy ? 'legacy_thread_workspace' : entry.name === 'uploads' ? 'thread_uploads' : 'thread_workspace';
+        const metric = await scanStoragePath(join(root, entry.name));
+        addBucket(map, {
+          tenantId: thread.tenant_id,
+          userId: thread.user_id,
+          spaceId: thread.space_id,
+          category,
+          ...metric,
+        });
+      }
+    }
+  }
+}
+
+/** `/u` 与会话、空间目录分开计数；用户文件不归属于任何单一空间。 */
+async function scanUserFiles(map: Map<string, StorageBucket>): Promise<void> {
+  const users = (await query<{ id: string; tenant_id: string }>(
+    'SELECT id, tenant_id FROM users ORDER BY id',
+  )).rows;
+  for (const user of users) {
+    const metric = await scanStoragePath(resolveUserFilesRoot(user.id));
+    if (!metric.allocatedBytes && !metric.fileCount && !metric.symlinkCount) continue;
+    addBucket(map, {
+      tenantId: user.tenant_id,
+      userId: user.id,
+      spaceId: null,
+      category: 'user_files',
+      ...metric,
+    });
+  }
+}
+
+/** 已删除会话可能留下旧版 `th_*` 目录；按空间归属统计，避免清理前漏算实际磁盘占用。 */
+async function scanOrphanLegacyWorkspaces(map: Map<string, StorageBucket>, workspaceRoot: string): Promise<void> {
+  const spaces = (await query<{ id: string; tenant_id: string }>(
+    'SELECT id, tenant_id FROM spaces ORDER BY id',
+  )).rows;
+  const known = new Set((await query<{ id: string; space_id: string }>(
+    'SELECT id, space_id FROM threads',
+  )).rows.map((thread) => `${thread.space_id}\0${thread.id}`));
+  for (const space of spaces) {
+    const root = resolve(workspaceRoot, space.id);
     let entries;
     try {
       entries = await readdir(root, { withFileTypes: true });
@@ -175,18 +230,36 @@ async function scanThreadWorkspaces(map: Map<string, StorageBucket>, workspaceRo
       throw error;
     }
     for (const entry of entries) {
-      const category = entry.name === 'uploads'
-          ? 'thread_uploads'
-          : entry.name === '.agents'
-            ? 'thread_agent_runtime'
-            : entry.name === 'plugins'
-              ? 'thread_plugins'
-              : 'thread_workspace';
-      const metric = await scanStoragePath(join(root, entry.name));
+      if (!entry.isDirectory() || !/^th_[0-9A-Za-z_-]+$/.test(entry.name) || known.has(`${space.id}\0${entry.name}`)) continue;
       addBucket(map, {
-        tenantId: thread.tenant_id,
-        userId: thread.user_id,
-        spaceId: thread.space_id,
+        tenantId: space.tenant_id,
+        userId: null,
+        spaceId: space.id,
+        category: 'orphan_legacy_thread_workspace',
+        ...await scanStoragePath(join(root, entry.name)),
+      });
+    }
+  }
+}
+
+/** 空间托管资源只按空间扫描一次；会话中的符号链接由线程扫描按链接本身计数。 */
+async function scanSpaceManagedResources(map: Map<string, StorageBucket>, workspaceRoot: string): Promise<void> {
+  const spaces = (await query<{ id: string; tenant_id: string }>(
+    'SELECT id, tenant_id FROM spaces ORDER BY id',
+  )).rows;
+  for (const space of spaces) {
+    for (const [directory, category] of [
+      ['.skills', 'space_skills'],
+      ['.workflows', 'space_workflows'],
+      ['.plugins', 'space_plugins'],
+      ['.agents', 'space_agents'],
+    ] as const) {
+      const metric = await scanStoragePath(resolve(workspaceRoot, space.id, directory));
+      if (!metric.allocatedBytes && !metric.fileCount && !metric.symlinkCount) continue;
+      addBucket(map, {
+        tenantId: space.tenant_id,
+        userId: null,
+        spaceId: space.id,
         category,
         ...metric,
       });
@@ -343,6 +416,9 @@ export function scanStorageUsage(): Promise<Date> {
     const settings = await getSystemToolSettings();
     const buckets = new Map<string, StorageBucket>();
     await scanThreadWorkspaces(buckets, settings.workspaceRoot);
+    await scanUserFiles(buckets);
+    await scanOrphanLegacyWorkspaces(buckets, settings.workspaceRoot);
+    await scanSpaceManagedResources(buckets, settings.workspaceRoot);
     await scanExternalArtifacts(buckets, settings.workspaceRoot);
     await scanBusinessPlugins(buckets);
     await scanDatabaseLogicalUsage(buckets);

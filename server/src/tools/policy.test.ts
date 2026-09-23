@@ -34,10 +34,21 @@ test('enforce: filesystem path confinement', () => {
   assert.equal(p.check('glob', { pattern: '**/*' }).ok, true);
 });
 
+test('用户文件目录只允许访问当前用户的根目录', () => {
+  const own = resolve('/u/us_owner');
+  const policy = createPolicy(cfg(), own);
+  assert.equal(policy.check('file_write', { path: resolve(own, 'notes.md') }).ok, true);
+  assert.equal(policy.check('file_read', { path: resolve('/u/us_other/notes.md') }).ok, false);
+  assert.equal(policy.check('file_read', { path: resolve(own, '../us_other/notes.md') }).ok, false);
+});
+
 test('materialized agent resource directories are readonly for file writes', () => {
   const p = createPolicy(cfg({ sandbox: 'off' }));
   const blockedSkill = p.check('file_write', { path: resolve(ROOT, '.agents/skills/database-access/SKILL.md') });
   assert.equal(blockedSkill.ok, false);
+  assert.equal(p.check('file_write', { path: resolve(ROOT, '.skills/private/SKILL.md') }).ok, false);
+  assert.equal(p.check('file_write', { path: resolve(ROOT, '.workflows/private/WORKFLOW.md') }).ok, false);
+  assert.equal(p.check('file_write', { path: resolve(ROOT, '.plugins/private/plugin.json') }).ok, false);
   assert.match((blockedSkill as { reason: string }).reason, /只读/);
   const blockedWorkflow = p.check('file_write', { path: resolve(ROOT, '.agents/workflows/software-development/WORKFLOW.md') });
   assert.equal(blockedWorkflow.ok, false);

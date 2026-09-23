@@ -9,7 +9,7 @@ import { ShellPanel } from './ShellPanel';
 import { SubagentPanel } from './SubagentPanel';
 import { cn } from '@/lib/utils';
 
-export type RightTabId = 'files' | `file:${string}` | `shell:${string}` | `subagent:${string}`;
+export type RightTabId = 'files' | 'user-files' | `file:${string}` | `shell:${string}` | `subagent:${string}`;
 
 interface Props {
   open: boolean;
@@ -23,6 +23,7 @@ interface Props {
   compact?: boolean;
   onTabChange: (tab: RightTabId | null) => void;
   onOpenFileBrowser: () => void;
+  onOpenUserFiles: () => void;
   onOpenFileTab: (path: string) => void;
   onOpenShellTab: (sessionId: string) => void;
   onOpenSubagentTab: (subagentId: string) => void;
@@ -52,6 +53,7 @@ function fileName(path: string): string {
 
 function tabSpec(tab: RightTabId, shellNames: Map<string, string>): TabSpec {
   if (tab === 'files') return { id: tab, label: '文件', icon: <FolderTree className="size-3.5 shrink-0" /> };
+  if (tab === 'user-files') return { id: tab, label: '我的文件', icon: <FolderTree className="size-3.5 shrink-0" /> };
   if (tab.startsWith('file:')) {
     const path = tab.slice('file:'.length);
     return { id: tab, label: fileName(path) || '文件', icon: <FileText className="size-3.5 shrink-0" /> };
@@ -134,6 +136,7 @@ function AddTabMenu({
   sessions,
   subagents,
   onOpenFileBrowser,
+  onOpenUserFiles,
   onOpenShellTab,
   onOpenSubagentTab,
   readOnly,
@@ -141,6 +144,7 @@ function AddTabMenu({
   sessions: ShellSession[];
   subagents: SubagentRun[];
   onOpenFileBrowser: () => void;
+  onOpenUserFiles: () => void;
   onOpenShellTab: (sessionId: string) => void;
   onOpenSubagentTab: (subagentId: string) => void;
   readOnly: boolean;
@@ -158,6 +162,10 @@ function AddTabMenu({
         <DropdownMenuItem onClick={onOpenFileBrowser}>
           <FolderTree className="mr-2 size-4" />
           文件浏览器
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={onOpenUserFiles}>
+          <FolderTree className="mr-2 size-4" />
+          我的文件
         </DropdownMenuItem>
         {!readOnly && (
           <>
@@ -196,6 +204,7 @@ export function RightSidebar({
   readOnly = false,
   onTabChange,
   onOpenFileBrowser,
+  onOpenUserFiles,
   onOpenFileTab,
   onOpenShellTab,
   onOpenSubagentTab,
@@ -303,6 +312,7 @@ export function RightSidebar({
             sessions={sessions}
             subagents={subagents}
             onOpenFileBrowser={onOpenFileBrowser}
+            onOpenUserFiles={onOpenUserFiles}
             onOpenShellTab={onOpenShellTab}
             onOpenSubagentTab={onOpenSubagentTab}
             readOnly={readOnly}
@@ -325,6 +335,19 @@ export function RightSidebar({
             onClose={onClose}
             onAttach={onAttach}
             onOpenFile={openFileAndCloseBrowser}
+          />
+        )}
+        {activeTab === 'user-files' && (
+          <RemoteFilesPanel
+            open
+            width={width}
+            previewPath={null}
+            embedded
+            compact={compact}
+            fileScope="user"
+            showAttach={false}
+            onClose={onClose}
+            onAttach={onAttach}
           />
         )}
         {activeFilePath && threadId && (
@@ -372,6 +395,7 @@ export function RightSidebar({
               sessions={sessions}
               subagents={subagents}
               onOpenFileBrowser={onOpenFileBrowser}
+              onOpenUserFiles={onOpenUserFiles}
               onOpenShellTab={onOpenShellTab}
               onOpenSubagentTab={onOpenSubagentTab}
               readOnly={readOnly}

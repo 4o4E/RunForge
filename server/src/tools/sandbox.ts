@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from 'node:child_process';
-import { accessSync, constants, existsSync, lstatSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { accessSync, constants, existsSync, lstatSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -13,13 +13,15 @@ export interface ShellSandboxConfig {
   policyMode: 'off' | 'enforce';
   backend: SandboxBackendName;
   workspaceRoot: string;
-  allowCommands: string[];
   useHostPath: boolean;
   envPath?: string;
   shareNet: boolean;
   env?: Record<string, string>;
   pluginExecutables?: Array<{ name: string; path: string }>;
   pluginRoots?: string[];
+  managedReadRoots?: string[];
+  spaceRoot?: string;
+  userFiles?: { source: string; mountPath: string };
 }
 
 export interface ShellExecResult {
@@ -36,21 +38,17 @@ export interface ShellSpawnSpec {
   cleanupPaths?: string[];
 }
 
-export interface ResolvedCommand {
-  name: string;
-  source: string;
-  dest: string;
-}
-
 interface BwrapOptions {
   workspaceRoot: string;
   command: string;
-  allowCommands: string[];
   shareNet: boolean;
   envPath?: string;
   env?: Record<string, string>;
   pluginExecutables?: Array<{ name: string; path: string }>;
   pluginRoots?: string[];
+  managedReadRoots?: string[];
+  spaceRoot?: string;
+  userFiles?: { source: string; mountPath: string };
 }
 
 const warned = new Set<string>();
@@ -102,25 +100,6 @@ export function findExecutable(name: string, envPath = process.env.PATH ?? ''): 
   return undefined;
 }
 
-/** 扫描 PATH 中真实可执行文件名,用于设置页给用户直接选择。 */
-export function scanExecutableNames(envPath = process.env.PATH ?? ''): string[] {
-  const names = new Set<string>();
-  for (const dir of unique(envPath.split(delimiter).filter(Boolean))) {
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (!entry.isFile() && !entry.isSymbolicLink()) continue;
-      const candidate = resolve(dir, entry.name);
-      if (canExecute(candidate)) names.add(entry.name);
-    }
-  }
-  return [...names].sort((a, b) => a.localeCompare(b));
-}
-
 /** bwrap 需要提前创建挂载点的父目录,这里只返回从浅到深的目录列表。 */
 export function parentDirs(path: string): string[] {
   const dirs: string[] = [];
@@ -164,6 +143,30 @@ function linkedPluginTargets(workspaceRoot: string, pluginRoots: readonly string
   return unique(targets);
 }
 
+/** 空间的插件目录只包含版本链接；目标快照仍按当前 run 的插件锁单独挂载。 */
+function managedPluginLinks(spaceRoot: string | null): string[] {
+  return spaceRoot ? existing([resolve(spaceRoot, '.plugins')]) : [];
+}
+
+/** 只挂载本次运行选中的 Skill、Workflow、SDK 内容版本，不暴露空间内其他版本。 */
+function selectedManagedTargets(workspaceRoot: string, spaceRoot: string | null, roots: readonly string[]): string[] {
+  if (!roots.length) return [];
+  if (!spaceRoot) throw new Error('托管资源缺少空间根目录');
+  const managedThreadRoot = resolve(workspaceRoot, '.agents');
+  const allowedTargets = ['.skills', '.workflows', '.agents'].map((name) => resolve(spaceRoot, name));
+  return unique(roots.map((root) => {
+    const path = resolve(root);
+    if (path !== managedThreadRoot && !path.startsWith(`${managedThreadRoot}/`)) {
+      throw new Error(`托管资源入口不属于当前会话：${path}`);
+    }
+    const target = realpathSync(path);
+    if (!allowedTargets.some((allowed) => target === allowed || target.startsWith(`${allowed}/`))) {
+      throw new Error(`托管资源目标不属于当前空间：${path}`);
+    }
+    return target;
+  }));
+}
+
 function safeEnvEntries(env: Record<string, string> | undefined): Array<[string, string]> {
   return Object.entries(env ?? {}).filter(([key, value]) => /^[A-Z_][A-Z0-9_]*$/.test(key) && typeof value === 'string');
 }
@@ -178,22 +181,10 @@ function cleanupTempPaths(paths: string[]): void {
   }
 }
 
-/** 把命令白名单解析成源路径和沙箱内目标路径,缺失命令会被跳过。 */
-export function resolveAllowedCommands(names: string[], envPath = process.env.PATH ?? ''): ResolvedCommand[] {
-  return unique(names)
-    .map((name) => {
-      const dest = findExecutable(name, envPath);
-      if (!dest) return undefined;
-      return { name, source: realpathSync(dest), dest };
-    })
-    .filter((cmd): cmd is ResolvedCommand => Boolean(cmd));
-}
-
 function hostPathForConfig(cfg: ShellSandboxConfig): { envPath: string; cleanupPaths: string[] } {
   const envPath = cfg.envPath ?? process.env.PATH ?? '';
-  const commands = resolveAllowedCommands(cfg.allowCommands, envPath);
   const pluginCommands = cfg.pluginExecutables ?? [];
-  if (!commands.length && !pluginCommands.length) return { envPath: '', cleanupPaths: [] };
+  if (!pluginCommands.length) return { envPath, cleanupPaths: [] };
 
   const dir = mkdtempSync(join(tmpdir(), 'runforge-shell-path-'));
   const linked = new Set<string>();
@@ -202,53 +193,64 @@ function hostPathForConfig(cfg: ShellSandboxConfig): { envPath: string; cleanupP
     linked.add(command.name);
     symlinkSync(resolve(command.path), join(dir, command.name));
   }
-  for (const command of commands) {
-    const linkName = basename(command.dest);
-    if (!linkName || linked.has(linkName)) continue;
-    linked.add(linkName);
-    symlinkSync(command.source, join(dir, linkName));
-  }
-  return { envPath: dir, cleanupPaths: [dir] };
+  return { envPath: `${dir}${delimiter}${envPath}`, cleanupPaths: [dir] };
 }
 
 /** 生成 bwrap 参数;纯函数便于单测,实际执行由 runShellCommand 完成。 */
 export function buildBwrapArgs(opts: BwrapOptions): string[] {
   const workspaceRoot = resolve(opts.workspaceRoot);
-  const readonlyWorkspacePaths = existing([resolve(workspaceRoot, 'plugins')]);
+  const threadParent = dirname(workspaceRoot);
+  const spaceRoot = opts.spaceRoot ?? (basename(threadParent) === 'c' ? dirname(threadParent) : null);
+  const readonlyWorkspacePaths = existing([resolve(workspaceRoot, 'plugins'), resolve(workspaceRoot, '.agents')]);
+  const readonlySpacePaths = managedPluginLinks(spaceRoot);
+  const managedTargets = selectedManagedTargets(workspaceRoot, spaceRoot, opts.managedReadRoots ?? []);
   const linkedReadonlyTargets = linkedPluginTargets(workspaceRoot, opts.pluginRoots ?? []);
-  const shell: ResolvedCommand = { name: 'sh', source: realpathSync('/bin/sh'), dest: '/bin/sh' };
-  const commands = resolveAllowedCommands(opts.allowCommands, opts.envPath);
+  const envPath = opts.envPath ?? process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin';
+  // bwrap 只投射容器里的系统文件与 PATH 目录；会话数据仍按当前 workspace/user 精确绑定。
+  const systemDirs = existing(['/usr', '/bin', '/sbin', '/lib', '/lib64']);
+  const configuredPathDirs = unique(envPath.split(delimiter).filter(isAbsolute).map((path) => resolve(path)));
+  const pathDirs = configuredPathDirs.filter((path) =>
+    !systemDirs.some((dir) => path === dir || path.startsWith(`${dir}/`))
+    && path !== workspaceRoot && !path.startsWith(`${workspaceRoot}/`)
+    && !(opts.userFiles && (path === opts.userFiles.mountPath || path.startsWith(`${opts.userFiles.mountPath}/`))));
+  const existingPathDirs = pathDirs.filter(existsSync);
+  const pathBindings = existingPathDirs.map((path) => ({ source: realpathSync(path), dest: path }));
+  // PATH 目录由 bwrap 挂载；先检查并固定真实源路径，避免符号链接变化后引入其他会话或用户目录。
+  for (const target of [...pathDirs, ...pathBindings.map((binding) => binding.source)]) {
+    const outsideCurrentWorkspace = target === '/w' || (target.startsWith('/w/')
+      && target !== workspaceRoot && !target.startsWith(`${workspaceRoot}/`));
+    const outsideCurrentUser = target === '/u' || (target.startsWith('/u/')
+      && !(opts.userFiles && (target === opts.userFiles.mountPath || target.startsWith(`${opts.userFiles.mountPath}/`))));
+    if (target === '/' || outsideCurrentWorkspace || outsideCurrentUser) {
+      throw new Error('PATH 不能挂载容器根目录或其他会话、用户的数据目录');
+    }
+  }
   const pluginCommands = (opts.pluginExecutables ?? []).map((item) => ({
     name: item.name,
     source: resolve(item.path),
     dest: `/runforge/plugin-bin/${item.name}`,
   }));
-  const bindFiles = unique([shell, ...commands].map((cmd) => `${cmd.source}\0${cmd.dest}`)).map((pair) => {
-    const [source, dest] = pair.split('\0');
-    return { source, dest };
-  });
-  const libDirs = existing(['/lib', '/lib64', '/usr/lib', '/usr/lib64']);
   const etcFiles = existing(
     opts.shareNet
-      ? ['/etc/ld.so.cache', '/etc/hosts', '/etc/resolv.conf', '/etc/nsswitch.conf']
-      : ['/etc/ld.so.cache'],
+      ? ['/etc/ld.so.cache', '/etc/passwd', '/etc/group', '/etc/hosts', '/etc/resolv.conf', '/etc/nsswitch.conf']
+      : ['/etc/ld.so.cache', '/etc/passwd', '/etc/group'],
   );
-  const extraReadOnlyPaths = existing([
-    ...(opts.shareNet ? ['/etc/ssl/certs', '/usr/share/ca-certificates'] : []),
-    ...(commands.some((cmd) => cmd.name === 'git') ? ['/usr/share/git-core'] : []),
-  ]);
-  const pathDirs = unique([
-    ...(pluginCommands.length ? ['/runforge/plugin-bin'] : []),
-    ...commands.map((cmd) => dirname(cmd.dest)),
-  ]);
+  const extraReadOnlyPaths = existing(['/etc/alternatives', ...(opts.shareNet ? ['/etc/ssl/certs'] : [])]);
+  const shellPath = pluginCommands.length ? `/runforge/plugin-bin:${envPath}` : envPath;
   const mountDirs = unique([
-    ...libDirs.flatMap(parentDirs),
+    ...systemDirs.flatMap(parentDirs),
+    ...systemDirs,
+    ...existingPathDirs.flatMap(parentDirs),
+    ...existingPathDirs,
     ...etcFiles.flatMap(parentDirs),
     ...extraReadOnlyPaths.flatMap(parentDirs),
-    ...bindFiles.flatMap((file) => parentDirs(file.dest)),
+    ...parentDirs('/bin/sh'),
     ...pluginCommands.flatMap((command) => parentDirs(command.dest)),
     ...parentDirs(workspaceRoot),
+    ...(opts.userFiles ? parentDirs(opts.userFiles.mountPath) : []),
     ...readonlyWorkspacePaths.flatMap(parentDirs),
+    ...readonlySpacePaths.flatMap(parentDirs),
+    ...managedTargets.flatMap(parentDirs),
     ...linkedReadonlyTargets.flatMap(parentDirs),
   ]);
 
@@ -258,20 +260,23 @@ export function buildBwrapArgs(opts: BwrapOptions): string[] {
 
   for (const dir of mountDirs) args.push('--dir', dir);
   args.push('--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp');
-  for (const dir of libDirs) args.push('--ro-bind', dir, dir);
+  for (const dir of systemDirs) args.push('--ro-bind', dir, dir);
+  for (const binding of pathBindings) args.push('--ro-bind', binding.source, binding.dest);
   for (const file of etcFiles) args.push('--ro-bind', file, file);
   for (const path of extraReadOnlyPaths) args.push('--ro-bind', path, path);
-  for (const file of bindFiles) args.push('--ro-bind', file.source, file.dest);
   for (const command of pluginCommands) args.push('--symlink', command.source, command.dest);
 
   args.push('--bind', workspaceRoot, workspaceRoot);
+  if (opts.userFiles) args.push('--bind', opts.userFiles.source, opts.userFiles.mountPath);
   for (const path of readonlyWorkspacePaths) args.push('--ro-bind', path, path);
+  for (const path of readonlySpacePaths) args.push('--ro-bind', path, path);
+  for (const path of managedTargets) args.push('--ro-bind', path, path);
   for (const path of linkedReadonlyTargets) args.push('--ro-bind', path, path);
   args.push('--chdir', workspaceRoot);
-  args.push('--setenv', 'PATH', pathDirs.length ? pathDirs.join(':') : '/usr/bin:/bin');
+  args.push('--setenv', 'PATH', shellPath);
   args.push('--setenv', 'HOME', workspaceRoot, '--setenv', 'PWD', workspaceRoot);
   for (const [key, value] of safeEnvEntries(opts.env)) args.push('--setenv', key, value);
-  args.push('--', shell.dest, '-c', opts.command);
+  args.push('--', '/bin/sh', '-c', opts.command);
   return args;
 }
 
@@ -326,6 +331,7 @@ function shouldUseBwrap(cfg: ShellSandboxConfig): { use: true; bwrapPath: string
 export async function runShellCommand(command: string, timeout: number, cfg: ShellSandboxConfig): Promise<ShellExecResult> {
   const selected = shouldUseBwrap(cfg);
   if (!selected.use) {
+    if (cfg.userFiles) throw new Error('用户文件目录只允许在 bwrap 沙箱中挂载');
     const hostPath = hostPathForConfig(cfg);
     try {
       return await hostShell(command, timeout, cfg.workspaceRoot, cfg.env, hostPath.envPath);
@@ -334,23 +340,17 @@ export async function runShellCommand(command: string, timeout: number, cfg: She
     }
   }
 
-  const missing = cfg.allowCommands.filter((name) => !findExecutable(name, cfg.envPath));
-  if (missing.length) {
-    warnOnce(
-      `bwrap-missing-commands:${missing.join(',')}`,
-      `工具沙箱 bwrap 模式：以下命令找不到，因此不可用：${missing.join(', ')}`,
-    );
-  }
-
   const args = buildBwrapArgs({
     workspaceRoot: cfg.workspaceRoot,
     command,
-    allowCommands: cfg.allowCommands,
     shareNet: cfg.shareNet,
     envPath: cfg.envPath,
     env: cfg.env,
     pluginExecutables: cfg.pluginExecutables,
     pluginRoots: cfg.pluginRoots,
+    managedReadRoots: cfg.managedReadRoots,
+    spaceRoot: cfg.spaceRoot,
+    userFiles: cfg.userFiles,
   });
   return execFileAsync(selected.bwrapPath, args, { timeout, maxBuffer: 1024 * 1024 * 10 });
 }
@@ -359,6 +359,7 @@ export async function runShellCommand(command: string, timeout: number, cfg: She
 export function buildShellSpawnSpec(command: string, cfg: ShellSandboxConfig): ShellSpawnSpec {
   const selected = shouldUseBwrap(cfg);
   if (!selected.use) {
+    if (cfg.userFiles) throw new Error('用户文件目录只允许在 bwrap 沙箱中挂载');
     const hostPath = hostPathForConfig(cfg);
     return isWindows
       ? {
@@ -382,19 +383,21 @@ export function buildShellSpawnSpec(command: string, cfg: ShellSandboxConfig): S
   const args = buildBwrapArgs({
     workspaceRoot: cfg.workspaceRoot,
     command,
-    allowCommands: cfg.allowCommands,
     shareNet: cfg.shareNet,
     envPath: cfg.envPath,
     env: cfg.env,
     pluginExecutables: cfg.pluginExecutables,
     pluginRoots: cfg.pluginRoots,
+    managedReadRoots: cfg.managedReadRoots,
+    spaceRoot: cfg.spaceRoot,
+    userFiles: cfg.userFiles,
   });
   return { file: selected.bwrapPath, args, backend: 'bwrap' };
 }
 
 export function describeShellSandbox(cfg: ShellSandboxConfig): string {
   if (cfg.policyMode !== 'enforce') return 'host';
-  if (cfg.useHostPath) return 'host (visible commands)';
+  if (cfg.useHostPath) return 'host (container PATH)';
   if (cfg.backend === 'none') return 'host (backend: none)';
   return `${cfg.backend}${cfg.shareNet ? ', net: enabled' : ', net: disabled'}`;
 }

@@ -78,6 +78,7 @@ function configService() {
 test('prompt template: 默认配置是单一模板，运行时替换占位符', () => {
   const defaults = defaultPromptTemplate('web');
   assert.match(defaults, /你是 RunForge/);
+  assert.match(defaults, /{{user\.filesRoot}}/);
   assert.doesNotMatch(defaults, /agent_loop|tool_behavior|standard_process/);
   const rendered = renderPromptTemplate('B {{workspace.root}}\n\nA', { 'workspace.root': '/workspace' });
   assert.equal(rendered, 'B /workspace\n\nA');
@@ -106,7 +107,8 @@ test('prompt placeholders: 服务端返回完整目录并按空间能力生成�
   const view = await service.promptPlaceholders('tn_config', 'web', config);
   const placeholders = new Map(view.placeholders.map((item) => [item.key, item]));
 
-  assert.equal(view.placeholders.length, 12);
+  assert.equal(view.placeholders.length, 13);
+  assert.equal(placeholders.get('user.filesRoot')?.token, '{{user.filesRoot}}');
   assert.equal(placeholders.get('workspace.root')?.token, '{{workspace.root}}');
   assert.equal(placeholders.get('workspace.root')?.runtime, true);
   assert.match(placeholders.get('workflow.catalog')?.content ?? '', /Available workflows/);
@@ -244,7 +246,7 @@ test('space config: run 接纳解析显式能力并从 external 空间双重移�
       businessPlugins: ['crm'],
       runtime: ['image'],
     },
-    external: { allowTrustedPrompt: true, allowNextStep: true },
+    external: { allowTrustedPrompt: true, allowNextStep: true, allowUserFiles: true },
   });
   const resolved = await service.resolveForRun('tn_config', {
     id: 'sp_config',
@@ -267,6 +269,8 @@ test('space config: run 接纳解析显式能力并从 external 空间双重移�
   assert.deepEqual(resolved.snapshot.capabilities.mcpServers, ['docs']);
   assert.deepEqual(resolved.snapshot.capabilities.businessPlugins, ['crm']);
   assert.deepEqual(resolved.snapshot.capabilities.runtime, ['image']);
+  assert.equal(resolved.snapshot.external.allowUserFiles, true);
+  assert.equal(resolved.snapshot.external.userFilesUserId, 'us_exec');
   assert.equal(resolved.pluginLock.plugins[0]?.id, 'business.crm');
   assert.deepEqual(resolved.pluginLock.plugins[0]?.config, { region: 'cn' });
   assert.match(resolved.snapshot.promptTemplate, /只输出审计结果/);

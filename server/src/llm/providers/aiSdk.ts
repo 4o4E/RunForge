@@ -156,7 +156,7 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
     model: buildModel(cfg, opts, callOptions?.fetch),
     messages: toModelMessages(messages),
     tools: toToolSet(tools),
-    // Anthropic 协议要求 max_tokens；使用模型目录声明的最大输出长度，不提供管理员可调的本地上限。
+    // Anthropic 协议要求 max_tokens；使用已保存的模型最大输出长度，其他协议不发送此参数。
     maxOutputTokens: opts.protocol === 'anthropic-messages' ? cfg.maxOutputTokens! : undefined,
     // 重试由 RunForge ProviderRunner 统一管理，确保每次 HTTP attempt 都可观测。
     maxRetries: 0,

@@ -337,7 +337,7 @@ function activeBranchRuns(runs: RunWithEvents[], activeRunId: string | null): Ru
 }
 
 function isRightTabId(value: unknown): value is RightTabId {
-  return value === 'files'
+  return value === 'files' || value === 'user-files'
     || (typeof value === 'string' && (value.startsWith('file:') || value.startsWith('shell:') || value.startsWith('subagent:')));
 }
 
@@ -1720,6 +1720,7 @@ export function App() {
           workspaceRoot={workspaceRoot}
           onTabChange={setRightPanelMode}
           onOpenFileBrowser={() => openRightTab('files')}
+          onOpenUserFiles={() => openRightTab('user-files')}
           onOpenFileTab={openRemoteFile}
           onOpenShellTab={(sessionId) => openRightTab(`shell:${sessionId}`)}
           onOpenSubagentTab={(subagentId) => openRightTab(`subagent:${subagentId}`)}
@@ -1784,6 +1785,7 @@ export function App() {
               workspaceRoot={workspaceRoot}
               onTabChange={setRightPanelMode}
               onOpenFileBrowser={() => openRightTab('files')}
+              onOpenUserFiles={() => openRightTab('user-files')}
               onOpenFileTab={openRemoteFile}
               onOpenShellTab={(sessionId) => openRightTab(`shell:${sessionId}`)}
               onOpenSubagentTab={(subagentId) => openRightTab(`subagent:${subagentId}`)}

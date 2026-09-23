@@ -78,7 +78,7 @@ export interface LlmConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
-  /** 仅用于必须显式声明 max_tokens 的协议，值取模型目录声明的最大输出长度。 */
+  /** 仅用于必须显式声明 max_tokens 的协议，值取已保存的模型配置。 */
   maxOutputTokens: number | null;
   timeoutMs: number;
   retries: number;

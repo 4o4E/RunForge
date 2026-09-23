@@ -48,7 +48,7 @@ export const shellTool: Tool = {
           sessionId: session.id,
           command,
           settings,
-          context: { threadId: ctx.threadId, runId: ctx.runId, stepId: ctx.stepId, step: ctx.step, pluginRoots: ctx.pluginRoots },
+          context: { threadId: ctx.threadId, runId: ctx.runId, stepId: ctx.stepId, step: ctx.step, pluginRoots: ctx.pluginRoots, managedReadRoots: ctx.managedReadRoots, spaceRoot: ctx.spaceRoot, userFiles: ctx.userFiles },
           waitMode: 'foreground',
           waitTimeoutMs: timeout,
           softTimeoutMs: Math.max(timeout, 10 * 60_000),
@@ -56,6 +56,7 @@ export const shellTool: Tool = {
           env: ctx.env,
           pluginExecutables: ctx.pluginExecutables,
           pluginRoots: ctx.pluginRoots,
+          managedReadRoots: ctx.managedReadRoots,
         });
         return formatCommandResult(result);
       }
@@ -63,13 +64,15 @@ export const shellTool: Tool = {
         policyMode: settings.sandbox,
         backend: settings.sandboxBackend,
         workspaceRoot: settings.workspaceRoot,
-        allowCommands: settings.shellAllowCommands,
         useHostPath: settings.shellUseHostPath,
         envPath: shellPathForSettings(settings),
         shareNet: settings.network === 'enabled',
         env: ctx?.env,
         pluginExecutables: ctx?.pluginExecutables,
         pluginRoots: ctx?.pluginRoots,
+        managedReadRoots: ctx?.managedReadRoots,
+        spaceRoot: ctx?.spaceRoot,
+        userFiles: ctx?.userFiles,
       });
       const output = [stdout, stderr && `[stderr]\n${stderr}`].filter(Boolean).join('\n').trim();
       return output ? redactShellOutput(output) : '（无输出）';

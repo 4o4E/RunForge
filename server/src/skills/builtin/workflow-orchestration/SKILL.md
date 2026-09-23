@@ -25,7 +25,7 @@ metadata:
 - `subagent_run` 不等待完成；不要把它当同步工具。
 - 同一个任务可以启动多个 subagent，但每个 subagent 的 `task`、`expectedOutput` 和 `constraints` 必须清楚。
 - workflow 只定义稳定阶段和 gate；本次具体目标写进 task assignment。
-- 如果需要新建或修改 workflow，写入 `.workflows/<name>/WORKFLOW.md`，不要修改 `.agents/workflows`。
+- Workflow 由管理员发布；当前会话只能使用已经启用的 Workflow，不能创建或修改。
 
 ## 输出
 

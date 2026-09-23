@@ -374,15 +374,15 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 ## 6. 文件系统与 workspace 隔离
 
 实例启动环境通过 `TOOL_WORKSPACE_ROOT` 配置 `workspaceRoot` 基础目录，生产 Compose 使用
-`/w`。所有空间统一使用 `<workspaceRoot>/<space_id>/<thread_id>`，因此生产路径为
-`/w/{spaceId}/{threadId}`。
+`/w`。所有空间统一使用 `<workspaceRoot>/<space_id>/c/<thread_id>`，因此生产路径为
+`/w/{spaceId}/c/{threadId}`。空间根目录中的 `.skills`、`.workflows`、`.plugins`、`.agents` 保存只读托管资源。
 
 - `getSystemToolSettings()` 从数据库读取系统工具策略，并从实例启动配置附加 `workspaceRoot`；系统设置接口不能修改该路径。
 - Agent、文件 API 和 shell session 在处理具体 thread 时共同调用 `resolveWorkspaceRootForThread(...)`，保证同一个 thread 使用同一路径。文件入口缺少 `threadId` 时返回 `THREAD_REQUIRED`；新会话首次上传附件会先创建 thread。
-- `normalizeRemotePath`/`isWithin`(`server/src/files/workspace.ts`)继续以当前 thread 的工作目录作为唯一围栏。
+- 文件工具与 Web 文件接口以当前 thread 的工作目录作为唯一可写围栏，并检查符号链接的真实目标；选中的空间托管资源仅可读取。
 - Office 预览缓存键包含 tenant 和 `space/thread` 工作区标识，避免跨工作区复用缓存。
 - 签名文件分享链接把 `tenantId`、`userId`、`spaceId` 和 `threadId` 全部写入 HMAC，任一定位字段被修改都会使签名失效。
-- 旧版 `<workspaceRoot>/<threadId>` 目录在首次访问时原子移动到 `<workspaceRoot>/<spaceId>/<threadId>`；目标已经存在时直接使用目标目录。
+- 旧版 `<workspaceRoot>/<spaceId>/<threadId>` 文件不自动移动到新目录；会话、消息和用量数据保持原样。
 
 ---
 
@@ -390,9 +390,11 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 
 延续 [工具沙箱设计](tool-sandbox.md) 已确立的两层模型(应用层路径策略 + bwrap OS 隔离),多租户在这两层之上都要收紧:
 
-**应用层路径策略**:围栏 root 使用当前 thread 的 `/w/{spaceId}/{threadId}`(见 §6)，直接复用现有路径检查。
+**应用层路径策略**:围栏 root 使用当前 thread 的 `/w/{spaceId}/c/{threadId}`(见 §6)，读写前检查真实路径。
 
-**bwrap 沙箱层**:`--bind <workspaceRoot> <workspaceRoot>` 只挂载当前 thread 工作目录；`plugins/` 再覆盖为只读挂载。命令白名单和网络开关由系统设置统一维护。
+用户跨会话文件使用容器内独立持久目录 `/u/{userId}`。用户 ID 是全局唯一主键，但网页接口仍按认证身份的 tenant/user 授权；普通用户不能指定其他用户 ID。外部空间仅在配置启用且 run 的执行用户与该空间接纳时的 execution user 一致时，才把相应目录作为第二个可写根。旧用户 workspace 不自动迁移或开放。
+
+**bwrap 沙箱层**:`--bind <workspaceRoot> <workspaceRoot>` 只挂载当前 thread 工作目录；受控 `.agents`、`plugins` 入口与本次选中的空间资源、插件快照分别只读挂载。容器 PATH 中的命令默认可用；系统设置维护防误操作黑名单和网络开关。
 
 **全局单例改造**:现有代码里几个 module-level 的全局状态,都要从"单例"变成"按 tenant_id 分片":
 
@@ -402,15 +404,15 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 | `shellManager`(`server/src/shell/manager.ts`) | 单例,`active: Map<string, ActiveCommand>` 覆盖所有租户所有 run | 保持单例(它管理的是同进程内的子进程句柄,天然是进程级资源),`ActiveCommand`/公开方法都带 `scope: Scope`,查询/清理逻辑按 scope 过滤;`markInterruptedCommandsOrphaned`(启动期孤儿命令清扫)保持跨租户扫描,用 `Unscoped` 后缀的 Store 方法,不在路由里暴露 |
 | `officePreview.ts` 的 `inflight` Map | key = `{path, size, mtime, converterUrl}` 的 hash,全局去重 | key 里加入 `tenantId`,因为 §6 之后 path 已经是租户专属路径,天然不会跨租户碰撞,这里只是显式保证 |
 
-**执行强隔离(容器化)是下一阶段,不在本次范围内**:上述改造把"数据/文件隔离"做到位,但 shell 工具仍然是"同进程 spawn 子进程 + bwrap namespace",不是"每个租户/每个 run 一个独立容器"。如果未来需要防御"租户能自定义/上传恶意二进制并诱导 bwrap 白名单外执行"这类更强的威胁模型,才需要升级到每 run 一个容器/microVM(gVisor、Firecracker),并配 CPU/内存/进程数配额。这是 [工具沙箱设计](tool-sandbox.md) §5"何时该做强隔离"里已经讨论过的优先级判断——多租户本身不强制要求这一步,只是让"是否需要"这个信号从"要不要对外" 变成了明确的"是"。
+**独立运行环境边界**:RunForge 服务运行在共享容器里，每个 Shell 子进程再由 bwrap 限制可见文件和进程；当前并非每个租户或每个 run 一个独立容器。如果未来需要防御恶意二进制、容器内核攻击或资源耗尽，还需要每 run 的独立容器或 microVM，并配置 CPU、内存和进程数配额。当前方案的实际边界见 [工具沙箱设计](tool-sandbox.md)。
 
 ---
 
 ## 8. Skills / Workflows
 
-- 内置 skill/workflow(`server/src/skills/builtin/`、`server/src/workflows/builtin/`)继续全局共享——它们是代码自带的能力,不含租户数据,没有隔离必要,所有租户看到同一份。
-- 用户自定义 skill 位于当前 thread 的 `<workspaceRoot>/.skills/<name>`，随空间和会话隔离。
-- 内置 skill 物化到 `<workspaceRoot>/.agents/skills/<name>`；业务插件位于 `<workspaceRoot>/plugins/<pluginId>`，使用服务端创建的相对符号链接指向内容哈希不可变快照，并由文件工具、文件 API 和 bwrap 保持只读。
+- 内置 Skill/Workflow 源文件由服务代码统一维护，运行时按内容版本准备到当前空间的 `.skills/.workflows`。
+- 普通会话不扫描或发布自建 Skill/Workflow；管理员对业务插件的安装和空间能力选择由现有管理入口负责。
+- 会话中的 `.agents/skills`、`.agents/workflows` 与 `plugins` 只保留受控相对链接，业务插件版本由运行记录锁定。文件工具与 bwrap 对选中的目标保持只读，Web 文件接口不公开这些目录。
 
 ---
 
@@ -477,7 +479,7 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 - ⚠️ 管理员审计本身是一个需要被信任的高权限能力:tenant owner/admin 能看到本租户任意成员的对话,system admin 能看到任意租户任意成员的对话——这不是"漏洞",而是设计如此(见 §1/§4),但意味着这两类身份的账号安全(密码强度、是否启用后续可能加的 2FA)比普通 member 更值得重视,一旦这两类账号被盗,影响面是"审计范围内的所有对话",需要在运营上对这两类账号的登录/密码策略从紧要求,这一版设计不包含强制 2FA,留作后续加固项。
 - ⚠️ JWT 吊销延迟:access JWT 一旦签发,在过期前无法撤销(§4),用户被禁用/踢出后仍可能有一个短窗口(access token 的过期时长)内继续使用旧 token;通过把过期时间设短(30~60 分钟)把风险窗口控制在可接受范围,而不是引入一张"已吊销 access token 黑名单"表把 JWT 又变回每请求查库。
 - ⚠️ refresh token / API token 是长期有效的不透明凭证,一旦泄露且未及时吊销,可以一直用到 `expires_at`/手动吊销为止——依赖 §4 的"只存 hash、创建时一次性显示明文"降低泄露概率,吊销响应速度取决于运营是否及时。
-- ⚠️ 执行层:shell 工具仍是同进程 + namespace 隔离,不是容器级强隔离;理论上如果 bwrap 配置有疏漏(如白名单命令本身有越权能力,例如白名单里的 `psql` 如果连接串配置不当),仍可能造成跨租户影响。这是 §7 提到的"下一阶段"要解决的问题,当前设计里作为已知风险记录,而不是假装已经解决。
+- ⚠️ 执行层:所有会话共享一个运行容器，Shell 子进程再由 bwrap namespace 隔离，不是每个租户或每个 run 独立容器；若挂载或凭证配置有疏漏，仍可能造成跨租户影响。命令黑名单只防误操作，不承担跨租户隔离。这是 §7 提到的更强隔离方案需要解决的问题。
 - ⚠️ 资源配额:CPU/内存/磁盘配额目前仍未实现(与单租户现状一致),多租户下"一个租户跑满资源影响其他租户"(noisy neighbor)问题需要额外的 cgroup/rlimit 工作,不在本次范围。
 - ⚠️ 引导账号默认密码是固定值(`1234.RunForge.5678`),不是随运行环境随机生成的秘密——只要读过这份文档或代码就知道默认密码,生产/公网环境**必须**通过 `RUNFORGE_BOOTSTRAP_ADMIN_PASSWORD`/`RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD` 覆盖,或登录后立刻改密,否则默认密码本身就是一个公开的后门。
 - ✅ `mcp/client.ts` 的 `listMcpTools`/`callMcpTool` 强制调用方传入当前 scope 的 `mcpSettings`，不存在隐式查询 `default` tenant 的分支。
