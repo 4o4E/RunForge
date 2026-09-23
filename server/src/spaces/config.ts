@@ -710,7 +710,13 @@ export class SpaceConfigService {
     catalog: TenantSpaceCapabilityCatalog,
     requestedModelRef?: string | null,
   ): Omit<RunSpaceConfigSnapshot, 'spaceId'> {
-    const allowedModelRefs = selectValues(config.model.allowedModelRefs, catalog.modelRefs, '模型');
+    const allowedModelRefs = unique(config.model.allowedModelRefs);
+    const unavailableModelRefs = missingValues(allowedModelRefs, new Set(catalog.modelRefs));
+    if (unavailableModelRefs.length) {
+      throw new SpaceConfigError(
+        `空间配置的模型当前不可用：${unavailableModelRefs.join(', ')}。请确认模型已启用、能力参数已配置且当前租户拥有供应商权限，或在空间设置中移除该模型。`,
+      );
+    }
     if (!allowedModelRefs.length) throw new SpaceConfigError('空间至少需要允许一个主 Agent 模型');
     const configuredDefault = config.model.defaultModelRef;
     if (configuredDefault && !allowedModelRefs.includes(configuredDefault)) {

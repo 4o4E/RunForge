@@ -797,7 +797,7 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
                   <Field label="Base URL"><Input value={draft.baseUrl} onChange={(event) => setProviderDraft({ baseUrl: event.target.value })} /></Field>
                   <Field label="API Key"><Input type="text" name="llm-provider-api-key" autoComplete="off" spellCheck={false} data-1p-ignore data-lpignore="true" data-bwignore="true" className="[-webkit-text-security:disc]" value={draft.apiKey} onChange={(event) => setProviderDraft({ apiKey: event.target.value })} /></Field>
                   <Field label="默认模型"><Select value={draft.defaultModel || 'none'} onValueChange={(value) => setProviderDraft({ defaultModel: value === 'none' ? '' : value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">未设置</SelectItem>{draft.models.map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}</SelectContent></Select></Field>
-                  <Field label="超时毫秒"><Input type="number" min={1000} value={draft.timeoutMs} onChange={(event) => setProviderDraft({ timeoutMs: Number(event.target.value) })} /></Field>
+                  <Field label="模型流空闲超时（毫秒）"><Input type="number" min={1000} value={draft.timeoutMs} onChange={(event) => setProviderDraft({ timeoutMs: Number(event.target.value) })} /></Field>
                   <Field label="重试次数"><Input type="number" min={0} value={draft.retries} onChange={(event) => setProviderDraft({ retries: Number(event.target.value) })} /></Field>
                 </div>
                 <div className="flex flex-wrap items-center justify-between gap-3">
@@ -900,7 +900,7 @@ export function LlmProviderSettingsPanel({ controlApi }: { controlApi: SettingsC
                   <SummaryRow label="Base URL" value={selected.baseUrl} />
                   <SummaryRow label="API Key" value={selected.apiKey ? '已配置' : '未配置'} />
                   <SummaryRow label="默认模型" value={selected.defaultModel || '未设置'} />
-                  <SummaryRow label="超时 / 重试" value={`${selected.timeoutMs} ms / ${selected.retries} 次`} />
+                  <SummaryRow label="模型流空闲超时 / 重试" value={`${selected.timeoutMs} ms / ${selected.retries} 次`} />
                 </div>
                 <div className="grid gap-2">
                   <div className="text-sm font-medium">已启用模型</div>

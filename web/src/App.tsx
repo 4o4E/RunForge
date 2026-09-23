@@ -481,7 +481,6 @@ export function App() {
   const threadPanelStatesRef = useRef<Record<string, ThreadPanelState>>({});
   const threadDraftsRef = useRef<Record<string, string>>({});
   const draftRef = useRef(route.draft);
-  const modelOptionsRef = useRef<LlmModelOption[]>([]);
   const selectedModelRefRef = useRef(selectedModelRef);
   const spaceIdRef = useRef<string | null>(route.spaceId);
   const reattachedEventsRef = useRef<AgentEvent[]>([]);
@@ -490,6 +489,12 @@ export function App() {
   const titleRefreshTimersRef = useRef<number[]>([]);
   const previousRightPanelVisibleRef = useRef(false);
   const rightPanelCloseTimerRef = useRef<number | null>(null);
+  const pendingSubmissionRef = useRef<{
+    text: string;
+    sentText: string;
+    attachments: ComposerAttachment[];
+    threadId: string | null;
+  } | null>(null);
 
   // 活跃会话 ID 放在 ref 中，稳定的 transport 可以读取和更新它，
   // 不需要在每次选择会话时重新创建 transport。
@@ -497,7 +502,6 @@ export function App() {
   const skipNextHistoryLoadRef = useRef<string | null>(null);
   threadIdRef.current = activeThreadId;
   spaceIdRef.current = route.spaceId;
-  modelOptionsRef.current = modelOptions;
   selectedModelRefRef.current = selectedModelRef;
 
   const currentThreadPanelState = useCallback((): ThreadPanelState => ({
@@ -695,7 +699,6 @@ export function App() {
       .then((settings) => {
         if (canceled) return;
         const options = settings.models;
-        modelOptionsRef.current = options;
         setModelOptions(options);
         setSelectedModelRef((current) => {
           const stored = readStoredModelRef();
@@ -870,19 +873,21 @@ export function App() {
     () => ({
       getThreadId: () => threadIdRef.current,
       getSpaceId: () => spaceIdRef.current,
-      getSelectedModelRef: () =>
-        modelOptionsRef.current.some((option) => option.ref === selectedModelRefRef.current)
-          ? selectedModelRefRef.current
-          : '',
+      // 已选模型若在其他页面被停用，仍交给服务端明确拒绝，不能静默改用空间默认模型。
+      getSelectedModelRef: () => selectedModelRefRef.current,
       setThreadId: (id) => {
         threadIdRef.current = id;
         skipNextHistoryLoadRef.current = id;
         navigateChatRoute({ draft: '', spaceId: spaceIdRef.current, threadId: id }, 'replace');
       },
       onThreadCreated: (thread) => {
+        if (pendingSubmissionRef.current) pendingSubmissionRef.current.threadId = thread.id;
         setThreads((current) => [thread, ...current.filter((item) => item.id !== thread.id)]);
       },
-      onRunStarted: refreshThreads,
+      onRunStarted: () => {
+        pendingSubmissionRef.current = null;
+        refreshThreads();
+      },
       onRunFinished: (threadId) => {
         refreshThreads();
         refreshThreadTitleAfterRun(threadId);
@@ -896,7 +901,30 @@ export function App() {
 
   const transport = useMemo(() => createAiSdkChatTransport(handle), [handle]);
 
-  const { messages, sendMessage, status, stop, setMessages } = useChat({ transport });
+  const { messages, sendMessage, status, stop, setMessages } = useChat({
+    transport,
+    onError: (error) => {
+      const pending = pendingSubmissionRef.current;
+      pendingSubmissionRef.current = null;
+      notify({
+        variant: 'error',
+        title: pending ? '消息未发送' : '对话连接出错',
+        description: error.message,
+        durationMs: 12_000,
+      });
+      if (!pending || pending.threadId !== threadIdRef.current) return;
+      setMessages((current) => {
+        const last = current.at(-1);
+        const lastText = last?.parts.filter((part) => part.type === 'text').map((part) => part.text).join('');
+        return last?.role === 'user' && lastText === pending.sentText ? current.slice(0, -1) : current;
+      });
+      draftRef.current = pending.text;
+      setComposerDraft(pending.text);
+      setAttachments(pending.attachments);
+      if (pending.threadId) rememberThreadDraftRef(pending.threadId, pending.text);
+      replaceDraftRouteLater(pending.threadId, pending.text);
+    },
+  });
   const busy = status === 'submitted' || status === 'streaming' || !!resumingRunId || !!reattachedRunId;
 
   useEffect(() => {
@@ -1440,6 +1468,7 @@ export function App() {
       : text;
     rememberSelectedModelRef(modelRef);
     setContinuableRunId(null);
+    if (!editingRunId) pendingSubmissionRef.current = { text, sentText: finalText, attachments, threadId: activeThreadId };
     if (activeThreadId) rememberThreadDraft(activeThreadId, '');
     draftRef.current = '';
     setComposerDraft('');

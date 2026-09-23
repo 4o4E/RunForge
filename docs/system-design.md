@@ -19,7 +19,7 @@
 - 通过 Agent 执行循环完成多步任务：计划、调用工具、观察结果、继续推进。
 - 通过 AI SDK 支持 `openai-responses`、`openai-chat`、`anthropic-messages` 三种 LLM 协议。
 - 内置通用工具：shell、托管 shell、文件读写/编辑、glob、grep、web fetch、web search、ask user、update plan、skill、workflow、subagent 和数据源访问。
-- LLM 请求固定使用流式传输，并支持超时和由 RunForge `ProviderRunner` 统一控制的瞬态错误重试。
+- LLM 请求固定使用流式传输。供应商的 `timeoutMs` 限制等待首个模型输出及相邻模型流片段的最长间隔，不限制持续输出的总时长；瞬态错误重试由 RunForge `ProviderRunner` 统一控制，已经发布输出的请求不重试。
 - 暴露 REST API 和 WebSocket 事件流。
 - 对话按 `thread -> run -> step` 组织并持久化到 PostgreSQL。
 - 前端提供 React 聊天控制台，可查看 reasoning、工具调用、工具结果和最终输出。

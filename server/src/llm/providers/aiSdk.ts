@@ -160,9 +160,7 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
     maxOutputTokens: opts.protocol === 'anthropic-messages' ? cfg.maxOutputTokens! : undefined,
     // 重试由 RunForge ProviderRunner 统一管理，确保每次 HTTP attempt 都可观测。
     maxRetries: 0,
-    abortSignal: callOptions?.abortSignal
-      ? AbortSignal.any([callOptions.abortSignal, AbortSignal.timeout(cfg.timeoutMs)])
-      : AbortSignal.timeout(cfg.timeoutMs),
+    abortSignal: callOptions?.abortSignal,
     // OpenAI Responses 走无状态模式，确保 reasoning item 返回不可解密的
     // encrypted_content，并由 RunForge 自己持久化；其他协议不发送此选项。
     providerOptions: opts.protocol === 'openai-responses' ? { openai: { store: false } } : undefined,
@@ -180,45 +178,68 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
     onDelta: (d: LlmDelta) => void,
     callOptions?: ProviderCallOptions,
   ): Promise<LlmResult> {
-    const r = streamText({
-      ...common(messages, tools, 'chat', callOptions),
-      // 错误由 fullStream 抛给调用方，统一由 agent 写入带 run/step 的诊断日志。
-      onError: () => {},
-    });
-    for await (const part of r.fullStream) {
-      if (part.type === 'text-delta') onDelta({ content: part.text });
-      else if (part.type === 'reasoning-delta') onDelta({ reasoning: part.text });
-      else if (part.type === 'tool-input-start') onDelta({ toolInputStart: { id: part.id, name: part.toolName } });
-      else if (part.type === 'tool-input-delta') onDelta({ toolInputDelta: { id: part.id, delta: part.delta } });
-      else if (part.type === 'tool-call') onDelta({ toolInputAvailable: { id: part.toolCallId, name: part.toolName, input: part.input } });
-      else if (part.type === 'error') throw part.error;
-    }
-    const [text, reasoningText, toolCalls, usage, finishReason, rawFinishReason, response] = await Promise.all([
-      r.text,
-      r.reasoningText,
-      r.toolCalls,
-      r.usage,
-      r.finishReason,
-      r.rawFinishReason,
-      r.response,
-    ]);
-    return {
-      content: text || null,
-      reasoning: reasoningText ?? null,
-      providerState: providerStateFromResponseMessages(response.messages),
-      toolCalls: toolCalls.map((c) => ({
-        id: c.toolCallId,
-        name: c.toolName,
-        arguments: JSON.stringify(c.input ?? {}),
-      })),
-      usage: {
-        inputTokens: usage?.inputTokens,
-        outputTokens: usage?.outputTokens,
-        cachedInputTokens: (usage as { cachedInputTokens?: number } | undefined)?.cachedInputTokens,
-      },
-      finishReason,
-      rawFinishReason,
+    // AI SDK 的 chunkMs 从首个 Provider 片段后才开始计时；首个有效输出前仍需独立计时。
+    // 推理、正文和工具调用均会发布 onDelta，因此输出期间不受整次请求墙钟时长限制。
+    const firstOutputAbort = new AbortController();
+    const firstOutputTimer = setTimeout(
+      () => firstOutputAbort.abort(new DOMException('等待模型首个输出事件超时', 'TimeoutError')),
+      cfg.timeoutMs,
+    );
+    const abortSignal = callOptions?.abortSignal
+      ? AbortSignal.any([callOptions.abortSignal, firstOutputAbort.signal])
+      : firstOutputAbort.signal;
+    let firstOutputSeen = false;
+    const publishDelta = (delta: LlmDelta) => {
+      if (!firstOutputSeen) {
+        firstOutputSeen = true;
+        clearTimeout(firstOutputTimer);
+      }
+      onDelta(delta);
     };
+    try {
+      const r = streamText({
+        ...common(messages, tools, 'chat', { ...callOptions, abortSignal }),
+        timeout: { chunkMs: cfg.timeoutMs },
+        // 错误由 fullStream 抛给调用方，统一由 agent 写入带 run/step 的诊断日志。
+        onError: () => {},
+      });
+      for await (const part of r.fullStream) {
+        if (part.type === 'text-delta') publishDelta({ content: part.text });
+        else if (part.type === 'reasoning-delta') publishDelta({ reasoning: part.text });
+        else if (part.type === 'tool-input-start') publishDelta({ toolInputStart: { id: part.id, name: part.toolName } });
+        else if (part.type === 'tool-input-delta') publishDelta({ toolInputDelta: { id: part.id, delta: part.delta } });
+        else if (part.type === 'tool-call') publishDelta({ toolInputAvailable: { id: part.toolCallId, name: part.toolName, input: part.input } });
+        else if (part.type === 'error') throw part.error;
+      }
+      const [text, reasoningText, toolCalls, usage, finishReason, rawFinishReason, response] = await Promise.all([
+        r.text,
+        r.reasoningText,
+        r.toolCalls,
+        r.usage,
+        r.finishReason,
+        r.rawFinishReason,
+        r.response,
+      ]);
+      return {
+        content: text || null,
+        reasoning: reasoningText ?? null,
+        providerState: providerStateFromResponseMessages(response.messages),
+        toolCalls: toolCalls.map((c) => ({
+          id: c.toolCallId,
+          name: c.toolName,
+          arguments: JSON.stringify(c.input ?? {}),
+        })),
+        usage: {
+          inputTokens: usage?.inputTokens,
+          outputTokens: usage?.outputTokens,
+          cachedInputTokens: (usage as { cachedInputTokens?: number } | undefined)?.cachedInputTokens,
+        },
+        finishReason,
+        rawFinishReason,
+      };
+    } finally {
+      clearTimeout(firstOutputTimer);
+    }
   }
 
   return {

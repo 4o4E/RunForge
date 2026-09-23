@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { createAiSdkProvider, providerStateFromResponseMessages, toModelMessages } from './providers/aiSdk.js';
 import type { ModelMessage } from 'ai';
 import type { LlmMessage } from './types.js';
@@ -193,5 +195,92 @@ test('AI SDK provider: 三种协议固定发送流式请求且只填写协议必
     }
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+async function withLocalSseServer(
+  firstDelayMs: number,
+  nextDelayMs: number,
+  chunkCount: number,
+  run: (baseUrl: string) => Promise<void>,
+): Promise<void> {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+    let timer: ReturnType<typeof setTimeout>;
+    let sent = 0;
+    const send = () => {
+      sent += 1;
+      response.write(`data: ${JSON.stringify({
+        id: 'chatcmpl-local',
+        object: 'chat.completion.chunk',
+        created: 1,
+        model: 'test-model',
+        choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: '思' }, finish_reason: null }],
+      })}\n\n`);
+      if (sent < chunkCount) {
+        timer = setTimeout(send, nextDelayMs);
+      } else {
+        response.write(`data: ${JSON.stringify({
+          id: 'chatcmpl-local',
+          object: 'chat.completion.chunk',
+          created: 1,
+          model: 'test-model',
+          choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+        })}\n\n`);
+        response.end('data: [DONE]\n\n');
+      }
+    };
+    timer = setTimeout(send, firstDelayMs);
+    response.on('close', () => clearTimeout(timer));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = (server.address() as AddressInfo).port;
+    await run(`http://127.0.0.1:${port}/v1`);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+}
+
+test('AI SDK provider: 持续推理输出超过单段超时仍可正常结束', async () => {
+  await withLocalSseServer(20, 150, 8, async (baseUrl) => {
+    const provider = createAiSdkProvider({
+      baseUrl,
+      apiKey: 'test-key',
+      model: 'test-model',
+      maxOutputTokens: null,
+      timeoutMs: 900,
+      retries: 0,
+    }, { protocol: 'openai-chat' });
+    const started = Date.now();
+    const reasoning: string[] = [];
+    const result = await provider.completeStream([{ role: 'user', content: '请思考' }], [], (delta) => {
+      if (delta.reasoning) reasoning.push(delta.reasoning);
+    });
+    assert.ok(Date.now() - started > 900);
+    assert.equal(reasoning.join(''), '思思思思思思思思');
+    assert.equal(result.finishReason, 'stop');
+  });
+});
+
+test('AI SDK provider: 首个输出和相邻输出均受无事件超时约束', async (t) => {
+  for (const [name, firstDelayMs, nextDelayMs] of [
+    ['首个输出', 700, 10],
+    ['相邻输出', 10, 700],
+  ] as const) {
+    await t.test(name, async () => {
+      await withLocalSseServer(firstDelayMs, nextDelayMs, 2, async (baseUrl) => {
+        const provider = createAiSdkProvider({
+          baseUrl,
+          apiKey: 'test-key',
+          model: 'test-model',
+          maxOutputTokens: null,
+          timeoutMs: 300,
+          retries: 0,
+        }, { protocol: 'openai-chat' });
+        await assert.rejects(provider.completeStream([{ role: 'user', content: '请思考' }], [], () => {}), /超时|abort/i);
+      });
+    });
   }
 });

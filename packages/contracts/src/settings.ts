@@ -91,6 +91,7 @@ export interface LlmProviderSettings {
   models: string[];
   modelCapabilities: LlmModelCapabilitySettings[];
   defaultModel: string;
+  /** 等待首个模型输出及相邻模型流片段的最长间隔，单位毫秒。 */
   timeoutMs: number;
   retries: number;
 }

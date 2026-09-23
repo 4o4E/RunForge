@@ -342,6 +342,34 @@ test('space config: 空间预算只有进一步收紧模型阈值时才成为有
   assert.equal(resolved.snapshot.model.contextBudgetSource, 'space-config');
 });
 
+test('space config: 已配置模型停用后在创建 run 前返回明确错误', async () => {
+  const config = await configService().snapshotForCreate('tn_config', 'web');
+  const service = new SpaceConfigService(async () => ({
+    ...structuredClone(catalog),
+    modelRefs: ['main:model-a'],
+  }));
+  const space = {
+    id: 'sp_disabled_model',
+    tenant_id: 'tn_config',
+    mode: 'web' as const,
+    name: 'Disabled Model',
+    execution_user_id: null,
+    config,
+    config_version: 1,
+    created_by_user_id: null,
+    visible_user_ids: [],
+    created_at: new Date(0).toISOString(),
+    updated_at: new Date(0).toISOString(),
+  };
+
+  await assert.rejects(
+    service.resolveForRun('tn_config', space, 'main:model-b'),
+    (error: unknown) => error instanceof SpaceConfigError
+      && /模型当前不可用：main:model-b/.test(error.message)
+      && /启用/.test(error.message),
+  );
+});
+
 test('space config: 业务插件声明的系统资源必须由空间统一 WORKLOAD_TOKEN 授权', async () => {
   const resourcePlugin = structuredClone(businessPlugin);
   resourcePlugin.manifest.resources = [{ type: 'llm.proxy' }];

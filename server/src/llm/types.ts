@@ -80,6 +80,7 @@ export interface LlmConfig {
   model: string;
   /** 仅用于必须显式声明 max_tokens 的协议，值取已保存的模型配置。 */
   maxOutputTokens: number | null;
+  /** 等待首个模型输出及相邻模型流片段的最长间隔，不是整次请求总时长。 */
   timeoutMs: number;
   retries: number;
 }

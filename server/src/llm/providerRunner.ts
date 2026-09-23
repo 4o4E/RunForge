@@ -145,7 +145,7 @@ function retryable(error: unknown, httpStatus: number | null): boolean {
     if (row.retryable === true || row.isRetryable === true) return true;
     const status = typeof row.statusCode === 'number' ? row.statusCode : row.status;
     if (typeof status === 'number' && RETRYABLE_STATUS.has(status)) return true;
-    if (row.name === 'AbortError') return true;
+    if (row.name === 'AbortError' || row.name === 'TimeoutError') return true;
   }
   return /timed? ?out|(?:fetch|request) failed|network|socket|terminated|econnreset|econnrefused|hang up/i.test(errorMessage(error));
 }
