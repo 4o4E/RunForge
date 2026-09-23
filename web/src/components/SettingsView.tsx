@@ -1,12 +1,10 @@
-import { Fragment, useEffect, useId, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Activity, ArchiveRestore, Moon, Palette, Plus, RefreshCw, Save, Sun, Trash2 } from 'lucide-react';
 import {
-  getThread,
   deleteThread,
   listThreads,
   updateThread,
-  type AgentEvent,
   type LlmSettings,
   type McpServerProbeResult,
   type McpServerSettings,
@@ -38,38 +36,13 @@ import { ModelSearchSelect, llmOptionsFromSettings } from './ModelSearchSelect';
 import { useThemeCtx } from '@/theme';
 import { useNotifications } from './GlobalNotifications';
 import { NavGroup, SectionButton } from '@/components/ui/settings-nav';
+import { UsageAnalyticsPanel } from '@/components/usage/UsageAnalyticsPanel';
+import { getPersonalUsage } from '@/usageApi';
 
 type SettingsPanel =
   | 'appearance'
   | 'usage-stats'
   | 'archived-threads';
-
-interface UsagePoint {
-  at: string;
-  inputTokens: number;
-  outputTokens: number;
-  cachedInputTokens: number;
-  totalTokens: number;
-}
-
-interface UsageStats {
-  threads: number;
-  runs: number;
-  points: UsagePoint[];
-  totalInput: number;
-  totalOutput: number;
-  totalCached: number;
-  totalTokens: number;
-  peakTokens: number;
-  averageTokens: number;
-  daily: UsageDay[];
-}
-
-interface UsageDay {
-  date: string;
-  totalTokens: number;
-  future: boolean;
-}
 
 function listToText(items: string[]): string {
   return items.join('\n');
@@ -295,86 +268,6 @@ export function shortTime(value: string | null): string {
   return new Date(value).toLocaleString();
 }
 
-function localDateKey(date: Date): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
-
-function startOfLocalDay(date: Date): Date {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
-}
-
-function numberField(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
-}
-
-function usagePointFromEvent(event: AgentEvent, at: string): UsagePoint | null {
-  if (event.type !== 'usage_update') return null;
-  const inputTokens = numberField(event.inputTokens);
-  const outputTokens = numberField(event.outputTokens);
-  const cachedInputTokens = numberField(event.cachedInputTokens);
-  const totalTokens = inputTokens + outputTokens;
-  if (totalTokens <= 0 && cachedInputTokens <= 0) return null;
-  return { at, inputTokens, outputTokens, cachedInputTokens, totalTokens };
-}
-
-function buildUsageStats(details: Awaited<ReturnType<typeof getThread>>[]): UsageStats {
-  const points: UsagePoint[] = [];
-  let runs = 0;
-  for (const detail of details) {
-    runs += detail.runs.length;
-    for (const run of detail.runs) {
-      for (const event of run.events) {
-        const point = usagePointFromEvent(event, run.updated_at || run.created_at);
-        if (point) points.push(point);
-      }
-    }
-  }
-  const dailyMap = new Map<string, number>();
-  for (const point of points) {
-    const date = new Date(point.at);
-    if (!Number.isNaN(date.getTime())) {
-      const key = localDateKey(date);
-      dailyMap.set(key, (dailyMap.get(key) ?? 0) + point.totalTokens);
-    }
-  }
-  const today = startOfLocalDay(new Date());
-  const end = new Date(today);
-  end.setDate(today.getDate() + (6 - today.getDay()));
-  const start = new Date(end);
-  start.setDate(end.getDate() - 83);
-  const daily = Array.from({ length: 84 }, (_, index) => {
-    const date = new Date(start);
-    date.setDate(start.getDate() + index);
-    const key = localDateKey(date);
-    return { date: key, totalTokens: dailyMap.get(key) ?? 0, future: date > today };
-  });
-  const totalInput = points.reduce((sum, point) => sum + point.inputTokens, 0);
-  const totalOutput = points.reduce((sum, point) => sum + point.outputTokens, 0);
-  const totalCached = points.reduce((sum, point) => sum + point.cachedInputTokens, 0);
-  const totalTokens = totalInput + totalOutput;
-  const peakTokens = points.reduce((peak, point) => Math.max(peak, point.totalTokens), 0);
-  const averageTokens = points.length ? Math.round(totalTokens / points.length) : 0;
-  return {
-    threads: details.length,
-    runs,
-    points,
-    totalInput,
-    totalOutput,
-    totalCached,
-    totalTokens,
-    peakTokens,
-    averageTokens,
-    daily,
-  };
-}
-
-function formatMetric(value: number): string {
-  return value.toLocaleString();
-}
-
 function AppearanceSettingsPanel() {
   const { theme, setTheme } = useThemeCtx();
 
@@ -421,132 +314,13 @@ function AppearanceSettingsPanel() {
 }
 
 function UsageStatsSettingsPanel() {
-  const [stats, setStats] = useState<UsageStats | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState('');
-
-  const refreshStats = () => {
-    setLoading(true);
-    setMessage('');
-    Promise.all([listThreads(), listThreads({ archived: true })])
-      .then(async ([activeThreads, archivedThreads]) => {
-        const threads = [...activeThreads, ...archivedThreads];
-        const details = await Promise.all(threads.map((thread) => getThread(thread.id)));
-        setStats(buildUsageStats(details));
-      })
-      .catch((err) => setMessage(`读取用量失败：${(err as Error).message}`))
-      .finally(() => setLoading(false));
-  };
-
-  useEffect(refreshStats, []);
-
-  const dailyUsage = stats?.daily ?? Array.from({ length: 84 }, () => ({ date: '', totalTokens: 0, future: false }));
-  const heatmapWeeks = Array.from({ length: 12 }, (_, week) => dailyUsage.slice(week * 7, week * 7 + 7));
-  const maxDaily = Math.max(1, ...dailyUsage.map((day) => day.totalTokens));
-
   return (
     <SettingsPanelShell
       title="用量统计"
-      description="按历史 run 事件统计 token 消耗、峰值、平均值和日热力图"
-      contentClassName="grid content-start gap-4"
-      actions={
-        <>
-          {message && <span className="max-w-md truncate text-sm text-muted-foreground">{message}</span>}
-          <Button variant="outline" onClick={refreshStats} disabled={loading}>
-            <RefreshCw className="h-4 w-4" />
-            {loading ? '刷新中' : '刷新'}
-          </Button>
-        </>
-      }
+      description="由服务端统一统计当前用户的 Token 消耗与存储占用"
+      contentClassName="min-h-0"
     >
-      <div className="grid items-start gap-3 md:grid-cols-3 xl:grid-cols-4">
-        <Card className="rounded-lg shadow-sm">
-          <CardHeader className="pb-2">
-            <CardDescription>总消耗</CardDescription>
-            <CardTitle>{formatMetric(stats?.totalTokens ?? 0)}</CardTitle>
-          </CardHeader>
-          <CardContent className="text-xs text-muted-foreground">
-            输入 {formatMetric(stats?.totalInput ?? 0)} · 输出 {formatMetric(stats?.totalOutput ?? 0)}
-          </CardContent>
-        </Card>
-        <Card className="rounded-lg shadow-sm">
-          <CardHeader className="pb-2">
-            <CardDescription>峰值</CardDescription>
-            <CardTitle>{formatMetric(stats?.peakTokens ?? 0)}</CardTitle>
-          </CardHeader>
-          <CardContent className="text-xs text-muted-foreground">单次 usage_update 的最高 token 消耗</CardContent>
-        </Card>
-        <Card className="rounded-lg shadow-sm">
-          <CardHeader className="pb-2">
-            <CardDescription>平均</CardDescription>
-            <CardTitle>{formatMetric(stats?.averageTokens ?? 0)}</CardTitle>
-          </CardHeader>
-          <CardContent className="text-xs text-muted-foreground">按 usage_update 条数平均</CardContent>
-        </Card>
-        <Card className="rounded-lg shadow-sm">
-          <CardHeader className="pb-2">
-            <CardDescription>缓存命中</CardDescription>
-            <CardTitle>{formatMetric(stats?.totalCached ?? 0)}</CardTitle>
-          </CardHeader>
-          <CardContent className="text-xs text-muted-foreground">
-            {formatMetric(stats?.threads ?? 0)} 个会话 · {formatMetric(stats?.runs ?? 0)} 个 run
-          </CardContent>
-        </Card>
-      </div>
-
-      <Card className="rounded-lg shadow-sm">
-        <CardHeader>
-          <CardTitle>日热力图</CardTitle>
-          <CardDescription>最近 12 周每日 token 消耗，颜色越深表示当天消耗越高</CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-3 overflow-x-auto">
-          <div className="grid w-max grid-cols-[auto_repeat(12,0.875rem)] gap-1">
-            <div />
-            {heatmapWeeks.map((week, index) => (
-              <div key={`week-${index}`} className="h-3 text-[10px] tabular-nums text-muted-foreground">
-                {index % 3 === 0 ? week[0]?.date.slice(5) : ''}
-              </div>
-            ))}
-            {['日', '一', '二', '三', '四', '五', '六'].map((weekday, row) => (
-              <Fragment key={`weekday-${weekday}`}>
-                <div className="flex h-3 items-center pr-1 text-[10px] text-muted-foreground">
-                  {row % 2 === 1 ? weekday : ''}
-                </div>
-                {heatmapWeeks.map((week, column) => {
-                  const day = week[row] ?? { date: '', totalTokens: 0, future: false };
-                  const ratio = day.totalTokens / maxDaily;
-                  return (
-                    <div
-                      key={`${day.date || column}-${row}`}
-                      className={cn('size-3 rounded-[2px] border border-border/60', day.future && 'opacity-35')}
-                      style={{
-                        backgroundColor:
-                          day.future
-                            ? 'transparent'
-                            : day.totalTokens > 0
-                              ? `hsl(var(--primary) / ${Math.max(0.18, ratio).toFixed(2)})`
-                              : 'hsl(var(--muted))',
-                      }}
-                      title={day.date ? `${day.date} · ${day.future ? '未到日期' : `${formatMetric(day.totalTokens)} token`}` : '暂无数据'}
-                    />
-                  );
-                })}
-              </Fragment>
-            ))}
-          </div>
-          <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
-            <span>少</span>
-            {[0.15, 0.35, 0.6, 0.85, 1].map((opacity) => (
-              <span
-                key={opacity}
-                className="size-3 rounded-[2px] border border-border/60"
-                style={{ backgroundColor: `hsl(var(--primary) / ${opacity})` }}
-              />
-            ))}
-            <span>多</span>
-          </div>
-        </CardContent>
-      </Card>
+      <UsageAnalyticsPanel load={getPersonalUsage} showUserFilter={false} />
     </SettingsPanelShell>
   );
 }

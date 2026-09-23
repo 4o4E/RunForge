@@ -389,7 +389,7 @@ sed -n '1,220p' /workspace/.skills/data-query/SKILL.md
 
 - `.agents/skills` 只读。
 - skill 路径必须位于 `workspaceRoot` 下。
-- 禁止 symlink 越界读取或写入；路径校验应使用 realpath。
+- 用户文件中的 symlink 禁止越界读取或写入；服务端为业务插件创建的受控链接只能指向本次 run 内容哈希锁定的不可变快照，并在 bwrap 中只读挂载。
 - shell 执行仍受 `SHELL_ENABLED`、`SHELL_DENY`、`TOOL_NETWORK`、`TOOL_MAX_OUTPUT` 控制。
 - 用户 skill 脚本视为不可信输入。
 - 内置 skill 不能因为来自代码仓库就绕过全局工具策略。
@@ -485,7 +485,7 @@ sed -n '1,220p' /workspace/.skills/data-query/SKILL.md
 安全验收：
 
 - `.agents/skills` 写入被拒绝。
-- symlink 指向 workspace 外部时读取/执行被拒绝。
+- 用户创建的 symlink 指向 workspace 外部时读取/执行被拒绝；服务端创建并按运行锁校验的业务插件链接除外。
 - 全局禁用 shell 时，skill 脚本无法执行。
 - 全局禁用网络时，skill 脚本不能通过 shell 获取网络能力。
 - 工具输出仍受 `TOOL_MAX_OUTPUT` 限制。

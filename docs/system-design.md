@@ -28,6 +28,7 @@
 - 支持 skill 文件协议，启动后索引内置和用户 skill，按需用 `skill_activate` 加载正文和资源。
 - 支持 workflow 文件协议，LLM 可按需列出和读取稳定流程。
 - 支持异步只读 subagent，主 agent 可派发子任务、轮询结果，并在前端资源栏查看。
+- 服务端统一聚合 Token 与存储占用，支持租户、用户、空间和时间维度；统计口径见[用量与存储分析](usage-and-storage-analysis.md)。
 
 ## 对话模型
 

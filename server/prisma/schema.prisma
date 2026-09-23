@@ -382,25 +382,26 @@ model provider_attempts {
 }
 
 model spaces {
-  id                   String                 @id
-  tenant_id            String
-  mode                 String
-  name                 String
-  execution_user_id    String?
-  config               Json                   @default("{}")
-  config_version       Int                    @default(1)
-  created_by_user_id   String?
-  created_at           DateTime               @default(now()) @db.Timestamptz(6)
-  updated_at           DateTime               @default(now()) @db.Timestamptz(6)
-  artifacts            artifacts[]
-  external_callers     external_callers[]
-  provider_invocations provider_invocations[]
-  space_visible_users  space_visible_users[]
-  tenants              tenants                @relation("spaces_tenant", fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  default_for_tenants  tenants[]              @relation("tenants_default_space")
-  execution_user       users?                 @relation("spaces_execution_user", fields: [execution_user_id, tenant_id], references: [id, tenant_id], onDelete: NoAction, onUpdate: Cascade)
-  created_by_user      users?                 @relation("spaces_created_by", fields: [created_by_user_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
-  threads              threads[]
+  id                    String                  @id
+  tenant_id             String
+  mode                  String
+  name                  String
+  execution_user_id     String?
+  config                Json                    @default("{}")
+  config_version        Int                     @default(1)
+  created_by_user_id    String?
+  created_at            DateTime                @default(now()) @db.Timestamptz(6)
+  updated_at            DateTime                @default(now()) @db.Timestamptz(6)
+  artifacts             artifacts[]
+  external_callers      external_callers[]
+  provider_invocations  provider_invocations[]
+  space_visible_users   space_visible_users[]
+  tenants               tenants                 @relation("spaces_tenant", fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  default_for_tenants   tenants[]               @relation("tenants_default_space")
+  execution_user        users?                  @relation("spaces_execution_user", fields: [execution_user_id, tenant_id], references: [id, tenant_id], onDelete: NoAction, onUpdate: Cascade)
+  created_by_user       users?                  @relation("spaces_created_by", fields: [created_by_user_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  threads               threads[]
+  storage_usage_samples storage_usage_samples[]
 
   @@unique([id, tenant_id])
   @@index([tenant_id, created_at], map: "idx_spaces_tenant")
@@ -625,6 +626,7 @@ model tenants {
   threads                     threads[]
   users                       users[]
   spaces                      spaces[]                      @relation("spaces_tenant")
+  storage_usage_samples       storage_usage_samples[]
   default_space               spaces?                       @relation("tenants_default_space", fields: [default_space_id, id], references: [id, tenant_id], onDelete: NoAction, onUpdate: Cascade)
 
   @@unique([is_bootstrap], map: "uq_tenants_bootstrap", where: raw("is_bootstrap"))
@@ -686,25 +688,49 @@ model threads {
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model users {
-  id                  String                @id
-  tenant_id           String
-  email               String
-  password_hash       String
-  role                String                @default("member")
-  status              String                @default("active")
-  is_bootstrap        Boolean               @default(false)
-  created_at          DateTime              @default(now()) @db.Timestamptz(6)
-  auth_tokens         auth_tokens[]
-  push_subscriptions  push_subscriptions[]
-  threads             threads[]
-  spaces_execution    spaces[]              @relation("spaces_execution_user")
-  spaces_created      spaces[]              @relation("spaces_created_by")
-  space_visible_users space_visible_users[]
-  tenants             tenants               @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  id                    String                  @id
+  tenant_id             String
+  email                 String
+  password_hash         String
+  role                  String                  @default("member")
+  status                String                  @default("active")
+  is_bootstrap          Boolean                 @default(false)
+  created_at            DateTime                @default(now()) @db.Timestamptz(6)
+  auth_tokens           auth_tokens[]
+  push_subscriptions    push_subscriptions[]
+  threads               threads[]
+  spaces_execution      spaces[]                @relation("spaces_execution_user")
+  spaces_created        spaces[]                @relation("spaces_created_by")
+  space_visible_users   space_visible_users[]
+  tenants               tenants                 @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  storage_usage_samples storage_usage_samples[]
 
   @@unique([tenant_id, email])
   @@unique([id, tenant_id])
   @@unique([is_bootstrap], map: "uq_users_bootstrap", where: raw("is_bootstrap"))
+}
+
+model storage_usage_samples {
+  id              BigInt   @id @default(autoincrement())
+  period          String
+  period_start    DateTime @db.Timestamptz(6)
+  tenant_id       String
+  user_id         String?
+  space_id        String?
+  category        String
+  logical_bytes   BigInt   @default(0)
+  allocated_bytes BigInt   @default(0)
+  file_count      BigInt   @default(0)
+  symlink_count   BigInt   @default(0)
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+  tenants         tenants  @relation(fields: [tenant_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  users           users?   @relation(fields: [user_id, tenant_id], references: [id, tenant_id], onDelete: Cascade, onUpdate: NoAction)
+  spaces          spaces?  @relation(fields: [space_id, tenant_id], references: [id, tenant_id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([period, period_start(sort: Desc)], map: "idx_storage_usage_samples_period")
+  @@index([tenant_id, period_start(sort: Desc)], map: "idx_storage_usage_samples_tenant")
+  @@index([tenant_id, user_id, period_start(sort: Desc)], map: "idx_storage_usage_samples_user")
+  @@index([tenant_id, space_id, period_start(sort: Desc)], map: "idx_storage_usage_samples_space")
 }
 
 model workload_tokens {

@@ -73,10 +73,35 @@ import {
 import { spaceConfigService } from '../spaces/config.js';
 import { deleteTenant, TenantDeletionError } from '../tenants/deletion.js';
 import { DeleteConflictError } from '../store/types.js';
+import { aggregateUsage, scanStorageUsage } from '../usage/service.js';
+import { parseUsageFilter } from './usage.js';
 
 export const systemApi = Router();
 
 systemApi.use('/tenants/:tenantId/spaces', systemSpacesApi);
+
+systemApi.get('/usage/aggregate', async (req, res) => {
+  let filter;
+  try {
+    filter = parseUsageFilter(req);
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
+    return;
+  }
+  try {
+    res.json(await aggregateUsage(filter));
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+systemApi.post('/usage/storage/refresh', async (_req, res) => {
+  try {
+    res.json({ capturedAt: (await scanStorageUsage()).toISOString() });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
 
 async function systemResourceScope(): Promise<TenantScope> {
   return { tenantId: await getSystemResourceTenantId() };

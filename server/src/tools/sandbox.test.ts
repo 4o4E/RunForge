@@ -1,10 +1,10 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import {
   buildBwrapArgs,
   buildShellSpawnSpec,
@@ -178,12 +178,16 @@ test('bwrap 只为业务插件声明命令建立 symlink 门面', () => {
 test('真实 bwrap 可以通过命令门面执行插件文件', async () => {
   if (process.platform !== 'linux') return;
   const workspace = await mkdtemp(join(tmpdir(), 'runforge-plugin-bwrap-'));
-  tempDirs.push(workspace);
-  const pluginDir = join(workspace, 'plugins', 'media', 'bin');
-  await mkdir(pluginDir, { recursive: true });
-  const command = join(pluginDir, 'helper');
-  await writeFile(command, '#!/bin/sh\nprintf bwrap-plugin\n');
-  await chmod(command, 0o755);
+  const snapshot = await mkdtemp(join(tmpdir(), 'runforge-plugin-snapshot-'));
+  tempDirs.push(workspace, snapshot);
+  const snapshotBin = join(snapshot, 'bin');
+  await mkdir(snapshotBin, { recursive: true });
+  await writeFile(join(snapshotBin, 'helper'), '#!/bin/sh\nprintf bwrap-plugin\n');
+  await chmod(join(snapshotBin, 'helper'), 0o755);
+  const pluginRoot = join(workspace, 'plugins', 'media');
+  await mkdir(dirname(pluginRoot), { recursive: true });
+  await symlink(relative(dirname(pluginRoot), snapshot), pluginRoot, 'dir');
+  const command = join(pluginRoot, 'bin', 'helper');
   const result = await runShellCommand('helper', 10_000, {
     policyMode: 'enforce',
     backend: 'bwrap',
@@ -192,8 +196,33 @@ test('真实 bwrap 可以通过命令门面执行插件文件', async () => {
     useHostPath: false,
     shareNet: false,
     pluginExecutables: [{ name: 'helper', path: command }],
+    pluginRoots: [pluginRoot],
   });
   assert.equal(result.stdout.trim(), 'bwrap-plugin');
+});
+
+test('bwrap 只挂载当前 run 明确选择的业务插件链接目标', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'runforge-plugin-roots-'));
+  const selectedSnapshot = await mkdtemp(join(tmpdir(), 'runforge-plugin-selected-'));
+  const unselectedSnapshot = await mkdtemp(join(tmpdir(), 'runforge-plugin-unselected-'));
+  tempDirs.push(workspace, selectedSnapshot, unselectedSnapshot);
+  const pluginsRoot = join(workspace, 'plugins');
+  await mkdir(pluginsRoot, { recursive: true });
+  const selectedRoot = join(pluginsRoot, 'selected');
+  const unselectedRoot = join(pluginsRoot, 'unselected');
+  await symlink(relative(pluginsRoot, selectedSnapshot), selectedRoot, 'dir');
+  await symlink(relative(pluginsRoot, unselectedSnapshot), unselectedRoot, 'dir');
+
+  const args = buildBwrapArgs({
+    workspaceRoot: workspace,
+    command: 'true',
+    allowCommands: [],
+    shareNet: false,
+    pluginRoots: [selectedRoot],
+  });
+
+  assert.equal(args.includes(selectedSnapshot), true);
+  assert.equal(args.includes(unselectedSnapshot), false);
 });
 
 test('buildBwrapArgs mounts git templates when git is allowed', () => {

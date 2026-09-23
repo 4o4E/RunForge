@@ -44,6 +44,7 @@ import { deletionGate } from '../deletion/gate.js';
 import { stopThreadsForDeletion } from '../deletion/runtime.js';
 import { removeExternalArtifacts } from '../deletion/files.js';
 import { abortRunExecution } from '../agent/executionControl.js';
+import { usageApi } from './usage.js';
 
 export const api = Router();
 
@@ -134,6 +135,7 @@ api.use('/spaces', tenantSpacesApi);
 api.use('/settings', settingsApi);
 api.use('/datasources', datasourcesApi);
 api.use('/notifications', notificationsApi);
+api.use('/usage', usageApi);
 
 async function killRunShellCommands(scope: Scope, runId: string): Promise<void> {
   try {

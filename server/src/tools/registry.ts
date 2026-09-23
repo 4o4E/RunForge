@@ -92,6 +92,7 @@ export async function runTool(
     settings?: Awaited<ReturnType<typeof getToolSettings>>;
     env?: Record<string, string>;
     pluginExecutables?: Array<{ name: string; path: string }>;
+    pluginRoots?: string[];
     threadId?: string;
     runId?: string;
     stepId?: string;

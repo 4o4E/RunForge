@@ -43,8 +43,9 @@ tenant 非敏感配置和 Secret 继续按相同插件 ID 保留。压缩包限�
 hash 恢复。同 ID 压缩包再次导入后视为重新安装，不恢复已经删除的非敏感配置；直接覆盖
 现有部署时继续保留配置。
 
-RunForge 不拉取 Git，也不建设业务插件发布仓库。活动 run 在首次启动时保存的工作副本继续
-使用原内容；更新后的内容只供之后接纳的新 run 使用。
+RunForge 不拉取 Git，也不建设业务插件发布仓库。活动 run 在首次启动时保存不可变内容哈希
+快照，thread 的 `plugins/<pluginId>` 使用相对符号链接指向该快照；更新后的内容只供之后接纳
+的新 run 使用。
 
 ## Manifest
 
@@ -117,9 +118,9 @@ HTTP/HTTPS，并且 `url` 与 `urlConfigKey` 必须二选一。
 - `plugin_lock.plugins` 保留空间中的插件顺序；同名可执行命令按该顺序选择第一个插件。
 - Secret 不进入 `plugin_lock`。业务 MCP 在激活和实际调用前读取 tenant 当前值；值变化时
   run 级 MCP session 会关闭旧连接并按新连接签名重连。
-- run 第一次启动时按内容 hash 保存一个不可变插件快照，并把快照通过写时复制克隆到当前
-  workspace 的 `plugins/<pluginId>`。支持写时复制的文件系统只在文件被修改后增加数据块；
-  其他文件系统回退为普通复制。工作副本使用独立 inode，旧快照仍可按运行锁恢复。
+- run 第一次启动时按内容 hash 保存一个不可变插件快照，并在当前 workspace 的
+  `plugins/<pluginId>` 创建指向该快照的相对符号链接。每个插件版本只保存一份实体内容；
+  bwrap 只把当前 run 已按运行锁选择并校验的链接目标按原路径只读挂载，旧快照仍可按运行锁恢复。
 - 业务 Skill 加入现有渐进加载目录，使用 `skill_activate` 激活；业务 MCP 随插件整体进入
   当前空间，但仍使用 `mcp_activate` 渐进发现工具。
 - 管理页可以展开查看每个 Skill 的名称、描述和 `SKILL.md` 入口正文。每个 MCP 会显示其
@@ -133,7 +134,7 @@ HTTP/HTTPS，并且 `url` 与 `urlConfigKey` 必须二选一。
   run 同时只有一个活动 token，等待后恢复执行时轮换，不按 Skill 或插件补签。
 - RunForge 会把 SDK 入口复制到当前 workspace 的 `.agents/runforge-workload-sdk/index.mjs`，
   并通过 `RUNFORGE_WORKLOAD_SDK` 暴露路径，因此调用方维护的业务插件不需要在部署目录中
-  安装 RunForge 依赖。该目录与 Skill、业务插件运行副本一样受工具写保护。
+  安装 RunForge 依赖。该目录与 Skill、业务插件链接一样受工具写保护。
 - Secret SDK 根据 `WORKLOAD_TOKEN` 反查 run 和 tenant，再按 key 读取当前值。一个 run 中
   的可信脚本共享同一 token；插件声明不限制某个脚本只能读取自己的 key。
 - `database.readonly` 映射现有数据源账号池，只签发只读权限档位；`llm.proxy` 和

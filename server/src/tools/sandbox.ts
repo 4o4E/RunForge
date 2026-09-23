@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from 'node:child_process';
-import { accessSync, constants, existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { accessSync, constants, existsSync, lstatSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -19,6 +19,7 @@ export interface ShellSandboxConfig {
   shareNet: boolean;
   env?: Record<string, string>;
   pluginExecutables?: Array<{ name: string; path: string }>;
+  pluginRoots?: string[];
 }
 
 export interface ShellExecResult {
@@ -49,6 +50,7 @@ interface BwrapOptions {
   envPath?: string;
   env?: Record<string, string>;
   pluginExecutables?: Array<{ name: string; path: string }>;
+  pluginRoots?: string[];
 }
 
 const warned = new Set<string>();
@@ -138,6 +140,30 @@ function existing(paths: string[]): string[] {
   return paths.filter((p) => existsSync(p));
 }
 
+/**
+ * 业务插件在 thread 中是指向内容哈希快照的符号链接。bwrap 只绑定 thread workspace
+ * 时看不到链接指向的外部 Docker volume，因此把服务端已经物化的链接目标按原路径只读绑定。
+ */
+function linkedPluginTargets(workspaceRoot: string, pluginRoots: readonly string[]): string[] {
+  const root = resolve(workspaceRoot, 'plugins');
+  if (!existsSync(root)) return [];
+  const targets: string[] = [];
+  for (const pluginRoot of pluginRoots) {
+    const path = resolve(pluginRoot);
+    try {
+      if (dirname(path) !== root) throw new Error(`业务插件根目录不属于当前 workspace：${path}`);
+      const stats = lstatSync(path);
+      // 没有正式快照的旧 run 可以继续使用 thread 内遗留实体目录；它已经包含在 workspace bind 中。
+      if (stats.isDirectory()) continue;
+      if (!stats.isSymbolicLink()) throw new Error(`业务插件根目录不是目录或受控链接：${path}`);
+      targets.push(realpathSync(path));
+    } catch {
+      throw new Error(`业务插件根目录无法解析：${path}`);
+    }
+  }
+  return unique(targets);
+}
+
 function safeEnvEntries(env: Record<string, string> | undefined): Array<[string, string]> {
   return Object.entries(env ?? {}).filter(([key, value]) => /^[A-Z_][A-Z0-9_]*$/.test(key) && typeof value === 'string');
 }
@@ -189,6 +215,7 @@ function hostPathForConfig(cfg: ShellSandboxConfig): { envPath: string; cleanupP
 export function buildBwrapArgs(opts: BwrapOptions): string[] {
   const workspaceRoot = resolve(opts.workspaceRoot);
   const readonlyWorkspacePaths = existing([resolve(workspaceRoot, 'plugins')]);
+  const linkedReadonlyTargets = linkedPluginTargets(workspaceRoot, opts.pluginRoots ?? []);
   const shell: ResolvedCommand = { name: 'sh', source: realpathSync('/bin/sh'), dest: '/bin/sh' };
   const commands = resolveAllowedCommands(opts.allowCommands, opts.envPath);
   const pluginCommands = (opts.pluginExecutables ?? []).map((item) => ({
@@ -222,6 +249,7 @@ export function buildBwrapArgs(opts: BwrapOptions): string[] {
     ...pluginCommands.flatMap((command) => parentDirs(command.dest)),
     ...parentDirs(workspaceRoot),
     ...readonlyWorkspacePaths.flatMap(parentDirs),
+    ...linkedReadonlyTargets.flatMap(parentDirs),
   ]);
 
   const args = ['--unshare-all', '--die-with-parent', '--new-session', '--tmpfs', '/'];
@@ -238,6 +266,7 @@ export function buildBwrapArgs(opts: BwrapOptions): string[] {
 
   args.push('--bind', workspaceRoot, workspaceRoot);
   for (const path of readonlyWorkspacePaths) args.push('--ro-bind', path, path);
+  for (const path of linkedReadonlyTargets) args.push('--ro-bind', path, path);
   args.push('--chdir', workspaceRoot);
   args.push('--setenv', 'PATH', pathDirs.length ? pathDirs.join(':') : '/usr/bin:/bin');
   args.push('--setenv', 'HOME', workspaceRoot, '--setenv', 'PWD', workspaceRoot);
@@ -321,6 +350,7 @@ export async function runShellCommand(command: string, timeout: number, cfg: She
     envPath: cfg.envPath,
     env: cfg.env,
     pluginExecutables: cfg.pluginExecutables,
+    pluginRoots: cfg.pluginRoots,
   });
   return execFileAsync(selected.bwrapPath, args, { timeout, maxBuffer: 1024 * 1024 * 10 });
 }
@@ -357,6 +387,7 @@ export function buildShellSpawnSpec(command: string, cfg: ShellSandboxConfig): S
     envPath: cfg.envPath,
     env: cfg.env,
     pluginExecutables: cfg.pluginExecutables,
+    pluginRoots: cfg.pluginRoots,
   });
   return { file: selected.bwrapPath, args, backend: 'bwrap' };
 }

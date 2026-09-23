@@ -15,6 +15,8 @@ export interface ToolRunContext {
   env?: Record<string, string>;
   /** 当前 run 由业务插件声明的命令；按空间插件顺序提供名称和绝对路径。 */
   pluginExecutables?: Array<{ name: string; path: string }>;
+  /** 当前 run 已按 plugin_lock 校验并物化的业务插件逻辑根目录。 */
+  pluginRoots?: string[];
   threadId?: string;
   runId?: string;
   stepId?: string;

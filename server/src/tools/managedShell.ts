@@ -5,10 +5,10 @@ import { store } from '../store/index.js';
 import type { Scope } from '../store/types.js';
 import { requiresDatabaseAccess, usesDatabaseAccessHelper, usesDatabaseCli } from './databaseAccessGuard.js';
 
-function requireShellContext(ctx: ToolRunContext | undefined): { scope: Scope; threadId: string; runId?: string; stepId?: string; step?: number; pluginExecutables?: Array<{ name: string; path: string }> } {
+function requireShellContext(ctx: ToolRunContext | undefined): { scope: Scope; threadId: string; runId?: string; stepId?: string; step?: number; pluginExecutables?: Array<{ name: string; path: string }>; pluginRoots?: string[] } {
   if (!ctx?.scope) throw new Error('托管 shell 需要当前身份 scope，上下文缺失。');
   if (!ctx?.threadId) throw new Error('托管 shell 需要当前 threadId，上下文缺失。');
-  return { scope: ctx.scope, threadId: ctx.threadId, runId: ctx.runId, stepId: ctx.stepId, step: ctx.step, pluginExecutables: ctx.pluginExecutables };
+  return { scope: ctx.scope, threadId: ctx.threadId, runId: ctx.runId, stepId: ctx.stepId, step: ctx.step, pluginExecutables: ctx.pluginExecutables, pluginRoots: ctx.pluginRoots };
 }
 
 function numberArg(value: unknown, fallback: number | null = null): number | null {
@@ -128,6 +128,7 @@ export const shellExecTool: Tool = {
       actor: parseShellActor(args.actor),
       env: ctx?.env,
       pluginExecutables: ctx?.pluginExecutables,
+      pluginRoots: ctx?.pluginRoots,
     });
     return formatCommandResult(result);
   },

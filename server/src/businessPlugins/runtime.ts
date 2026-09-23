@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { cp, lstat, mkdir, readdir, rename, rm } from 'node:fs/promises';
-import { constants, existsSync } from 'node:fs';
+import { cp, lstat, mkdir, readdir, realpath, rename, rm, symlink } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { validateHeaderValue } from 'node:http';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { McpServerSettings } from '@runforge/contracts';
 import { CordisRuntimeManager } from '../plugins/runtime.js';
 import type { SpaceRuntimeLock } from '../plugins/types.js';
@@ -39,6 +39,7 @@ export interface BusinessPluginRuntimeInput {
 export interface BusinessPluginRunHandle {
   skills: SkillIndexItem[];
   executables: BusinessPluginExecutable[];
+  pluginRoots: string[];
   mcpServers: McpServerSettings[];
   refreshMcpServers(stepId?: string | null): Promise<McpServerSettings[]>;
   dispose(): Promise<void>;
@@ -59,8 +60,11 @@ function snapshotPluginRoot(
   pluginId: string,
   contentHash: string,
 ): string {
+  const normalized = resolve(candidateRoot);
+  const snapshotSuffix = join('.runforge-snapshots', pluginId, contentHash, 'plugin');
+  if (normalized.endsWith(`${sep}${snapshotSuffix}`)) return normalized;
   return resolve(
-    dirname(candidateRoot),
+    dirname(normalized),
     '.runforge-snapshots',
     pluginId,
     contentHash,
@@ -72,21 +76,46 @@ function linkedPluginRoot(workspaceRoot: string, pluginId: string): string {
   return resolve(workspaceRoot, 'plugins', pluginId);
 }
 
-async function ensureWorkspaceCopy(source: string, target: string): Promise<void> {
+async function isSymbolicLinkTo(target: string, source: string): Promise<boolean> {
+  try {
+    if (!(await lstat(target)).isSymbolicLink()) return false;
+    return await realpath(target) === await realpath(source);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * thread 只保留指向内容哈希快照的相对符号链接。相对链接不固化容器内绝对路径，
+ * 同一目录树整体迁移后仍然有效；快照本身继续由 plugin_lock 固定版本。
+ */
+async function ensureWorkspaceLink(source: string, target: string): Promise<void> {
+  if (await isSymbolicLinkTo(target, source)) return;
   const parent = dirname(target);
   await mkdir(parent, { recursive: true });
   const staging = `${target}.tmp-${process.pid}-${randomUUID()}`;
+  const backup = `${target}.old-${process.pid}-${randomUUID()}`;
+  let movedExisting = false;
   try {
-    // COPYFILE_FICLONE 在支持的文件系统上使用写时复制；不支持时由 Node.js 回退为普通复制。
-    // 工作副本必须使用独立 inode，shell 直接写入时不能修改按 hash 保存的运行快照。
-    await cp(source, staging, { recursive: true, mode: constants.COPYFILE_FICLONE });
-    try {
-      await rename(staging, target);
-    } catch (error) {
-      if (!existsSync(target)) throw error;
+    const linkTarget = relative(parent, resolve(source));
+    if (!linkTarget || isAbsolute(linkTarget)) {
+      throw new BusinessPluginError('BUSINESS_PLUGIN_PATH_INVALID', `无法为业务插件创建相对链接：${source}`);
     }
+    await symlink(linkTarget, staging, 'dir');
+    try {
+      await rename(target, backup);
+      movedExisting = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    await rename(staging, target);
+    if (movedExisting) await rm(backup, { recursive: true, force: true });
+  } catch (error) {
+    if (movedExisting && !existsSync(target)) await rename(backup, target);
+    throw error;
   } finally {
     await rm(staging, { recursive: true, force: true });
+    if (existsSync(target)) await rm(backup, { recursive: true, force: true });
   }
 }
 
@@ -132,17 +161,12 @@ async function materializePlugin(
   candidate?: BusinessPluginDefinition,
 ): Promise<BusinessPluginDefinition> {
   const target = linkedPluginRoot(workspaceRoot, pluginId);
-  const linked = await expectedPlugin(target, pluginId, contentHash);
-  if (linked) return linked;
-  if (existsSync(target)) {
-    const stats = await lstat(target);
-    if (!stats.isDirectory()) {
-      throw new BusinessPluginError('BUSINESS_PLUGIN_PATH_INVALID', `业务插件工作目录被占用：${target}`);
-    }
-    await rm(target, { recursive: true });
-  }
+  const existing = await expectedPlugin(target, pluginId, contentHash);
 
   if (!candidate || candidate.manifest.id !== pluginId) {
+    // 旧版本曾把完整插件保存在 thread；对应的内容哈希快照丢失时继续使用该副本，
+    // 避免清理前创建的 run 无法恢复。存在正式快照时会在下方自动替换为链接。
+    if (existing && !(await lstat(target)).isSymbolicLink()) return existing;
     throw new BusinessPluginError(
       'BUSINESS_PLUGIN_NOT_READY',
       `业务插件部署和运行链接均不可用：${pluginId} (${contentHash})`,
@@ -168,16 +192,20 @@ async function materializePlugin(
     throw new BusinessPluginError('BUSINESS_PLUGIN_NOT_READY', `业务插件快照创建失败：${pluginId} (${contentHash})`);
   }
 
-  await ensureWorkspaceCopy(snapshot.root, target);
-  const materialized = await expectedPlugin(target, pluginId, contentHash);
-  if (!materialized) {
+  await ensureWorkspaceLink(snapshot.root, target);
+  if (!(await isSymbolicLinkTo(target, snapshot.root))) {
     await rm(target, { recursive: true, force: true });
     throw new BusinessPluginError(
       'BUSINESS_PLUGIN_NOT_READY',
-      `业务插件 ${pluginId} 在复制期间发生变化，拒绝启动 run`,
+      `业务插件 ${pluginId} 的 thread 链接创建失败，拒绝启动 run`,
     );
   }
-  return materialized;
+  // 校验使用快照真实路径；提供给 Skill、脚本和工具的仍是 thread 内稳定逻辑路径。
+  return {
+    ...snapshot,
+    root: target,
+    manifestPath: resolve(target, relative(snapshot.root, snapshot.manifestPath)),
+  };
 }
 
 function stringConfig(config: Readonly<Record<string, unknown>>, key: string): string | null {
@@ -396,6 +424,7 @@ export class BusinessPluginRuntimeService {
       return {
         skills,
         executables,
+        pluginRoots: definitions.map((definition) => definition.root),
         mcpServers,
         refreshMcpServers,
         dispose: async () => {

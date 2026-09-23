@@ -22,6 +22,7 @@ import { externalArtifactStorage } from './external/artifactStorage.js';
 import { listArtifactStorageKeys } from './external/repository.js';
 import { mountWebApp } from './web/static.js';
 import { materializeLegacySpaceConfigs } from './spaces/materialize.js';
+import { startStorageUsageScheduler } from './usage/service.js';
 
 const app = express();
 assertJwtSecretConfigured();
@@ -48,6 +49,7 @@ try {
   console.warn(`   External artifact reconciliation skipped: ${(error as Error).message}`);
 }
 startDatasourceLeaseReconciler();
+startStorageUsageScheduler();
 
 const displayHost = config.host.includes(':') ? `[${config.host}]` : config.host;
 

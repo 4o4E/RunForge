@@ -11,4 +11,5 @@ export type * from './auth.js';
 export * from './spaces.js';
 export * from './external.js';
 export type * from './businessPlugins.js';
+export type * from './usage.js';
 export * from './schemas.js';

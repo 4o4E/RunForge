@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { chmod, mkdtemp, mkdir, readFile, readdir, rename, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, cp, lstat, mkdtemp, mkdir, readFile, readlink, realpath, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { create as createTar } from 'tar';
@@ -474,11 +474,12 @@ test('业务插件运行时：materialize 多文件 Skill，并通过 tenant res
   assert.equal(handle.skills[0]?.id, 'business:crm/customer-query');
   assert.equal(handle.skills[0]?.root, join(workspaceRoot, 'plugins', 'crm', 'skills', 'customer-query'));
   assert.equal(existsSync(join(handle.skills[0]!.root, 'references', 'schema.md')), true);
-  await writeFile(join(handle.skills[0]!.root, 'references', 'schema.md'), '# workspace changed');
-  assert.equal(
-    await readFile(join(sourceRoot, '.runforge-snapshots', 'crm', definition.contentHash, 'plugin', 'skills', 'customer-query', 'references', 'schema.md'), 'utf8'),
-    '# Customer schema',
-  );
+  const workspacePluginRoot = join(workspaceRoot, 'plugins', 'crm');
+  const snapshotRoot = join(sourceRoot, '.runforge-snapshots', 'crm', definition.contentHash, 'plugin');
+  assert.equal((await lstat(workspacePluginRoot)).isSymbolicLink(), true);
+  assert.equal(resolve(dirname(workspacePluginRoot), await readlink(workspacePluginRoot)), snapshotRoot);
+  assert.equal(await realpath(workspacePluginRoot), await realpath(snapshotRoot));
+  assert.equal(await readFile(join(handle.skills[0]!.root, 'references', 'schema.md'), 'utf8'), '# Customer schema');
   assert.equal(handle.mcpServers[0]?.bearerToken, '');
   const debugServer = resolveBusinessPluginMcpServer(
     definition,
@@ -496,6 +497,19 @@ test('业务插件运行时：materialize 多文件 Skill，并通过 tenant res
   assert.deepEqual(requested, ['crm.api-key', 'crm.api-key']);
 
   await handle.dispose();
+  await rm(workspacePluginRoot, { force: true });
+  await cp(snapshotRoot, workspacePluginRoot, { recursive: true });
+  assert.equal((await lstat(workspacePluginRoot)).isDirectory(), true);
+  const migrated = await runtime.startRun({
+    runId: 'ru_business_runtime_migrate_copy',
+    workspaceRoot,
+    definitions: [definition],
+    lock: runLock(definition),
+    resolveSecrets: async () => ({ 'crm.api-key': 'rotated-tenant-secret' }),
+  });
+  assert.equal((await lstat(workspacePluginRoot)).isSymbolicLink(), true);
+  assert.equal(await readFile(join(migrated.skills[0]!.root, 'references', 'schema.md'), 'utf8'), '# Customer schema');
+  await migrated.dispose();
   await runtime.dispose();
 });
 

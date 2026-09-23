@@ -48,13 +48,14 @@ export const shellTool: Tool = {
           sessionId: session.id,
           command,
           settings,
-          context: { threadId: ctx.threadId, runId: ctx.runId, stepId: ctx.stepId, step: ctx.step },
+          context: { threadId: ctx.threadId, runId: ctx.runId, stepId: ctx.stepId, step: ctx.step, pluginRoots: ctx.pluginRoots },
           waitMode: 'foreground',
           waitTimeoutMs: timeout,
           softTimeoutMs: Math.max(timeout, 10 * 60_000),
           hardTimeoutMs: Math.max(timeout * 3, 30 * 60_000),
           env: ctx.env,
           pluginExecutables: ctx.pluginExecutables,
+          pluginRoots: ctx.pluginRoots,
         });
         return formatCommandResult(result);
       }
@@ -68,6 +69,7 @@ export const shellTool: Tool = {
         shareNet: settings.network === 'enabled',
         env: ctx?.env,
         pluginExecutables: ctx?.pluginExecutables,
+        pluginRoots: ctx?.pluginRoots,
       });
       const output = [stdout, stderr && `[stderr]\n${stderr}`].filter(Boolean).join('\n').trim();
       return output ? redactShellOutput(output) : '（无输出）';

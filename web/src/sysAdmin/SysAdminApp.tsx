@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Bot, Database, Image, KeyRound, Layers3, LogOut, Package, Shield, ShieldCheck, Users, Wifi, Wrench } from 'lucide-react';
+import { Activity, ArrowLeft, Bot, Database, Image, KeyRound, Layers3, LogOut, Package, Shield, ShieldCheck, Users, Wifi, Wrench } from 'lucide-react';
 import type { TenantSummary } from '@runforge/contracts';
 import { listSystemTenants, sysAdminLogout } from '../sysAdminApi';
 import { Card, CardContent } from '@/components/ui/card';
@@ -21,6 +21,8 @@ import { BusinessPluginManagementPanel } from '@/components/businessPlugins/Busi
 import { createSystemBusinessPluginControlApi } from '@/businessPluginControlApi';
 import { TenantUsersPanel } from '@/components/tenants/TenantUsersPanel';
 import { createSystemTenantUsersControlApi } from '@/tenantUsersControlApi';
+import { UsageAnalyticsPanel } from '@/components/usage/UsageAnalyticsPanel';
+import { getSystemUsage, refreshSystemStorageUsage } from '@/usageApi';
 
 type TenantSection = 'users' | 'spaces' | 'business-plugins';
 type SystemSection =
@@ -28,6 +30,7 @@ type SystemSection =
   | 'runtime-capabilities'
   | 'mcp-client'
   | 'tools-sandbox'
+  | 'usage'
   | DatasourceSettingsPage;
 
 type SysAdminRoute =
@@ -44,6 +47,7 @@ const SYSTEM_SECTIONS = new Set<SystemSection>([
   'runtime-capabilities',
   'mcp-client',
   'tools-sandbox',
+  'usage',
   'datasource-connection',
   'datasource-permissions',
   'datasource-pool',
@@ -55,6 +59,7 @@ const SYSTEM_SECTION_TITLES: Record<SystemSection, string> = {
   'runtime-capabilities': '运行时能力',
   'mcp-client': 'MCP 客户端',
   'tools-sandbox': 'Shell / 沙箱',
+  usage: '用量与存储',
   'datasource-connection': '数据源连接',
   'datasource-permissions': '数据源权限',
   'datasource-pool': '数据源账号池',
@@ -263,6 +268,7 @@ export function SysAdminApp() {
               <SectionButton active={route.page === 'settings' && route.section === 'runtime-capabilities'} icon={<Image className="h-4 w-4" />} onClick={() => navigate({ page: 'settings', section: 'runtime-capabilities' })}>运行时能力</SectionButton>
               <SectionButton active={route.page === 'settings' && route.section === 'mcp-client'} icon={<Wifi className="h-4 w-4" />} onClick={() => navigate({ page: 'settings', section: 'mcp-client' })}>MCP 客户端</SectionButton>
               <SectionButton active={route.page === 'settings' && route.section === 'tools-sandbox'} icon={<Wrench className="h-4 w-4" />} onClick={() => navigate({ page: 'settings', section: 'tools-sandbox' })}>Shell / 沙箱</SectionButton>
+              <SectionButton active={route.page === 'settings' && route.section === 'usage'} icon={<Activity className="h-4 w-4" />} onClick={() => navigate({ page: 'settings', section: 'usage' })}>用量与存储</SectionButton>
             </NavGroup>
 
             <NavGroup label="系统数据源">
@@ -294,6 +300,9 @@ export function SysAdminApp() {
           {route.page === 'settings' && route.section === 'runtime-capabilities' && <RuntimeCapabilitySettingsPanel controlApi={settingsControlApi} />}
           {route.page === 'settings' && route.section === 'mcp-client' && <McpServerSettingsPanel controlApi={settingsControlApi} />}
           {route.page === 'settings' && route.section === 'tools-sandbox' && <ToolsSettingsPanel controlApi={settingsControlApi} />}
+          {route.page === 'settings' && route.section === 'usage' && (
+            <UsageAnalyticsPanel load={getSystemUsage} showTenantFilter refreshStorage={refreshSystemStorageUsage} />
+          )}
           {route.page === 'settings' && route.section.startsWith('datasource-') && (
             <DatasourceSettingsPanel controlApi={datasourceControlApi} page={route.section as DatasourceSettingsPage} />
           )}

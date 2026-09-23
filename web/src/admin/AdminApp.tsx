@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Layers3, LogOut, Package, Users } from 'lucide-react';
+import { Activity, ArrowLeft, Layers3, LogOut, Package, Users } from 'lucide-react';
 import { getCurrentUser, logout } from '../api';
 import type { CurrentTenantUserSummary } from '@runforge/contracts';
 import { Card, CardContent } from '@/components/ui/card';
@@ -13,13 +13,15 @@ import { createTenantSpaceControlApi } from '@/spaceControlApi';
 import { BusinessPluginManagementPanel } from '@/components/businessPlugins/BusinessPluginManagementPanel';
 import { createTenantBusinessPluginControlApi } from '@/businessPluginControlApi';
 import { createTenantUsersControlApi } from '@/tenantUsersControlApi';
+import { UsageAnalyticsPanel } from '@/components/usage/UsageAnalyticsPanel';
+import { getTenantUsage } from '@/usageApi';
 
-type AdminSection = 'users' | 'spaces' | 'business-plugins';
+type AdminSection = 'users' | 'spaces' | 'business-plugins' | 'usage';
 type AdminRoute =
   | { page: 'section'; section: AdminSection }
   | { page: 'prompt'; spaceId: string };
 
-const ADMIN_SECTIONS = new Set<AdminSection>(['users', 'spaces', 'business-plugins']);
+const ADMIN_SECTIONS = new Set<AdminSection>(['users', 'spaces', 'business-plugins', 'usage']);
 
 function isAdminSection(value: string | undefined): value is AdminSection {
   return value !== undefined && ADMIN_SECTIONS.has(value as AdminSection);
@@ -133,6 +135,9 @@ export function AdminApp() {
               <SectionButton active={route.page === 'section' && route.section === 'business-plugins'} icon={<Package className="h-4 w-4" />} onClick={() => navigate({ page: 'section', section: 'business-plugins' })}>
                 业务插件
               </SectionButton>
+              <SectionButton active={route.page === 'section' && route.section === 'usage'} icon={<Activity className="h-4 w-4" />} onClick={() => navigate({ page: 'section', section: 'usage' })}>
+                用量与存储
+              </SectionButton>
             </NavGroup>
           </CardContent>
         </Card>
@@ -152,6 +157,9 @@ export function AdminApp() {
           )}
           {route.page === 'section' && route.section === 'business-plugins' && businessPluginControlApi && (
             <BusinessPluginManagementPanel api={businessPluginControlApi} />
+          )}
+          {route.page === 'section' && route.section === 'usage' && (
+            <UsageAnalyticsPanel load={getTenantUsage} />
           )}
           {route.page === 'prompt' && spaceControlApi && (
             <SpacePromptManagementPage

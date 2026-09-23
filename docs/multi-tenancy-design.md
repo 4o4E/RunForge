@@ -39,6 +39,7 @@
 - 每个用户独立的 workspace 文件树；租户只作为上层目录边界,同租户用户默认不共享文件。
 - 系统管理员授予的一组系统资源,当前包括 LLM provider 和数据源。
 - 租户内独立管理的用户、空间和业务插件。
+- owner/admin 可以查看本租户按用户和空间聚合的 Token 与存储占用；member 只能查看本人数据。系统管理员通过独立系统接口跨租户分析，不借用租户身份。
 
 `tenant_id` 是贯穿改造的主键。所有新租户均由服务端使用雪花 ID + Base62 生成，并带 `tn_` 前缀；名称与 ID 相互独立，`Default` 只表示引导租户的初始名称。`tenants.is_bootstrap` 标记承载系统资源和默认登录入口的引导租户。现有数据库中旧的 `id='default'` 会在启动时迁移为新的 `tn_` ID，所有关联外键通过 `ON UPDATE CASCADE` 同步更新。
 
@@ -409,7 +410,7 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 
 - 内置 skill/workflow(`server/src/skills/builtin/`、`server/src/workflows/builtin/`)继续全局共享——它们是代码自带的能力,不含租户数据,没有隔离必要,所有租户看到同一份。
 - 用户自定义 skill 位于当前 thread 的 `<workspaceRoot>/.skills/<name>`，随空间和会话隔离。
-- 内置 skill 物化到 `<workspaceRoot>/.agents/skills/<name>`；业务插件位于 `<workspaceRoot>/plugins/<pluginId>`，文件从不可变快照写时复制到工作目录，并由文件工具和文件 API 保持只读。
+- 内置 skill 物化到 `<workspaceRoot>/.agents/skills/<name>`；业务插件位于 `<workspaceRoot>/plugins/<pluginId>`，使用服务端创建的相对符号链接指向内容哈希不可变快照，并由文件工具、文件 API 和 bwrap 保持只读。
 
 ---
 
