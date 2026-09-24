@@ -127,7 +127,7 @@ export async function hydrateImageAttachments(messages: LlmMessage[], workspaceR
   };
   for (const [index, message] of messages.entries()) {
     if ((message.role !== 'user' && message.role !== 'tool') || !message.content) {
-      flushToolImages();
+      if (message.role !== 'tool') flushToolImages();
       hydrated.push(message);
       continue;
     }
@@ -143,7 +143,8 @@ export async function hydrateImageAttachments(messages: LlmMessage[], workspaceR
       return expected === token.path;
     });
     if (!tokens.length) {
-      flushToolImages();
+      // 同一轮可能同时包含图片读取和普通工具结果；全部工具结果结束后才能插入用户图片消息。
+      if (message.role !== 'tool') flushToolImages();
       hydrated.push(message);
       continue;
     }
@@ -155,13 +156,13 @@ export async function hydrateImageAttachments(messages: LlmMessage[], workspaceR
     }
 
     if (!imageParts.length) {
-      flushToolImages();
+      if (message.role !== 'tool') flushToolImages();
       hydrated.push(message);
       continue;
     }
 
     if (message.role === 'tool') {
-      // 工具结果必须紧邻其 assistant tool-call；图片放到随后独立的 user 多模态消息。
+      // 保持本轮所有 tool_result 连续，图片在整轮工具结果之后作为用户多模态消息传入。
       hydrated.push({ ...message, content: message.content.replace(FILE_TOKEN_RE, '').trim() });
       pendingToolImages.push(...imageParts);
     } else {

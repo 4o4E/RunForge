@@ -112,6 +112,37 @@ test('hydrateImageAttachments: tool 图片引用在持久化后仍恢复为图�
   }
 });
 
+test('hydrateImageAttachments: 混合图片与普通工具结果时保持整轮结果连续', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runforge-mixed-tool-images-'));
+  try {
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    await writeFile(join(root, 'first.png'), bytes);
+    await writeFile(join(root, 'second.png'), bytes);
+    const image = (path: string, callId: string) => appendImageAttachmentTokens(`已读取图片：${path}`, [{
+      type: 'image', data: bytes.toString('base64'), mimeType: 'image/png', path,
+    }], callId);
+    const hydrated = await hydrateImageAttachments([
+      { role: 'assistant', content: null, toolCalls: [
+        { id: 'read_first', name: 'file_read', arguments: '{"path":"first.png"}' },
+        { id: 'read_failed', name: 'file_read', arguments: '{"path":"missing.png"}' },
+        { id: 'shell_done', name: 'shell_exec', arguments: '{"command":"true"}' },
+        { id: 'read_second', name: 'file_read', arguments: '{"path":"second.png"}' },
+      ] },
+      { role: 'tool', content: image('first.png', 'read_first'), toolCallId: 'read_first' },
+      { role: 'tool', content: '工具策略已阻止：文件不存在', toolCallId: 'read_failed' },
+      { role: 'tool', content: 'status: succeeded', toolCallId: 'shell_done' },
+      { role: 'tool', content: image('second.png', 'read_second'), toolCallId: 'read_second' },
+    ], root);
+    assert.deepEqual(hydrated.map((message) => message.role), ['assistant', 'tool', 'tool', 'tool', 'tool', 'user']);
+    assert.deepEqual(hydrated.slice(1, 5).map((message) => message.toolCallId), [
+      'read_first', 'read_failed', 'shell_done', 'read_second',
+    ]);
+    assert.deepEqual(hydrated[5]?.contentParts?.map((part) => part.type), ['image', 'image']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('hydrateImageAttachments: 普通工具输出中的 file token 不会被当成图片', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runforge-tool-text-'));
   try {

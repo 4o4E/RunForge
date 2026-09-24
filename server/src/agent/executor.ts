@@ -365,8 +365,12 @@ function detectLoopGuard(signatures: string[], failures: string[]): LoopGuardHit
   return null;
 }
 
-function isPendingSubagentWait(name: string, result: string): boolean {
-  return (name === SUBAGENT_POLL_TOOL_NAME || name === SUBAGENT_LIST_TOOL_NAME) && /\bstatus: running\b/.test(result);
+function isPendingToolWait(name: string, result: string): boolean {
+  if (name === 'shell_poll') {
+    return /^shell command: [^\n]+\nsession: [^\n]+\nstatus: running(?:\n|$)/.test(result);
+  }
+  return (name === SUBAGENT_POLL_TOOL_NAME || name === SUBAGENT_LIST_TOOL_NAME)
+    && /\bstatus: running\b/.test(result);
 }
 
 function renderAbnormalFinishMessage(finishReason: FinishReason, rawFinishReason: string | undefined, hasText: boolean): string {
@@ -1744,6 +1748,22 @@ async function executeRunControlled(
         return toolPolicy.capOutput(`已激活 MCP ${activation.server.id}。从当前 run 的下一次模型请求开始加载 ${activation.tools.length} 个工具：${names}`);
       };
 
+      // 同一轮模型请求可能并列调用相同工具；重复限制按轮次计数，避免一次并列调用被误判为连续重复。
+      const stepGuardSignatures = new Set<string>();
+      const stepGuardFailures = new Set<string>();
+      const recordToolGuard = (signature: string, failure = '') => {
+        if (!stepGuardSignatures.has(signature)) {
+          recentToolSignatures.push(signature);
+          if (recentToolSignatures.length > 6) recentToolSignatures.shift();
+          stepGuardSignatures.add(signature);
+        }
+        if (failure && !stepGuardFailures.has(failure)) {
+          recentFailures.push(failure);
+          if (recentFailures.length > 6) recentFailures.shift();
+          stepGuardFailures.add(failure);
+        }
+      };
+
       // 执行模型请求的每个工具，并把结果回填给模型。
       for (const call of toolCalls) {
         cancellationSignal.throwIfAborted();
@@ -1784,10 +1804,7 @@ async function executeRunControlled(
           const signature = toolSignature(call.name, !parsedArgs.ok
             ? { _invalidArgs: call.arguments.slice(0, 240) }
             : { _blockedBySpace: true });
-          recentToolSignatures.push(signature);
-          if (recentToolSignatures.length > 6) recentToolSignatures.shift();
-          recentFailures.push(`${signature}:${text.slice(0, 240)}`);
-          if (recentFailures.length > 6) recentFailures.shift();
+          recordToolGuard(signature, `${signature}:${text.slice(0, 240)}`);
           continue;
         }
 
@@ -1939,17 +1956,10 @@ async function executeRunControlled(
         ctx.setLastDbId(await store.addMessage(scope, threadId, runId, step.id, toolMsg));
 
         const signature = toolSignature(call.name, args);
-        if (!isPendingSubagentWait(call.name, result.text)) {
-          recentToolSignatures.push(signature);
-          if (recentToolSignatures.length > 6) recentToolSignatures.shift();
-        }
         const failure = /^(工具 .* 抛出异常|工具策略已阻止|未知工具：)/.test(result.text)
           ? `${signature}:${result.text.slice(0, 240)}`
           : '';
-        if (failure) {
-          recentFailures.push(failure);
-          if (recentFailures.length > 6) recentFailures.shift();
-        }
+        if (!isPendingToolWait(call.name, result.text)) recordToolGuard(signature, failure);
 
       }
       const guardHit = detectLoopGuard(recentToolSignatures, recentFailures);
