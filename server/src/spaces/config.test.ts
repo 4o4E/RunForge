@@ -12,7 +12,7 @@ import {
 } from './config.js';
 import { RunAdmissionService } from './runAdmission.js';
 import type { BusinessPluginDefinition } from '../businessPlugins/types.js';
-import { defaultPromptTemplate, renderPromptTemplate } from './prompt.js';
+import { defaultPromptTemplate, renderFileLinkRules, renderPromptTemplate } from './prompt.js';
 
 const businessPlugin: BusinessPluginDefinition = {
   root: '/plugins/tn_config/crm',
@@ -82,6 +82,8 @@ test('prompt template: 默认配置是单一模板，运行时替换占位符', 
   assert.doesNotMatch(defaults, /agent_loop|tool_behavior|standard_process/);
   const rendered = renderPromptTemplate('B {{workspace.root}}\n\nA', { 'workspace.root': '/workspace' });
   assert.equal(rendered, 'B /workspace\n\nA');
+  assert.match(renderFileLinkRules('/u/us_example'), /\[个人资料\]\(\/u\/us_example\/notes\.md\)/);
+  assert.match(renderFileLinkRules(null), /用户文件目录已禁用/);
 });
 
 test('prompt template: 已发布旧配置转换为单一模板，无效占位符在保存时被拒绝', () => {

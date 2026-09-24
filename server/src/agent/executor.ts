@@ -54,6 +54,7 @@ import {
 } from '../spaces/config.js';
 import {
   defaultPromptTemplate,
+  renderFileLinkRules,
   renderPromptTemplate,
   runtimeCapabilityPromptValues,
   validatePromptTemplate,
@@ -1017,7 +1018,7 @@ async function executeRunControlled(
     }
 
     const runtimeCapabilityValues = runtimeCapabilityPromptValues(capabilitySnapshot);
-    const prompt = renderPromptTemplate(spaceConfig?.promptTemplate ?? defaultPromptTemplate(spaceConfig?.mode ?? 'web'), {
+    const basePrompt = renderPromptTemplate(spaceConfig?.promptTemplate ?? defaultPromptTemplate(spaceConfig?.mode ?? 'web'), {
       'workspace.root': toolSettings.workspaceRoot,
       'user.filesRoot': userFiles?.mountPath ?? '已禁用',
       'sandbox.mode': toolSettings.sandbox,
@@ -1032,6 +1033,7 @@ async function executeRunControlled(
       'runtime.capabilityDetails': runtimeCapabilityValues.capabilityDetails,
       'external.trustedPrompt': spaceConfig?.external.trustedPrompt ?? '',
     });
+    const prompt = `${basePrompt}\n\n${renderFileLinkRules(userFiles?.mountPath ?? null)}`;
     const ctx = new ContextManager(prior, runtimeUserInput, renderGoal(goal), {
       appendUserInput: !hasPersistedMessages,
       systemPrompt: prompt,

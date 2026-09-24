@@ -24,6 +24,7 @@ import { SpaceDebugMessages, StepContextDetails, SystemPromptMessage } from './S
 import { StepContextDebugProvider, useStepContextDebug } from './StepContextDebug';
 import { Separator } from '@/components/ui/separator';
 import { parseFileTokens } from '../messageInput';
+import { workspacePathFromHref } from '../fileLinks';
 
 type Part = UIMessage['parts'][number];
 type Timing = { startedAt?: string; endedAt?: string; durationMs?: number };
@@ -31,7 +32,6 @@ type ActivityEntry = { part: Part; index: number };
 
 const RELATIVE_PATH_RE = /(?:\.{1,2}\/)?(?:server|web|docs|src|uploads|tests)\/[A-Za-z0-9._~+/@:-]+/g;
 const FILE_LINK_PREFIX = 'runforge-file://';
-const LEGACY_FILE_LINK_PREFIX = 'my-agent-file://';
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -623,8 +623,9 @@ function trimPathToken(value: string): { label: string; path: string; suffix: st
 
 function pathRegex(workspaceRoot: string | null): RegExp {
   const relative = RELATIVE_PATH_RE.source;
-  const root = workspaceRoot ? `${escapeRegExp(workspaceRoot.replace(/\/+$/, ''))}/[A-Za-z0-9._~+/@:-]+` : '';
-  return new RegExp(root ? `${root}|${relative}` : relative, 'g');
+  const root = workspaceRoot ? `${escapeRegExp(workspaceRoot.replace(/\/+$/, ''))}(?:/[A-Za-z0-9._~+/@:-]+)?` : '';
+  const user = '/u/[A-Za-z0-9_-]+(?:/[A-Za-z0-9._~+/@:-]+)?';
+  return new RegExp([root, user, relative].filter(Boolean).join('|'), 'g');
 }
 
 function escapeMarkdownLinkLabel(value: string): string {
@@ -633,61 +634,6 @@ function escapeMarkdownLinkLabel(value: string): string {
 
 function fileHref(path: string): string {
   return `${FILE_LINK_PREFIX}${encodeURIComponent(path)}`;
-}
-
-function stripFileLineSuffix(value: string): string {
-  return value.replace(/#L\d+(?:-L?\d+)?$/i, '').replace(/(?::\d+){1,2}$/, '');
-}
-
-function decodeHrefPath(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-function pathFromHref(href: string): string | null {
-  const prefix = href.startsWith(FILE_LINK_PREFIX)
-    ? FILE_LINK_PREFIX
-    : href.startsWith(LEGACY_FILE_LINK_PREFIX)
-      ? LEGACY_FILE_LINK_PREFIX
-      : null;
-  if (!prefix) return null;
-  try {
-    return decodeURIComponent(href.slice(prefix.length));
-  } catch {
-    return href.slice(prefix.length);
-  }
-}
-
-function workspacePathFromHref(href: string, workspaceRoot: string | null): string | null {
-  if (href.startsWith(FILE_LINK_PREFIX) || href.startsWith(LEGACY_FILE_LINK_PREFIX)) return pathFromHref(href);
-  if (/^[a-z][a-z0-9+.-]*:/i.test(href) && !href.startsWith('file://')) return null;
-
-  let rawPath = href;
-  if (href.startsWith('file://')) {
-    try {
-      rawPath = new URL(href).pathname;
-    } catch {
-      return null;
-    }
-  }
-  const withoutQuery = rawPath.split(/[?#]/, 1)[0] ?? '';
-  let candidate = stripFileLineSuffix(decodeHrefPath(withoutQuery)).trim();
-  if (!candidate) return null;
-
-  const root = workspaceRoot?.replace(/\/+$/, '') ?? '';
-  if (root && (candidate === root || candidate.startsWith(`${root}/`))) {
-    candidate = candidate.slice(root.length).replace(/^\/+/, '') || '.';
-  } else if (candidate.startsWith('/')) {
-    return null;
-  }
-
-  candidate = candidate.replace(/^\.\/+/, '');
-  if (!candidate || candidate.startsWith('../')) return null;
-  if (!/[/.]/.test(candidate)) return null;
-  return candidate;
 }
 
 function linkifyPathChunk(text: string, workspaceRoot: string | null): string {

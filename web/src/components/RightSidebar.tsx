@@ -9,7 +9,7 @@ import { ShellPanel } from './ShellPanel';
 import { SubagentPanel } from './SubagentPanel';
 import { cn } from '@/lib/utils';
 
-export type RightTabId = 'files' | 'user-files' | `file:${string}` | `shell:${string}` | `subagent:${string}`;
+export type RightTabId = 'files' | 'user-files' | `file:${string}` | `user-file:${string}` | `shell:${string}` | `subagent:${string}`;
 
 interface Props {
   open: boolean;
@@ -52,10 +52,10 @@ function fileName(path: string): string {
 }
 
 function tabSpec(tab: RightTabId, shellNames: Map<string, string>): TabSpec {
-  if (tab === 'files') return { id: tab, label: '文件', icon: <FolderTree className="size-3.5 shrink-0" /> };
+  if (tab === 'files') return { id: tab, label: '工作文件', icon: <FolderTree className="size-3.5 shrink-0" /> };
   if (tab === 'user-files') return { id: tab, label: '我的文件', icon: <FolderTree className="size-3.5 shrink-0" /> };
-  if (tab.startsWith('file:')) {
-    const path = tab.slice('file:'.length);
+  if (tab.startsWith('file:') || tab.startsWith('user-file:')) {
+    const path = tab.slice(tab.indexOf(':') + 1);
     return { id: tab, label: fileName(path) || '文件', icon: <FileText className="size-3.5 shrink-0" /> };
   }
   if (tab.startsWith('shell:')) {
@@ -161,7 +161,7 @@ function AddTabMenu({
         <MenuDivider label="文件" />
         <DropdownMenuItem onClick={onOpenFileBrowser}>
           <FolderTree className="mr-2 size-4" />
-          文件浏览器
+          工作文件
         </DropdownMenuItem>
         <DropdownMenuItem onClick={onOpenUserFiles}>
           <FolderTree className="mr-2 size-4" />
@@ -270,6 +270,7 @@ export function RightSidebar({
   const activeShellSessionId = !readOnly && activeTab?.startsWith('shell:') ? activeTab.slice('shell:'.length) : null;
   const activeSubagentId = activeTab?.startsWith('subagent:') ? activeTab.slice('subagent:'.length) : null;
   const activeFilePath = activeTab?.startsWith('file:') ? activeTab.slice('file:'.length) : null;
+  const activeUserFilePath = activeTab?.startsWith('user-file:') ? activeTab.slice('user-file:'.length) : null;
   const openFileAndCloseBrowser = useCallback((path: string) => {
     onOpenFileTab(path);
     onCloseTab('files');
@@ -363,6 +364,19 @@ export function RightSidebar({
             onOpenFile={onOpenFileTab}
           />
         )}
+        {activeUserFilePath && (
+          <RemoteFilesPanel
+            open
+            width={width}
+            previewPath={activeUserFilePath}
+            embedded
+            compact={compact}
+            fileScope="user"
+            showAttach={false}
+            onClose={onClose}
+            onAttach={onAttach}
+          />
+        )}
         {(activeTab === 'files' || activeFilePath) && !threadId && (
           <div className="flex h-full items-center justify-center px-6 text-center text-sm text-muted-foreground">
             发送消息或上传附件后会创建会话工作目录。
@@ -389,17 +403,26 @@ export function RightSidebar({
           />
         )}
         {!activeTab && (
-          <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-sm text-muted-foreground">
-            <div>暂无打开的预览</div>
-            <AddTabMenu
-              sessions={sessions}
-              subagents={subagents}
-              onOpenFileBrowser={onOpenFileBrowser}
-              onOpenUserFiles={onOpenUserFiles}
-              onOpenShellTab={onOpenShellTab}
-              onOpenSubagentTab={onOpenSubagentTab}
-              readOnly={readOnly}
-            />
+          <div className="flex h-full flex-col items-center justify-center gap-4 overflow-y-auto px-6 py-8">
+            <div className="text-sm font-medium">打开预览</div>
+            <div className="flex w-full max-w-72 flex-col gap-2">
+              <Button variant="outline" className="justify-start" onClick={onOpenFileBrowser}>
+                <FolderTree className="size-4" />工作文件
+              </Button>
+              <Button variant="outline" className="justify-start" onClick={onOpenUserFiles}>
+                <FolderTree className="size-4" />我的文件
+              </Button>
+              {!readOnly && sessions.filter(isLiveSession).map((session) => (
+                <Button key={session.id} variant="outline" className="justify-start" onClick={() => onOpenShellTab(session.id)}>
+                  <Terminal className="size-4" />{session.name}
+                </Button>
+              ))}
+              {subagents.map((subagent) => (
+                <Button key={subagent.id} variant="outline" className="justify-start" onClick={() => onOpenSubagentTab(subagent.id)}>
+                  <Bot className="size-4" /><span className="truncate">{subagentLabel(subagent)}</span>
+                </Button>
+              ))}
+            </div>
           </div>
         )}
       </div>

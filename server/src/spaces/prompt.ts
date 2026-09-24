@@ -36,7 +36,6 @@ const RUN_COMPLETION_PROMPT = `- 计划里的最后一步如果是“汇报结�
 const RESPONSE_STYLE_PROMPT = '- 回复要简洁；能合理假设时说明假设，不要频繁打断用户。';
 const ASK_USER_PROMPT = '- 需要用户补充信息时调用 ask_user，并明确表单约束：主回答必填时设置 required=true，必须选择的选项设置 option.required=true，不要要求用户在普通输入框里回答。';
 const MARKDOWN_OUTPUT_PROMPT = `- 默认使用 Markdown 输出；日常报告、表格、代码、Mermaid 图和 LaTeX 公式都直接写在 Markdown 中。
-- 提到 workspace 内的文件时，必须使用 Markdown 链接语法，优先写 workspace 相对路径，例如 [server/src/agent/context.ts](server/src/agent/context.ts)。
 - Mermaid 使用语言名为 "mermaid" 的 fenced code block；行内 LaTeX 公式使用 $...$，独立公式块使用 $$...$$。
 - Mermaid 节点 ID 只使用英文字母、数字和下划线；节点标签包含中文、空格、符号、HTML 换行、斜杠或 @ 时必须写成 node_id["标签"]。
 - 数据分析、对比、趋势、占比、流程和架构图优先用 Markdown 或 Mermaid 直接输出。`;
@@ -45,6 +44,16 @@ const HTML_ARTIFACT_PROMPT = `- 仅在 Mermaid 或 Markdown 无法表达的图�
 - 创建 artifact 后，最终回答必须用 Markdown 链接语法说明产物路径。
 - 除非用户明确要求原始 JSON，否则不要把界面写成声明式 JSON 或组件树。`;
 const DATABASE_ACCESS_PROMPT = '- 涉及数据库、数据源、schema、库表、字段或数据统计时，必须先激活 database-access skill；不要使用宿主进程 DATABASE_URL、长期密码或服务端私密环境变量。';
+/** 文件链接是网页预览入口规则，运行时追加以覆盖已经保存的空间提示词模板。 */
+export function renderFileLinkRules(userFilesRoot: string | null): string {
+  const userRule = userFilesRoot
+    ? `- 提到用户跨会话文件或目录时，使用用户文件目录下的绝对路径作为 Markdown 链接目标，例如 [个人资料](${userFilesRoot}/notes.md) 和 [资料目录](${userFilesRoot}/资料/)；点击后会在右侧“我的文件”面板打开。`
+    : '- 用户文件目录已禁用，不要生成指向用户文件的链接。';
+  return `文件链接规则：
+- 提到当前会话的工作文件或目录时，使用 Markdown 链接，链接目标写工作区相对路径，例如 [报告](artifacts/report.md) 和 [产物目录](artifacts/)；点击后会在右侧工作文件预览面板打开。
+${userRule}
+- 目录链接目标建议以 / 结尾。路径包含空格时，用尖括号包住 Markdown 链接目标。链接目标必须是实际存在的文件或目录。`;
+}
 const EXTERNAL_MODE_PROMPT = '当前 run 来自 external 空间：不能向 Web 用户提问或进入 waiting_for_user；信息不足时采用合理假设，或在最终结果中明确说明缺失信息。';
 const WORKSPACE_RUNTIME_PROMPT = `运行时文件系统上下文:
 - 持久工作区根目录: {{workspace.root}}

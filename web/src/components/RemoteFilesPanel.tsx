@@ -541,12 +541,47 @@ export function RemoteFilesPanel({
     setCurrentPath('.');
     setExpanded(new Set(['.']));
     setTreeEntries({});
-    void loadDir('.');
+    if (previewPath) void loadTreeDir('.');
+    else void loadDir('.');
     // thread 切换必须清空旧目录缓存，避免在新 workspace 面板里短暂展示上一会话文件。
   }, [open, showBrowser, threadId]);
 
   useEffect(() => {
-    if (open && previewPath) void openFile(previewPath);
+    if (!open || !previewPath) return;
+    if (!showBrowser) {
+      void openFile(previewPath);
+      return;
+    }
+    const path = previewPath.replace(/\/+$/, '') || '.';
+    let canceled = false;
+    // 文件链接和目录链接共用预览入口；通过父目录的真实条目类型决定展示内容。
+    void (async () => {
+      if (path === '.') {
+        await loadDir('.');
+        if (!canceled) setShowTree(true);
+        return;
+      }
+      try {
+        const parent = await listRemoteFiles(parentDirOf(path), threadId);
+        if (canceled) return;
+        const entry = parent.entries.find((item) => item.path === path);
+        if (entry?.type !== 'dir') {
+          void openFile(path);
+          return;
+        }
+        const dirs = [...ancestorDirsForPath(path), path];
+        const listings = await Promise.all(dirs.map((dir) => listRemoteFiles(dir, threadId)));
+        if (canceled) return;
+        setTreeEntries((current) => ({ ...current, ...Object.fromEntries(listings.map((listing) => [listing.path, listing.entries])) }));
+        setCurrentPath(path);
+        setExpanded(new Set(dirs));
+        setSelectedPath(null);
+        setShowTree(true);
+      } catch (err) {
+        if (!canceled) setError((err as Error).message);
+      }
+    })();
+    return () => { canceled = true; };
   }, [open, previewPath, threadId]);
 
   useEffect(() => {

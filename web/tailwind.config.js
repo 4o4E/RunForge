@@ -60,7 +60,8 @@ export default {
       },
       fontFamily: {
         sans: ['Inter', 'SF Pro Text', 'PingFang SC', 'Hiragino Sans GB', 'system-ui', 'sans-serif'],
-        mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        // Windows 使用 VS Code 默认的 Consolas；其他系统依次使用对应平台的等宽字体。
+        mono: ['Consolas', 'Menlo', 'Monaco', 'Droid Sans Mono', 'Liberation Mono', 'Courier New', 'monospace'],
       },
       boxShadow: {
         panel: '0 18px 42px rgba(21, 34, 48, 0.08)',

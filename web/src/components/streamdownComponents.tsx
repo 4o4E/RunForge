@@ -893,6 +893,7 @@ function StreamdownCode({ className, children, node, ...props }: MarkdownCodePro
       startLine={startLine}
       className={cn(
         className,
+        '[&_[data-streamdown=code-block-body]_pre]:font-mono [&_[data-streamdown=code-block-body]_code]:font-mono',
         wrap && '[&_[data-streamdown=code-block-body]]:overflow-x-hidden [&_[data-streamdown=code-block-body]_pre]:whitespace-pre-wrap [&_[data-streamdown=code-block-body]_pre]:break-words',
       )}
     >

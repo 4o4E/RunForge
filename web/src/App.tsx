@@ -42,6 +42,7 @@ import { toUiEvent } from './transport/legacy';
 import { Sidebar } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
 import { RightSidebar, type RightTabId } from './components/RightSidebar';
+import { fileTabForPath } from './fileLinks';
 import { SearchView } from './components/SearchView';
 import type { ComposerAttachment } from './components/Composer';
 import type { AskUserDraft } from './components/AskUserCard';
@@ -338,7 +339,7 @@ function activeBranchRuns(runs: RunWithEvents[], activeRunId: string | null): Ru
 
 function isRightTabId(value: unknown): value is RightTabId {
   return value === 'files' || value === 'user-files'
-    || (typeof value === 'string' && (value.startsWith('file:') || value.startsWith('shell:') || value.startsWith('subagent:')));
+    || (typeof value === 'string' && (value.startsWith('file:') || value.startsWith('user-file:') || value.startsWith('shell:') || value.startsWith('subagent:')));
 }
 
 function numberInRange(value: unknown, fallback: number, min: number, max: number): number {
@@ -371,7 +372,7 @@ function threadPanelStateValue(value: unknown): ThreadPanelState {
   const tabs = rightTabsValue(object.rightPanelTabs);
   const mode = isRightTabId(object.rightPanelMode) && tabs.includes(object.rightPanelMode) ? object.rightPanelMode : tabs[0] ?? null;
   return {
-    rightPanelOpen: typeof object.rightPanelOpen === 'boolean' ? object.rightPanelOpen && tabs.length > 0 : false,
+    rightPanelOpen: typeof object.rightPanelOpen === 'boolean' ? object.rightPanelOpen : false,
     rightPanelTabs: tabs,
     rightPanelMode: mode,
   };
@@ -452,6 +453,7 @@ export function App() {
   const [mobileRightPanelOpen, setMobileRightPanelOpen] = useState(false);
   const [filesPanelWidth, setFilesPanelWidth] = useState(720);
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
+  const [userFilesRoot, setUserFilesRoot] = useState<string | null>(null);
   const [currentUserRole, setCurrentUserRole] = useState<'owner' | 'admin' | 'member' | null>(null);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [modelOptions, setModelOptions] = useState<LlmModelOption[]>([]);
@@ -505,7 +507,7 @@ export function App() {
   selectedModelRefRef.current = selectedModelRef;
 
   const currentThreadPanelState = useCallback((): ThreadPanelState => ({
-    rightPanelOpen: rightPanelOpen && rightPanelTabs.length > 0,
+    rightPanelOpen,
     rightPanelTabs,
     rightPanelMode: rightPanelMode && rightPanelTabs.includes(rightPanelMode) ? rightPanelMode : rightPanelTabs[0] ?? null,
   }), [rightPanelMode, rightPanelOpen, rightPanelTabs]);
@@ -677,6 +679,14 @@ export function App() {
       canceled = true;
     };
   }, [activeThreadId]);
+
+  useEffect(() => {
+    let canceled = false;
+    getRemoteFileInfo('@user')
+      .then((info) => { if (!canceled) setUserFilesRoot(info.workspaceRoot); })
+      .catch(() => { if (!canceled) setUserFilesRoot(null); });
+    return () => { canceled = true; };
+  }, []);
 
   // 只用来决定要不要在侧边栏显示"管理后台"入口；失败时静默保持 null(不显示入口)。
   useEffect(() => {
@@ -1536,18 +1546,23 @@ export function App() {
 
   function toggleRightPanel() {
     if (isMobile) {
-      if (!rightPanelTabs.length) {
-        setRightPanelTabs(['files']);
-        setRightPanelMode('files');
-      }
       setMobileRightPanelOpen((open) => !open);
       return;
     }
     setRightPanelOpen((open) => !open);
   }
 
-  function openRemoteFile(path: string) {
-    openRightTab(`file:${path}`);
+  async function openRemoteFile(path: string) {
+    try {
+      let root = userFilesRoot;
+      if (path.startsWith('/u/') && !root) {
+        root = (await getRemoteFileInfo('@user')).workspaceRoot;
+        setUserFilesRoot(root);
+      }
+      openRightTab(fileTabForPath(path, workspaceRoot, root));
+    } catch (err) {
+      notify({ variant: 'error', title: '无法打开文件链接', description: (err as Error).message });
+    }
   }
 
   function cancelActiveRun() {

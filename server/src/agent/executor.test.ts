@@ -238,7 +238,8 @@ test('executeRun: 使用 run 的空间配置副本装配提示词、工具和上
     toolSettings: testToolSettings(),
   });
 
-  assert.equal(observed.systemPrompt, 'SPACE-SNAPSHOT-SECOND\n\nSPACE-SNAPSHOT-FIRST');
+  assert.match(observed.systemPrompt, /^SPACE-SNAPSHOT-SECOND\n\nSPACE-SNAPSHOT-FIRST\n\n文件链接规则：/);
+  assert.match(observed.systemPrompt, /点击后会在右侧工作文件预览面板打开/);
   assert.deepEqual(observed.tools, ['file_read']);
   const usage = published.find((event): event is Extract<AgentEvent, { type: 'usage_update' }> => event.type === 'usage_update');
   assert.equal(usage?.contextBudget, 12_345);
