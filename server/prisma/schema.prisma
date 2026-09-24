@@ -216,6 +216,7 @@ model messages {
   created_at     DateTime @default(now()) @db.Timestamptz(6)
   summary_of     BigInt[]
   provider_state Json?
+  media_refs     Json?
   runs           runs     @relation(fields: [run_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   steps          steps?   @relation(fields: [step_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   threads        threads  @relation(fields: [thread_id], references: [id], onDelete: Cascade, onUpdate: NoAction)

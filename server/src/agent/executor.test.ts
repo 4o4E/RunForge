@@ -1638,7 +1638,7 @@ test('executeRun: 新 run 切换模型后在首次请求前按新模型阈值压
     });
     await store.addMessage(scope, thread.id, oldRun.id, null, {
       role: 'tool',
-      content: 'x'.repeat(4_000),
+      content: 'x'.repeat(20_000),
       toolCallId: 'old-tool-call',
     });
     await store.setRunStatus(scope, oldRun.id, 'done');
@@ -1660,12 +1660,12 @@ test('executeRun: 新 run 切换模型后在首次请求前按新模型阈值压
       toolSettings: testToolSettings(),
       contextSettings: {
         modelContextWindow: 1_000_000,
-        contextBudget: 200,
+        contextBudget: 12_000,
         contextBudgetSource: 'model-compaction-threshold',
       },
     });
 
-    assert.equal(firstRequestToolContent, maskPlaceholder('x'.repeat(4_000)));
+    assert.equal(firstRequestToolContent, maskPlaceholder('x'.repeat(20_000)));
     assert.equal(published.some((event) => event.type === 'compaction'), false);
   } finally {
     config.agent.keepRecentMessages = previousKeepRecent;
@@ -1746,7 +1746,7 @@ test('executeRun: records L3 summary and main model calls as separate provider p
       hardStepCap: 3,
       contextSettings: {
         modelContextWindow: 10_000,
-        contextBudget: 1_000,
+        contextBudget: 12_000,
         contextBudgetSource: 'test',
       },
       toolSettings: testToolSettings(),

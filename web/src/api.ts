@@ -451,12 +451,15 @@ export const saveRemoteFileContent = (path: string, content: string, baseSha256:
     body: JSON.stringify({ path, content, baseSha256, force: options.force === true, ...fileBodyLocation(options.threadId) }),
   }).then(json<FileTextSaveResponse>);
 
-export const uploadLocalFile = (path: string, contentBase64: string, threadId?: string | null) =>
-  authFetch('/api/files/upload', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path, contentBase64, ...fileBodyLocation(threadId) }),
-  }).then(json<{ path: string; size: number }>);
+export const uploadLocalFile = (path: string, file: File, threadId?: string | null, signal?: AbortSignal) => {
+  const form = new FormData();
+  form.append('path', path);
+  form.append('threadId', threadId === '@user' ? '' : threadId ?? '');
+  form.append('location', threadId === '@user' ? 'user' : 'workspace');
+  form.append('file', file, file.name);
+  return authFetch('/api/files/upload', { method: 'POST', body: form, signal })
+    .then(json<{ path: string; size: number }>);
+};
 
 export const getLlmSettingsOptions = () => authFetch('/api/settings/llm/options').then(json<LlmSettingsOptions>);
 

@@ -1,12 +1,28 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { estimateTokens, maskOldAssistantToolCalls, maskOldToolResults, slidingWindow, summaryCandidate, totalChars } from './compaction.js';
+import { estimatePendingMediaTokens, estimateTokens, maskOldAssistantToolCalls, maskOldToolResults, slidingWindow, summaryCandidate, totalChars } from './compaction.js';
 import { ContextManager } from './context.js';
 import { config } from '../config.js';
 import type { LlmMessage, Provider } from '../llm/types.js';
 import type { ThreadMessage } from '../store/types.js';
+import { segmentToolRoundForSummary } from './contextCompactor.js';
+import { readFile } from 'node:fs/promises';
 
 const big = (n: number) => 'x'.repeat(n);
+
+test('完整文档分段摘要保留真实读取状态与片段编号', async () => {
+  const content = await readFile(new URL('../../../docs/multi-tenancy-design.md', import.meta.url), 'utf8');
+  const messages: LlmMessage[] = [
+    { role: 'assistant', content: null, toolCalls: [{ id: 'read-doc', name: 'file_read', arguments: '{"path":"multi-tenancy-design.md"}' }] },
+    { role: 'tool', content, toolCallId: 'read-doc' },
+  ];
+  const segmented = segmentToolRoundForSummary(messages, 6000);
+  assert.ok(segmented.chunks.length > 1);
+  assert.match(segmented.completeness, /原始结果完整/);
+  assert.ok(segmented.chunks.every((chunk) => chunk.length <= 6000 && chunk.includes('分段不是原始结果截断')));
+  assert.ok(segmented.chunks.every((chunk) => chunk.includes('原始结果完整')));
+  assert.ok(segmented.chunks.some((chunk) => chunk.includes(content.slice(-100))));
+});
 
 // A realistic round: assistant requests a tool, tool returns a large result.
 function round(id: string, resultChars: number): LlmMessage[] {
@@ -18,8 +34,55 @@ function round(id: string, resultChars: number): LlmMessage[] {
 
 test('estimateTokens scales with content and calibration factor', () => {
   const msgs: LlmMessage[] = [{ role: 'user', content: big(400) }];
-  assert.equal(estimateTokens(msgs, 0.25), 100);
-  assert.equal(estimateTokens(msgs, 0.5), 200);
+  assert.equal(estimateTokens(msgs, 0.25), 200);
+  assert.equal(estimateTokens(msgs, 0.75), 300);
+});
+
+test('中文与英文混合内容按不同字符比例保守估算', () => {
+  const content = '请读取 server/src/agent/executor.ts，并总结最近 3 次工具调用的结果。';
+  const estimate = estimateTokens([{ role: 'user', content }]);
+  const asciiUnits = Array.from(content).filter((char) => char.codePointAt(0)! <= 0x7f).length;
+  const cjkUnits = Array.from(content).filter((char) => /\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}/u.test(char)).length;
+  assert.equal(estimate, Math.ceil(asciiUnits * 0.5 + cjkUnits + (content.length - asciiUnits - cjkUnits) * 0.75));
+  assert.ok(estimate > Math.ceil(content.length * 0.25));
+});
+
+test('usage 校准不会把字符估算降到语言比例估算以下', () => {
+  const messages: LlmMessage[] = [{ role: 'user', content: '请检查这个上下文预算是否足够。' }];
+  assert.equal(estimateTokens(messages, 0.15), estimateTokens(messages, 0.25));
+  assert.ok(estimateTokens(messages, 1.2) > estimateTokens(messages, 0.25));
+});
+
+test('上下文预算只计尚未消费的图片引用', () => {
+  const image = { type: 'image' as const, path: 'photo.png', mimeType: 'image/png' };
+  const messages: LlmMessage[] = [
+    { role: 'user', content: '旧照片', mediaRefs: [image] },
+    { role: 'assistant', content: '已阅读。' },
+    { role: 'user', content: '新照片', mediaRefs: [image] },
+  ];
+  assert.equal(estimatePendingMediaTokens(messages), 4096);
+  const withoutMedia = estimateTokens(messages.map((message) => ({ ...message, mediaRefs: [] })));
+  assert.equal(estimateTokens(messages), withoutMedia + 4096);
+});
+
+test('图片引用和 contentParts 指向同一文件时只计一次', () => {
+  const image = { type: 'image' as const, path: '/w/report/page-1.png', mimeType: 'image/png' };
+  const messages: LlmMessage[] = [{
+    role: 'user',
+    content: '查看这一页。',
+    mediaRefs: [image],
+    contentParts: [{ type: 'image', path: image.path, mimeType: image.mimeType, data: 'data' }],
+  }];
+  assert.equal(estimatePendingMediaTokens(messages), 4096);
+});
+
+test('同一路径重复发送图片时逐张计入预算', () => {
+  const image = { type: 'image' as const, path: '/w/report/page-1.png', mimeType: 'image/png' };
+  const messages: LlmMessage[] = [
+    { role: 'user', content: '查看第一页', mediaRefs: [image] },
+    { role: 'user', content: '再查看第一页', mediaRefs: [image] },
+  ];
+  assert.equal(estimatePendingMediaTokens(messages), 8192);
 });
 
 test('maskOldToolResults elides old large tool outputs but keeps pairing', () => {

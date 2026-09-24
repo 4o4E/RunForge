@@ -96,6 +96,11 @@ export function toUiEvent(e: AgentEvent): UiEvent | null {
       return { kind: 'notice', step: e.step, message: e.message };
     case 'stream_retry':
       return null;
+    case 'media_downgrade':
+      return {
+        kind: 'notice', step: e.step,
+        message: `模型 ${e.model} 本轮未读取图片内容（${e.files.join('、')}）。${e.details?.length ? `原因：${e.details.join('；')}。` : ''}请勿依据图片内容判断。`,
+      };
     case 'final':
       return { kind: 'final', step: e.step, output: e.output, finishReason: e.finishReason, rawFinishReason: e.rawFinishReason };
     case 'error':

@@ -180,6 +180,7 @@ ALTER TABLE messages ADD COLUMN summary_of INT[];      -- 若本行是摘要，�
 - **masking（L1）**：决策持久化为 `collapsed='masked'`。原始 `content` 保留在库，占位符由长度在 `loadThreadMessages` 时派生（`maskPlaceholder(len)`）。重启后视图一致、不丢、不重算。
 - **滑动窗口 drop（L2）**：**仅内存安全阀**，不落库——因为 drop 会丢信息。重启后从全量日志按相同逻辑重新派生，DB 数据从不销毁。
 - **summarized（L3）**：折叠行标 `collapsed='summarized'`，`loadThreadMessages` 跳过、只留摘要行。
+- **最近完整工具轮次**：当整轮结果超预算时，原始调用与结果标为 `collapsed='masked'` 并保留配对占位；另存摘要行供模型继续使用。这样模型仍能辨认用户要求的工具调用已经完成，原始内容仍可从数据库调试视图读取。
 - **压缩事件**：只有真正生成并持久化 L3 摘要时才写入 `events.type='compaction'`，保存发生时间、token 前后值、受影响消息 id、动作和压缩后替代内容；前端按事件顺序显示时间点。L1 masking、L2 内存窗口移除、显示参数裁剪和 run 结束后的历史整理只更新模型视图或持久化标记，不显示为压缩事件。
 - **Debug 原始视图**：`GET /api/threads/:id?debug=1` 才返回原始 `content/tool_calls.arguments`；默认详情只返回长度、工具名和 `collapsed` 状态。
 - **加密推理状态**：OpenAI Responses 的 `encrypted_content` 以不透明 `provider_state` 保存并回放，应用不可解密；消息被 mask、summarize 或窗口移除后，不再把对应旧推理状态发给模型。
@@ -188,8 +189,9 @@ ALTER TABLE messages ADD COLUMN summary_of INT[];      -- 若本行是摘要，�
 
 - [config.ts](../server/src/config.ts) — `agent.hardStepCap / contextBudget / keepRecentMessages`
 - [agent/compaction.ts](../server/src/agent/compaction.ts) — `estimateTokens / maskOldToolResults / slidingWindow / maskPlaceholder`（纯函数，有单测）
-- [agent/context.ts](../server/src/agent/context.ts) — `Context` → `ContextManager`：`items` 跟踪 `dbId`；`maybeCompact()` 返回 `collapsedIds`；`recordUsage()` 校准
-- [agent/executor.ts](../server/src/agent/executor.ts) — 循环改 `hardStepCap`；每步顶部检查取消；每步前 `maybeCompact()` 并 `markMessagesCollapsed(collapsedIds)`；捕获 `addMessage` 返回的 id 回填 `setLastDbId`；`recordUsage(result.usage)`
+- [agent/context.ts](../server/src/agent/context.ts) — `Context` → `ContextManager`：`items` 跟踪 `dbId`；`maybeCompact()` 按工具定义预留预算并返回 `collapsedIds`；`recordUsage()` 校准
+- [agent/executor.ts](../server/src/agent/executor.ts) — 循环遵守 `hardStepCap`；每步顶部检查取消；模型请求前按工具定义和待发送图片压缩上下文，最近的完整工具轮次仍超预算时生成分段摘要，持久化摘要与折叠标记；捕获 `addMessage` 返回的 id 回填 `setLastDbId`；`recordUsage(result.usage)`
+- 对始终启用思考的方舟 `glm-5-3-flash-260828`，摘要请求使用较低思考强度；正式对话继续使用空间选定的模型默认设置。
 - [store/types.ts](../server/src/store/types.ts) + [pgStore.ts](../server/src/store/pgStore.ts) / [memoryStore.ts](../server/src/store/memoryStore.ts) — `ThreadMessage`(带 `id/collapsed`)；`addMessage` 返回 id；`markMessagesCollapsed`；`loadThreadMessages` 返回压缩视图
 - [prisma/schema.prisma](../server/prisma/schema.prisma) + [prisma/migrations](../server/prisma/migrations) — `messages.collapsed / summary_of / provider_state`；migration 是唯一结构来源
 - [api/http.ts](../server/src/api/http.ts) — `POST /runs/:id/cancel`

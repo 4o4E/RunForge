@@ -256,6 +256,28 @@ test('summary messages reload at the position of the folded rows', async () => {
   assert.deepEqual(reloaded.map((m) => m.content), ['summary of old detail', 'recent detail']);
 });
 
+test('最近工具轮次的摘要重载后保留调用与结果配对', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, '读取文档');
+  const assistant = await store.addMessage(scope, thread.id, run.id, null, {
+    role: 'assistant', content: null,
+    toolCalls: [{ id: 'read-doc', name: 'file_read', arguments: '{"path":"design.md"}' }],
+  });
+  const original = '真实文档内容。'.repeat(600);
+  const result = await store.addMessage(scope, thread.id, run.id, null, { role: 'tool', content: original, toolCallId: 'read-doc' });
+  await store.addSummaryMessage(scope, thread.id, run.id, null, { role: 'system', content: '已完成 design.md 读取：文档摘要。' }, [assistant, result]);
+  await store.markMessagesCollapsed(scope, [assistant, result], 'masked');
+
+  const reloaded = await store.loadThreadMessages(scope, thread.id);
+  assert.deepEqual(reloaded.map((message) => message.role), ['assistant', 'tool', 'system']);
+  assert.equal(reloaded[0].toolCalls?.[0]?.id, reloaded[1].toolCallId);
+  assert.equal(reloaded[1].content, maskPlaceholder(original));
+  assert.equal(reloaded[2].content, '已完成 design.md 读取：文档摘要。');
+  const raw = await store.loadRawThreadMessages(scope, thread.id);
+  assert.equal(raw.find((message) => message.id === result)?.content, original);
+});
+
 test('L3 summaries are promoted and orphan tool results are removed from model view', async () => {
   const store = new MemoryStore();
   const thread = await store.createThread(scope);

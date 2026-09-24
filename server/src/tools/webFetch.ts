@@ -1,4 +1,5 @@
 import type { Tool } from './types.js';
+import { envHttpProxyDispatcher } from '../net/envHttpProxy.js';
 
 // Very small HTML → text reduction (strip tags/scripts). Good enough for a skeleton.
 function htmlToText(html: string): string {
@@ -42,7 +43,8 @@ export const webFetchTool: Tool = {
       const res = await fetch(url, {
         headers: { 'User-Agent': 'RunForge/0.1' },
         signal: ctx?.abortSignal,
-      });
+        dispatcher: envHttpProxyDispatcher,
+      } as RequestInit & { dispatcher: typeof envHttpProxyDispatcher });
       if (!res.ok) return `抓取失败（${res.status}）：${url}`;
       const ct = res.headers.get('content-type') ?? '';
       const raw = await res.text();

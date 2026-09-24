@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile, mkdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import sharp from 'sharp';
 import { shellTool } from './shell.js';
 import { fileReadTool } from './fileRead.js';
 import { fileWriteTool } from './fileWrite.js';
@@ -33,7 +34,7 @@ before(async () => {
   await writeFile(join(dir, 'sub', 'b.ts'), 'export const b = 2;\n');
   await writeFile(join(dir, '健身', '背景信息.md'), '# 训练背景\n');
   await writeFile(join(dir, 'readme.md'), '# hello\n');
-  await writeFile(join(dir, 'frame.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  await writeFile(join(dir, 'frame.png'), await sharp({ create: { width: 1, height: 1, channels: 3, background: '#ffffff' } }).png().toBuffer());
 });
 
 after(async () => {

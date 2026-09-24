@@ -1,7 +1,7 @@
 import type { LlmMessage, LlmUsage } from '../llm/types.js';
 import type { CompactionAffectedMessage } from '@runforge/contracts';
 import type { ThreadMessage } from '../store/types.js';
-import type { Provider } from '../llm/types.js';
+import type { LlmMediaRef, Provider } from '../llm/types.js';
 import { config, type AgentContextSettings } from '../config.js';
 import {
   createContextCompactor,
@@ -10,7 +10,7 @@ import {
   type ContextCompactor,
   type WorkingMessage,
 } from './contextCompactor.js';
-import { estimateTokens, maskPlaceholder, totalChars } from './compaction.js';
+import { estimatePendingMediaTokens, estimateTokens, maskPlaceholder, totalChars } from './compaction.js';
 
 export type { CompactionInfo, CompactionResult };
 
@@ -18,6 +18,7 @@ interface ContextOptions {
   appendUserInput?: boolean;
   systemPrompt?: string;
   contextSettings?: AgentContextSettings;
+  userMediaRefs?: LlmMediaRef[];
 }
 
 /**
@@ -36,6 +37,8 @@ export class ContextManager {
   private readonly contextSettings: AgentContextSettings;
   /** 上次模型调用实际发送的字符数，用于校准比例。 */
   private lastSentChars = 0;
+  private lastSentMediaTokens = 0;
+  private lastRequestOverheadTokens = 0;
 
   constructor(priorMessages: ThreadMessage[], userInput: string, initialGoal = '', opts: ContextOptions = {}) {
     this.contextSettings = opts.contextSettings ?? {
@@ -55,13 +58,14 @@ export class ContextManager {
           toolCalls: p.toolCalls,
           toolCallId: p.toolCallId,
           providerState: p.providerState,
+          mediaRefs: p.mediaRefs,
           collapsed: p.collapsed,
         },
         dbId: p.id,
       });
     }
     if (appendUserInput) {
-      this.items.push({ msg: { role: 'user', content: userInput }, dbId: null });
+      this.items.push({ msg: { role: 'user', content: userInput, mediaRefs: opts.userMediaRefs }, dbId: null });
     }
     this.pruneSupersededGoalUpdates();
   }
@@ -117,8 +121,8 @@ export class ContextManager {
 
   /** 回填真实 token 用量，让下一次估算贴近当前模型。 */
   recordUsage(usage?: LlmUsage): void {
-    if (usage?.inputTokens && this.lastSentChars > 0) {
-      const ratio = usage.inputTokens / this.lastSentChars;
+    if (usage?.inputTokens && this.lastSentChars > 0 && this.lastSentMediaTokens === 0) {
+      const ratio = Math.max(0, usage.inputTokens - this.lastRequestOverheadTokens) / this.lastSentChars;
       // 限制在合理区间内，避免单次异常响应把估算器带偏。
       this.tokensPerChar = Math.min(0.6, Math.max(0.15, ratio));
     }
@@ -180,13 +184,14 @@ export class ContextManager {
    * 工作上下文超过警戒线时执行压缩级联。
    * 这里会原地修改工作列表；有改动则返回新 mask 的 DB id 和压缩结果，否则返回 null。
    */
-  async maybeCompact(provider?: Provider): Promise<CompactionResult | null> {
+  async maybeCompact(provider?: Provider, requestOverheadTokens = 0): Promise<CompactionResult | null> {
     const before = this.items;
-    const result = await this.compactor.compact(this.compactionInput(provider));
+    this.lastRequestOverheadTokens = requestOverheadTokens;
+    const result = await this.compactor.compact(this.compactionInput(provider, requestOverheadTokens));
     return this.applyCompactionOutput(result, before);
   }
 
-  private compactionInput(provider?: Provider) {
+  private compactionInput(provider?: Provider, requestOverheadTokens = 0) {
     const items = this.cloneItems(this.items);
     return {
       // 压缩策略可替换消息对象；传入副本后才能可靠比较压缩前后内容并生成审计明细。
@@ -195,7 +200,10 @@ export class ContextManager {
       tokensPerChar: this.tokensPerChar,
       provider,
       forceMaskedToolNames: this.forceMaskedToolNames,
-      contextSettings: this.contextSettings,
+      contextSettings: requestOverheadTokens ? {
+        ...this.contextSettings,
+        contextBudget: this.contextSettings.contextBudget - requestOverheadTokens,
+      } : this.contextSettings,
     };
   }
 
@@ -302,6 +310,7 @@ export class ContextManager {
       info: CompactionInfo;
       collapsedIds: number[];
       summarizedIds: number[];
+      summaryOfIds?: number[];
       summaryMessage?: LlmMessage;
       items?: WorkingMessage[];
       sentChars?: number;
@@ -310,14 +319,17 @@ export class ContextManager {
   ): CompactionResult | null {
     if (!result) {
       this.lastSentChars = totalChars(this.all());
+      this.lastSentMediaTokens = estimatePendingMediaTokens(this.all());
       return null;
     }
     if (result.items) this.items = result.items;
     this.lastSentChars = result.sentChars ?? totalChars(this.all());
+    this.lastSentMediaTokens = estimatePendingMediaTokens(this.all());
     return {
       info: result.info,
       collapsedIds: result.collapsedIds,
       summarizedIds: result.summarizedIds,
+      summaryOfIds: result.summaryOfIds,
       summaryMessage: result.summaryMessage,
       affected: this.affectedMessages(
         before,

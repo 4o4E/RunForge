@@ -1,4 +1,5 @@
 import type { Tool } from './types.js';
+import { envHttpProxyDispatcher } from '../net/envHttpProxy.js';
 
 // Keyless web search via DuckDuckGo's HTML endpoint. Best-effort for a skeleton;
 // swap in a real search API (Bing/Brave/SerpAPI) for production quality.
@@ -18,7 +19,8 @@ export const webSearchTool: Tool = {
       const res = await fetch('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query), {
         headers: { 'User-Agent': 'Mozilla/5.0 RunForge/0.1' },
         signal: ctx?.abortSignal,
-      });
+        dispatcher: envHttpProxyDispatcher,
+      } as RequestInit & { dispatcher: typeof envHttpProxyDispatcher });
       if (!res.ok) return `搜索失败（${res.status}）`;
       const html = await res.text();
       const results: string[] = [];

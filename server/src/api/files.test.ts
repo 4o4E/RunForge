@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { request as httpRequest } from 'node:http';
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { formatHexRows, parseByteRange, previewTextLines } from './files.js';
@@ -110,6 +111,107 @@ test('用户文件接口只访问登录用户目录并拒绝目录逃逸', async
       });
       assert.equal(upload.status, 201);
       assert.equal(await readFile(join(base, owner.id, 'notes.txt'), 'utf8'), '个人资料');
+      const form = new FormData();
+      form.append('path', 'media/sample.bin');
+      form.append('threadId', '');
+      form.append('location', 'user');
+      form.append('file', new Blob([Buffer.from([0, 1, 2, 255])]), 'sample.bin');
+      const streamed = await fetch(`${apiBase}/upload`, { method: 'POST', headers: { Authorization: `Bearer ${ownerToken}` }, body: form });
+      assert.equal(streamed.status, 201, await streamed.clone().text());
+      assert.deepEqual(await readFile(join(base, owner.id, 'media', 'sample.bin')), Buffer.from([0, 1, 2, 255]));
+      const largeContent = Buffer.alloc(50 * 1024 * 1024 + 1, 0x5a);
+      const largeForm = new FormData();
+      largeForm.append('path', 'media/large.bin');
+      largeForm.append('threadId', '');
+      largeForm.append('location', 'user');
+      largeForm.append('file', new Blob([largeContent]), 'large.bin');
+      const largeUpload = await fetch(`${apiBase}/upload`, { method: 'POST', headers: { Authorization: `Bearer ${ownerToken}` }, body: largeForm });
+      assert.equal(largeUpload.status, 201);
+      assert.equal((await largeUpload.json() as { size: number }).size, largeContent.length);
+      const largeDownload = await fetch(`${apiBase}/raw?location=user&path=media%2Flarge.bin`, { headers: { Authorization: `Bearer ${ownerToken}` } });
+      assert.equal(largeDownload.status, 200);
+      const downloadedLargeContent = Buffer.from(await largeDownload.arrayBuffer());
+      assert.equal(downloadedLargeContent.length, largeContent.length);
+      assert.equal(downloadedLargeContent[0], 0x5a);
+      assert.equal(downloadedLargeContent.at(-1), 0x5a);
+      const outOfOrderBoundary = 'runforge-order-check';
+      const outOfOrderBody = [
+        `--${outOfOrderBoundary}\r\nContent-Disposition: form-data; name="file"; filename="bad.bin"\r\nContent-Type: application/octet-stream\r\n\r\npartial`,
+        `\r\n--${outOfOrderBoundary}\r\nContent-Disposition: form-data; name="path"\r\n\r\nmedia/bad.bin`,
+        `\r\n--${outOfOrderBoundary}\r\nContent-Disposition: form-data; name="threadId"\r\n\r\n`,
+        `\r\n--${outOfOrderBoundary}\r\nContent-Disposition: form-data; name="location"\r\n\r\nuser\r\n--${outOfOrderBoundary}--\r\n`,
+      ].join('');
+      const outOfOrder = await fetch(`${apiBase}/upload`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${ownerToken}`, 'Content-Type': `multipart/form-data; boundary=${outOfOrderBoundary}` },
+        body: outOfOrderBody,
+      });
+      assert.equal(outOfOrder.status, 400);
+      assert.equal(existsSync(join(base, owner.id, 'media', 'bad.bin')), false);
+      assert.deepEqual((await readdir(join(base, owner.id, 'media'))).sort(), ['large.bin', 'sample.bin']);
+      const mediaPath = join(base, owner.id, 'media');
+      const interruptBoundary = 'runforge-interrupt-check';
+      const interruptedRequest = httpRequest(`http://127.0.0.1:${port}${apiBase.slice(apiBase.indexOf('/api'))}/upload`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${ownerToken}`, 'Content-Type': `multipart/form-data; boundary=${interruptBoundary}` },
+      });
+      interruptedRequest.on('error', () => undefined);
+      interruptedRequest.write([
+        `--${interruptBoundary}\r\nContent-Disposition: form-data; name="path"\r\n\r\nmedia/sample.bin`,
+        `\r\n--${interruptBoundary}\r\nContent-Disposition: form-data; name="threadId"\r\n\r\n`,
+        `\r\n--${interruptBoundary}\r\nContent-Disposition: form-data; name="location"\r\n\r\nuser`,
+        `\r\n--${interruptBoundary}\r\nContent-Disposition: form-data; name="file"; filename="sample.bin"\r\nContent-Type: application/octet-stream\r\n\r\nreplacement-start`,
+      ].join(''));
+      let temporaryFileAppeared = false;
+      for (let attempt = 0; attempt < 500; attempt += 1) {
+        if ((await readdir(mediaPath)).some((name) => name.endsWith('.upload'))) {
+          temporaryFileAppeared = true;
+          break;
+        }
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+      }
+      assert.equal(temporaryFileAppeared, true);
+      interruptedRequest.destroy();
+      let temporaryFileRemains = true;
+      for (let attempt = 0; attempt < 500; attempt += 1) {
+        temporaryFileRemains = (await readdir(mediaPath)).some((name) => name.endsWith('.upload'));
+        if (!temporaryFileRemains) break;
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+      }
+      assert.equal(temporaryFileRemains, false);
+      assert.deepEqual(await readFile(join(mediaPath, 'sample.bin')), Buffer.from([0, 1, 2, 255]));
+      let oversizedRequest: ReturnType<typeof httpRequest> | undefined;
+      const oversizedResponse = await new Promise<{ status: number; body: string }>((resolveResponse, rejectResponse) => {
+        const timeout = setTimeout(() => {
+          oversizedRequest?.destroy();
+          rejectResponse(new Error('超限上传请求未及时响应'));
+        }, 5000);
+        oversizedRequest = httpRequest(`http://127.0.0.1:${port}${apiBase.slice(apiBase.indexOf('/api'))}/upload`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${ownerToken}`,
+            'Content-Type': 'multipart/form-data; boundary=runforge-large-check',
+            'Content-Length': String(1024 * 1024 * 1024 + 64 * 1024 + 1),
+          },
+        }, (response) => {
+          let body = '';
+          response.setEncoding('utf8');
+          response.on('data', (chunk: string) => { body += chunk; });
+          response.on('end', () => {
+            clearTimeout(timeout);
+            resolveResponse({ status: response.statusCode ?? 0, body });
+          });
+        });
+        oversizedRequest.on('error', (error) => {
+          clearTimeout(timeout);
+          rejectResponse(error);
+        });
+        oversizedRequest.flushHeaders();
+      });
+      assert.equal(oversizedResponse.status, 413);
+      assert.equal(oversizedResponse.body.includes('上传上限'), true);
+      assert.deepEqual(await readFile(join(mediaPath, 'sample.bin')), Buffer.from([0, 1, 2, 255]));
+      assert.deepEqual((await readdir(mediaPath)).sort(), ['large.bin', 'sample.bin']);
       const ownerRead = await fetch(`${apiBase}/content?location=user&path=notes.txt`, { headers: ownerHeaders });
       assert.equal(ownerRead.status, 200);
       const share = await fetch(`${apiBase}/share-link`, {

@@ -2,6 +2,7 @@ import { appendFile, mkdir, readdir, rm } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { config } from '../../config.js';
 import type { ProviderAttemptErrorKind } from './repository.js';
+import { sanitizeMediaPayloads } from './mediaPayload.js';
 
 const TRACE_FILE_RE = /^provider-(\d{4}-\d{2}-\d{2})\.jsonl$/;
 
@@ -57,7 +58,8 @@ export class ProviderTraceWriter {
         await this.cleanup(now);
         this.cleanedDate = today;
       }
-      await appendFile(join(this.directory, `provider-${today}.jsonl`), `${JSON.stringify(record)}\n`, 'utf8');
+      const safeRecord = sanitizeMediaPayloads(record) as ProviderTraceRecord;
+      await appendFile(join(this.directory, `provider-${today}.jsonl`), `${JSON.stringify(safeRecord)}\n`, 'utf8');
     });
     this.queue = task.catch(() => undefined);
     return task;

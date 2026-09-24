@@ -4,11 +4,13 @@ import { mkdir } from 'node:fs/promises';
 import { getConfiguredProvider, getConfiguredSystemTitleProvider } from '../llm/index.js';
 import type { LlmDelta, LlmMessage, LlmUsage, Provider } from '../llm/types.js';
 import { parseToolArguments } from '../llm/toolArgs.js';
-import { appendImageAttachmentTokens, hydrateImageAttachments } from '../llm/attachments.js';
+import { hydrateImageAttachments, mediaRefsFromUserText } from '../llm/attachments.js';
+import { isExplicitImageRejection, omitImagesForTextContinuation } from '../llm/mediaFallback.js';
 import { runTool, toolSchemas } from '../tools/registry.js';
 import type { ToolResult } from '../tools/types.js';
 import { createPolicy } from '../tools/policy.js';
 import { ContextManager } from './context.js';
+import { estimateTokens } from './compaction.js';
 import {
   activateSkillItem,
   loadSkillIndex,
@@ -143,6 +145,7 @@ export interface ExecutorDeps {
   workloadRuntimeEnv?: (scope: Scope, runId: string, allowedCapabilities: RuntimeCapabilityName[]) => Promise<WorkloadRuntimeEnv>;
   generateThreadTitle: boolean;
   contextSettings: AgentContextSettings;
+  inputModalities: import('@runforge/contracts').LlmInputModality[];
   materializeRunArtifacts?: (
     scope: Scope,
     runId: string,
@@ -302,6 +305,7 @@ async function defaultDeps(
       contextBudget: config.agent.contextBudget,
       contextBudgetSource: config.agent.contextBudgetSource,
     }),
+    inputModalities: overrides.inputModalities ?? configured?.inputModalities ?? ['text', 'image'],
     materializeRunArtifacts: overrides.materializeRunArtifacts,
     businessPluginRegistry: overrides.businessPluginRegistry ?? businessPluginRegistry,
     businessPluginRuntime: overrides.businessPluginRuntime ?? businessPluginRuntime,
@@ -740,6 +744,8 @@ async function executeRunControlled(
         onDelta,
         onRetry,
         abortSignal: cancellationSignal,
+        // 方舟 GLM-5.3 始终思考；只在摘要场景降低强度，避免简单压缩消耗大量推理 token。
+        reasoningEffort: purpose === 'compaction' && descriptor.model === 'glm-5-3-flash-260828' ? 'low' : undefined,
       }),
     };
   };
@@ -755,25 +761,26 @@ async function executeRunControlled(
       inputTokens: usage?.inputTokens,
       outputTokens: usage?.outputTokens,
       cachedInputTokens: usage?.cachedInputTokens,
-      estContextTokens: currentCtx?.estTokens(),
+      estContextTokens: currentCtx ? currentCtx.estTokens() + currentRequestOverheadTokens : undefined,
       contextBudget: deps.contextSettings.contextBudget,
     });
   };
 
   const persistCompaction = async (stepId: string | null, compaction: Awaited<ReturnType<ContextManager['maybeCompact']>>) => {
     if (!compaction) return;
-    if (compaction.summaryMessage && compaction.summarizedIds.length) {
+    const summaryOfIds = compaction.summaryOfIds ?? compaction.summarizedIds;
+    if (compaction.summaryMessage && summaryOfIds.length) {
       const summaryId = await store.addSummaryMessage(
         scope,
         threadId,
         runId,
         stepId,
         compaction.summaryMessage,
-        compaction.summarizedIds,
+        summaryOfIds,
       );
       // L3 摘要在工作上下文中不是最后一条，需要按对象引用回填 DB id。
       currentCtx?.setSummaryDbId(compaction.summaryMessage, summaryId);
-      await store.markMessagesCollapsed(scope, compaction.summarizedIds, 'summarized');
+      if (compaction.summarizedIds.length) await store.markMessagesCollapsed(scope, compaction.summarizedIds, 'summarized');
     }
     const summarized = new Set(compaction.summarizedIds);
     const maskedIds = compaction.collapsedIds.filter((id) => !summarized.has(id));
@@ -783,7 +790,7 @@ async function executeRunControlled(
     // 只有真正生成并持久化 L3 摘要时才向前端展示“已压缩上下文”。
     // masking、窗口移除、显示参数裁剪和 Skill 入口整理都属于模型视图维护，
     // 不应伪装成用户可见的压缩过程。
-    if (compaction.summarizedIds.length > 0 && compaction.summaryMessage) {
+    if (summaryOfIds.length > 0 && compaction.summaryMessage) {
       await emit(stepId, {
         type: 'compaction',
         step: currentStepIdx,
@@ -796,6 +803,7 @@ async function executeRunControlled(
   };
 
   let currentCtx: ContextManager | null = null;
+  let currentRequestOverheadTokens = 0;
   let currentStepIdx = 0;
   const mcpSession = new McpClientSession();
   const runtimeResources: { businessPluginHandle?: BusinessPluginRunHandle } = {};
@@ -1038,16 +1046,20 @@ async function executeRunControlled(
       'external.trustedPrompt': spaceConfig?.external.trustedPrompt ?? '',
     });
     const prompt = `${basePrompt}\n\n${renderFileLinkRules(userFiles?.mountPath ?? null)}`;
+    const userMediaRefs = mediaRefsFromUserText(runtimeUserInput);
     const ctx = new ContextManager(prior, runtimeUserInput, renderGoal(goal), {
       appendUserInput: !hasPersistedMessages,
       systemPrompt: prompt,
       contextSettings: deps.contextSettings,
+      userMediaRefs,
     });
     ctx.setActiveSkillInstructions([...activeSkillActivations.values()].map((activation) => activation.systemMessage));
     currentCtx = ctx;
     if (!hasPersistedMessages) {
       // 新 run 或尚未写入任何消息的 pending run，必须先落用户输入。
-      await store.addMessage(scope, threadId, runId, null, { role: 'user', content: runtimeUserInput });
+      await store.addMessage(scope, threadId, runId, null, {
+        role: 'user', content: runtimeUserInput, mediaRefs: userMediaRefs,
+      });
     }
 
     const stepIds = new Map<number, string>();
@@ -1066,6 +1078,12 @@ async function executeRunControlled(
     const streamStats = new StreamStatsTracker(runId, publish, persistLiveEvent);
     const recentToolSignatures: string[] = [];
     const recentFailures: string[] = [];
+    const rejectedImageModels = new Set<string>();
+    for (const event of runEvents) {
+      if (event.type === 'media_downgrade' && event.reason === 'provider_rejected') {
+        rejectedImageModels.add(event.model);
+      }
+    }
     let noActionTurns = 0;
     const acceptsNextStep = spaceConfig?.mode === 'external' && spaceConfig.external.allowNextStep;
 
@@ -1237,11 +1255,33 @@ async function executeRunControlled(
           selectedProvider.provider,
           selectedProvider.descriptor,
         );
+        const subagentModalities = 'inputModalities' in selectedProvider
+          ? selectedProvider.inputModalities
+          : deps.inputModalities;
+        let subagentImageRejected = false;
         const toolTrace: string[] = [];
         let output = '';
         let usage: LlmUsage | undefined;
         for (let turn = 0; turn < SUBAGENT_MAX_TOOL_TURNS; turn += 1) {
-          const result = await subagentProvider.completeStream(messages, tools, () => {}, { abortSignal });
+          const imageIssues: import('../llm/attachments.js').ImageAttachmentIssue[] = [];
+          const modelMessages = await hydrateImageAttachments(
+            messages, toolSettings.workspaceRoot, userFiles?.source,
+            { allowImages: subagentModalities.includes('image') && !subagentImageRejected, issues: imageIssues },
+          );
+          if (imageIssues.length) {
+            toolTrace.push(`- 图片未进入 subagent 模型：${imageIssues.map((issue) => issue.name).join('、')}`);
+          }
+          let publishedDelta = false;
+          let result;
+          try {
+            result = await subagentProvider.completeStream(modelMessages, tools, () => { publishedDelta = true; }, { abortSignal });
+          } catch (error) {
+            const prepared = omitImagesForTextContinuation(modelMessages);
+            if (publishedDelta || !prepared.omitted.length || !isExplicitImageRejection(error)) throw error;
+            subagentImageRejected = true;
+            toolTrace.push(`- 图片被 subagent 模型拒绝：${prepared.omitted.map((item) => item.name).join('、')}`);
+            result = await subagentProvider.completeStream(prepared.messages, tools, () => {}, { abortSignal });
+          }
           abortSignal.throwIfAborted();
           usage = addUsage(usage, result.usage);
           output = result.content?.trim() || output;
@@ -1257,6 +1297,7 @@ async function executeRunControlled(
           for (const call of result.toolCalls) {
             abortSignal.throwIfAborted();
             let text: string;
+            let mediaRefs: import('../llm/types.js').LlmMediaRef[] | undefined;
             const parsedArgs = parseToolArguments(call.arguments || '{}');
             if (!allowedToolNames.has(call.name)) {
               text = `subagent 当前 profile 不允许调用工具：${call.name}`;
@@ -1288,11 +1329,14 @@ async function executeRunControlled(
                   abortSignal,
                 });
                 text = resultText.text;
+                mediaRefs = resultText.contentParts?.flatMap((part) => part.type === 'image'
+                  ? [{ type: 'image' as const, path: part.path, mimeType: part.mimeType, name: part.name }]
+                  : []);
               }
             }
             abortSignal.throwIfAborted();
             toolTrace.push(`- ${call.name}: ${text.split('\n')[0]?.slice(0, 200) ?? ''}`);
-            messages.push({ role: 'tool', content: text, toolCallId: call.id });
+            messages.push({ role: 'tool', content: text, toolCallId: call.id, mediaRefs });
           }
         }
         if (!output) output = 'subagent 未返回文本结果。';
@@ -1461,11 +1505,6 @@ async function executeRunControlled(
       await applyPendingExternalInputs(step.id, stepIdx);
       streamStats.mark(stepIdx, 'llm_waiting', undefined, true);
 
-      // 模型调用前先控制工作上下文大小；mask 决策会落库，窗口丢弃只留在内存。
-      const compaction = await ctx.maybeCompact(observedProvider('compaction', step.id));
-      await persistCompaction(step.id, compaction);
-      // 每个 step 调模型前先推估算上下文，避免等待模型返回期间占用为空。
-      await emitUsageUpdate(step.id, stepIdx);
       // 一次模型请求内的能力集合必须保持不变；本轮激活的 Skill/MCP 从下一次请求才生效。
       const requestMcpServerIds = new Set(activeMcp.keys());
       const requestActiveSkillNames = new Set(activeSkills.map((skill) => skill.name));
@@ -1481,6 +1520,7 @@ async function executeRunControlled(
       let llmActiveTool: StreamStats['activeTool'];
       const streamedToolInputChars = new Map<string, number>();
       const streamedToolNames = new Map<string, string>();
+      let publishedLlmDelta = false;
       const stopLlmHeartbeat = streamStats.startHeartbeat(stepIdx, () => llmStage, () => llmActiveTool);
       try {
         const activeMcpTools = [...activeMcp.values()].flatMap((activation) => activation.tools);
@@ -1489,7 +1529,49 @@ async function executeRunControlled(
           : undefined;
         const tools = await toolSchemas(selectedToolNames, activeMcpTools, !spaceConfig);
         requestAllowedToolNames = new Set(tools.map((tool) => tool.name));
-        const modelMessages = await hydrateImageAttachments(ctx.all(), toolSettings.workspaceRoot, userFiles?.source);
+        // 工具定义会进入真实模型请求；为消息和媒体留出预算，不能只按消息正文判断。
+        const toolTokens = estimateTokens([{ role: 'system', content: JSON.stringify(tools) }]) + 512;
+        currentRequestOverheadTokens = toolTokens;
+        const contextBudget = deps.contextSettings.contextBudget;
+        if (toolTokens >= contextBudget) throw new Error(`模型工具定义已超过上下文预算：${toolTokens}/${contextBudget} token`);
+        const compactionProvider = observedProvider('compaction', step.id);
+        for (let pass = 0; pass < 4; pass += 1) {
+          const before = ctx.estTokens();
+          const compaction = await ctx.maybeCompact(compactionProvider, toolTokens);
+          await persistCompaction(step.id, compaction);
+          if (ctx.estTokens() + toolTokens < contextBudget || !compaction || ctx.estTokens() >= before) break;
+        }
+        // 在等待模型响应期间也发布包含工具定义的估算值。
+        await emitUsageUpdate(step.id, stepIdx);
+        const selectedModel = deps.providerDescriptor.model;
+        const canSendImages = deps.inputModalities.includes('image') && !rejectedImageModels.has(selectedModel);
+        const imageIssues: import('../llm/attachments.js').ImageAttachmentIssue[] = [];
+        const textOnlyEstimate = estimateTokens(ctx.all().map((message) => ({ ...message, mediaRefs: undefined, contentParts: undefined })));
+        let maxImages = Math.min(8, Math.max(0, Math.floor((contextBudget - toolTokens - textOnlyEstimate - 512) / 4096)));
+        let modelMessages: LlmMessage[];
+        while (true) {
+          imageIssues.length = 0;
+          modelMessages = await hydrateImageAttachments(
+            ctx.all(), toolSettings.workspaceRoot, userFiles?.source,
+            { allowImages: canSendImages, maxImages, issues: imageIssues },
+          );
+          const requestTokens = estimateTokens(modelMessages) + toolTokens;
+          if (requestTokens < contextBudget) break;
+          const includedImages = modelMessages.reduce((count, message) => count
+            + (message.contentParts?.filter((part) => part.type === 'image').length ?? 0), 0);
+          if (includedImages === 0) {
+            throw new Error(`模型请求超过上下文预算：估算 ${requestTokens}，预算 ${contextBudget} token。请缩小本轮文件读取范围。`);
+          }
+          maxImages = includedImages - 1;
+        }
+        if (imageIssues.length) {
+          await emit(step.id, {
+            type: 'media_downgrade', step: stepIdx, modality: 'image', model: selectedModel,
+            reason: canSendImages ? 'preflight_rejected' : rejectedImageModels.has(selectedModel) ? 'provider_rejected' : 'configured_unsupported',
+            files: imageIssues.map((item) => item.name),
+            details: imageIssues.map((item) => item.reason),
+          });
+        }
         await store.saveStepContext(scope, step.id, {
           messages: modelMessages,
           tools,
@@ -1497,6 +1579,7 @@ async function executeRunControlled(
           capturedAt: new Date().toISOString(),
         });
         const onStreamDelta = (d: LlmDelta) => {
+          if (d.content || d.reasoning || d.toolInputStart || d.toolInputDelta || d.toolInputAvailable) publishedLlmDelta = true;
           if (d.toolInputStart) {
             llmStage = 'tool_call';
             llmActiveTool = d.toolInputStart;
@@ -1554,7 +1637,18 @@ async function executeRunControlled(
             message,
           });
         });
-        result = await stepProvider.completeStream(modelMessages, tools, onStreamDelta);
+        try {
+          result = await stepProvider.completeStream(modelMessages, tools, onStreamDelta);
+        } catch (error) {
+          const prepared = omitImagesForTextContinuation(modelMessages);
+          if (publishedLlmDelta || !prepared.omitted.length || !isExplicitImageRejection(error)) throw error;
+          rejectedImageModels.add(selectedModel);
+          await emit(step.id, {
+            type: 'media_downgrade', step: stepIdx, modality: 'image', model: selectedModel,
+            reason: 'provider_rejected', files: prepared.omitted.map((item) => item.name),
+          });
+          result = await stepProvider.completeStream(prepared.messages, tools, onStreamDelta);
+        }
       } finally {
         stopLlmHeartbeat();
       }
@@ -1946,11 +2040,14 @@ async function executeRunControlled(
           durationMs: trace.durationMs,
         });
 
-        // 图片内容不直接落库；保存受控引用，下一次请求（包括重启恢复）再从 workspace 重读。
+        // 工具产生的媒体只保存受控文件引用；模型请求时再读取内容，保留工具结果配对。
         const toolMsg = {
           role: 'tool' as const,
-          content: appendImageAttachmentTokens(result.text, result.contentParts, call.id),
+          content: result.text,
           toolCallId: call.id,
+          mediaRefs: result.contentParts?.flatMap((part) => part.type === 'image'
+            ? [{ type: 'image' as const, path: part.path, mimeType: part.mimeType, name: part.name }]
+            : []),
         };
         ctx.add(toolMsg);
         ctx.setLastDbId(await store.addMessage(scope, threadId, runId, step.id, toolMsg));

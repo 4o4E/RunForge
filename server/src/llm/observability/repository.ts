@@ -1,6 +1,7 @@
 import { prisma } from '../../db/prisma.js';
 import { newProviderAttemptId, newProviderInvocationId } from '../../id.js';
 import { nullableJson, requiredJson } from '../../store/prismaRows.js';
+import { sanitizeMediaPayloads } from './mediaPayload.js';
 
 export type ProviderRecordStatus = 'running' | 'success' | 'error';
 export type ProviderAttemptErrorKind = 'http' | 'transport' | 'parse' | 'runtime';
@@ -71,7 +72,7 @@ export class PrismaProviderObservationRepository implements ProviderObservationR
         purpose: input.purpose,
         provider: input.provider,
         model: input.model,
-        logical_request: requiredJson(input.logicalRequest),
+        logical_request: requiredJson(sanitizeMediaPayloads(input.logicalRequest)),
         started_at: new Date(input.startedAt),
       },
     });
@@ -86,7 +87,7 @@ export class PrismaProviderObservationRepository implements ProviderObservationR
       where: { id },
       data: {
         status: input.status,
-        normalized_response: nullableJson(input.normalizedResponse),
+        normalized_response: nullableJson(sanitizeMediaPayloads(input.normalizedResponse)),
         error: input.error,
         ended_at: input.endedAt ? new Date(input.endedAt) : null,
       },
@@ -103,7 +104,7 @@ export class PrismaProviderObservationRepository implements ProviderObservationR
         invocation_id: input.invocationId,
         attempt: input.attempt,
         url: input.url,
-        request_body: requiredJson(input.requestBody),
+        request_body: requiredJson(sanitizeMediaPayloads(input.requestBody)),
         started_at: new Date(input.startedAt),
       },
     });
@@ -119,13 +120,13 @@ export class PrismaProviderObservationRepository implements ProviderObservationR
       data: {
         http_status: input.httpStatus,
         provider_response_id: input.providerResponseId,
-        raw_stream: input.rawStream,
-        normalized_response: nullableJson(input.normalizedResponse),
+        raw_stream: input.rawStream == null ? null : String(sanitizeMediaPayloads(input.rawStream)),
+        normalized_response: nullableJson(sanitizeMediaPayloads(input.normalizedResponse)),
         finish_reason: input.finishReason,
         usage: nullableJson(input.usage),
         status: input.status,
         error_kind: input.errorKind,
-        error: input.error,
+        error: input.error == null ? null : String(sanitizeMediaPayloads(input.error)),
         ended_at: input.endedAt ? new Date(input.endedAt) : null,
       },
     });
@@ -142,7 +143,7 @@ export class MemoryProviderObservationRepository implements ProviderObservationR
   ): Promise<string> {
     const id = newProviderInvocationId();
     this.invocations.set(id, {
-      ...structuredClone(input),
+      ...structuredClone({ ...input, logicalRequest: sanitizeMediaPayloads(input.logicalRequest) }),
       id,
       normalizedResponse: null,
       status: 'running',
@@ -158,7 +159,10 @@ export class MemoryProviderObservationRepository implements ProviderObservationR
   ): Promise<void> {
     const current = this.invocations.get(id);
     if (!current) throw new Error(`Provider invocation 不存在：${id}`);
-    this.invocations.set(id, { ...current, ...structuredClone(input) });
+    this.invocations.set(id, { ...current, ...structuredClone({
+      ...input,
+      normalizedResponse: sanitizeMediaPayloads(input.normalizedResponse),
+    }) });
   }
 
   async createAttempt(
@@ -170,7 +174,7 @@ export class MemoryProviderObservationRepository implements ProviderObservationR
     if (duplicate) throw new Error(`Provider attempt 序号重复：${input.invocationId}/${input.attempt}`);
     const id = newProviderAttemptId();
     this.attempts.set(id, {
-      ...structuredClone(input),
+      ...structuredClone({ ...input, requestBody: sanitizeMediaPayloads(input.requestBody) }),
       id,
       httpStatus: null,
       providerResponseId: null,
@@ -192,7 +196,12 @@ export class MemoryProviderObservationRepository implements ProviderObservationR
   ): Promise<void> {
     const current = this.attempts.get(id);
     if (!current) throw new Error(`Provider attempt 不存在：${id}`);
-    this.attempts.set(id, { ...current, ...structuredClone(input) });
+    this.attempts.set(id, { ...current, ...structuredClone({
+      ...input,
+      rawStream: input.rawStream == null ? null : String(sanitizeMediaPayloads(input.rawStream)),
+      normalizedResponse: sanitizeMediaPayloads(input.normalizedResponse),
+      error: input.error == null ? null : String(sanitizeMediaPayloads(input.error)),
+    }) });
   }
 }
 

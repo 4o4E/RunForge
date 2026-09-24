@@ -6,6 +6,8 @@ import type { LlmMessage } from '../llm/types.js';
 import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
 import { sanitizeThreadMessagesForModel } from './messageView.js';
+import { sanitizeMediaPayloads } from '../llm/observability/mediaPayload.js';
+import { mediaRefsFromUserText } from '../llm/attachments.js';
 import { DeleteConflictError, isTerminalRunStatus, RunActiveError, SpaceConfigChangedError } from './types.js';
 import type {
   AuthTokenRow,
@@ -139,6 +141,7 @@ async function applyPendingRunInputsInTransaction(
         run_id: runId,
         role: 'user',
         content,
+        media_refs: nullableJson(mediaRefsFromUserText(content)),
       },
       select: { id: true },
     });
@@ -623,6 +626,7 @@ export class PgStore implements Store {
           collapsed: string | null;
           summary_of: string[] | null;
           provider_state: LlmMessage['providerState'] | null;
+          media_refs: LlmMessage['mediaRefs'] | null;
           created_at: string;
         }>(
           isSourceRun
@@ -636,9 +640,9 @@ export class PgStore implements Store {
             .filter((id): id is number => id != null);
           const { rows: inserted } = await client.query<{ id: string }>(
             `INSERT INTO messages (
-               thread_id, run_id, step_id, role, content, tool_calls, tool_call_id, collapsed, summary_of, provider_state, created_at
+               thread_id, run_id, step_id, role, content, tool_calls, tool_call_id, collapsed, summary_of, provider_state, media_refs, created_at
              )
-             VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9::bigint[], $10::jsonb, $11)
+             VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9::bigint[], $10::jsonb, $11::jsonb, $12)
              RETURNING id`,
             [
               forkThreadId,
@@ -651,6 +655,7 @@ export class PgStore implements Store {
               oldMessage.collapsed,
               mappedSummaryOf?.length ? mappedSummaryOf : null,
               oldMessage.provider_state ? JSON.stringify(oldMessage.provider_state) : null,
+              oldMessage.media_refs ? JSON.stringify(oldMessage.media_refs) : null,
               oldMessage.created_at,
             ],
           );
@@ -1052,6 +1057,7 @@ export class PgStore implements Store {
             run_id: id,
             role: 'user',
             content: fields.userMessageContent,
+            media_refs: nullableJson(mediaRefsFromUserText(fields.userMessageContent)),
           },
         });
       }
@@ -1119,7 +1125,7 @@ export class PgStore implements Store {
           },
         },
       },
-      data: { context_snapshot: requiredJson(snapshot) },
+      data: { context_snapshot: requiredJson(sanitizeMediaPayloads(snapshot)) },
     });
     if (updated.count !== 1) {
       throw new Error(`step 不存在、不属于当前用户或上下文已经固定：${stepId}`);
@@ -1237,15 +1243,20 @@ export class PgStore implements Store {
         collapsed: true,
         summary_of: true,
         provider_state: true,
+        media_refs: true,
       },
       orderBy: { id: 'asc' },
     });
     // Build the compacted LLM-facing view. The original content/tool args stay in
     // the DB; masked rows render placeholders, summarized rows are folded out.
+    const summarizedIds = new Set(rows.filter((row) => row.collapsed === 'summarized').map((row) => String(row.id)));
+    const sortKey = (row: typeof rows[number]) => row.summary_of.length && row.summary_of.every((id) => summarizedIds.has(String(id)))
+      ? Number(row.summary_of[0])
+      : Number(row.id);
     const messages = rows
       .filter((r) => r.collapsed !== 'summarized'
         && !isEphemeralSystemMessage(r.role as LlmMessage['role'], r.content))
-      .sort((a, b) => Number(a.summary_of[0] ?? a.id) - Number(b.summary_of[0] ?? b.id))
+      .sort((a, b) => sortKey(a) - sortKey(b))
       .map((r) => ({
         id: serialId(r.id),
         role: r.role as LlmMessage['role'],
@@ -1258,6 +1269,9 @@ export class PgStore implements Store {
         providerState: r.collapsed === 'masked'
           ? undefined
           : (r.provider_state as unknown as LlmMessage['providerState'] ?? undefined),
+        mediaRefs: r.collapsed === 'masked'
+          ? undefined
+          : (r.media_refs as unknown as LlmMessage['mediaRefs'] ?? undefined),
         collapsed: r.collapsed as ThreadMessage['collapsed'] ?? undefined,
       }));
     return sanitizeThreadMessagesForModel(messages);
@@ -1330,6 +1344,7 @@ export class PgStore implements Store {
         toolCalls: row.tool_calls as unknown as LlmMessage['toolCalls'] ?? undefined,
         toolCallId: row.tool_call_id ?? undefined,
         providerState: row.provider_state as unknown as LlmMessage['providerState'] ?? undefined,
+        mediaRefs: row.media_refs as unknown as LlmMessage['mediaRefs'] ?? undefined,
         collapsed: row.collapsed as RawThreadMessage['collapsed'] ?? undefined,
         summaryOf: row.summary_of.map(serialId),
         created_at: row.created_at.toISOString(),
@@ -1353,6 +1368,7 @@ export class PgStore implements Store {
         tool_calls: nullableJson(msg.toolCalls),
         tool_call_id: msg.toolCallId ?? null,
         provider_state: nullableJson(msg.providerState),
+        media_refs: nullableJson(msg.mediaRefs),
       },
       select: { id: true },
     });

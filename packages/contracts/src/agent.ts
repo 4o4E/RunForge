@@ -178,5 +178,6 @@ export type AgentEvent =
   | { type: 'progress_stalled'; step: number; reason: string; question?: string }
   | { type: 'recovery'; step: number; message: string }
   | { type: 'stream_retry'; step: number; provider: string; message: string }
+  | { type: 'media_downgrade'; step: number; modality: 'image'; model: string; reason: 'configured_unsupported' | 'provider_rejected' | 'preflight_rejected'; files: string[]; details?: string[] }
   | { type: 'final'; step: number; output: string; finishReason?: FinishReason; rawFinishReason?: string }
   | { type: 'error'; step: number; message: string; finishReason?: FinishReason; rawFinishReason?: string };

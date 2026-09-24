@@ -15,6 +15,8 @@ import {
   estimateTokens,
   maskOldAssistantToolCalls,
   maskOldToolResults,
+  maskPlaceholder,
+  maskToolCallArguments,
   renderSummaryPrompt,
   slidingWindow,
   summaryCandidate,
@@ -44,6 +46,8 @@ export interface CompactionResult {
   /** 本次新增 mask 的 DB id，executor 会落库；窗口丢弃只在内存中发生。 */
   collapsedIds: number[];
   summarizedIds: number[];
+  /** 摘要覆盖的原始消息；近期工具轮次保留配对占位时与 summarizedIds 不同。 */
+  summaryOfIds?: number[];
   summaryMessage?: LlmMessage;
   affected: CompactionAffectedMessage[];
 }
@@ -101,6 +105,96 @@ function maskForcedToolCallPayloads(items: WorkingMessage[], forceToolNames: str
   return maskPayloads(items, Number.MAX_SAFE_INTEGER, forceToolNames);
 }
 
+/** 最近一轮工具结果只有在全部返回后才能整体摘要，避免留下悬空的调用或结果。 */
+function latestCompleteToolRound(items: WorkingMessage[]): { start: number; end: number } | null {
+  const end = items.length;
+  let firstResult = end;
+  while (firstResult > 0 && items[firstResult - 1]?.msg.role === 'tool') firstResult -= 1;
+  if (firstResult === end || firstResult === 0) return null;
+  const assistant = items[firstResult - 1]?.msg;
+  if (assistant?.role !== 'assistant' || !assistant.toolCalls?.length) return null;
+  const expected = new Set(assistant.toolCalls.map((call) => call.id));
+  const actual = items.slice(firstResult, end).map((item) => item.msg.toolCallId);
+  if (actual.length !== expected.size || new Set(actual).size !== expected.size || actual.some((id) => !id || !expected.has(id))) return null;
+  return { start: firstResult - 1, end };
+}
+
+/** 摘要输入保留每条结果的完整性与分段编号；摘要请求的切分不等于原文件截断。 */
+export function segmentToolRoundForSummary(messages: LlmMessage[], maxChars: number): { chunks: string[]; completeness: string } {
+  const calls = new Map(messages[0]?.toolCalls?.map((call) => [call.id, call]) ?? []);
+  const blocks: string[] = [];
+  const statuses: string[] = [];
+  for (const call of messages[0]?.toolCalls ?? []) {
+    if (call.arguments.length <= 300) continue;
+    const label = `工具 ${call.name} 的原始调用参数`;
+    const partSize = Math.max(256, maxChars - label.length - 100);
+    const count = Math.ceil(call.arguments.length / partSize);
+    for (let index = 0; index < count; index++) {
+      blocks.push(`${label}\n摘要输入第 ${index + 1}/${count} 段（分段不是参数截断）：\n${call.arguments.slice(index * partSize, (index + 1) * partSize)}`);
+    }
+  }
+  for (const message of messages) {
+    if (message.role !== 'tool') continue;
+    const call = calls.get(message.toolCallId ?? '');
+    const media = message.mediaRefs?.map((ref) => `${ref.name ?? ref.path}（${ref.mimeType}）`).join('、');
+    const truncated = (message.content ?? '').includes('…[工具策略已截断') || (message.content ?? '').includes('（内容已截断；');
+    const args = call?.arguments ?? '{}';
+    const label = `工具 ${call?.name ?? '未知'}，参数 ${args.length > 300 ? `${args.slice(0, 300)}…（参数共 ${args.length} 字符）` : args}，原始结果${truncated ? '已截断' : '完整'}`;
+    statuses.push(label);
+    const body = `${message.content ?? ''}${media ? `\n媒体引用：${media}` : ''}`;
+    const partSize = Math.max(256, maxChars - label.length - 100);
+    const count = Math.max(1, Math.ceil(body.length / partSize));
+    for (let index = 0; index < count; index++) {
+      blocks.push(`${label}\n摘要输入第 ${index + 1}/${count} 段（此处分段不是原始结果截断）：\n${body.slice(index * partSize, (index + 1) * partSize)}`);
+    }
+  }
+  const chunks: string[] = [];
+  let current = '';
+  for (const block of blocks) {
+    if (current && current.length + block.length + 2 > maxChars) {
+      chunks.push(current);
+      current = '';
+    }
+    current += `${current ? '\n\n' : ''}${block}`;
+  }
+  if (current) chunks.push(current);
+  return { chunks, completeness: statuses.join('；') };
+}
+
+async function summarizeRecentToolRound(
+  messages: LlmMessage[], goal: string, provider: Provider, contextBudget: number,
+): Promise<string> {
+  const maxChars = Math.max(512, Math.floor(contextBudget * 0.6));
+  const finalSummaryChars = Math.min(6000, Math.max(1500, Math.floor(contextBudget * 0.3)));
+  const { chunks, completeness } = segmentToolRoundForSummary(messages, maxChars);
+  const summarizeChunk = async (text: string, stage: string): Promise<string> => {
+    const limit = stage.startsWith('原始记录') ? Math.min(1400, Math.ceil(finalSummaryChars / 4)) : finalSummaryChars;
+    const result = await provider.completeStream([
+      { role: 'system', content: `请准确压缩已完成工具调用的实际结果，最多 ${limit} 字。按文件或工具结果分别保留关键事实、路径、读取范围和真正的不确定之处。摘要输入分段不是源文件截断，不得依据片段边界推断文件不完整。原始结果的完整性以此清单为准：${completeness}。当前任务需要依据这些结果继续完成。` },
+      { role: 'user', content: `当前目标：${goal}\n${stage}\n${text}` },
+    ], [], () => {});
+    const summary = result.content?.trim();
+    if (!summary) throw new Error('上下文超预算，工具轮次摘要没有返回文字');
+    return summary;
+  };
+  let parts: string[] = [];
+  for (const [index, chunk] of chunks.entries()) {
+    parts.push(await summarizeChunk(chunk, `原始记录第 ${index + 1}/${chunks.length} 段：`));
+  }
+  // 大量并列工具结果先分段摘要，再逐层合并；每次摘要请求仍受同一字符上限约束。
+  for (let level = 0; parts.length > 1; level += 1) {
+    if (level >= 8) throw new Error('上下文超预算，工具轮次摘要未能收敛');
+    const combined = parts.join('\n\n');
+    const next: string[] = [];
+    for (let start = 0; start < combined.length; start += maxChars) {
+      next.push(await summarizeChunk(combined.slice(start, start + maxChars), '已压缩片段合并：'));
+    }
+    if (next.length >= parts.length) throw new Error('上下文超预算，工具轮次摘要未缩短');
+    parts = next;
+  }
+  return parts[0] ?? '';
+}
+
 /** 当前 RunForge 策略：L1 mask、L3 摘要、L2 内存窗口，保持既有行为。 */
 class CurrentContextCompactor implements ContextCompactor {
   readonly name: ContextCompactor['name'] = 'current';
@@ -142,11 +236,13 @@ class CurrentContextCompactor implements ContextCompactor {
     }
 
     const summarizedIds: number[] = [];
+    let summaryOfIds: number[] | undefined;
     let summarized = 0;
     let dropped = 0;
     const reason = `${contextBudgetSource}: budget=${contextBudget}, modelWindow=${modelContextWindow}, strategy=current`;
 
-    const { collapsedIds, masked } = maskPayloads(items, keepRecentMessages, input.forceMaskedToolNames);
+    const { collapsedIds, masked: initiallyMasked } = maskPayloads(items, keepRecentMessages, input.forceMaskedToolNames);
+    let masked = initiallyMasked;
 
     let l3Summary: LlmMessage | undefined;
     if (input.provider && estimateTokens(messagesOf(items), input.tokensPerChar) >= contextBudget) {
@@ -178,6 +274,34 @@ class CurrentContextCompactor implements ContextCompactor {
       }
     }
 
+    // 旧历史处理完仍超预算时，保留最近完整工具轮次的配对占位并补充摘要。
+    // 一次只压缩一轮，让 executor 先持久化摘要，再决定是否还需要下一次压缩。
+    if (!l3Summary && input.provider && estimateTokens(messagesOf(items), input.tokensPerChar) >= contextBudget) {
+      const recent = latestCompleteToolRound(items);
+      if (recent) {
+        const original = items.slice(recent.start, recent.end);
+        const ids = dbIds(original);
+        if (ids.length === original.length) {
+          const body = await summarizeRecentToolRound(
+            original.map((item) => item.msg), input.goalContent, input.provider, contextBudget,
+          );
+          l3Summary = summaryWithGoal(`最近完整工具轮次摘要：\n${body}`, input.goalContent);
+          // 模型需要看见 file_read 等调用已经完成；成对占位与摘要同时保留。
+          // 原始正文只在派生视图缩短，重启后由 collapsed=masked 恢复同样的配对。
+          for (const item of original) {
+            item.msg = item.msg.role === 'tool'
+              ? { ...item.msg, content: maskPlaceholder(item.msg.content ?? ''), mediaRefs: [], contentParts: undefined, collapsed: 'masked' }
+              : { ...item.msg, toolCalls: maskToolCallArguments(item.msg.toolCalls ?? []).calls, providerState: undefined, collapsed: 'masked' };
+            collapsedIds.push(item.dbId as number);
+          }
+          masked += ids.length;
+          items.splice(recent.end, 0, { msg: l3Summary, dbId: null });
+          summaryOfIds = ids;
+          summarized = ids.length;
+        }
+      }
+    }
+
     const sentChars = totalChars(messagesOf(items));
     return {
       items,
@@ -185,6 +309,7 @@ class CurrentContextCompactor implements ContextCompactor {
       info: { estBefore, estAfter: estimateTokens(messagesOf(items), input.tokensPerChar), masked, summarized, dropped, reason },
       collapsedIds,
       summarizedIds,
+      summaryOfIds,
       summaryMessage: l3Summary,
     };
   }

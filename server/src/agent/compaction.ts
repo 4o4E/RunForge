@@ -24,10 +24,51 @@ export function totalChars(messages: LlmMessage[]): number {
   return messages.reduce((sum, m) => sum + msgChars(m), 0);
 }
 
-/** Rough token estimate. `tokensPerChar` is calibrated from real usage when
- *  available (see ContextManager); the ~0.25 default is the usual english ratio. */
+/** 只估算本轮尚未被模型消费的图片；旧图片仍可经 file_read 重新读取。
+ * 同一文件可能同时出现在持久化引用和本轮 contentParts 中，按路径只计一次。 */
+export function estimatePendingMediaTokens(messages: LlmMessage[]): number {
+  let lastAssistant = -1;
+  messages.forEach((message, index) => {
+    if (message.role === 'assistant') lastAssistant = index;
+  });
+  const references = new Map<string, number>();
+  const prepared = new Map<string, number>();
+  messages.forEach((message, index) => {
+    if (index <= lastAssistant) return;
+    for (const ref of message.mediaRefs ?? []) {
+      if (ref.type === 'image') references.set(ref.path, (references.get(ref.path) ?? 0) + 1);
+    }
+    for (const part of message.contentParts ?? []) {
+      if (part.type === 'image') prepared.set(part.path, (prepared.get(part.path) ?? 0) + 1);
+    }
+  });
+  // 引用和派生内容会同时表示同一张图片；重复发送同一路径仍要逐张计入预算。
+  const paths = new Set([...references.keys(), ...prepared.keys()]);
+  const count = [...paths].reduce((sum, path) => sum + Math.max(references.get(path) ?? 0, prepared.get(path) ?? 0), 0);
+  return count * 4096;
+}
+
+/**
+ * 保守估算文本 token。中文、日文和韩文字符通常接近每字一个 token；ASCII
+ * 内容按每字符 0.5 token 估算，为代码、路径和 JSON 留出余量；其他字符按
+ * 每字符 0.75 估算。usage 校准只允许把估算提高，避免一次偏低用量把后续预算压低。
+ */
 export function estimateTokens(messages: LlmMessage[], tokensPerChar = 0.25): number {
-  return Math.round(totalChars(messages) * tokensPerChar);
+  let asciiUnits = 0;
+  let cjkUnits = 0;
+  let otherUnits = 0;
+  for (const message of messages) {
+    const text = `${message.content ?? ''}${message.toolCalls ? JSON.stringify(message.toolCalls) : ''}`;
+    for (const char of text) {
+      const units = char.length;
+      if (char.codePointAt(0)! <= 0x7f) asciiUnits += units;
+      else if (/\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}/u.test(char)) cjkUnits += units;
+      else otherUnits += units;
+    }
+  }
+  const heuristic = asciiUnits * 0.5 + cjkUnits * 1.0 + otherUnits * 0.75;
+  const calibrated = totalChars(messages) * Math.max(0, tokensPerChar);
+  return Math.ceil(Math.max(heuristic, calibrated) + estimatePendingMediaTokens(messages));
 }
 
 const MASK_MIN_CHARS = 200; // don't bother masking already-small tool results

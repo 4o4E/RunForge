@@ -7,6 +7,7 @@ import type { LlmResult, Provider } from './types.js';
 import { ProviderRunner, type ProviderInvocationContext } from './providerRunner.js';
 import { MemoryProviderObservationRepository } from './observability/repository.js';
 import { ProviderTraceWriter, type ProviderTraceRecord } from './observability/trace.js';
+import { sanitizeMediaPayloads } from './observability/mediaPayload.js';
 
 const context: ProviderInvocationContext = {
   tenantId: 'tn_provider_runner',
@@ -115,6 +116,48 @@ test('ProviderRunner: 由 RunForge 重试并保存每个真实 HTTP attempt', as
   assert.equal(lines[0].retryScheduled, true);
   assert.equal(lines[1].status, 'success');
   assert.equal(JSON.stringify(lines).includes('Bearer must-not-persist'), false);
+});
+
+test('多协议观测记录省略图片字节并保留媒体与调试信息', async () => {
+  const base64 = 'A'.repeat(128);
+  const openAiBody = {
+    model: 'gpt-vision',
+    messages: [{ role: 'user', content: [
+      { type: 'text', text: '请描述图片' },
+      { type: 'image_url', image_url: { url: `data:image/png;base64,${base64}`, detail: 'high' } },
+    ] }],
+  };
+  const anthropicBody = {
+    model: 'claude-vision',
+    messages: [{ role: 'user', content: [
+      { type: 'text', text: '请描述图片' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64 } },
+    ] }],
+  };
+  const compatibleBody = {
+    model: 'compatible-vision',
+    messages: [{ role: 'user', content: [
+      { type: 'text', text: '请描述图片' },
+      { type: 'image_url', image_url: { url: `data:image/webp;base64,${base64}` } },
+    ] }],
+  };
+  const streamedImage = `data: {"type":"image","source":{"type":"base64","media_type":"image/png","data":"${base64}"}}\n`;
+  const longText = '普通文本'.repeat(100);
+  const sanitized = sanitizeMediaPayloads({ openAiBody, anthropicBody, compatibleBody, streamedImage, longText }) as {
+    openAiBody: typeof openAiBody;
+    anthropicBody: typeof anthropicBody;
+    compatibleBody: typeof compatibleBody;
+    streamedImage: string;
+    longText: string;
+  };
+  const persisted = JSON.stringify(sanitized);
+  assert.equal(persisted.includes(base64), false);
+  assert.equal(sanitized.streamedImage.includes(base64), false);
+  assert.equal(sanitized.longText, longText);
+  assert.equal(persisted.includes('请描述图片'), true);
+  assert.equal(persisted.includes('image/jpeg'), true);
+  assert.equal(persisted.includes('detail'), true);
+  assert.equal(persisted.includes('字节数=96'), true);
 });
 
 test('ProviderRunner: 已向 runtime 发布流式增量后不重试', async () => {

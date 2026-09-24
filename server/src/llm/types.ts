@@ -15,6 +15,14 @@ export type LlmContentPart =
   | { type: 'text'; text: string }
   | { type: 'image'; data: string; mimeType: string; path: string; name?: string };
 
+/** 附件的持久化引用。模型请求时才从受控文件区读取内容。 */
+export interface LlmMediaRef {
+  type: 'image' | 'file';
+  path: string;
+  mimeType: string;
+  name?: string;
+}
+
 /** Provider 返回的推理状态。正文只用于可读摘要，providerOptions 中可能携带
  *  OpenAI encrypted_content；应用不解密，只负责原样持久化和回放。 */
 export type LlmJsonValue = null | string | number | boolean | LlmJsonValue[] | LlmJsonObject;
@@ -35,6 +43,7 @@ export interface LlmMessage {
   content: string | null;
   /** 用户消息的派生多模态内容；只在调模型前生成，不落库。 */
   contentParts?: LlmContentPart[];
+  mediaRefs?: LlmMediaRef[];
   /** assistant turns only */
   toolCalls?: LlmToolCall[];
   /** tool turns only — links the result to a prior tool call */
@@ -99,6 +108,8 @@ export interface LlmDelta {
 export interface ProviderCallOptions {
   fetch?: typeof globalThis.fetch;
   abortSignal?: AbortSignal;
+  /** 已确认支持的模型在摘要请求中降低思考强度，不影响普通对话。 */
+  reasoningEffort?: 'low';
 }
 
 /** A pluggable LLM backend. */

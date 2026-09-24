@@ -3,6 +3,7 @@ import { createAiSdkProvider } from './providers/aiSdk.js';
 import { getLlmSettings, getSystemLlmSettings, type LlmProviderSettings, type LlmSettings } from '../settings.js';
 import type { TenantScope } from '../store/types.js';
 import type { ProviderDescriptor } from './providerRunner.js';
+import type { LlmInputModality } from '@runforge/contracts';
 
 function parseModelRef(ref: string): { providerId: string; model: string } | null {
   const idx = ref.indexOf(':');
@@ -32,6 +33,7 @@ type ConfiguredProvider = {
   modelRef: string;
   contextWindow: number;
   compactionThreshold: number;
+  inputModalities: LlmInputModality[];
 };
 
 function configuredProvider(settings: LlmSettings, modelRef: string | undefined, fallbackRef: string): ConfiguredProvider {
@@ -58,6 +60,7 @@ function configuredProvider(settings: LlmSettings, modelRef: string | undefined,
     modelRef: ref,
     contextWindow: capability.contextWindow,
     compactionThreshold: capability.compactionThreshold,
+    inputModalities: capability.inputModalities,
   };
 }
 

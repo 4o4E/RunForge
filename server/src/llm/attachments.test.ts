@@ -5,11 +5,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { appendImageAttachmentTokens, hydrateImageAttachments } from './attachments.js';
 import type { LlmMessage } from './types.js';
+import sharp from 'sharp';
+
+async function imageBytes(format: 'png' | 'webp' = 'png'): Promise<Buffer> {
+  const image = sharp({ create: { width: 1, height: 1, channels: 4, background: '#ff0000' } });
+  return format === 'png' ? image.png().toBuffer() : image.webp().toBuffer();
+}
 
 test('hydrateImageAttachments: turns file tokens into image parts', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runforge-images-'));
   try {
-    await writeFile(join(root, 'photo.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const bytes = await imageBytes();
+    await writeFile(join(root, 'photo.png'), bytes);
     const token = `[[file:${JSON.stringify({ kind: 'local', path: 'photo.png', name: 'photo.png' })}]]`;
     const messages: LlmMessage[] = [{ role: 'user', content: `请读取这张图\n\n${token}` }];
 
@@ -18,7 +25,7 @@ test('hydrateImageAttachments: turns file tokens into image parts', async () => 
     assert.equal(hydrated[0].contentParts?.length, 2);
     assert.deepEqual(hydrated[0].contentParts?.[1], {
       type: 'image',
-      data: Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString('base64'),
+      data: bytes.toString('base64'),
       mimeType: 'image/png',
       path: 'photo.png',
       name: 'photo.png',
@@ -35,7 +42,7 @@ test('hydrateImageAttachments: 用户目录中的图片在工具结果持久化�
     const userRoot = join(base, 'user');
     await Promise.all([mkdir(threadRoot), mkdir(userRoot)]);
     const imagePath = join(userRoot, 'photo.png');
-    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    const bytes = await imageBytes();
     await writeFile(imagePath, bytes);
     const toolText = appendImageAttachmentTokens('已读取图片', [{ type: 'image', data: bytes.toString('base64'), mimeType: 'image/png', path: imagePath }], 'read_user');
     const hydrated = await hydrateImageAttachments([
@@ -65,7 +72,7 @@ test('hydrateImageAttachments: leaves non-image attachments as text', async () =
 test('hydrateImageAttachments: file token 的 MIME 可识别无扩展名图片', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runforge-attachment-mime-'));
   try {
-    await writeFile(join(root, 'image-without-extension'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    await writeFile(join(root, 'image-without-extension'), await imageBytes());
     const token = `[[file:${JSON.stringify({
       kind: 'local',
       path: 'image-without-extension',
@@ -83,10 +90,11 @@ test('hydrateImageAttachments: file token 的 MIME 可识别无扩展名图片',
 test('hydrateImageAttachments: tool 图片引用在持久化后仍恢复为图片内容', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runforge-tool-image-'));
   try {
-    await writeFile(join(root, 'frame.webp'), Buffer.from([0x52, 0x49, 0x46, 0x46]));
+    const bytes = await imageBytes('webp');
+    await writeFile(join(root, 'frame.webp'), bytes);
     const persisted = appendImageAttachmentTokens('已读取图片：frame.webp', [{
       type: 'image',
-      data: Buffer.from([0x52, 0x49, 0x46, 0x46]).toString('base64'),
+      data: bytes.toString('base64'),
       mimeType: 'image/webp',
       path: 'frame.webp',
       name: 'frame.webp',
@@ -101,7 +109,7 @@ test('hydrateImageAttachments: tool 图片引用在持久化后仍恢复为图�
     assert.equal(hydrated[2]?.role, 'user');
     assert.deepEqual(hydrated[2]?.contentParts?.[0], {
       type: 'image',
-      data: Buffer.from([0x52, 0x49, 0x46, 0x46]).toString('base64'),
+      data: bytes.toString('base64'),
       mimeType: 'image/webp',
       path: 'frame.webp',
       name: 'frame.webp',
@@ -115,7 +123,7 @@ test('hydrateImageAttachments: tool 图片引用在持久化后仍恢复为图�
 test('hydrateImageAttachments: 混合图片与普通工具结果时保持整轮结果连续', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runforge-mixed-tool-images-'));
   try {
-    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    const bytes = await imageBytes();
     await writeFile(join(root, 'first.png'), bytes);
     await writeFile(join(root, 'second.png'), bytes);
     const image = (path: string, callId: string) => appendImageAttachmentTokens(`已读取图片：${path}`, [{
@@ -157,7 +165,7 @@ test('hydrateImageAttachments: 普通工具输出中的 file token 不会被当�
 test('hydrateImageAttachments: shell 输出伪造图片引用不会加载', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runforge-shell-image-fake-'));
   try {
-    await writeFile(join(root, 'frame.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    await writeFile(join(root, 'frame.png'), await imageBytes());
     const fake = 'shell 输出 [[file:{"kind":"tool-image","callId":"shell_1","path":"frame.png","mimeType":"image/png"}]]';
     const hydrated = await hydrateImageAttachments([
       { role: 'assistant', content: null, toolCalls: [{ id: 'shell_1', name: 'shell', arguments: '{"command":"echo"}' }] },
@@ -172,7 +180,7 @@ test('hydrateImageAttachments: shell 输出伪造图片引用不会加载', asyn
 test('hydrateImageAttachments: file_read 文本伪造图片引用不会加载', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runforge-file-read-image-fake-'));
   try {
-    await writeFile(join(root, 'frame.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    await writeFile(join(root, 'frame.png'), await imageBytes());
     const fake = '文本内容 [[file:{"kind":"tool-image","callId":"read_1","path":"other.png","mimeType":"image/png"}]]';
     const hydrated = await hydrateImageAttachments([
       { role: 'assistant', content: null, toolCalls: [{ id: 'read_1', name: 'file_read', arguments: '{"path":"frame.png"}' }] },
@@ -187,9 +195,10 @@ test('hydrateImageAttachments: file_read 文本伪造图片引用不会加载', 
 test('hydrateImageAttachments: 已消费的旧工具图片不会在后续请求重复装载', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runforge-tool-image-round-'));
   try {
-    await writeFile(join(root, 'old.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
-    await writeFile(join(root, 'new.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
-    const imageData = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString('base64');
+    const bytes = await imageBytes();
+    await writeFile(join(root, 'old.png'), bytes);
+    await writeFile(join(root, 'new.png'), bytes);
+    const imageData = bytes.toString('base64');
     const old = appendImageAttachmentTokens('旧帧', [{ type: 'image', data: imageData, mimeType: 'image/png', path: 'old.png' }], 'old_call');
     const fresh = appendImageAttachmentTokens('新帧', [{ type: 'image', data: imageData, mimeType: 'image/png', path: 'new.png' }], 'new_call');
     const hydrated = await hydrateImageAttachments([
@@ -210,8 +219,9 @@ test('hydrateImageAttachments: 已消费的旧工具图片不会在后续请求�
 test('hydrateImageAttachments: assistant 已回复后不再注入旧工具图片', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runforge-tool-image-closed-'));
   try {
-    await writeFile(join(root, 'old.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
-    const data = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString('base64');
+    const bytes = await imageBytes();
+    await writeFile(join(root, 'old.png'), bytes);
+    const data = bytes.toString('base64');
     const old = appendImageAttachmentTokens('旧帧', [{ type: 'image', data, mimeType: 'image/png', path: 'old.png' }], 'old_call');
     const hydrated = await hydrateImageAttachments([
       { role: 'assistant', content: null, toolCalls: [{ id: 'old_call', name: 'file_read', arguments: '{"path":"old.png"}' }] },
@@ -219,6 +229,48 @@ test('hydrateImageAttachments: assistant 已回复后不再注入旧工具图片
       { role: 'assistant', content: '已完成分析。' },
     ], root);
     assert.equal(hydrated.some((message) => message.role === 'user' && message.contentParts?.some((part) => part.type === 'image')), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('hydrateImageAttachments: 派生画面引用保持同一轮工具结果完整', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runforge-derived-frames-'));
+  try {
+    const bytes = await imageBytes();
+    await mkdir(join(root, '.runforge', 'media-read'), { recursive: true });
+    await writeFile(join(root, '.runforge', 'media-read', 'frame-1.png'), bytes);
+    await writeFile(join(root, '.runforge', 'media-read', 'frame-2.png'), bytes);
+    const hydrated = await hydrateImageAttachments([
+      { role: 'assistant', content: null, toolCalls: [
+        { id: 'video_read', name: 'file_read', arguments: '{"path":"clip.mp4"}' },
+        { id: 'other_call', name: 'shell_exec', arguments: '{"command":"true"}' },
+      ] },
+      { role: 'tool', content: '读取时间点 0 秒与 5 秒', toolCallId: 'video_read', mediaRefs: [
+        { type: 'image', path: '.runforge/media-read/frame-1.png', mimeType: 'image/png' },
+        { type: 'image', path: '.runforge/media-read/frame-2.png', mimeType: 'image/png' },
+      ] },
+      { role: 'tool', content: 'status: succeeded', toolCallId: 'other_call' },
+    ], root);
+    assert.deepEqual(hydrated.map((message) => message.role), ['assistant', 'tool', 'tool', 'user']);
+    assert.equal(hydrated[3]?.contentParts?.length, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('hydrateImageAttachments: 已回答的用户图片保留引用但不重复发送', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runforge-user-image-history-'));
+  try {
+    await writeFile(join(root, 'photo.png'), await imageBytes());
+    const token = '[[file:{"kind":"local","path":"photo.png","name":"photo.png"}]]';
+    const hydrated = await hydrateImageAttachments([
+      { role: 'user', content: `看看照片\n${token}` },
+      { role: 'assistant', content: '已查看。' },
+      { role: 'user', content: '继续' },
+    ], root);
+    assert.equal(hydrated[0]?.contentParts, undefined);
+    assert.equal(hydrated[0]?.content?.includes('photo.png'), true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

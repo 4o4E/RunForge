@@ -152,6 +152,13 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
   if (opts.protocol === 'anthropic-messages' && cfg.maxOutputTokens === null) {
     throw new Error(`Anthropic 模型 ${cfg.model} 缺少最大输出长度，无法生成协议必填的 max_tokens`);
   }
+  const requestProviderOptions = (callOptions?: ProviderCallOptions): Record<string, Record<string, string | boolean>> | undefined => {
+    if (opts.protocol === 'openai-responses') return { openai: { store: false } };
+    if (opts.protocol === 'openai-chat' && cfg.model === 'glm-5-3-flash-260828' && callOptions?.reasoningEffort) {
+      return { maas: { reasoningEffort: callOptions.reasoningEffort } };
+    }
+    return undefined;
+  };
   const common = (messages: LlmMessage[], tools: LlmTool[], functionId: string, callOptions?: ProviderCallOptions) => ({
     model: buildModel(cfg, opts, callOptions?.fetch),
     messages: toModelMessages(messages),
@@ -163,7 +170,7 @@ export function createAiSdkProvider(cfg: LlmConfig, opts: AiSdkOptions): Provide
     abortSignal: callOptions?.abortSignal,
     // OpenAI Responses 走无状态模式，确保 reasoning item 返回不可解密的
     // encrypted_content，并由 RunForge 自己持久化；其他协议不发送此选项。
-    providerOptions: opts.protocol === 'openai-responses' ? { openai: { store: false } } : undefined,
+    providerOptions: requestProviderOptions(callOptions),
     // OTEL GenAI spans (chat + tool calls) when telemetry is on. No-op otherwise.
     experimental_telemetry: {
       isEnabled: config.telemetry.enabled,

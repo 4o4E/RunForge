@@ -9,6 +9,7 @@ import {
   type ProviderTraceRecord,
   type ProviderTraceWriter,
 } from './observability/trace.js';
+import { sanitizeMediaPayloads } from './observability/mediaPayload.js';
 
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 const SECRET_QUERY_KEY = /(api[-_]?key|access[-_]?token|token|secret|signature|sig|^key$)/i;
@@ -38,6 +39,7 @@ export interface RunProviderInput {
   onDelta?: (delta: LlmDelta) => void;
   onRetry?: (input: { attempt: number; message: string }) => void | Promise<void>;
   abortSignal?: AbortSignal;
+  reasoningEffort?: 'low';
 }
 
 interface AttemptSnapshot {
@@ -227,11 +229,11 @@ export class ProviderRunner {
       purpose: input.context.purpose,
       provider: input.context.provider,
       model: input.context.model,
-      logicalRequest: {
+      logicalRequest: sanitizeMediaPayloads({
         messages: input.messages,
         tools: input.tools,
         stream: true,
-      },
+      }),
       startedAt: invocationStartedAt,
     });
 
@@ -259,7 +261,7 @@ export class ProviderRunner {
         const request = new Request(requestInput, init);
         snapshot.startedAt = new Date().toISOString();
         snapshot.url = safeUrl(request.url);
-        snapshot.requestBody = jsonBody(await request.clone().text());
+        snapshot.requestBody = sanitizeMediaPayloads(jsonBody(await request.clone().text()));
         snapshot.id = await this.repository.createAttempt({
           invocationId,
           attempt,
@@ -279,7 +281,7 @@ export class ProviderRunner {
           input.messages,
           input.tools,
           onDelta,
-          { fetch: observingFetch, abortSignal: input.abortSignal },
+          { fetch: observingFetch, abortSignal: input.abortSignal, reasoningEffort: input.reasoningEffort },
         );
         const endedAt = new Date().toISOString();
         const normalizedResponse = resultForPersistence(result);
@@ -288,8 +290,8 @@ export class ProviderRunner {
           await this.repository.finishAttempt(snapshot.id, {
             httpStatus: snapshot.httpStatus,
             providerResponseId: snapshot.providerResponseId,
-            rawStream: snapshot.rawResponse || null,
-            normalizedResponse,
+            rawStream: snapshot.rawResponse ? String(sanitizeMediaPayloads(snapshot.rawResponse)) : null,
+            normalizedResponse: sanitizeMediaPayloads(normalizedResponse),
             finishReason: result.finishReason ?? null,
             usage: result.usage ?? null,
             status: 'success',
@@ -338,13 +340,13 @@ export class ProviderRunner {
           await this.repository.finishAttempt(snapshot.id, {
             httpStatus: snapshot.httpStatus,
             providerResponseId: snapshot.providerResponseId,
-            rawStream: snapshot.rawResponse || null,
+            rawStream: snapshot.rawResponse ? String(sanitizeMediaPayloads(snapshot.rawResponse)) : null,
             normalizedResponse: null,
             finishReason: null,
             usage: null,
             status: 'error',
             errorKind: kind,
-            error: message,
+            error: String(sanitizeMediaPayloads(message)),
             endedAt,
           });
           await writeTrace(this.traceWriter, {

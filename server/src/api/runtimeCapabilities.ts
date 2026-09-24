@@ -16,13 +16,9 @@ import { store } from '../store/index.js';
 import { scopeForThread, type Scope } from '../store/types.js';
 import { providerRunner } from '../llm/providerRunner.js';
 import { retainRunExecution, type RunExecutionRegistration } from '../agent/executionControl.js';
-import { EnvHttpProxyAgent } from 'undici';
+import { envHttpProxyDispatcher } from '../net/envHttpProxy.js';
 
 export const runtimeCapabilitiesApi = Router();
-
-// 图片供应商属于外部网络资源。服务端统一遵循 HTTP_PROXY/HTTPS_PROXY/NO_PROXY，
-// 避免容器或 WSL 中只有代理出口时由原生 fetch 绕过代理直接连接失败。
-const imageHttpDispatcher = new EnvHttpProxyAgent();
 
 type CallStatus = 'success' | 'error';
 
@@ -421,8 +417,8 @@ async function proxyPackyImage(
       headers,
       body: upstreamBody,
       signal: AbortSignal.any([abortSignal, ctrl.signal]),
-      dispatcher: imageHttpDispatcher,
-    } as RequestInit & { dispatcher: typeof imageHttpDispatcher });
+      dispatcher: envHttpProxyDispatcher,
+    } as RequestInit & { dispatcher: typeof envHttpProxyDispatcher });
     const text = await response.text();
     let parsed: unknown = text;
     try {

@@ -6,6 +6,7 @@ import { basename, dirname, extname } from 'node:path';
 import type { LlmTool } from '../llm/types.js';
 import type { McpServerSettings, McpSettings } from '../settings.js';
 import { isImageMediaType, normalizeRemotePath, toRemotePath } from '../files/workspace.js';
+import { envHttpProxyDispatcher } from '../net/envHttpProxy.js';
 
 export interface McpMappedTool {
   serverId: string;
@@ -87,7 +88,10 @@ async function createConnectedClient(server: McpServerSettings, signal?: AbortSi
   const client = new Client({ name: 'RunForge', version: '0.1.0' }, { capabilities: {} });
   if (!server.url.trim()) throw new Error(`MCP server ${server.id} 缺少远程 MCP URL`);
   await client.connect(new StreamableHTTPClientTransport(new URL(server.url), {
-    requestInit: { headers: headersForServer(server) },
+    requestInit: {
+      headers: headersForServer(server),
+      dispatcher: envHttpProxyDispatcher,
+    } as RequestInit & { dispatcher: typeof envHttpProxyDispatcher },
   }), { timeout: server.timeoutMs, signal });
   return client;
 }

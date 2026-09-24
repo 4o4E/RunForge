@@ -3,6 +3,8 @@ import type { LlmMessage } from '../llm/types.js';
 import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
 import { sanitizeThreadMessagesForModel } from './messageView.js';
+import { sanitizeMediaPayloads } from '../llm/observability/mediaPayload.js';
+import { mediaRefsFromUserText } from '../llm/attachments.js';
 import { DeleteConflictError, isTerminalRunStatus, RunActiveError, SpaceConfigChangedError } from './types.js';
 import type {
   AppliedRunInput,
@@ -83,6 +85,7 @@ interface StoredMsg {
   toolCalls?: LlmMessage['toolCalls'];
   toolCallId?: string;
   providerState?: LlmMessage['providerState'];
+  mediaRefs?: LlmMessage['mediaRefs'];
   collapsed?: 'masked' | 'summarized';
   summaryOf?: number[];
   seq: number;
@@ -701,6 +704,7 @@ export class MemoryStore implements Store {
         step_id: null,
         role: 'user',
         content: fields.userMessageContent,
+        mediaRefs: mediaRefsFromUserText(fields.userMessageContent),
         seq: this.seq++,
         created_at: this.now(),
       });
@@ -743,7 +747,7 @@ export class MemoryStore implements Store {
     if (!step || !this.runOwnedBy(this.runs.get(step.run_id), scope) || step.context_snapshot) {
       throw new Error(`step 不存在、不属于当前用户或上下文已经固定：${stepId}`);
     }
-    step.context_snapshot = structuredClone(snapshot);
+    step.context_snapshot = structuredClone(sanitizeMediaPayloads(snapshot)) as StepContextSnapshot;
   }
   async listStepContextSummaries(
     scope: Scope,
@@ -815,9 +819,14 @@ export class MemoryStore implements Store {
   async loadThreadMessages(scope: Scope, threadId: string, options: { runId?: string | null } = {}): Promise<ThreadMessage[]> {
     if (!this.threadOwnedBy(this.threads.get(threadId), scope)) return [];
     const branchRunIds = this.branchRunIds(threadId, options.runId);
+    const summarizedIds = new Set(this.messages.filter((message) => message.collapsed === 'summarized').map((message) => message.seq));
     const messages = this.messages
       .filter((m) => branchRunIds.has(m.run_id) && m.thread_id === threadId && m.collapsed !== 'summarized' && !isEphemeralSystemMessage(m.role, m.content))
-      .sort((a, b) => (a.summaryOf?.[0] ?? a.seq) - (b.summaryOf?.[0] ?? b.seq))
+      .sort((a, b) => (
+        a.summaryOf?.length && a.summaryOf.every((id) => summarizedIds.has(id)) ? a.summaryOf[0] : a.seq
+      ) - (
+        b.summaryOf?.length && b.summaryOf.every((id) => summarizedIds.has(id)) ? b.summaryOf[0] : b.seq
+      ))
       .map((m) => ({
         id: m.seq,
         role: m.role,
@@ -828,6 +837,7 @@ export class MemoryStore implements Store {
             : m.toolCalls,
         toolCallId: m.toolCallId,
         providerState: m.collapsed === 'masked' ? undefined : m.providerState,
+        mediaRefs: m.collapsed === 'masked' ? undefined : m.mediaRefs,
         collapsed: m.collapsed,
       }));
     return sanitizeThreadMessagesForModel(messages);
@@ -847,6 +857,7 @@ export class MemoryStore implements Store {
         toolCalls: message.toolCalls,
         toolCallId: message.toolCallId,
         providerState: message.providerState,
+        mediaRefs: message.mediaRefs,
         collapsed: message.collapsed,
         summaryOf: message.summaryOf ?? [],
         created_at: message.created_at,
@@ -893,6 +904,7 @@ export class MemoryStore implements Store {
       toolCalls: msg.toolCalls,
       toolCallId: msg.toolCallId,
       providerState: msg.providerState,
+      mediaRefs: msg.mediaRefs,
       seq,
       created_at: this.now(),
     });

@@ -52,18 +52,6 @@ import { useNotifications } from './components/GlobalNotifications';
 import { browserPushSupported, currentBrowserPushPermission, disableBrowserPush, enableBrowserPush, readBrowserPushState, type BrowserPushState } from './notifications';
 import { attachmentToken, parseFileTokens } from './messageInput';
 
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(reader.error ?? new Error('failed to read file'));
-    reader.onload = () => {
-      const value = String(reader.result ?? '');
-      resolve(value.includes(',') ? value.split(',')[1] : value);
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
@@ -1510,8 +1498,7 @@ export function App() {
       handle.setThreadId(thread.id);
       handle.onThreadCreated(thread);
     }
-    const contentBase64 = await fileToBase64(file);
-    const uploaded = await uploadLocalFile(path, contentBase64, targetThreadId);
+    const uploaded = await uploadLocalFile(path, file, targetThreadId);
     if (threadIdRef.current !== targetThreadId) {
       throw new Error('上传期间会话已切换，文件仍保存在原会话，请在当前会话重新上传');
     }

@@ -1,10 +1,12 @@
 import { Router } from 'express';
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+import { createReadStream, createWriteStream } from 'node:fs';
 import { lstat, mkdir, open as openFile, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
+import { pipeline } from 'node:stream/promises';
 import type { Request, Response } from 'express';
+import Busboy from 'busboy';
 import { resolveThreadWorkspaceRoot, resolveUserFilesRoot } from '../files/workspaceRoot.js';
 import { threadWorkspaceAccess, ThreadWorkspaceAccessError } from '../files/threadWorkspace.js';
 import { ensureOfficePdfPreview, isOfficeConvertiblePath } from '../files/officePreview.js';
@@ -25,6 +27,7 @@ const MAX_PREVIEW_LINE_CHARS = 12_000;
 const DEFAULT_HEX_LIMIT = 4 * 1024;
 const MAX_HEX_LIMIT = 64 * 1024;
 const HEX_ROW_BYTES = 16;
+const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024;
 
 export const filesApi = Router();
 
@@ -269,7 +272,86 @@ filesApi.get('/list', requireTenantScope, async (req, res) => {
 
 filesApi.post('/upload', requireTenantScope, async (req, res) => {
   let operation: ReturnType<typeof deletionGate.enter> | undefined;
+  let temporaryPath = '';
+  let pendingUploads: Promise<void>[] = [];
   try {
+    if (req.is('multipart/form-data')) {
+      const declaredLength = Number(req.headers['content-length']);
+      if (Number.isFinite(declaredLength) && declaredLength > MAX_UPLOAD_BYTES + 64 * 1024) {
+        res.status(413).json({ error: `文件超过上传上限 ${MAX_UPLOAD_BYTES} 字节` });
+        return;
+      }
+      const busboy = Busboy({
+        headers: req.headers,
+        limits: { files: 1, fields: 3, parts: 5, fileSize: MAX_UPLOAD_BYTES, fieldNameSize: 32, fieldSize: 1024 },
+      });
+      const fields: Record<string, string> = {};
+      let targetPath = '';
+      let targetRoot = '';
+      let uploadedSize = 0;
+      let fileCount = 0;
+      let uploadError: Error | null = null;
+      const fileTasks: Promise<void>[] = [];
+      pendingUploads = fileTasks;
+
+      busboy.on('field', (name, value, info) => {
+        if (info.nameTruncated || info.valueTruncated || !['path', 'threadId', 'location'].includes(name) || name in fields) {
+          uploadError ??= new Error('上传字段无效');
+          return;
+        }
+        fields[name] = value;
+        req.body = fields;
+      });
+      busboy.on('file', (name, stream) => {
+        fileCount += 1;
+        const task = (async () => {
+          if (name !== 'file' || fileCount !== 1) throw new Error('上传必须包含一个 file 文件');
+          if (!fields.path || !('threadId' in fields) || (fields.location !== 'user' && fields.location !== 'workspace') || (fields.location === 'workspace' && !fields.threadId)) {
+            throw new Error('上传字段 path、threadId、location 必须先于文件提供');
+          }
+          const access = await resolveFileAccess(req, res, fields.path, 'write');
+          if (!access) {
+            stream.resume();
+            throw new Error('文件工作区无写入权限');
+          }
+          operation = deletionGate.enter({ tenantId: access.tenantId, spaceId: access.spaceId, threadId: access.threadId });
+          targetPath = access.file;
+          targetRoot = access.workspaceRoot;
+          await mkdir(dirname(targetPath), { recursive: true });
+          temporaryPath = join(dirname(targetPath), `.${randomUUID()}.upload`);
+          stream.on('data', (chunk: Buffer) => { uploadedSize += chunk.length; });
+          await pipeline(stream, createWriteStream(temporaryPath, { flags: 'wx', mode: 0o600 }));
+          if (stream.truncated) throw Object.assign(new Error(`文件超过上传上限 ${MAX_UPLOAD_BYTES} 字节`), { status: 413 });
+        })();
+        fileTasks.push(task);
+        void task.catch((error: Error & { status?: number }) => {
+          uploadError ??= error;
+          if (error.status === 413) uploadError = error;
+          stream.resume();
+        });
+      });
+      busboy.on('filesLimit', () => { uploadError ??= new Error('上传只能包含一个文件'); });
+      busboy.on('fieldsLimit', () => { uploadError ??= new Error('上传字段过多'); });
+      busboy.on('partsLimit', () => { uploadError ??= new Error('上传内容过多'); });
+
+      await new Promise<void>((resolvePromise, rejectPromise) => {
+        busboy.once('error', rejectPromise);
+        busboy.once('finish', resolvePromise);
+        req.once('aborted', () => {
+          uploadError ??= new Error('上传已中断');
+          busboy.destroy(uploadError);
+          rejectPromise(uploadError);
+        });
+        req.pipe(busboy);
+      });
+      await Promise.all(fileTasks);
+      if (uploadError) throw uploadError;
+      if (fileCount !== 1 || !temporaryPath || !targetPath) throw new Error('上传缺少 file 文件');
+      await rename(temporaryPath, targetPath);
+      temporaryPath = '';
+      res.status(201).json({ path: toRemotePath(targetPath, targetRoot), size: uploadedSize });
+      return;
+    }
     const access = await resolveFileAccess(req, res, req.body?.path, 'write');
     if (!access) return;
     operation = deletionGate.enter({ tenantId: access.tenantId, spaceId: access.spaceId, threadId: access.threadId });
@@ -282,6 +364,13 @@ filesApi.post('/upload', requireTenantScope, async (req, res) => {
     await writeFile(targetPath, content);
     res.status(201).json({ path: toRemotePath(targetPath, access.workspaceRoot), size: content.length });
   } catch (err) {
+    await Promise.allSettled(pendingUploads);
+    if (temporaryPath) await rm(temporaryPath, { force: true }).catch(() => undefined);
+    if ((err as { status?: number }).status === 413) {
+      res.status(413).json({ error: (err as Error).message });
+      return;
+    }
+    if (req.aborted || res.headersSent) return;
     sendFileError(res, err);
   } finally {
     operation?.finish();

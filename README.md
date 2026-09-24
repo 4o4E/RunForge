@@ -43,9 +43,10 @@ docker compose --env-file .env.docker -f deploy/compose.external-postgres.yml up
 ```
 
 两套 Compose 都在 `http://localhost:8080` 提供 Web 控制台、REST API 和 WebSocket。
-`.env.docker` 只保存当前 Compose 实际使用的数据库密钥、签名密钥和初始账号密码。LLM
-Provider 在服务启动后由系统管理员写入系统设置,再授权给租户使用。镜像版本、端口、工具参数及外部服务地址直接在
-对应 Compose 文件中修改。`runforge-workspaces`、`runforge-user-files`、`runforge-business-plugins` 和
+`.env.docker` 保存当前 Compose 使用的数据库密钥、签名密钥和初始账号密码；需要平台音频转写时，
+还可按模板配置 OpenAI 兼容转写服务的地址、模型和密钥。LLM Provider 在服务启动后由系统管理员
+写入系统设置，再授权给租户使用。镜像版本、端口、工具参数及其他外部服务地址直接在对应 Compose
+文件中修改。`runforge-workspaces`、`runforge-user-files`、`runforge-business-plugins` 和
 `runforge-provider-traces` 分别保存会话文件、用户跨会话文件、业务插件和 Provider 观测记录；自带 PostgreSQL
 的版本额外使用 `runforge-postgres` 卷保存数据库。
 

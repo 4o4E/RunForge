@@ -38,8 +38,17 @@ services:
       RUNFORGE_PROVIDER_TRACE_DIR: /app/provider-traces
       # 租户业务插件部署和历史运行快照目录；多个目录时使用逗号分隔。
       RUNFORGE_BUSINESS_PLUGIN_ROOTS: /app/business-plugins
+      # 可选：需要代理访问外部网页或 MCP 时，在部署环境配置代理地址。
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1,host.docker.internal}
       # Office 转换服务地址；空值关闭 Office 文件预览。
       OFFICE_PREVIEW_CONVERTER_URL: ""
+      # 可选音频转写服务；选中音视频业务插件的空间也可使用租户 Speaches 配置。
+      RUNFORGE_TRANSCRIPTION_BASE_URL: ${RUNFORGE_TRANSCRIPTION_BASE_URL:-}
+      RUNFORGE_TRANSCRIPTION_API_KEY: ${RUNFORGE_TRANSCRIPTION_API_KEY:-}
+      RUNFORGE_TRANSCRIPTION_MODEL: ${RUNFORGE_TRANSCRIPTION_MODEL:-}
+      RUNFORGE_TRANSCRIPTION_LANGUAGE: ${RUNFORGE_TRANSCRIPTION_LANGUAGE:-zh}
       # Office 转换请求超时时间，单位为毫秒，必须为正整数。
       OFFICE_PREVIEW_TIMEOUT_MS: "180000"
       # Office 预览缓存版本；空值使用默认缓存，修改该值会使旧缓存失效。
