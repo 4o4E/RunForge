@@ -1,6 +1,6 @@
 schemaVersion: 2
 id: bilibili-video-analysis
-version: 0.3.0
+version: 0.3.1
 displayName: B站视频分析
 description: 解析 B 站链接并下载目标分 P 的媒体、元数据和评论，供 Agent 分析。
 
