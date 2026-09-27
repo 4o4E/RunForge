@@ -8,6 +8,37 @@ interface ActiveRunExecution {
 }
 
 const activeExecutions = new Map<string, ActiveRunExecution>();
+const runActivityWaiters = new Map<string, Set<() => void>>();
+
+/** 唤醒等待当前 run 新输入或子任务状态变化的 executor。 */
+export function notifyRunActivity(runId: string): void {
+  const waiters = runActivityWaiters.get(runId);
+  if (!waiters) return;
+  runActivityWaiters.delete(runId);
+  for (const wake of waiters) wake();
+}
+
+/** 等待 run 活动；超时由调用方重新核对数据库，以兼容多进程部署。 */
+export function waitForRunActivity(runId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  return new Promise((resolve) => {
+    const waiters = runActivityWaiters.get(runId) ?? new Set<() => void>();
+    runActivityWaiters.set(runId, waiters);
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', finish);
+      waiters.delete(finish);
+      if (!waiters.size) runActivityWaiters.delete(runId);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    waiters.add(finish);
+    signal?.addEventListener('abort', finish, { once: true });
+  });
+}
 
 export interface RunExecutionRegistration {
   signal: AbortSignal;

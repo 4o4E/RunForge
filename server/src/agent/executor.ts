@@ -83,7 +83,7 @@ import { readAuditedWorkloadSecrets } from '../businessPlugins/secretService.js'
 import { verifySpaceRuntimeLock } from '../plugins/lock.js';
 import type { JsonValue, SpaceRuntimeLock } from '../plugins/types.js';
 import { materializeWorkloadSdk } from '../workloadSdk/materialize.js';
-import { registerRunExecution, retainRunExecution } from './executionControl.js';
+import { notifyRunActivity, registerRunExecution, retainRunExecution, waitForRunActivity } from './executionControl.js';
 
 const ASK_USER_TOOL_NAME = 'ask_user';
 const DATABASE_ACCESS_SKILL_NAME = 'database-access';
@@ -93,7 +93,10 @@ const SUBAGENT_LIST_TOOL_NAME = 'subagent_list';
 const STREAM_STATS_POINTS = 24;
 const STREAM_STATS_MIN_INTERVAL_MS = 250;
 const SECRET_KEY_RE = /(password|passwd|pwd|secret|token|key|credential|connectionurl)/i;
-const SUBAGENT_MAX_TOOL_TURNS = 12;
+// 只读调研优先尽早整理已找到的证据，避免反复搜索把上下文耗尽；写作任务保留较多工具轮次。
+// 最后一个模型轮次专门整理结论，防止工具调用耗尽后把空结果误报为成功。
+const SUBAGENT_READONLY_MAX_TURNS = 6;
+const SUBAGENT_WRITER_MAX_TURNS = 12;
 const SUBAGENT_POLL_MAX_WAIT_SECONDS = 120;
 const SUBAGENT_FORBIDDEN_TOOLS = new Set([
   ASK_USER_TOOL_NAME,
@@ -1086,6 +1089,10 @@ async function executeRunControlled(
     }
     let noActionTurns = 0;
     const acceptsNextStep = spaceConfig?.mode === 'external' && spaceConfig.external.allowNextStep;
+    let lastAppliedExternalInputVersion = runEvents.reduce(
+      (version, event) => event.type === 'external_input_applied' ? Math.max(version, event.version) : version,
+      0,
+    );
 
     const addAppliedExternalInputs = async (
       inputs: AppliedRunInput[],
@@ -1103,6 +1110,7 @@ async function executeRunControlled(
           inputId: input.inputId,
           version: input.version,
         });
+        lastAppliedExternalInputVersion = Math.max(lastAppliedExternalInputVersion, input.version);
       }
       if (inputs.length) {
         // 新输入代表调用方提供了新的推进信息，旧的空转/重复检测不能跨边界误判。
@@ -1260,9 +1268,8 @@ async function executeRunControlled(
           : deps.inputModalities;
         let subagentImageRejected = false;
         const toolTrace: string[] = [];
-        let output = '';
         let usage: LlmUsage | undefined;
-        for (let turn = 0; turn < SUBAGENT_MAX_TOOL_TURNS; turn += 1) {
+        const completeTurn = async (availableTools: typeof tools) => {
           const imageIssues: import('../llm/attachments.js').ImageAttachmentIssue[] = [];
           const modelMessages = await hydrateImageAttachments(
             messages, toolSettings.workspaceRoot, userFiles?.source,
@@ -1272,19 +1279,24 @@ async function executeRunControlled(
             toolTrace.push(`- 图片未进入 subagent 模型：${imageIssues.map((issue) => issue.name).join('、')}`);
           }
           let publishedDelta = false;
-          let result;
+          let result: Awaited<ReturnType<typeof subagentProvider.completeStream>>;
           try {
-            result = await subagentProvider.completeStream(modelMessages, tools, () => { publishedDelta = true; }, { abortSignal });
+            result = await subagentProvider.completeStream(modelMessages, availableTools, () => { publishedDelta = true; }, { abortSignal });
           } catch (error) {
             const prepared = omitImagesForTextContinuation(modelMessages);
             if (publishedDelta || !prepared.omitted.length || !isExplicitImageRejection(error)) throw error;
             subagentImageRejected = true;
             toolTrace.push(`- 图片被 subagent 模型拒绝：${prepared.omitted.map((item) => item.name).join('、')}`);
-            result = await subagentProvider.completeStream(prepared.messages, tools, () => {}, { abortSignal });
+            result = await subagentProvider.completeStream(prepared.messages, availableTools, () => {}, { abortSignal });
           }
+          return result;
+        };
+        let finalText = '';
+        const maxTurns = profile.label === 'writer' ? SUBAGENT_WRITER_MAX_TURNS : SUBAGENT_READONLY_MAX_TURNS;
+        for (let turn = 0; turn < maxTurns - 1; turn += 1) {
+          const result = await completeTurn(tools);
           abortSignal.throwIfAborted();
           usage = addUsage(usage, result.usage);
-          output = result.content?.trim() || output;
           const assistantMsg = {
             role: 'assistant' as const,
             content: result.content,
@@ -1292,7 +1304,10 @@ async function executeRunControlled(
             providerState: result.providerState,
           };
           messages.push(assistantMsg);
-          if (!result.toolCalls.length) break;
+          if (!result.toolCalls.length) {
+            finalText = result.content?.trim() ?? '';
+            break;
+          }
 
           for (const call of result.toolCalls) {
             abortSignal.throwIfAborted();
@@ -1339,7 +1354,29 @@ async function executeRunControlled(
             messages.push({ role: 'tool', content: text, toolCallId: call.id, mediaRefs });
           }
         }
-        if (!output) output = 'subagent 未返回文本结果。';
+
+        if (!finalText) {
+          messages.push({
+            role: 'user',
+            content: [
+              '请现在整理本子任务的最终结论。工具调用轮次已经用完或未能生成答复，请只依据前文已经取得的工具结果：直接回答任务，说明支持结论的关键证据，并明确指出证据不足、无法确认的部分及原因。不要继续调用工具，也不要把工具执行记录当作结论。必须输出有实际内容的文本。',
+            ].join('\n'),
+          });
+          const synthesis = await completeTurn([]);
+          abortSignal.throwIfAborted();
+          usage = addUsage(usage, synthesis.usage);
+          if (synthesis.toolCalls.length) {
+            throw new Error('subagent 结论整理阶段仍请求调用工具，未能按已收集证据完成答复。');
+          }
+          finalText = synthesis.content?.trim() ?? '';
+          messages.push({
+            role: 'assistant',
+            content: synthesis.content,
+            providerState: synthesis.providerState,
+          });
+        }
+        if (!finalText) throw new Error('subagent 已完成工具调用，但结论整理阶段没有返回实质文本。');
+        let output = finalText;
         if (toolTrace.length) {
           output = `${output}\n\n工具执行摘要 / Tool execution summary:\n${toolTrace.join('\n')}`;
         }
@@ -1425,7 +1462,10 @@ async function executeRunControlled(
 
       const subagentExecution = retainRunExecution(runId);
       void completeSubagent(row, args, stepId, stepIdx, toolStartedAt, subagentExecution.signal)
-        .finally(() => subagentExecution.finish());
+        .finally(() => {
+          notifyRunActivity(runId);
+          subagentExecution.finish();
+        });
       return {
         text: [
           `subagentRunId: ${row.id}`,
@@ -1453,8 +1493,17 @@ async function executeRunControlled(
         return { text: `当前 thread 无权读取 subagentRunId: ${subagentRunId}` };
       }
       while (row.status === 'running' && Date.now() < deadline) {
-        await waitMs(Math.min(1000, Math.max(100, deadline - Date.now())));
+        cancellationSignal.throwIfAborted();
+        // 同进程会被 next_step 或子任务完成事件唤醒；每秒复查一次数据库以覆盖跨进程请求。
+        const timeoutMs = Math.min(1000, deadline - Date.now());
+        await waitForRunActivity(runId, timeoutMs, cancellationSignal);
         row = (await store.getSubagentRun(scope, subagentRunId)) ?? row;
+        const parentRun = await store.getRun(scope, runId);
+        if (parentRun && parentRun.input_version > lastAppliedExternalInputVersion) {
+          return {
+            text: `${renderSubagentRow(row, false)}\n\n主对话已收到新的 next_step 输入，先返回处理该输入；子任务仍可稍后继续查询。`,
+          };
+        }
       }
       if (row.status === 'running' && waitSeconds > 0) {
         return { text: `${renderSubagentRow(row, false)}\n\n等待 ${waitSeconds} 秒后仍未完成，返回当前状态。` };

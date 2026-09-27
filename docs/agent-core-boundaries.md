@@ -126,6 +126,8 @@ OpenTelemetry 面向工程观测，RunForge 的 `events` 面向用户可见执�
 - 每 step 的 LLM 调用、工具调用、工具结果回填。
 - 用户取消、等待用户、无进展检测和 hard step cap。
 - final 输出和 plan 收口。
+- `subagent_poll` 等待子任务期间可被当前 run 的 external `next_step` 输入唤醒；工具返回后由下一 step 的主循环吸收输入。跨进程输入依靠有上限的数据库复查补足本地通知。
+- subagent 保留有限的工具轮次；只读调研最多使用五轮工具，再用一轮无工具调用整理已有证据，避免连续检索耗尽上下文。writer 最多使用十一轮工具和一轮结论整理。仍无实质文本则记录失败。
 
 为什么自研：
 
@@ -136,6 +138,7 @@ OpenTelemetry 面向工程观测，RunForge 的 `events` 面向用户可见执�
 - [server/src/agent/executor.ts](../server/src/agent/executor.ts)
 - [server/src/agent/types.ts](../server/src/agent/types.ts)
 - [server/src/store/types.ts](../server/src/store/types.ts)
+- [server/src/agent/executionControl.ts](../server/src/agent/executionControl.ts)
 
 ### 上下文管理和压缩不变式
 

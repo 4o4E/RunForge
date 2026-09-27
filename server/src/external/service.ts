@@ -24,7 +24,7 @@ import {
 } from './artifactStorage.js';
 import { MAX_EXTERNAL_ARTIFACT_BYTES } from './artifactProtocol.js';
 import { deletionGate } from '../deletion/gate.js';
-import { abortRunExecution } from '../agent/executionControl.js';
+import { abortRunExecution, notifyRunActivity } from '../agent/executionControl.js';
 import { DeleteConflictError } from '../store/types.js';
 
 function stableJson(value: unknown): string {
@@ -236,6 +236,7 @@ export class ExternalCommandService {
         threadId: command.threadId,
         source: command.source,
       });
+      if (!appended.replayed) notifyRunActivity(appended.response.runId);
       return appended.response;
     }
 

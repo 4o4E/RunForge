@@ -34,7 +34,7 @@ export const subagentRunTool: Tool = {
 
 export const subagentPollTool: Tool = {
   name: 'subagent_poll',
-  description: '查询一个 subagent 子任务的当前状态和结果。可设置 waitSeconds 等待完成，超时后返回当前状态，避免连续轮询。',
+  description: '查询一个 subagent 子任务的当前状态和结果。可设置 waitSeconds 等待完成；等待期间当前 run 收到新的 external next_step 输入时会提前返回，让主 agent 在下一轮先处理新输入。超时后返回当前状态，避免连续轮询。',
   parameters: {
     type: 'object',
     properties: {
