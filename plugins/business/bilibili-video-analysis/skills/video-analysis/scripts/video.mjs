@@ -45,20 +45,29 @@ async function apiJson(url) {
 
 const video = await videoUrl(input);
 if (operation === 'comments' || operation === 'video') {
-  // 音轨没有有效讲话时，评论与画面不能替代视频内容分析。
+  // 分档必须发生在转写之后；评论允许配合空转写判断，画面只供详细分析使用。
   const transcripts = (await readdir(output)).filter((name) =>
     name.startsWith(`${video.bvid}-p${video.page}`) && name.endsWith('.srt'));
   if (transcripts.length !== 1) throw new Error('先完成实际音轨转写，再决定是否读取评论或关键帧');
-  const transcript = await readFile(join(output, transcripts[0]), 'utf8');
-  if (!transcript.trim()) throw new Error('转写为空、没有有效讲话；应返回 skipped，不要继续分析画面或评论');
+  if (operation === 'video') {
+    const transcript = await readFile(join(output, transcripts[0]), 'utf8');
+    if (!transcript.trim()) throw new Error('转写为空、没有有效讲话；不能进入需要画面的详细分析');
+  }
 }
 if (operation === 'metadata') {
   const data = await apiJson(`https://api.bilibili.com/x/web-interface/view?bvid=${video.bvid}`);
   const part = data.pages?.[video.page - 1];
   if (!part) throw new Error(`视频不存在第 ${video.page} 分 P`);
+  let category = String(data.tname_v2 || data.tname || '').trim();
+  if (!category && data.tid) {
+    const related = await apiJson(`https://api.bilibili.com/x/web-interface/archive/related?bvid=${video.bvid}`);
+    category = (Array.isArray(related) ? related : [])
+      .find((entry) => Number(entry?.tid) === Number(data.tid) && String(entry?.tname || '').trim())
+      ?.tname?.trim() || '';
+  }
   const result = {
     url: video.url, bvid: video.bvid, aid: data.aid, cid: part.cid, page: video.page,
-    title: data.title, partTitle: part.part, description: data.desc, category: data.tname,
+    title: data.title, partTitle: part.part, description: data.desc, category,
     durationSeconds: part.duration, author: data.owner?.name,
   };
   const metadataFile = join(output, `${video.bvid}-p${video.page}-metadata.json`);
@@ -67,10 +76,24 @@ if (operation === 'metadata') {
 } else if (operation === 'comments') {
   const data = await apiJson(`https://api.bilibili.com/x/web-interface/view?bvid=${video.bvid}`);
   const comments = await apiJson(`https://api.bilibili.com/x/v2/reply/main?oid=${data.aid}&type=1&mode=3&next=0`);
+  const regular = Array.isArray(comments.replies) ? comments.replies : [];
+  const pinned = [comments.upper?.top, ...(Array.isArray(comments.top_replies) ? comments.top_replies : [])]
+    .filter((entry) => entry && typeof entry === 'object');
+  const pinnedIds = new Set([...pinned, ...regular.filter((entry) => entry.reply_control?.is_up_top)]
+    .map((entry) => String(entry.rpid)));
+  const selected = [...pinned, ...regular]
+    .filter((entry, index, all) => all.findIndex((candidate) => String(candidate.rpid) === String(entry.rpid)) === index)
+    .sort((left, right) => Number(pinnedIds.has(String(right.rpid))) - Number(pinnedIds.has(String(left.rpid))) ||
+      Number(right.like || 0) - Number(left.like || 0))
+    .slice(0, 20);
   const result = {
     bvid: video.bvid, page: video.page,
-    comments: (comments.replies ?? []).slice(0, 20).map((entry) => ({
-      id: entry.rpid, likes: entry.like, author: entry.member?.uname,
+    comments: selected.map((entry) => ({
+      id: entry.rpid,
+      pinned: pinnedIds.has(String(entry.rpid)) || Boolean(entry.reply_control?.is_up_top),
+      likes: entry.like,
+      author: entry.member?.uname,
+      authorIsUploader: String(entry.member?.mid || '') === String(data.owner?.mid || ''),
       text: entry.content?.message,
     })),
   };
