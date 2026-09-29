@@ -24,13 +24,16 @@ function runLock(definition: Awaited<ReturnType<typeof loadBusinessPlugin>>) {
   });
 }
 
-test('仓库业务插件：AI 绘图、A 股行情、搜索与每日新闻插件符合当前协议', async () => {
+test('仓库业务插件：图片、行情、搜索与新闻插件符合当前协议', async () => {
   const image = await loadBusinessPlugin(resolve('..', 'plugins/business/ai-image-generation'));
+  const lens = await loadBusinessPlugin(resolve('..', 'plugins/business/brix-google-lens'));
   const stock = await loadBusinessPlugin(resolve('..', 'plugins/business/a-share-market-data'));
   const research = await loadBusinessPlugin(resolve('..', 'plugins/business/web-research'));
   const news = await loadBusinessPlugin(resolve('..', 'plugins/business/daily-news-research'));
   assert.equal(image.manifest.resources[0]?.type, 'image.proxy');
   assert.equal(image.manifest.skills[0]?.id, 'ai-image-generation');
+  assert.equal(lens.manifest.skills[0]?.id, 'google-lens');
+  assert.deepEqual(lens.manifest.secrets.map((secret) => secret.key), ['brix.base-url', 'brix.token']);
   assert.equal(stock.manifest.resources.length, 0);
   assert.equal(stock.manifest.skills[0]?.id, 'a-share-market-data');
   assert.equal(research.manifest.mcpServers[0]?.id, 'exa');

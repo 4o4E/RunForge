@@ -1,0 +1,21 @@
+schemaVersion: 2
+id: brix-google-lens
+version: 0.1.0
+displayName: Brix Google Lens
+description: 读取当前任务的本地图片，通过 Brix 服务端 google-lens 脚本查询可验证的图片出处。
+
+skills:
+  - id: google-lens
+    path: skills/google-lens
+
+executables: []
+secrets:
+  - key: brix.base-url
+    required: true
+    description: Brix HTTP 服务地址，例如 http://brix.ubuntu.lan:9233
+  - key: brix.token
+    required: true
+    description: Brix HTTP Bearer Token
+resources: []
+configSchema:
+  type: object

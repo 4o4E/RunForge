@@ -12,6 +12,7 @@
     "model-catalog:update": "pnpm --filter server model-catalog:update",
     "model-catalog:check": "pnpm --filter server model-catalog:check",
     "migrate:legacy-plugin-links": "pnpm --filter server migrate:legacy-plugin-links",
+    "package:business-plugin": "pnpm --filter server package:business-plugin",
     "db:migrate": "pnpm --filter server db:migrate",
     "start:server": "pnpm --filter server start",
     "test": "pnpm --filter @runforge/contracts build && pnpm --filter @runforge/workload-sdk test && pnpm --filter server test && pnpm --filter web test",

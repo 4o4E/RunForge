@@ -43,6 +43,7 @@
 
 - **提交**：Conventional Commits（`feat(server): …` / `fix(web): …`）。提交前 `pnpm test` 必须全绿。
 - **提交时机**：仅在用户明确要求时提交/推送。
+- **业务插件打包**：只在仓库根目录执行 `pnpm package:business-plugin <插件ID>`。脚本必须先按业务插件协议验证源码并复核压缩包可真实导入；交付物固定写入 `build/business-plugins/<插件ID>-<manifest.version>.zip`，不手工选择其他输出目录或临时压缩插件目录。
 - **前端组件**：能用组件库的控件一律用组件库，优先复用 `web/src/components/ui/` 已有 shadcn 组件；缺少组件时按 shadcn/Radix 官方模式补本地封装，不要手写外观相似但行为自造的替代组件。
 - **压缩不变式**（改压缩务必守住，见设计文档 §6）：
   - `tool_call ↔ tool_result` 配对永不破坏；
