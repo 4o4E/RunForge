@@ -1196,8 +1196,6 @@ test('executeRun: starts async subagents and allows cross-run polling', async ()
                 id: 'sub_1',
                 name: 'subagent_run',
                 arguments: JSON.stringify({
-                  stageId: 'review',
-                  stageGoal: '确认变更是否有阻塞问题。',
                   runtimeProfileId: 'readonly',
                   skillNames: ['data-analysis'],
                   task: '审查 executor 的 subagent 分支。',
@@ -1208,8 +1206,6 @@ test('executeRun: starts async subagents and allows cross-run polling', async ()
                 id: 'sub_2',
                 name: 'subagent_run',
                 arguments: JSON.stringify({
-                  stageId: 'test',
-                  stageGoal: '确认测试覆盖是否足够。',
                   runtimeProfileId: 'readonly',
                   task: '检查是否需要补充 subagent 异步测试。',
                   expectedOutput: '列出测试建议。',
@@ -1229,7 +1225,6 @@ test('executeRun: starts async subagents and allows cross-run polling', async ()
 
   const started = published.find((e) => e.type === 'subagent_started');
   assert.equal(started?.type, 'subagent_started');
-  assert.equal(started?.type === 'subagent_started' ? started.stageId : '', 'review');
   assert.deepEqual(started?.type === 'subagent_started' ? started.skillNames : [], ['data-analysis']);
   assert.equal((await store.getRun(scope, run.id))?.status, 'done');
 

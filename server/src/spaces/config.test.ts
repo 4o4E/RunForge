@@ -109,13 +109,12 @@ test('prompt placeholders: 服务端返回完整目录并按空间能力生成�
   const view = await service.promptPlaceholders('tn_config', 'web', config);
   const placeholders = new Map(view.placeholders.map((item) => [item.key, item]));
 
-  assert.equal(view.placeholders.length, 13);
+  assert.equal(view.placeholders.length, 12);
   assert.equal(placeholders.get('user.filesRoot')?.token, '{{user.filesRoot}}');
   assert.equal(placeholders.get('workspace.root')?.token, '{{workspace.root}}');
   assert.equal(placeholders.get('workspace.root')?.runtime, true);
-  assert.match(placeholders.get('workflow.catalog')?.content ?? '', /Available workflows/);
+  assert.equal(placeholders.has('workflow.catalog'), false);
   assert.match(placeholders.get('skills.catalog')?.content ?? '', /Available skills/);
-  assert.doesNotMatch(placeholders.get('workflow.catalog')?.content ?? '', /当前工作区/);
   assert.doesNotMatch(placeholders.get('skills.catalog')?.content ?? '', /当前工作区/);
   assert.match(placeholders.get('mcp.catalog')?.content ?? '', /browser/);
   assert.equal(placeholders.get('runtime.enabledCapabilities')?.content, 'datasource.credentials, image');

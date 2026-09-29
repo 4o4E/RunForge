@@ -18,8 +18,6 @@ import { updatePlanTool } from './updatePlan.js';
 import { skillActivateTool } from './skillActivate.js';
 import { mcpActivateTool } from './mcpActivate.js';
 import { subagentListTool, subagentPollTool, subagentRunTool } from './subagentRun.js';
-import { workflowListTool, workflowReadTool } from './workflow.js';
-import { datasourceListTool } from './datasourceList.js';
 import { managedShellTools } from './managedShell.js';
 
 const TOOLS: Tool[] = [
@@ -35,12 +33,9 @@ const TOOLS: Tool[] = [
   updatePlanTool,
   skillActivateTool,
   mcpActivateTool,
-  workflowListTool,
-  workflowReadTool,
   subagentRunTool,
   subagentPollTool,
   subagentListTool,
-  datasourceListTool,
   ...managedShellTools,
 ];
 
@@ -50,8 +45,6 @@ const CORE_TOOL_NAMES = new Set([
   'update_plan',
   'skill_activate',
   'mcp_activate',
-  'workflow_list',
-  'workflow_read',
   'subagent_run',
   'subagent_poll',
   'subagent_list',

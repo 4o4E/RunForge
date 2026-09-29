@@ -18,7 +18,7 @@
 
 - 通过 Agent 执行循环完成多步任务：计划、调用工具、观察结果、继续推进。
 - 通过 AI SDK 支持 `openai-responses`、`openai-chat`、`anthropic-messages` 三种 LLM 协议。
-- 内置通用工具：shell、托管 shell、文件读写/编辑、glob、grep、web fetch、web search、ask user、update plan、skill、workflow、subagent 和数据源访问。
+- 内置通用工具：shell、托管 shell、文件读写/编辑、glob、grep、web fetch、web search、ask user、update plan、skill 和 subagent。数据源通过 Workload SDK 使用。
 - LLM 请求固定使用流式传输。供应商的 `timeoutMs` 限制等待首个模型输出及相邻模型流片段的最长间隔，不限制持续输出的总时长；瞬态错误重试由 RunForge `ProviderRunner` 统一控制，已经发布输出的请求不重试。
 - 暴露 REST API 和 WebSocket 事件流。
 - 对话按 `thread -> run -> step` 组织并持久化到 PostgreSQL。
@@ -26,7 +26,6 @@
 - 支持上下文压缩、持久 Goal 状态、取消 run、服务启动恢复、工具输出截断和工具策略。
 - 支持托管 shell session，长耗时命令可以后台运行、轮询、终止，并在右侧 Shell 面板中持续观察。
 - 支持 Skill 文件协议，按空间准备只读内置资源，并按需用 `skill_activate` 加载正文和资源；普通会话不能创建或修改 Skill。
-- 支持 Workflow 文件协议，LLM 可按需列出和读取空间中已启用的只读流程；普通会话不能创建或修改 Workflow。
 - 支持异步只读 subagent，主 agent 可派发子任务、轮询结果，并在前端资源栏查看。
 - 服务端统一聚合 Token 与存储占用，支持租户、用户、空间和时间维度；统计口径见[用量与存储分析](usage-and-storage-analysis.md)。
 
@@ -57,7 +56,7 @@ Server (Node.js / TypeScript 单体)
   |     |-- ContextManager: system prompt、历史消息、Goal 派生裁剪和压缩视图
   |     |-- ProviderRunner: invocation/attempt 持久化、统一重试、原始流观测
   |     |     `-- Provider 抽象: AI SDK 协议实现
-  |     |-- Skill / MCP / Workflow registry: 按 run 渐进加载外部能力和任务流程
+  |     |-- Skill / MCP registry: 按 run 渐进加载外部能力
   |     |-- Tool registry: 工具注册、策略检查、输出截断
   |     |-- Subagent runner: 异步只读子任务
   |     `-- Run bus: 进程内事件发布
@@ -154,8 +153,8 @@ Web 创建 thread
 - `policy.ts`：工具 allow/deny、路径围栏、shell 开关、网络开关、输出截断。
 - `sandbox.ts`：shell 子进程执行后端，支持宿主执行和 bwrap。
 - `managedShell.ts`：托管 shell 工具，提供 session 复用、前台/后台命令、轮询和终止。
-- `skillActivate.ts`、`workflow.ts`、`subagentRun.ts`、`datasourceList.ts`：skill、workflow、subagent 和数据源访问入口。
-- 具体工具：`shell`、`shell_session_open`、`shell_session_reuse`、`shell_session_list`、`shell_exec`、`shell_poll`、`shell_kill`、`shell_session_close`、`file_read`、`file_write`、`file_edit`、`glob`、`grep`、`web_fetch`、`web_search`、`ask_user`、`update_plan`、`skill_activate`、`workflow_list`、`workflow_read`、`subagent_run`、`subagent_poll`、`subagent_list`、`datasource_list`。
+- `skillActivate.ts`、`subagentRun.ts`：skill 和 subagent 入口。
+- 具体工具：`shell`、`shell_session_open`、`shell_session_reuse`、`shell_session_list`、`shell_exec`、`shell_poll`、`shell_kill`、`shell_session_close`、`file_read`、`file_write`、`file_edit`、`glob`、`grep`、`web_fetch`、`web_search`、`ask_user`、`update_plan`、`skill_activate`、`subagent_run`、`subagent_poll`、`subagent_list`。
 
 `server/src/shell/`
 
@@ -163,10 +162,10 @@ Web 创建 thread
 - `bus.ts`：thread 级 shell 事件发布。
 - `redact.ts`：shell 输出脱敏。
 
-`server/src/skills/` 和 `server/src/workflows/`
+`server/src/skills/`
 
 - `registry.ts`：扫描内置和用户目录，校验文件协议，物化只读内置资源，并渲染初始目录。
-- `server/src/skills/builtin/`、`server/src/workflows/builtin/`：内置 skill 和 workflow 源文件。
+- `server/src/skills/builtin/`：内置 skill 源文件。
 
 `server/src/store/`
 
@@ -268,7 +267,7 @@ PostgreSQL 以执行过程为核心建模：
 - `provider_attempts`：一次真实上游 HTTP 请求，保存 wire body、原始响应、状态、用量、
   Provider ID 和错误分类；同一 invocation 内 attempt 序号唯一。
 - `app_settings`：系统资源配置、租户资源授权和租户内业务插件配置；env 只作为系统工具配置的初始默认值或兜底。
-- `subagent_runs`：主 agent 派发的异步只读子任务，保存 task assignment、stage、skill、输出和 usage。
+- `subagent_runs`：主 agent 派发的异步子任务，保存 task assignment、运行配置、skill、输出和 usage。
 - `shell_sessions`、`shell_commands`、`shell_command_logs`、`shell_session_events`：托管 shell 会话、命令、增量日志和审计事件。
 - `datasources`、`datasource_permission_profiles`、`datasource_accounts`、`workload_tokens`、`datasource_account_leases`：统一 run 级系统资源 token、数据源账号池和短期凭证租约。
 - `workload_secret_access_logs`：通过 workload token 读取 tenant Secret 的审计，只保存上下文、key 和结果，不保存明文。
@@ -307,7 +306,7 @@ Run API：
 - `/api/system/tenant-access/:tenantId`：系统管理员读取和保存租户资源授权。
 - `/api/shell-sessions`、`/api/shell-commands`：托管 shell session、命令、日志、终止和用户标记。
 - `/api/threads/:id/subagents`：列出当前 thread 下可恢复查看的 subagent 子任务。
-- `/api/datasources`、`/api/runtime/datasources`：读取租户获准的数据源目录和租赁运行时短期凭证。
+- `/api/datasources`：管理端读取租户获准的数据源；`/api/runtime/datasources` 是 Workload SDK 使用的数据源目录和短期凭证内部接口。
 
 ## 事件模型
 

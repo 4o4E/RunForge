@@ -51,9 +51,9 @@ space 归属于 tenant，是一套可动态更新的运行配置和权限边界�
 空间保存一个完整的 `promptTemplate` 字符串。创建空间时按空间模式复制默认内容，保存后由空间
 独立维护。管理员直接编辑完整模板，不使用模板列表、提示词分块、启用状态或顺序配置。
 
-模板可以引用受控动态值，例如 workspace 路径、沙箱设置、Workflow/Skill/MCP 目录、运行资源
+模板可以引用受控动态值，例如 workspace 路径、沙箱设置、Skill/MCP 目录、运行资源
 和外部可信指令。保存配置时拒绝未知或格式错误的占位符。管理接口返回完整占位符目录及当前
-空间对应的内容；前端完成替换并实时展示预览。Workflow 和 Skill 的管理预览读取当前内置目录
+空间对应的内容；前端完成替换并实时展示预览。Skill 的管理预览读取当前内置目录
 以及空间选择的业务插件目录，实际运行使用该 run 工作区中加载完成的真实目录。
 
 已发布旧配置中的 `systemPrompt` 会与对应模式的默认内容组合成完整模板，转换后保存为单一模板。
@@ -282,13 +282,13 @@ Provider 调用前 materialize。文件写入和状态更新都可重试，进�
 - 所有空间的 thread 使用 `/w/<spaceId>/c/<threadId>` 独立可写目录。旧会话目录中的文件不自动迁移，消息和用量记录保持原样。
 - 用户跨会话文件直接存放在独立持久卷 `/u/<userId>`，不移动旧用户 workspace 或会话文件。Web run 使用所属用户目录；external 空间由管理员通过 `external.allowUserFiles` 决定是否让新 run 读写其 execution user 的目录，默认关闭。空间配置在 run 接纳时固化，修改开关不改变已经接纳的 run；切换 execution user 后，旧 thread 的新 run 不再挂载旧用户目录。
 - 提示词占位符 `{{user.filesRoot}}` 在本次 run 已通过 bwrap 挂载用户目录时为绝对路径 `/u/<userId>`，否则为“已禁用”。文件工具与 shell 仅能访问当前用户目录，不自动访问其他会话；Web 文件入口独立按登录用户授权。
-- 空间根目录中的 `.skills`、`.workflows`、`.plugins`、`.agents` 只保存服务端管理的只读资源。thread 中的受控相对链接只指向当前运行选定的版本，不开放其他 thread 的文件。
+- 空间根目录中的 `.skills`、`.plugins`、`.agents` 只保存服务端管理的只读资源。thread 中的受控相对链接只指向当前运行选定的版本，不开放其他 thread 的文件。
 - 调用方不能提交或修改真实 workspace 路径。
 - thread 创建后不能迁移到其他 space。
 - 文件 API、shell、Office 预览、artifact 和签名分享都先从数据库校验 thread 归属，再由
   服务端计算路径。
 - 文件工具按真实路径检查读写边界；bwrap 只挂载当前 thread、已选托管资源与锁定的业务插件快照。
-- 空间允许的 skill/workflow/plugin 由空间配置装配，不从其他 thread 的工作目录发现。
+- 空间允许的 skill/plugin 由空间配置装配，不从其他 thread 的工作目录发现。
 
 当前实现约定：Web 文件接口使用 `threadId` 作为逻辑上下文参数，而不是接收真实目录。
 服务端先校验当前用户是否能访问该 thread/space，再按上述规则计算 workspace。Web 空间的文件写入仍要求

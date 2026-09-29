@@ -2,6 +2,7 @@ import { Router } from 'express';
 import {
   acquireCredential,
   DatasourceError,
+  listWorkloadDatasourceCatalog,
   releaseLease,
   toPublicCredential,
   validateWorkloadToken,
@@ -48,7 +49,22 @@ runtimeApi.post('/secrets/get', async (req, res) => {
   }
 });
 
-// 容器脚本调用：用 workload token 换当前 run 独占的数据库临时凭证。
+// Workload SDK 调用：列出当前 run token 获准使用的只读数据源目录。
+runtimeApi.post('/datasources', async (req, res) => {
+  let execution: RunExecutionRegistration | undefined;
+  try {
+    const token = bearerToken(req.headers.authorization);
+    const validated = await validateWorkloadToken(token);
+    execution = retainRunExecution(validated.token.run_id);
+    execution.signal.throwIfAborted();
+    res.json(await listWorkloadDatasourceCatalog(token));
+  } catch (err) {
+    handleError(res, err);
+  } finally {
+    execution?.finish();
+  }
+});
+
 runtimeApi.post('/datasources/:id/credentials', async (req, res) => {
   let execution: RunExecutionRegistration | undefined;
   try {

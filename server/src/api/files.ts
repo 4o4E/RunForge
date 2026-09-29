@@ -247,7 +247,7 @@ filesApi.get('/list', requireTenantScope, async (req, res) => {
 
     const rootListing = resolve(dir) === resolve(access.workspaceRoot);
     const entries = await Promise.all(
-      (await readdir(dir)).filter((name) => !(rootListing && ['.agents', '.skills', '.workflows', '.plugins', 'plugins'].includes(name.toLowerCase()))).map(async (name) => {
+      (await readdir(dir)).filter((name) => !(rootListing && ['.agents', '.skills', '.plugins', 'plugins'].includes(name.toLowerCase()))).map(async (name) => {
         const abs = join(dir, name);
         const linkInfo = await lstat(abs);
         if (linkInfo.isSymbolicLink()) return null;

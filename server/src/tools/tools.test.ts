@@ -12,7 +12,6 @@ import { globTool } from './glob.js';
 import { grepTool } from './grep.js';
 import { truncateFetchText } from './webFetch.js';
 import { getTool, runTool, toolSchemas } from './registry.js';
-import { publicDatasourceForTool } from './datasourceList.js';
 import { shellExecTool } from './managedShell.js';
 import { requiresDatabaseAccess } from './databaseAccessGuard.js';
 import type { ToolResult, ToolRunContext } from './types.js';
@@ -48,14 +47,11 @@ test('registry exposes neutral tool schemas and dispatches by name', async () =>
   assert.equal(schemas.some((s) => s.name.includes('artifact')), false);
   assert.ok(schemas.find((s) => s.name === 'skill_activate'));
   assert.ok(schemas.find((s) => s.name === 'mcp_activate'));
-  assert.ok(schemas.find((s) => s.name === 'workflow_list'));
-  assert.ok(schemas.find((s) => s.name === 'workflow_read'));
-  assert.ok(schemas.find((s) => s.name === 'datasource_list'));
+  assert.equal(schemas.some((s) => s.name === 'workflow_list' || s.name === 'workflow_read'), false);
+  assert.equal(schemas.some((s) => s.name === 'datasource_list'), false);
   assert.ok((await toolSchemas(['file_read'])).some((s) => s.name === 'file_read'));
   assert.equal((await toolSchemas(['file_read'])).some((s) => s.name === 'shell'), false);
   assert.ok((await toolSchemas(['file_read'])).some((s) => s.name === 'update_plan'));
-  assert.ok((await toolSchemas(['file_read'])).some((s) => s.name === 'workflow_read'));
-  assert.ok((await toolSchemas(['datasource_list'])).some((s) => s.name === 'datasource_list'));
   assert.ok(getTool('glob'));
   assert.match((await runTool('does_not_exist', {}, { scope: TEST_SCOPE })).text, /未知工具/);
 });
@@ -119,42 +115,6 @@ test('mcp settings keep connection and activation-routing fields', () => {
   assert.equal('env' in server, false);
 });
 
-test('datasource_list public view redacts secrets and admin config', () => {
-  const view = publicDatasourceForTool(
-    {
-      id: 'ds_1',
-      tenant_id: 'default',
-      name: 'sales',
-      type: 'postgres',
-      status: 'active',
-      enabled: true,
-      connection: { host: 'db.example.com', port: 5432, database: 'sales', password: 'secret' },
-      admin_config: { connectionUrl: 'postgres://admin:secret@db.example.com/sales' },
-      pool_config: {},
-      created_at: '2026-06-13T00:00:00.000Z',
-      updated_at: '2026-06-13T00:00:00.000Z',
-    },
-    [
-      {
-        id: 'dp_1',
-        datasource_id: 'ds_1',
-        name: 'readonly',
-        mode: 'readonly',
-        template_role: 'sales_readonly',
-        grants: {},
-        pool_config: {},
-        created_at: '2026-06-13T00:00:00.000Z',
-        updated_at: '2026-06-13T00:00:00.000Z',
-      },
-    ],
-  );
-  assert.equal(view.hasAdminConfig, true);
-  assert.deepEqual(view.profiles, [{ name: 'readonly', mode: 'readonly', templateRole: 'sales_readonly' }]);
-  assert.equal((view.connection as Record<string, unknown>).password, '[redacted]');
-  assert.equal(JSON.stringify(view).includes('connectionUrl'), false);
-  assert.equal(JSON.stringify(view).includes('postgres://admin'), false);
-});
-
 test('registry forwards run context to tool implementations', async () => {
   const tool = getTool('shell');
   assert.ok(tool);
@@ -185,35 +145,6 @@ test('registry forwards run context to tool implementations', async () => {
   } finally {
     tool.run = originalRun;
   }
-});
-
-test('workflow_read ignores thread-authored skills and workflows', async () => {
-  const skillRoot = join(dir, '.skills', 'ppt-master');
-  await mkdir(join(skillRoot, 'workflows'), { recursive: true });
-  await writeFile(
-    join(skillRoot, 'SKILL.md'),
-    [
-      '---',
-      'name: ppt-master',
-      'description: Generate presentation artifacts.',
-      '---',
-      '',
-      '# PPT Master',
-      '',
-      'See workflows/index.md for the skill internal workflow.',
-    ].join('\n'),
-    'utf8',
-  );
-  await writeFile(join(skillRoot, 'workflows', 'index.md'), '# Internal skill workflow\n', 'utf8');
-
-  const out = await runTool(
-    'workflow_read',
-    { name: 'ppt-master' },
-    { scope: TEST_SCOPE, settings: normalizeToolSettings({ workspaceRoot: dir }) },
-  );
-
-  assert.match(out.text, /未找到 workflow: ppt-master/);
-  assert.doesNotMatch(out.text, /# Internal skill workflow/);
 });
 
 test('shell runs a command (PowerShell on Windows, sh elsewhere)', async () => {
@@ -262,7 +193,7 @@ test('shell blocks database CLI when the run workload token is missing', async (
 });
 
 test('shell blocks database-access SDK scripts when the run workload token is missing', async () => {
-  const command = `python3 ${dir}/.agents/skills/database-access/scripts/psql_query.py --sql "select 1"`;
+  const command = `node ${dir}/.agents/skills/database-access/scripts/psql-query.mjs --sql "select 1"`;
   assert.equal(requiresDatabaseAccess(command), true);
   const blockedShell = text(await shellTool.run(
     { command },

@@ -953,8 +953,6 @@ export class MemoryStore implements Store {
   async createSubagentRun(scope: Scope, input: {
     parentRunId: string;
     parentStepId?: string | null;
-    workflowId?: string | null;
-    stageId?: string | null;
     runtimeProfileId?: string | null;
     taskAssignment: Record<string, unknown>;
     skillNames?: string[];
@@ -966,8 +964,8 @@ export class MemoryStore implements Store {
       tenant_id: scope.tenantId,
       parent_run_id: input.parentRunId,
       parent_step_id: input.parentStepId ?? null,
-      workflow_id: input.workflowId ?? null,
-      stage_id: input.stageId ?? null,
+      workflow_id: null,
+      stage_id: null,
       runtime_profile_id: input.runtimeProfileId ?? null,
       status: 'running',
       task_assignment: input.taskAssignment,

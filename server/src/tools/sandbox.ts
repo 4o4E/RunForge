@@ -148,12 +148,12 @@ function managedPluginLinks(spaceRoot: string | null): string[] {
   return spaceRoot ? existing([resolve(spaceRoot, '.plugins')]) : [];
 }
 
-/** 只挂载本次运行选中的 Skill、Workflow、SDK 内容版本，不暴露空间内其他版本。 */
+/** 只挂载本次运行选中的 Skill 和 SDK 内容版本，不暴露空间内其他版本。 */
 function selectedManagedTargets(workspaceRoot: string, spaceRoot: string | null, roots: readonly string[]): string[] {
   if (!roots.length) return [];
   if (!spaceRoot) throw new Error('托管资源缺少空间根目录');
   const managedThreadRoot = resolve(workspaceRoot, '.agents');
-  const allowedTargets = ['.skills', '.workflows', '.agents'].map((name) => resolve(spaceRoot, name));
+  const allowedTargets = ['.skills', '.agents'].map((name) => resolve(spaceRoot, name));
   return unique(roots.map((root) => {
     const path = resolve(root);
     if (path !== managedThreadRoot && !path.startsWith(`${managedThreadRoot}/`)) {

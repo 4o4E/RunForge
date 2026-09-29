@@ -1457,8 +1457,6 @@ export class PgStore implements Store {
   async createSubagentRun(scope: Scope, input: {
     parentRunId: string;
     parentStepId?: string | null;
-    workflowId?: string | null;
-    stageId?: string | null;
     runtimeProfileId?: string | null;
     taskAssignment: Record<string, unknown>;
     skillNames?: string[];
@@ -1480,8 +1478,8 @@ export class PgStore implements Store {
         scope.tenantId,
         input.parentRunId,
         input.parentStepId ?? null,
-        input.workflowId ?? null,
-        input.stageId ?? null,
+        null,
+        null,
         input.runtimeProfileId ?? null,
         JSON.stringify(input.taskAssignment),
         input.skillNames ?? [],

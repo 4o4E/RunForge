@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPoolUsername, toPublicCredential } from './accountPool.js';
+import { buildPoolUsername, toPublicCredential, toPublicDatasourceResource } from './accountPool.js';
 import { generateWorkloadToken, hashWorkloadToken } from './token.js';
 import type { CredentialLease } from './types.js';
 
@@ -17,6 +17,46 @@ test('账号池用户名只包含数据库安全字符并限制长度', () => {
 
   assert.match(username, /^ag_[a-z0-9_]+$/);
   assert.ok(username.length <= 63);
+});
+
+test('Workload SDK 数据源目录只返回选择数据源所需的信息', () => {
+  const resource = toPublicDatasourceResource(
+    {
+      id: 'ds_1',
+      tenant_id: 'system',
+      name: 'sales',
+      type: 'postgres',
+      status: 'active',
+      enabled: true,
+      connection: { host: 'db.example.com', port: 5432, database: 'sales', password: 'secret' },
+      admin_config: { connectionUrl: 'postgres://admin:secret@db.example.com/sales' },
+      pool_config: {},
+      created_at: '',
+      updated_at: '',
+    },
+    [{
+      id: 'dp_1',
+      datasource_id: 'ds_1',
+      name: 'readonly',
+      mode: 'readonly',
+      template_role: 'sales_readonly',
+      grants: {},
+      pool_config: {},
+      created_at: '',
+      updated_at: '',
+    }],
+  );
+
+  assert.deepEqual(resource, {
+    id: 'ds_1',
+    name: 'sales',
+    type: 'postgres',
+    database: 'sales',
+    profiles: [{ name: 'readonly', mode: 'readonly' }],
+  });
+  assert.equal(JSON.stringify(resource).includes('db.example.com'), false);
+  assert.equal(JSON.stringify(resource).includes('secret'), false);
+  assert.equal(JSON.stringify(resource).includes('template_role'), false);
 });
 
 test('返回给容器的凭证不会包含管理连接配置', () => {

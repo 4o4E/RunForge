@@ -1,5 +1,6 @@
 import type {
   PublicCredentialResponse,
+  PublicDatasourceCatalogResponse,
   RuntimeCapabilityCredential,
   WorkloadResourceType,
   WorkloadSecretResponse,
@@ -26,6 +27,9 @@ export type WorkloadResourceResult<T extends WorkloadResourceType> =
 
 export type WorkloadResourceOptions<T extends WorkloadResourceType> =
   T extends 'database.readonly' ? DatabaseReadonlyAcquireOptions : Record<string, never>;
+
+export type WorkloadResourceCatalogResult<T extends WorkloadResourceType> =
+  T extends 'database.readonly' ? PublicDatasourceCatalogResponse : never;
 
 function required(value: string | undefined, name: string): string {
   if (!value?.trim()) throw new Error(`缺少 ${name}`);
@@ -93,6 +97,17 @@ export class RunForgeWorkloadClient {
   };
 
   readonly resources = {
+    list: async <T extends WorkloadResourceType>(
+      type: T,
+    ): Promise<WorkloadResourceCatalogResult<T>> => {
+      if (type === 'database.readonly') {
+        return this.post<PublicDatasourceCatalogResponse>(
+          `${this.runtimeApiBase}/datasources`,
+          {},
+        ) as Promise<WorkloadResourceCatalogResult<T>>;
+      }
+      throw new Error(`不支持列出的 Workload 资源：${String(type)}`);
+    },
     acquire: async <T extends WorkloadResourceType>(
       type: T,
       options?: WorkloadResourceOptions<T>,

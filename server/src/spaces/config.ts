@@ -41,11 +41,6 @@ import {
 import { probeMcpServer } from '../mcp/client.js';
 import { renderMcpCatalog, renderMcpSystemRules } from '../mcp/client.js';
 import {
-  loadBuiltinWorkflowIndex,
-  renderWorkflowCatalog,
-  renderWorkflowSystemRules,
-} from '../workflows/registry.js';
-import {
   defaultPromptTemplate,
   promptPlaceholders as buildPromptPlaceholders,
   runtimeCapabilityPromptValues,
@@ -450,10 +445,9 @@ export class SpaceConfigService {
     userId?: string | null,
   ): Promise<PromptPlaceholdersView> {
     const config = normalizeSpaceConfig(value, mode);
-    const [catalog, toolSettings, workflows, builtinSkills] = await Promise.all([
+    const [catalog, toolSettings, builtinSkills] = await Promise.all([
       this.loadCatalog(tenantId),
       getSystemToolSettings(),
-      loadBuiltinWorkflowIndex(),
       loadBuiltinSkillDocuments(),
     ]);
     const selectedMcpServerIds = selectValues(
@@ -530,10 +524,6 @@ export class SpaceConfigService {
         'sandbox.backend': toolSettings.sandboxBackend,
         'shell.hostPath': toolSettings.shellUseHostPath ? '是' : '否',
         'network.mode': toolSettings.network,
-        'workflow.catalog': [
-          renderWorkflowSystemRules(),
-          renderWorkflowCatalog(workflows),
-        ].join('\n\n'),
         'skills.catalog': [
           renderSkillSystemRules(),
           renderSkillCatalog(skills),

@@ -7,7 +7,7 @@ metadata:
 
 # Chart Selection
 
-## Workflow
+## 操作步骤
 
 1. 先判断 Markdown/Mermaid 是否能直接表达清楚；能表达清楚就不要另生 HTML 文件。
 2. 数据分析、对比、趋势、占比、流程、关系、时序、状态和架构说明优先用 Mermaid。

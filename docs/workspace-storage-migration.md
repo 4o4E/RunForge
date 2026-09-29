@@ -6,7 +6,7 @@
 
 新工作区按空间和会话分层：
 
-- `/w/<spaceId>/.skills`、`.workflows`、`.plugins`、`.agents` 保存空间托管资源。服务端负责准备，
+- `/w/<spaceId>/.skills`、`.plugins`、`.agents` 保存空间托管资源。服务端负责准备，
   会话只读访问；`.plugins` 引用空间选用的业务插件版本快照。
 - `/w/<spaceId>/c/<threadId>` 是会话唯一的可写目录。运行时只挂接该会话选中的托管资源，
   不挂接同空间的其他会话目录。
@@ -43,7 +43,7 @@ docker compose run --rm --no-deps --entrypoint node runforge dist/maintenance/cl
 
 旧版 default 空间使用的
 `<workspaceRoot>/tenants/<tenantId>/users/<userId>/workspace` 不属于旧会话目录，本次迁移不清理。
-空间托管资源应按空间放入 `/w/<spaceId>/.skills`、`.workflows`、`.plugins`、`.agents`，不要放入
+空间托管资源应按空间放入 `/w/<spaceId>/.skills`、`.plugins`、`.agents`，不要放入
 会话目录。
 
 工作区路径变化后需要重新生成文件分享链接。新存储采样同时计入尚未清理的旧会话目录，清理后

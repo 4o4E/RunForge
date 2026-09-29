@@ -47,16 +47,12 @@ test('materialized agent resource directories are readonly for file writes', () 
   const blockedSkill = p.check('file_write', { path: resolve(ROOT, '.agents/skills/database-access/SKILL.md') });
   assert.equal(blockedSkill.ok, false);
   assert.equal(p.check('file_write', { path: resolve(ROOT, '.skills/private/SKILL.md') }).ok, false);
-  assert.equal(p.check('file_write', { path: resolve(ROOT, '.workflows/private/WORKFLOW.md') }).ok, false);
   assert.equal(p.check('file_write', { path: resolve(ROOT, '.plugins/private/plugin.json') }).ok, false);
   assert.match((blockedSkill as { reason: string }).reason, /只读/);
-  const blockedWorkflow = p.check('file_write', { path: resolve(ROOT, '.agents/workflows/software-development/WORKFLOW.md') });
-  assert.equal(blockedWorkflow.ok, false);
   const blockedBusinessPlugin = p.check('file_write', { path: resolve(ROOT, 'plugins/crm/skills/query/SKILL.md') });
   assert.equal(blockedBusinessPlugin.ok, false);
   const blockedWorkloadSdk = p.check('file_write', { path: resolve(ROOT, '.agents/runforge-workload-sdk/index.mjs') });
   assert.equal(blockedWorkloadSdk.ok, false);
-  assert.match((blockedWorkflow as { reason: string }).reason, /只读/);
 });
 
 test('off mode skips path confinement but keeps always-on resource guards', () => {

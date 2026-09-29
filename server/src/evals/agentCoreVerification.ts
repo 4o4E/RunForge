@@ -302,7 +302,7 @@ const scenarios: Scenario[] = [
     },
   },
   {
-    id: 'shell-plus-file-workflow',
+    id: 'shell-plus-file-procedure',
     title: 'Shell + 文件工具：运行命令并写报告',
     hardStepCap: 14,
     async prepare(ctx) {
@@ -312,7 +312,7 @@ const scenarios: Scenario[] = [
     },
     input(ctx) {
       return [
-        '请完成 RunForge agent 核心验收场景 shell-plus-file-workflow。',
+        '请完成 RunForge agent 核心验收场景 shell-plus-file-procedure。',
         `必须使用 shell 执行：wc -l ${ctx.paths.numbers}`,
         `然后必须调用 file_write 工具把行数写入文件：${ctx.paths.report}`,
         '不要用 shell 重定向、tee、printf、cat > file 之类命令写报告文件；shell 只用于统计行数。',

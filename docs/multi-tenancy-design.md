@@ -24,7 +24,7 @@
 
 - 不做租户自建/自服务的完整 SaaS 控制台(计费、套餐、公开注册审批流程)——新用户由租户内的 owner/admin 创建,不做面向公网的自助注册。
 - 不做细粒度的资源级权限矩阵(谁能看哪个具体 thread 的按资源 ACL);本次只做 owner/admin/member 三档角色 + §2 里约定的默认可见性规则。
-- 不假设租户之间需要跨租户协作或数据共享;需要共享的数据(如内置 skill/workflow)单独处理,见 §8。
+- 不假设租户之间需要跨租户协作或数据共享;需要共享的数据(如内置 skill)单独处理,见 §8。
 - 不支持一个用户同时属于多个租户(no cross-tenant membership);如果未来需要"一个账号切换多个团队",在 `users` 之上加一张 `tenant_memberships` 关联表即可扩展,现在按"一个用户属于一个租户"简化,匹配当前"tenant = 一个团队部署"的产品形态。
 - 不在这版设计里引入独立的任务队列或多 worker 横向扩展——那是 [长任务设计](long-task-design.md) 的范畴,和多租户是正交的两件事,可以分别推进。
 
@@ -102,7 +102,7 @@ Server (Node.js / TypeScript 单体)
   |-- API 层(不变,但所有 handler 从上下文取 tenant_id / user_id / role)
   |
   |-- Agent 执行循环
-  |     |-- ContextManager / Provider / Skill·Workflow registry / Tool registry / Subagent runner
+  |     |-- ContextManager / Provider / Skill registry / Tool registry / Subagent runner
   |     `-- Run bus(按 tenant_id 分片订阅)
   |
   |-- Shell manager(按 tenant_id 分片的 active-command 表)
@@ -375,7 +375,7 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 
 实例启动环境通过 `TOOL_WORKSPACE_ROOT` 配置 `workspaceRoot` 基础目录，生产 Compose 使用
 `/w`。所有空间统一使用 `<workspaceRoot>/<space_id>/c/<thread_id>`，因此生产路径为
-`/w/{spaceId}/c/{threadId}`。空间根目录中的 `.skills`、`.workflows`、`.plugins`、`.agents` 保存只读托管资源。
+`/w/{spaceId}/c/{threadId}`。空间根目录中的 `.skills`、`.plugins`、`.agents` 保存只读托管资源。
 
 - `getSystemToolSettings()` 从数据库读取系统工具策略，并从实例启动配置附加 `workspaceRoot`；系统设置接口不能修改该路径。
 - Agent、文件 API 和 shell session 在处理具体 thread 时共同调用 `resolveWorkspaceRootForThread(...)`，保证同一个 thread 使用同一路径。文件入口缺少 `threadId` 时返回 `THREAD_REQUIRED`；新会话首次上传附件会先创建 thread。
@@ -408,11 +408,11 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 
 ---
 
-## 8. Skills / Workflows
+## 8. Skills
 
-- 内置 Skill/Workflow 源文件由服务代码统一维护，运行时按内容版本准备到当前空间的 `.skills/.workflows`。
-- 普通会话不扫描或发布自建 Skill/Workflow；管理员对业务插件的安装和空间能力选择由现有管理入口负责。
-- 会话中的 `.agents/skills`、`.agents/workflows` 与 `plugins` 只保留受控相对链接，业务插件版本由运行记录锁定。文件工具与 bwrap 对选中的目标保持只读，Web 文件接口不公开这些目录。
+- 内置 Skill 源文件由服务代码统一维护，运行时按内容版本准备到当前空间的 `.skills`。
+- 普通会话不扫描或发布自建 Skill；管理员对业务插件的安装和空间能力选择由现有管理入口负责。
+- 会话中的 `.agents/skills` 与 `plugins` 只保留受控相对链接，业务插件版本由运行记录锁定。文件工具与 bwrap 对选中的目标保持只读，Web 文件接口不公开这些目录。
 
 ---
 

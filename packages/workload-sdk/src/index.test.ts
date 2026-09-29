@@ -8,6 +8,9 @@ test('Workload SDK 只发送统一 token、step 和资源参数，不接受 tena
     requests.push({ url: String(input), init });
     const url = String(input);
     if (url.endsWith('/secrets/get')) return Response.json({ key: 'crm.api-key', value: 'current-value' });
+    if (url.endsWith('/datasources')) return Response.json({
+      datasources: [{ id: 'ds_reports', name: '报表库', type: 'postgres', database: 'reports', profiles: [{ name: 'reports-readonly', mode: 'readonly' }] }],
+    });
     if (url.includes('/datasources/')) {
       return Response.json({ leaseId: 'dl_test', type: 'postgres', username: 'reader', password: 'short-lived', expiresAt: new Date(0).toISOString(), connection: {} });
     }
@@ -22,12 +25,14 @@ test('Workload SDK 只发送统一 token、step 和资源参数，不接受 tena
   });
 
   assert.equal(await client.secrets.get('crm.api-key'), 'current-value');
+  assert.equal((await client.resources.list('database.readonly')).datasources[0]?.id, 'ds_reports');
   assert.equal((await client.resources.acquire('database.readonly', { datasourceId: 'ds_reports', profile: 'reports-readonly' })).username, 'reader');
   assert.equal((await client.resources.acquire('llm.proxy')).capability, 'llm');
   assert.equal((await client.resources.acquire('image.proxy')).capability, 'image');
 
   assert.deepEqual(requests.map((request) => request.url), [
     'http://runforge.test/api/runtime/secrets/get',
+    'http://runforge.test/api/runtime/datasources',
     'http://runforge.test/api/runtime/datasources/ds_reports/credentials',
     'http://runforge.test/api/runtime-capabilities/credentials',
     'http://runforge.test/api/runtime-capabilities/credentials',
@@ -40,5 +45,5 @@ test('Workload SDK 只发送统一 token、step 和资源参数，不接受 tena
     assert.equal('tenantId' in body, false);
     assert.equal('businessPluginId' in body, false);
   }
-  assert.equal(JSON.parse(String(requests[1]?.init?.body)).profile, 'reports-readonly');
+  assert.equal(JSON.parse(String(requests[2]?.init?.body)).profile, 'reports-readonly');
 });

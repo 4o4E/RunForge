@@ -72,7 +72,7 @@ test('Agent file paths allow ordinary thread files and only selected resource li
 test('Web file paths reject managed resources and every symbolic link', async () => {
   const base = await mkdtemp(join(tmpdir(), 'runforge-web-workspace-path-'));
   const thread = join(base, 'space', 'c', 'thread');
-  const managed = join(base, 'space', '.workflows');
+  const managed = join(base, 'space', '.skills');
   const outside = join(base, 'outside');
   try {
     await Promise.all([
@@ -81,7 +81,7 @@ test('Web file paths reject managed resources and every symbolic link', async ()
       mkdir(outside, { recursive: true }),
     ]);
     await writeFile(join(thread, 'note.txt'), 'thread file');
-    await writeFile(join(managed, 'flow.md'), 'managed flow');
+    await writeFile(join(managed, 'skill.md'), 'managed skill');
     await writeFile(join(outside, 'secret.txt'), 'private');
     await symlink(managed, join(thread, '.agents'), 'dir');
     await symlink(outside, join(thread, 'private-link'), 'dir');

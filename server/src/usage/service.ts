@@ -250,7 +250,6 @@ async function scanSpaceManagedResources(map: Map<string, StorageBucket>, worksp
   for (const space of spaces) {
     for (const [directory, category] of [
       ['.skills', 'space_skills'],
-      ['.workflows', 'space_workflows'],
       ['.plugins', 'space_plugins'],
       ['.agents', 'space_agents'],
     ] as const) {

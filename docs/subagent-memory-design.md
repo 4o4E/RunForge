@@ -1,6 +1,6 @@
 # Subagent、Agent 配置与 Gene Memory 设计
 
-本文记录 `RunForge` 当前 subagent v1、skill、workflow 的协作边界，并设计后续 runtime profile
+本文记录 `RunForge` 当前 subagent v1、skill 的协作边界，并设计后续 runtime profile
 和 gene memory 体系。目标不是把 agent 变成低代码流程编排器，而是让入口 agent 能按任务成熟度选择：
 
 - 稳定工作：读稳定文档和 skill，自动注入少量相关经验，按已验证流程执行。
@@ -15,7 +15,7 @@
 - 长任务通过 Goal 锚点、上下文压缩和 `update_plan` 降低目标漂移。
 - skill 系统已经按文件夹协议实现，`SKILL.md` 是入口，激活后才加载正文和资源。
 - skill 激活是 run 级状态，run 结束后清空，避免工具暴露和上下文持续膨胀。
-- workflow 系统已经按文件夹协议实现，LLM 可通过 `workflow_list` 和 `workflow_read` 读取稳定流程。
+- 当前没有原生 workflow 子系统；稳定执行方法由 skill 和 `update_plan` 表达。
 - subagent v1 已实现异步只读推理：主 agent 可以派发子任务，拿到 `subagentRunId` 后轮询或跨 run 查看结果。
 - 当前没有跨 thread 的 memory 系统，也没有经验检索、写入、引用和退化闭环。
 
@@ -41,8 +41,7 @@ skill 决定这类事通常怎么做，runtime profile 决定能用什么资源�
 
 Workflow stage 定义稳定流程中的阶段边界，不承载具体实现经验。
 
-当前实现采用本地文件协议。`server/src/workflows/builtin` 是内置 Workflow 源文件；服务按内容版本把它们准备到 `/w/<spaceId>/.workflows/builtin`，并在当前会话 `.agents/workflows` 建立只读相对链接。普通用户的会话不能创建或修改 Workflow，也不会扫描会话内的 `.workflows`。管理员在对话中发布 Workflow 的功能需要和业务插件发布权限共同设计，当前尚未提供。
-- LLM 通过 `workflow_list` 查看可用 workflow，通过 `workflow_read` 按需读取正文。
+本节是后续阶段编排的候选设计，不是当前运行资源，也不对应原生工具或文件目录。
 
 应包含：
 
@@ -557,13 +556,13 @@ subagent 是 thread 级异步资源，不阻塞入口 agent 的主循环。
 - 第一版后台任务依赖当前服务进程存活；如果服务重启，`running` 状态任务需要后续补
   recovery worker 或超时标记机制。
 
-这样设计的原因是：workflow 协作模型里，入口 agent 的职责是分派、协调和综合，不应该
+这样设计的原因是：异步协作模型里，入口 agent 的职责是分派、协调和综合，不应该
 被某一个子任务的 LLM 调用卡住；否则多个 subagent 只是同步工具调用，无法模拟真实多人
 并行协作。
 
 ## 数据模型
 
-当前已经落库 `subagent_runs`，用于保存 subagent task assignment、stage、skill、输出和 usage。
+当前已经落库 `subagent_runs`，用于保存 subagent task assignment、运行配置、skill、输出和 usage。
 memory / gene 相关表仍是后续建议。RAG 索引可以后接，不应先绑死在某个向量库。
 
 建议表：

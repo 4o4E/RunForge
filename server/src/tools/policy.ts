@@ -56,9 +56,6 @@ const META: Record<string, ToolMeta> = {
   subagent_run: { kind: 'safe' },
   subagent_poll: { kind: 'safe' },
   subagent_list: { kind: 'safe' },
-  datasource_list: { kind: 'safe' },
-  workflow_list: { kind: 'safe' },
-  workflow_read: { kind: 'safe' },
 };
 
 /** True when `target` resolves to a location at or under `root`. */
@@ -85,10 +82,8 @@ export function createPolicy(cfg: ToolPolicyConfig, userFilesMountPath?: string)
     const readonlyAgentRoots = [
       resolve(cfg.workspaceRoot, '.agents'),
       resolve(cfg.workspaceRoot, '.skills'),
-      resolve(cfg.workspaceRoot, '.workflows'),
       resolve(cfg.workspaceRoot, '.plugins'),
       resolve(cfg.workspaceRoot, '.agents/skills'),
-      resolve(cfg.workspaceRoot, '.agents/workflows'),
       resolve(cfg.workspaceRoot, '.agents/runforge-workload-sdk'),
       resolve(cfg.workspaceRoot, 'plugins'),
     ];
@@ -109,7 +104,7 @@ export function createPolicy(cfg: ToolPolicyConfig, userFilesMountPath?: string)
     if (meta.kind === 'exec') {
       const command = String(args.command ?? '');
       const mentionsReadonlyAgentRoot = readonlyAgentRoots.some((root) => command.includes(root) || command.includes(root.replace(`${cfg.workspaceRoot}/`, '')));
-      const writeLike = /(^|[;&|]\s*)(rm|mv|cp)\b|>\s*[^&|;]*(?:\.agents\/(?:skills|workflows|runforge-workload-sdk)|plugins\/)|tee\b[^&|;]*(?:\.agents\/(?:skills|workflows|runforge-workload-sdk)|plugins\/)|sed\s+-i\b/.test(command);
+      const writeLike = /(^|[;&|]\s*)(rm|mv|cp)\b|>\s*[^&|;]*(?:\.agents\/(?:skills|runforge-workload-sdk)|plugins\/)|tee\b[^&|;]*(?:\.agents\/(?:skills|runforge-workload-sdk)|plugins\/)|sed\s+-i\b/.test(command);
       if (mentionsReadonlyAgentRoot && writeLike) {
         return { ok: false, reason: `内置 agent 资源目录只读：${readonlyAgentRoots.join(', ')}` };
       }

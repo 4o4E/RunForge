@@ -17,7 +17,7 @@ export interface ToolRunContext {
   pluginExecutables?: Array<{ name: string; path: string }>;
   /** 当前 run 已按 plugin_lock 校验并物化的业务插件逻辑根目录。 */
   pluginRoots?: string[];
-  /** 当前 run 选中的内置 Skill、Workflow、SDK 空间资源真实根目录。 */
+  /** 当前 run 选中的内置 Skill 和 SDK 空间资源真实根目录。 */
   managedReadRoots?: string[];
   /** 当前 thread 所属空间的托管资源根目录，仅供资源解析使用。 */
   spaceRoot?: string;

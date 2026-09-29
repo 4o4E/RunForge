@@ -58,16 +58,19 @@ curl -X POST http://localhost:8080/api/datasources/<datasource_id>/profiles \
 正常执行时 RunForge 会在 run 启动时自动签发唯一的活动 workload token，并注入运行环境；
 不会按 Skill 或业务插件分别签发，也不对租户用户或外部调用方暴露 token 签发接口。
 
-容器脚本换取短期数据库凭证：
+容器脚本通过 `RUNFORGE_WORKLOAD_SDK` 指向的统一 SDK 列出可用数据源并换取短期数据库凭证：
 
-```bash
-curl -X POST http://localhost:8080/api/runtime/datasources/<datasource_id>/credentials \
-  -H "Authorization: Bearer $WORKLOAD_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{ "profile": "readonly" }'
+```javascript
+const { RunForgeWorkloadClient } = await import(process.env.RUNFORGE_WORKLOAD_SDK);
+const client = new RunForgeWorkloadClient();
+const catalog = await client.resources.list('database.readonly');
+const credential = await client.resources.acquire('database.readonly', {
+  datasourceId: catalog.datasources[0].id,
+  profile: 'readonly',
+});
 ```
 
-脚本用返回的 `username/password/host/port/database` 调原生 CLI：
+应用脚本不要直接请求运行时 HTTP 接口。SDK 返回的 `username/password/host/port/database` 仅在当前进程内传给原生 CLI：
 
 ```bash
 psql "postgresql://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME"

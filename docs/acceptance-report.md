@@ -32,7 +32,7 @@
 
 - 三种 LLM 协议都复用 Vercel AI SDK 处理协议、流式解析和工具拼装。
 - RunForge `ProviderRunner` 管理重试，并记录每次真实 HTTP attempt。
-- 工具通过统一 registry 执行，内置 shell、托管 shell、文件读写/编辑、glob、grep、web fetch、web search、ask user、update plan、skill、workflow、subagent 和数据源访问。
+- 工具通过统一 registry 执行，内置 shell、托管 shell、文件读写/编辑、glob、grep、web fetch、web search、ask user、update plan、skill 和 subagent；数据源通过 Workload SDK 使用。
 - 工具结果以 tool message 回填，并保留 `toolCallId`，满足主流模型协议对工具调用配对的要求。
 - reasoning（推理信息）只用于前端展示，不回填上下文。
 
@@ -58,13 +58,12 @@
 
 边界：默认 `TOOL_SANDBOX=off`；当前没有 per-run workspace、CPU/内存/进程数/磁盘配额，也没有域名 allowlist。托管 shell 仍依赖当前 server 进程和本机后端，尚未支持远程 worker 接管。
 
-### Skill、Workflow 与 Subagent
+### Skill 与 Subagent
 
 - 支持 Skill 文件协议：内置 Skill 按内容版本准备在空间 `.skills` 中，会话通过 `.agents/skills` 的只读相对链接访问；普通会话不读取自建 Skill。
 - 初始上下文只注入 Skill `id` 和描述；需要正文时通过 `skill_activate(id)` 按需加载，并记录 `skill_activated` 事件。
 - Skill 入口通过工具结果进入上下文，下一次 LLM 请求完整消费后立即折叠；run 内保留短锚点，同一 run 恢复可从事件重建，新 run 自动取消激活。
 - 初始上下文只注入 MCP Server `id` 和描述；通过 `mcp_activate(id)` 后才加载该 Server 的全部工具 schema，且只在当前 run 生效。
-- 支持 workflow 文件协议：内置 workflow 从 `server/src/workflows/builtin` 物化，LLM 可用 `workflow_list` 和 `workflow_read` 选择稳定流程。
 - 支持异步只读 subagent：主 agent 通过 `subagent_run` 创建子任务，立即拿到 `subagentRunId`，后续通过 `subagent_poll` / `subagent_list` 回收结果。
 - subagent 输出和 usage 写入 `subagent_runs`，并产生 `subagent_started`、`subagent_finished` 或 `subagent_failed` 事件；前端右侧资源栏可以查看 subagent。
 

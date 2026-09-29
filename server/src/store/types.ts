@@ -545,8 +545,6 @@ export interface Store {
   createSubagentRun(scope: Scope, input: {
     parentRunId: string;
     parentStepId?: string | null;
-    workflowId?: string | null;
-    stageId?: string | null;
     runtimeProfileId?: string | null;
     taskAssignment: Record<string, unknown>;
     skillNames?: string[];

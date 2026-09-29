@@ -13,6 +13,21 @@ export interface PublicCredentialResponse {
   connection: Record<string, unknown>;
 }
 
+export interface PublicDatasourceResource {
+  id: string;
+  name: string;
+  type: DatasourceType;
+  database?: string;
+  profiles: Array<{
+    name: string;
+    mode: 'readonly';
+  }>;
+}
+
+export interface PublicDatasourceCatalogResponse {
+  datasources: PublicDatasourceResource[];
+}
+
 export interface RuntimeCapabilityCredentialRequest {
   capability: RuntimeCapabilityName;
 }

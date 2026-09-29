@@ -111,43 +111,32 @@ SELECT * FROM orders LIMIT 20;
 
 ## Platform Workload Token
 
-如果当前 run 提供 `WORKLOAD_TOKEN`，先通过平台接口换短期凭证，再用原生 CLI。每个 run 的 token 和短期凭证都会刷新，旧 run 的凭证不能复用。
+如果当前 run 提供 `WORKLOAD_TOKEN`，使用平台物化的统一 Workload SDK 列出数据源并换取短期凭证，再用原生 CLI。每个 run 的 token 和短期凭证都会刷新，旧 run 的凭证不能复用。
 
 需要的环境变量：
 
 ```bash
 export WORKLOAD_TOKEN="..."
+export RUNFORGE_WORKLOAD_SDK="..."
 export DATASOURCE_ID="ds_xxx"
 export DATASOURCE_PROFILE="readonly"
 export RUNFORGE_RUNTIME_API_BASE="http://localhost:8080/api/runtime"
 ```
 
-直接调用接口：
+列出当前 run 可以使用的数据源：
 
 ```bash
-curl -s -X POST "$RUNFORGE_RUNTIME_API_BASE/datasources/$DATASOURCE_ID/credentials" \
-  -H "Authorization: Bearer $WORKLOAD_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "{\"profile\":\"${DATASOURCE_PROFILE:-readonly}\"}"
+node /path/to/skill/scripts/datasource-list.mjs
 ```
 
-返回的 `username/password/host/port/database` 只用于本次 run，不写入仓库文件，不放进最终回答。
+目录只包含数据源标识、名称、类型、数据库名称和只读权限档位，不包含连接地址或管理配置。凭据中的 `username/password/host/port/database` 只用于本次 run，不写入仓库文件，不放进最终回答。
 
 ## SDK Files
-
-Python:
-
-```python
-from db_credential import get_datasource_credential
-
-credential = get_datasource_credential()
-# 把 credential 立即传给数据库驱动或 CLI；不要 print 密码。
-```
 
 PostgreSQL CLI wrapper:
 
 ```bash
-python3 /path/to/skill/scripts/psql_query.py --sql "select current_database(), current_user;"
+node /path/to/skill/scripts/psql-query.mjs --sql "select current_database(), current_user;"
 ```
 
 这个 wrapper 会在同一进程内换取短期凭证并调用 `psql`，不要先单独打印完整凭证 JSON。
@@ -155,18 +144,11 @@ python3 /path/to/skill/scripts/psql_query.py --sql "select current_database(), c
 Node.js:
 
 ```javascript
-import { getDatasourceCredential } from './dbCredential.mjs';
+import { getDatasourceCredential, listDatasourceResources } from './dbCredential.mjs';
 
+const catalog = await listDatasourceResources();
 const credential = await getDatasourceCredential();
-// 把 credential 立即传给数据库驱动或 CLI；不要 console.log 密码。
-```
-
-Shell:
-
-```bash
-source ./db_credential.sh
-credential_json="$(db_credential_json)"
-# 只在必要时传给后续命令；不要把 credential_json 写入日志。
+// 立即把 credential 传给数据库驱动或 CLI；不要输出密码。
 ```
 
 ## Safety Checks

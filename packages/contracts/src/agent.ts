@@ -127,8 +127,6 @@ export type AgentEvent =
       type: 'subagent_started';
       step: number;
       subagentRunId: string;
-      workflowId?: string | null;
-      stageId?: string | null;
       runtimeProfileId?: string | null;
       modelRef?: string | null;
       skillNames: string[];

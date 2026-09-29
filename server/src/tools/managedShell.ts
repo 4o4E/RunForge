@@ -112,7 +112,7 @@ export const shellExecTool: Tool = {
       return '当前 run 缺少统一的 WORKLOAD_TOKEN，属于运行环境初始化异常；不能通过激活 Skill 补签 token，也不要跨 run 复用旧凭证。';
     }
     if (usesDatabaseCli(command) && !usesDatabaseAccessHelper(command)) {
-      return '检测到直接调用数据库 CLI。WORKLOAD_TOKEN 只是本次 run 换取短期凭证的令牌，不是数据库密码；请使用 database-access helper（例如 psql_query.py 或 db_credential.py/db_credential.sh）在同一命令内换取本 run 的短期凭证，不要复用旧 run 的数据库用户名或宿主 DATABASE_URL。';
+      return '检测到直接调用数据库 CLI。WORKLOAD_TOKEN 只是本次 run 换取短期凭证的令牌，不是数据库密码；请使用 database-access 的 psql-query.mjs，通过统一 Workload SDK 换取本 run 的短期凭证，不要复用旧 run 的数据库用户名或宿主 DATABASE_URL。';
     }
     const shellCtx = requireShellContext(ctx);
     const result = await shellManager.exec({

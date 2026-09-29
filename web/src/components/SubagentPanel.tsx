@@ -34,15 +34,13 @@ function textValue(value: unknown): string {
 
 function subagentTitle(row: SubagentRun): string {
   const task = textValue(row.task_assignment.task);
-  return task || row.stage_id || row.id;
+  return task || row.id;
 }
 
 function subagentInput(row: SubagentRun): string {
   const lines = [
-    row.stage_id ? `阶段：${row.stage_id}` : null,
     row.runtime_profile_id ? `运行配置：${row.runtime_profile_id}` : null,
     row.skill_names.length ? `Skills：${row.skill_names.join(', ')}` : null,
-    textValue(row.task_assignment.stageGoal) ? `阶段目标：${textValue(row.task_assignment.stageGoal)}` : null,
     textValue(row.task_assignment.task) ? `任务：${textValue(row.task_assignment.task)}` : null,
     textValue(row.task_assignment.context) ? `上下文：\n${textValue(row.task_assignment.context)}` : null,
     textValue(row.task_assignment.expectedOutput) ? `期望输出：${textValue(row.task_assignment.expectedOutput)}` : null,

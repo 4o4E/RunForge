@@ -1,5 +1,5 @@
 import type { UIMessage } from 'ai';
-import { Activity, Bot, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Circle, Copy, Fingerprint, FileText, GitBranch, LoaderCircle, PackageMinus, Pencil, Workflow, XCircle } from 'lucide-react';
+import { Activity, Bot, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Circle, Copy, Fingerprint, FileText, GitBranch, LoaderCircle, PackageMinus, Pencil, XCircle } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import {
@@ -1022,7 +1022,7 @@ function ActivityGroup({
   return (
     <Collapsible open={open} onOpenChange={setOverride} className="not-prose w-full">
       <CollapsibleTrigger className="flex h-6 w-full items-center gap-2 text-left text-sm font-medium text-muted-foreground transition-colors hover:text-foreground">
-        <Workflow className="size-4 shrink-0" />
+        <Activity className="size-4 shrink-0" />
         <span className="min-w-0 truncate">过程 · {entries.length} 项</span>
         {totalMs !== undefined && <span className="shrink-0 text-xs font-normal">{formatDuration(totalMs)}</span>}
         <ChevronDown className={cn('size-4 shrink-0 transition-transform', open && 'rotate-180')} />

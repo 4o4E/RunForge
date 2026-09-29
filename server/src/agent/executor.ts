@@ -46,7 +46,6 @@ import type { AskUserAnswer, AskUserMode, AskUserOption, AskUserSpec, StreamStag
 import { shellManager } from '../shell/manager.js';
 import { requiresDatabaseAccess } from '../tools/databaseAccessGuard.js';
 import type { SubagentRunRow } from '../store/types.js';
-import { loadWorkflowIndex, renderWorkflowCatalog, renderWorkflowSystemRules } from '../workflows/registry.js';
 import { scheduleThreadTitleGeneration } from './threadTitle.js';
 import { notifyRunCompleted } from '../notifications/push.js';
 import {
@@ -113,9 +112,6 @@ const SUBAGENT_READONLY_TOOLS = [
   'grep',
   'web_fetch',
   'web_search',
-  'workflow_list',
-  'workflow_read',
-  'datasource_list',
 ];
 const SUBAGENT_WRITER_TOOLS = [
   ...SUBAGENT_READONLY_TOOLS,
@@ -995,10 +991,8 @@ async function executeRunControlled(
       if (!skill) throw new Error(`未找到 skill: ${nameOrId}`);
       return activateSkillItem(skill, toolSettings.workspaceRoot);
     };
-    const workflowIndex = await loadWorkflowIndex(toolSettings.workspaceRoot, undefined, spaceRoot);
     const managedReadRoots = [
       ...skillIndex.filter((skill) => skill.source === 'builtin').map((skill) => skill.root),
-      ...workflowIndex.map((workflow) => workflow.root),
       resolve(toolSettings.workspaceRoot, '.agents/runforge-workload-sdk'),
     ];
     const mcpToolLoader = async (settings: McpSettings, serverId: string, stepId?: string | null): Promise<McpActivation> => {
@@ -1040,7 +1034,6 @@ async function executeRunControlled(
       'sandbox.backend': toolSettings.sandboxBackend,
       'shell.hostPath': toolSettings.shellUseHostPath ? '是' : '否',
       'network.mode': toolSettings.network,
-      'workflow.catalog': [renderWorkflowSystemRules(), renderWorkflowCatalog(workflowIndex)].join('\n\n'),
       'skills.catalog': [renderSkillSystemRules(), renderSkillCatalog(skillIndex)].join('\n\n'),
       'mcp.catalog': [renderMcpSystemRules(), renderMcpCatalog(mcpSettings)].join('\n\n'),
       'runtime.environment': workloadRuntimeSummary,
@@ -1158,7 +1151,6 @@ async function executeRunControlled(
       const lines = [
         `subagentRunId: ${row.id}`,
         `status: ${row.status}`,
-        `stageId: ${row.stage_id ?? '未指定'}`,
         `runtimeProfileId: ${row.runtime_profile_id ?? 'default'}`,
         `modelRef: ${modelRef ?? '主 agent 默认模型'}`,
         `createdAt: ${row.created_at}`,
@@ -1182,9 +1174,6 @@ async function executeRunControlled(
       abortSignal: AbortSignal,
     ): Promise<void> => {
       const task = optionalString(args.task) ?? '未记录';
-      const workflowId = optionalString(args.workflowId);
-      const stageId = optionalString(args.stageId);
-      const stageGoal = optionalString(args.stageGoal);
       const runtimeProfileId = optionalString(args.runtimeProfileId);
       const modelRef = optionalString(args.modelRef);
       const skillNames = stringList(args.skillNames);
@@ -1236,9 +1225,6 @@ async function executeRunControlled(
           {
             role: 'user',
             content: [
-              `workflowId: ${workflowId ?? '未指定'}`,
-              `stageId: ${stageId ?? '未指定'}`,
-              `stageGoal: ${stageGoal ?? '未指定'}`,
               `runtimeProfileId: ${runtimeProfileId ?? 'default'}`,
               `modelRef: ${modelRef ?? '主 agent 默认模型'}`,
               '',
@@ -1423,9 +1409,6 @@ async function executeRunControlled(
       const task = optionalString(args.task);
       if (!task) return { text: 'subagent_run 缺少必填 task。' };
 
-      const workflowId = optionalString(args.workflowId);
-      const stageId = optionalString(args.stageId);
-      const stageGoal = optionalString(args.stageGoal);
       const runtimeProfileId = optionalString(args.runtimeProfileId);
       const modelRef = optionalString(args.modelRef);
       const skillNames = stringList(args.skillNames);
@@ -1434,15 +1417,12 @@ async function executeRunControlled(
         context: optionalString(args.context),
         expectedOutput: optionalString(args.expectedOutput),
         constraints: optionalString(args.constraints),
-        stageGoal,
         modelRef,
       };
 
       const row = await store.createSubagentRun(scope, {
         parentRunId: runId,
         parentStepId: stepId,
-        workflowId,
-        stageId,
         runtimeProfileId,
         taskAssignment,
         skillNames,
@@ -1451,8 +1431,6 @@ async function executeRunControlled(
         type: 'subagent_started',
         step: stepIdx,
         subagentRunId: row.id,
-        workflowId,
-        stageId,
         runtimeProfileId,
         modelRef,
         skillNames,
@@ -1470,7 +1448,6 @@ async function executeRunControlled(
         text: [
           `subagentRunId: ${row.id}`,
           'status: running',
-          `stageId: ${stageId ?? '未指定'}`,
           `runtimeProfileId: ${runtimeProfileId ?? 'default'}`,
           `modelRef: ${modelRef ?? '主 agent 默认模型'}`,
           '',

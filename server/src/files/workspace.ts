@@ -26,13 +26,13 @@ export function normalizeRemotePath(raw: unknown, configuredRoot: string): strin
 
 function isReservedThreadPath(root: string, target: string): boolean {
   const first = relative(root, target).split(sep)[0]?.toLowerCase();
-  return ['.agents', '.skills', '.workflows', '.plugins', 'plugins'].includes(first ?? '');
+  return ['.agents', '.skills', '.plugins', 'plugins'].includes(first ?? '');
 }
 
 function isControlledLinkPath(root: string, linkPath: string): boolean {
   const parts = relative(root, linkPath).split(sep).map((part) => part.toLowerCase());
   return (parts[0] === 'plugins' && parts.length === 2)
-    || (parts[0] === '.agents' && ['skills', 'workflows'].includes(parts[1] ?? '') && parts.length === 3)
+    || (parts[0] === '.agents' && parts[1] === 'skills' && parts.length === 3)
     || (parts[0] === '.agents' && parts[1] === 'runforge-workload-sdk' && parts.length === 2);
 }
 

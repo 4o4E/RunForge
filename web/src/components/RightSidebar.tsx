@@ -67,7 +67,7 @@ function tabSpec(tab: RightTabId, shellNames: Map<string, string>): TabSpec {
 
 function subagentLabel(subagent: SubagentRun): string {
   const task = typeof subagent.task_assignment.task === 'string' ? subagent.task_assignment.task.trim() : '';
-  return task || subagent.stage_id || subagent.id;
+  return task || subagent.id;
 }
 
 function MenuDivider({ label }: { label: string }) {

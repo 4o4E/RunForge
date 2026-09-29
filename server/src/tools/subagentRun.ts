@@ -7,9 +7,6 @@ export const subagentRunTool: Tool = {
   parameters: {
     type: 'object',
     properties: {
-      workflowId: { type: 'string', description: '可选 workflow id，用于证据追踪。' },
-      stageId: { type: 'string', description: 'workflow stage id，例如 design、implement、review、test。' },
-      stageGoal: { type: 'string', description: '当前阶段目标。' },
       runtimeProfileId: { type: 'string', description: '运行时配置 id。writer=可使用读写文件和 shell 工具；readonly/default=只读推理和只读工具。' },
       modelRef: {
         type: 'string',

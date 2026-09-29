@@ -15,7 +15,7 @@ import { getTenantResourceAuthorization } from '../settings.js';
 import { getSystemResourceTenantId } from '../systemResourceTenant.js';
 import { disablePostgresAccount, ensurePostgresAccount, ensurePostgresReadonlyTemplateRole } from './postgresAdapter.js';
 import { generateWorkloadToken, hashWorkloadToken, iso, randomPassword, secondsFromNow } from './token.js';
-import type { RuntimeCapabilityName } from '@runforge/contracts';
+import type { PublicDatasourceCatalogResponse, PublicDatasourceResource, RuntimeCapabilityName } from '@runforge/contracts';
 import type {
   CredentialLease,
   DatasourceAccountRow,
@@ -261,6 +261,34 @@ export async function listAuthorizedPermissionProfiles(
   const authorization = await getTenantResourceAuthorization(scope.tenantId);
   if (!authorization.datasourceIds.includes(datasourceId)) return [];
   return listPermissionProfiles({ tenantId: await getSystemResourceTenantId() }, datasourceId);
+}
+
+/** Workload SDK 只列出当前 run token 已授权且可申请只读凭证的数据源。 */
+export function toPublicDatasourceResource(
+  datasource: DatasourceRow,
+  profiles: PermissionProfileRow[],
+): PublicDatasourceResource {
+  const database = typeof datasource.connection.database === 'string' ? datasource.connection.database : undefined;
+  return {
+    id: datasource.id,
+    name: datasource.name,
+    type: datasource.type,
+    ...(database ? { database } : {}),
+    profiles: profiles
+      .filter((profile) => profile.mode === 'readonly')
+      .map((profile) => ({ name: profile.name, mode: 'readonly' })),
+  };
+}
+
+export async function listWorkloadDatasourceCatalog(rawToken: string): Promise<PublicDatasourceCatalogResponse> {
+  const validated = await requireWorkloadCapability(rawToken, DATASOURCE_CREDENTIAL_CAPABILITY);
+  const datasources = (await listDatasources({ tenantId: await getSystemResourceTenantId() }))
+    .filter((datasource) => datasource.enabled && datasource.status === 'active' && tokenAllowedDatasource(validated.token, datasource.id));
+  const catalog = await Promise.all(datasources.map(async (datasource) => {
+    const profiles = await listPermissionProfiles({ tenantId: datasource.tenant_id }, datasource.id);
+    return toPublicDatasourceResource(datasource, profiles);
+  }));
+  return { datasources: catalog.filter((datasource) => datasource.profiles.length > 0) };
 }
 
 export async function updatePermissionProfile(
