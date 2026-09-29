@@ -1,10 +1,10 @@
 import { readFile } from 'node:fs/promises';
 import { extname, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { BrixClient } from './brix-client.mjs';
+import { pathToFileURL } from 'node:url';
+import { ensureBundledScript } from './bundled-scripts.mjs';
+import { createWorkloadBrixClient } from './workload-client.mjs';
 
 const SCRIPT_NAME = 'google-lens';
-const SCRIPT_PATH = fileURLToPath(new URL('../assets/google-lens.ts', import.meta.url));
 
 function imageMimeType(path) {
   switch (extname(path).toLowerCase()) {
@@ -23,20 +23,15 @@ export async function execute(imagePath, options = {}) {
   const absoluteImagePath = resolve(imagePath);
   const bytes = await readFile(absoluteImagePath);
   if (!bytes.length) throw new Error('图片文件为空');
-  const scriptSource = await readFile(options.scriptPath ?? SCRIPT_PATH, 'utf8');
-  const client = options.client ?? await workloadClient();
-  await client.ensureScript(SCRIPT_NAME, scriptSource, 'ts');
+  const client = options.client ?? await createWorkloadBrixClient();
+  if (options.scriptPath) {
+    await client.ensureScript(SCRIPT_NAME, await readFile(options.scriptPath, 'utf8'), 'ts');
+  } else {
+    await ensureBundledScript(client, SCRIPT_NAME);
+  }
   return client.runScript(SCRIPT_NAME, {
     image: `data:${imageMimeType(absoluteImagePath)};base64,${bytes.toString('base64')}`,
   });
-}
-
-async function workloadClient() {
-  const { RunForgeWorkloadClient } = await import(process.env.RUNFORGE_WORKLOAD_SDK);
-  const workload = new RunForgeWorkloadClient();
-  const baseUrl = await workload.secrets.get('brix.base-url');
-  const token = await workload.secrets.get('brix.token');
-  return new BrixClient(baseUrl, token);
 }
 
 async function main() {

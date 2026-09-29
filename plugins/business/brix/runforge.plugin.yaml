@@ -1,12 +1,12 @@
 schemaVersion: 2
-id: brix-google-lens
+id: brix
 version: 0.1.0
-displayName: Brix Google Lens
-description: 读取当前任务的本地图片，通过 Brix 服务端 google-lens 脚本查询可验证的图片出处。
+displayName: Brix 浏览器自动化
+description: 通过 Brix 执行通用浏览器操作和受控服务端脚本，Google Lens 是其中一项内置能力。
 
 skills:
-  - id: google-lens
-    path: skills/google-lens
+  - id: brix-browser
+    path: skills/brix-browser
 
 executables: []
 secrets:
@@ -16,6 +16,7 @@ secrets:
   - key: brix.token
     required: true
     description: Brix HTTP Bearer Token
+mcpServers: []
 resources: []
 configSchema:
   type: object

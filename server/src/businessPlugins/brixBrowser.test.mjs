@@ -4,8 +4,8 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { BrixClient } from '../../../plugins/business/brix-google-lens/skills/google-lens/scripts/brix-client.mjs';
-import { execute } from '../../../plugins/business/brix-google-lens/skills/google-lens/scripts/lens.mjs';
+import { BrixClient } from '../../../plugins/business/brix/skills/brix-browser/scripts/brix-client.mjs';
+import { execute } from '../../../plugins/business/brix/skills/brix-browser/scripts/lens.mjs';
 
 async function fixture(scriptExists) {
   const calls = [];
@@ -57,7 +57,7 @@ test('脚本缺失时保存规范脚本后执行 Lens，并关闭 session', asyn
   await writeFile(source, 'export const script = true;');
   try {
     const output = await execute(image, { scriptPath: source, client: new BrixClient(target.baseUrl, 'token') });
-    assert.equal(output.pages[0].title, '来源');
+    assert.equal(output.output.pages[0].title, '来源');
     assert.deepEqual(target.calls.map(({ method, url }) => `${method} ${url}`), [
       'GET /scripts/google-lens', 'PUT /scripts/google-lens', 'POST /sessions',
       'POST /sessions/s1/scripts/google-lens', 'DELETE /sessions/s1',
