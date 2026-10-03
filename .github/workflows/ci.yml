@@ -18,8 +18,8 @@ jobs:
     env:
       # Prisma 生成客户端需要连接配置，但生成过程不访问数据库。
       DATABASE_URL: postgresql://runforge@127.0.0.1:5432/runforge
-      TOOL_WORKSPACE_ROOT: ${{ runner.temp }}/runforge-workspaces
-      RUNFORGE_USER_FILES_ROOT: ${{ runner.temp }}/runforge-user-files
+      TOOL_WORKSPACE_ROOT: ${{ github.workspace }}/.run/ci/workspaces
+      RUNFORGE_USER_FILES_ROOT: ${{ github.workspace }}/.run/ci/user-files
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -70,8 +70,8 @@ jobs:
           --health-retries 12
     env:
       DATABASE_URL: postgresql://runforge:runforge-ci-only-password@127.0.0.1:5432/runforge
-      TOOL_WORKSPACE_ROOT: ${{ runner.temp }}/runforge-workspaces
-      RUNFORGE_USER_FILES_ROOT: ${{ runner.temp }}/runforge-user-files
+      TOOL_WORKSPACE_ROOT: ${{ github.workspace }}/.run/ci/workspaces
+      RUNFORGE_USER_FILES_ROOT: ${{ github.workspace }}/.run/ci/user-files
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
