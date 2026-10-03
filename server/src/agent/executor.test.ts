@@ -1384,6 +1384,7 @@ test('executeRun: repeated running subagent polls do not trigger loop guard', as
   const run = await store.createRun(scope, thread.id, 'wait for slow subagent');
   const published: AgentEvent[] = [];
   let parentTurn = 0;
+  let observedRunningPolls = 0;
 
   await executeRun(run.id, {
     store,
@@ -1392,7 +1393,8 @@ test('executeRun: repeated running subagent polls do not trigger loop guard', as
       async completeStream(messages) {
         const prompt = messages.map((m) => m.content ?? '').join('\n');
         if (prompt.includes('异步只读推理型 subagent')) {
-          await new Promise((resolve) => setTimeout(resolve, 50));
+          // 先真实观察到重复运行中结果，再完成子任务；不依赖宿主机调度速度。
+          await waitUntil(() => observedRunningPolls >= 3, 5000);
           return { content: '慢速 subagent 已完成。', toolCalls: [] };
         }
         parentTurn += 1;
@@ -1405,10 +1407,15 @@ test('executeRun: repeated running subagent polls do not trigger loop guard', as
         const history = messages.map((m) => m.content ?? '').join('\n');
         const subagentRunId = history.match(/subagentRunId: (sr_[A-Za-z0-9]+)/)?.[1];
         if (subagentRunId && !history.includes('慢速 subagent 已完成。')) {
-          await new Promise((resolve) => setTimeout(resolve, 20));
+          observedRunningPolls = messages.filter((message) => message.role === 'tool'
+            && message.toolCallId?.startsWith('poll_')
+            && /\bstatus: running\b/.test(message.content ?? '')).length;
           return {
             content: null,
-            toolCalls: [{ id: `poll_${parentTurn}`, name: 'subagent_poll', arguments: JSON.stringify({ subagentRunId }) }],
+            toolCalls: [{ id: `poll_${parentTurn}`, name: 'subagent_poll', arguments: JSON.stringify({
+              subagentRunId,
+              ...(observedRunningPolls >= 3 ? { waitSeconds: 2 } : {}),
+            }) }],
           };
         }
         return { content: '已汇总慢速 subagent 结果。', toolCalls: [] };
@@ -1422,7 +1429,7 @@ test('executeRun: repeated running subagent polls do not trigger loop guard', as
   assert.equal((await store.getRun(scope, run.id))?.status, 'done');
   assert.equal(published.some((event) => event.type === 'progress_stalled'), false);
   const pollResults = (await store.loadThreadMessages(scope, thread.id)).filter((msg) => msg.role === 'tool' && msg.toolCallId?.startsWith('poll_'));
-  assert.equal(pollResults.some((msg) => /\bstatus: running\b/.test(msg.content ?? '')), true);
+  assert.ok(pollResults.filter((msg) => /\bstatus: running\b/.test(msg.content ?? '')).length >= 3);
   assert.equal(pollResults.some((msg) => /\bstatus: done\b/.test(msg.content ?? '')), true);
 });
 
