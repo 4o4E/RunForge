@@ -454,7 +454,13 @@ try {
   assert.equal(viewerThreads.some((thread) => thread.id === webThread.id), false);
 
   const replayedEvents = await store.getEvents(scheduledRuns.get(runA.runId)!, runA.runId);
-  assert.equal(replayedEvents.some((item) => item.type === 'user_answer'), true);
+  const inputMessages = await store.loadRawThreadMessages(scheduledRuns.get(runA.runId)!, runA.threadId, { runId: runA.runId });
+  const appliedInputMessage = inputMessages.find((message) => message.role === 'user' && message.content?.includes(nextStepA.input));
+  assert.ok(appliedInputMessage, '追加输入必须保留在持久化用户消息中');
+  const inputBoundaryIndex = replayedEvents.findIndex((item) => item.type === 'history_user_message' && item.messageId === appliedInputMessage.id);
+  assert.ok(inputBoundaryIndex >= 0, '普通追加输入必须生成对应的历史消息边界');
+  assert.ok(replayedEvents.findIndex((item) => item.type === 'llm_delta') > inputBoundaryIndex, '追加输入必须显示在回应之前');
+  assert.equal(replayedEvents.some((item) => item.type === 'user_answer'), false);
   assert.equal(replayedEvents.some((item) => item.type === 'final'), true);
 
   await spaceAccess.delete(ownerActor, spaceB.id, {});
