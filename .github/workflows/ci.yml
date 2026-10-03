@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+env:
+  RUNFORGE_JWT_SECRET: runforge-ci-only-jwt-secret
+  RUNFORGE_SHARE_SECRET: runforge-ci-only-share-secret
+
 jobs:
   build-and-unit:
     name: 构建、类型检查与单元测试

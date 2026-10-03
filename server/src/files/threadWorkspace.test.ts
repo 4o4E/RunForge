@@ -1,5 +1,8 @@
-import { test } from 'node:test';
+import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { MemoryStore } from '../store/memoryStore.js';
 import { DeleteConflictError, type Scope, type ThreadRow } from '../store/types.js';
 import { SpaceAccessService } from '../spaces/access.js';
@@ -9,6 +12,15 @@ import {
 } from './threadWorkspace.js';
 import { resolveThreadWorkspaceRoot } from './workspaceRoot.js';
 import { deletionGate } from '../deletion/gate.js';
+
+// 真实文件访问使用测试进程拥有的临时目录，不要求宿主机提供系统目录写入权限。
+let testRoot: string;
+before(async () => {
+  testRoot = await mkdtemp(join(tmpdir(), 'runforge-thread-workspace-'));
+});
+after(async () => {
+  await rm(testRoot, { recursive: true, force: true });
+});
 
 async function fixture() {
   const store = new MemoryStore();
@@ -49,7 +61,7 @@ async function fixture() {
 
 test('thread workspace: 所有空间都按 space/thread 隔离且文件入口必须绑定 thread', async () => {
   const ctx = await fixture();
-  const base = '/srv/runforge/thread-workspace-test';
+  const base = join(testRoot, 'thread-workspace');
   const access = new ThreadWorkspaceAccessService(ctx.store, ctx.spaces, async () => ({ workspaceRoot: base }));
   const ownerScope = { tenantId: ctx.provisioned.tenant.id, userId: ctx.provisioned.owner.id };
   await assert.rejects(
@@ -81,7 +93,7 @@ test('thread workspace: 所有空间都按 space/thread 隔离且文件入口必
 
 test('thread workspace: external thread 对可见用户只读且不冒充 execution user', async () => {
   const ctx = await fixture();
-  const base = '/srv/runforge/external-thread-workspace-test';
+  const base = join(testRoot, 'external-thread-workspace');
   const externalSpace = await ctx.spaces.create(ctx.ownerIdentity, {
     mode: 'external',
     name: 'External',
@@ -154,7 +166,7 @@ test('thread workspace: external thread 对可见用户只读且不冒充 execut
 
 test('thread workspace: 删除开始后不再创建工作目录', async () => {
   const ctx = await fixture();
-  const base = '/srv/runforge/deleting-thread-workspace-test';
+  const base = join(testRoot, 'deleting-thread-workspace');
   const access = new ThreadWorkspaceAccessService(ctx.store, ctx.spaces, async () => ({ workspaceRoot: base }));
   const scope = { tenantId: ctx.provisioned.tenant.id, userId: ctx.provisioned.owner.id };
   const thread = await ctx.store.createThread(scope, 'Deleting Thread');

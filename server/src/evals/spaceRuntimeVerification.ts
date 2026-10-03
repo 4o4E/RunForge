@@ -68,6 +68,7 @@ const externalCommands = new ExternalCommandService(
 let upstreamRequests = 0;
 let activeUpstreamRequests = 0;
 let maxConcurrentUpstreamRequests = 0;
+let requireConcurrentRequests = false;
 const provider: Provider = {
   name: 'space-runtime-verification',
   async completeStream(messages, tools, _onDelta, options) {
@@ -104,7 +105,14 @@ const providerRunner = new ProviderRunner(
       const request = input instanceof Request ? input : new Request(input, init);
       const body = await request.clone().json() as { messages?: Array<{ role?: string; content?: unknown }> };
       const lastUser = [...(body.messages ?? [])].reverse().find((message) => message.role === 'user');
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      if (requireConcurrentRequests) {
+        // 等待两个实际请求同时进入，避免把机器调度速度当成并发能力；串行执行仍会超时失败。
+        const deadline = Date.now() + 10_000;
+        while (maxConcurrentUpstreamRequests < 2) {
+          assert.ok(Date.now() < deadline, '两个外部 run 未能并发进入上游请求');
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
       return new Response(JSON.stringify({
         id: `resp_space_e2e_${requestNumber}`,
         output: `verified:${String(lastUser?.content ?? '')}`,
@@ -345,10 +353,12 @@ try {
     (await artifactStorage.read(`${callerA.caller.id}/${artifactA.artifact.id}`)).toString('utf8'),
     artifactContent.toString('utf8'),
   );
+  requireConcurrentRequests = true;
   const concurrentRuns = await Promise.allSettled([
     executeObservedRun(runA.runId, scheduledRuns.get(runA.runId)!),
     executeObservedRun(runB.runId, scheduledRuns.get(runB.runId)!),
   ]);
+  requireConcurrentRequests = false;
   const failedConcurrentRun = concurrentRuns.find((result) => result.status === 'rejected');
   if (failedConcurrentRun?.status === 'rejected') throw failedConcurrentRun.reason;
   const workspaceA = (concurrentRuns[0] as PromiseFulfilledResult<string>).value;
