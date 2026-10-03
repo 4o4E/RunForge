@@ -309,7 +309,7 @@ ALTER TABLE push_subscriptions   ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NUL
 
 `subagent_runs`、`shell_sessions` 不需要单独的 `user_id`——它们总是挂在某个 `thread`(或 `parent_run_id` 间接指向的 thread)之下,归属通过 `thread_id`/`parent_run_id` 传递,不需要冗余存一份。`datasources` 是 §2 定义的租户级共享资源,故意不挂 `user_id`。
 
-`runs`、`steps`、`messages`、`events`、`shell_commands`、`shell_command_logs`、`datasource_accounts` 等表不直接加 `tenant_id`/`user_id`——它们已经通过外键(`thread_id`/`run_id`/`session_id`/`datasource_id`)间接归属某个租户和用户,直接加列会造成冗余且要保证和父表一致。这些表的隔离通过 `JOIN` 父表或 RLS 策略引用父表间接实现:
+`runs`、`steps`、`messages`、`shell_commands`、`shell_command_logs`、`datasource_accounts` 等表不直接加 `tenant_id`/`user_id`——它们已经通过外键(`thread_id`/`run_id`/`session_id`/`datasource_id`)间接归属某个租户和用户,直接加列会造成冗余且要保证和父表一致。这些表的隔离通过 `JOIN` 父表或 RLS 策略引用父表间接实现:
 
 ```sql
 CREATE POLICY tenant_isolation_runs ON runs
@@ -475,7 +475,7 @@ Store 层(`server/src/store/pgStore.ts`)所有查询方法签名加 `{tenantId, 
 - ⚠️ 数据库层:**只有应用层查询过滤,没有 Postgres RLS 兜底**。Phase 2 已经给 `threads`/`subagent_runs`/`shell_sessions`/`datasources`/`push_subscriptions` 等业务表加了 `tenant_id`/`user_id` 列,Store 层(`pgStore.ts`/`memoryStore.ts`)每个方法按 scope 过滤,是当前唯一的强制边界。**明确跳过 RLS 的原因**:Prisma 和过渡期原生 SQL 共用 `server/src/db/pool.ts` 的 `pg.Pool`,当前没有“一个请求固定同一连接和事务”的执行上下文；RLS 所需的 `SET LOCAL app.tenant_id` 因此不能稳定覆盖整个请求。**这意味着**:任何绕过 Store/repository、直接用 `query()`/`pool` 手写 SQL 的新代码,如果忘记租户过滤,就是完整的跨租户数据泄露,且没有数据库层兜底会拦住它——`accountPool.ts` 里 `datasources`/`workload_tokens`/`datasource_account_leases` 等尚未迁移查询仍需逐条核对 scope。空间阶段不再新增散落原生 SQL，后续需要更高保证级别时再单独设计 RLS 请求事务边界。
 - ✅ 文件系统层:所有空间统一按 `spaceId/threadId` 分目录；应用层路径围栏与 bwrap bind mount 使用同一个派生目录。基础目录由实例启动环境固定，系统设置和租户接口均不能修改(见 §6)。
 - ✅ 事件流:WebSocket 订阅前按 `{tenantId, userId}` 查一次归属(`store.getRun`/`store.getThread`),查不到直接 1008 拒绝,不会走到 `subscribe`——实现方式和最初设想的"事件打 tenant_id 标签"不同,记录在 §7,但达到的隔离粒度更细(连 user_id 都校验了,不只是 tenant 边界)。
-- ✅ 用户可见性:所有 Tier 1 查询按 `(tenant_id, user_id)` 双重过滤,同租户内的普通用户看不到彼此的 thread;Tier 2 表(`runs`/`messages`/`events`/`shell_commands` 等)通过 JOIN 父表间接过滤(见 §5)。唯一的例外(管理员审计)目前还没实现,仍是设计态,不是已落地的旁路。
+- ✅ 用户可见性:所有 Tier 1 查询按 `(tenant_id, user_id)` 双重过滤,同租户内的普通用户看不到彼此的 thread;Tier 2 表(`runs`/`steps`/`messages`/`shell_commands` 等)通过 JOIN 父表间接过滤(见 §5)。唯一的例外(管理员审计)目前还没实现,仍是设计态,不是已实现的旁路。
 - ⚠️ 管理员审计本身是一个需要被信任的高权限能力:tenant owner/admin 能看到本租户任意成员的对话,system admin 能看到任意租户任意成员的对话——这不是"漏洞",而是设计如此(见 §1/§4),但意味着这两类身份的账号安全(密码强度、是否启用后续可能加的 2FA)比普通 member 更值得重视,一旦这两类账号被盗,影响面是"审计范围内的所有对话",需要在运营上对这两类账号的登录/密码策略从紧要求,这一版设计不包含强制 2FA,留作后续加固项。
 - ⚠️ JWT 吊销延迟:access JWT 一旦签发,在过期前无法撤销(§4),用户被禁用/踢出后仍可能有一个短窗口(access token 的过期时长)内继续使用旧 token;通过把过期时间设短(30~60 分钟)把风险窗口控制在可接受范围,而不是引入一张"已吊销 access token 黑名单"表把 JWT 又变回每请求查库。
 - ⚠️ refresh token / API token 是长期有效的不透明凭证,一旦泄露且未及时吊销,可以一直用到 `expires_at`/手动吊销为止——依赖 §4 的"只存 hash、创建时一次性显示明文"降低泄露概率,吊销响应速度取决于运营是否及时。

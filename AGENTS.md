@@ -30,14 +30,15 @@
 3. **重启开发容器**：按 `AGENTS.local.md` 中的本机命令重新构建并启动容器；`pnpm` 只负责构建和验证，不负责容器启停。
 4. **跑一个有代表性的对话**：短任务（< ~90k tokens 上下文）不会触发压缩；要验证压缩
    需要长任务（读大项目、多轮工具）。
-5. **从数据库分析这次 run**（前端看不到的指标在库里）：确认
+5. **从数据库和 run trace 分析这次 run**：确认
    - run `status`（done / error / canceled）与 `error`
-   - 事件里是否有 `compaction`，其 `estBefore/estAfter/masked/dropped`
-   - `messages` 的总量、最大单条工具结果（应 ≤ `TOOL_MAX_OUTPUT`）、`collapsed` 计数
+   - `steps.result` 中每次完整模型请求的聚合输出、用量与流式统计
+   - run trace 中是否有 `compaction`，其 `estBefore/estAfter/masked/dropped`
+   - step 工具结果的总量、最大单条工具结果（应 ≤ `TOOL_MAX_OUTPUT`）、run 元数据中的压缩选择
    - DB 查询的具体做法见 `AGENTS.local.md`。
 
 判定标准：长任务应**压着 token 预算跑完**，而不是撞窗口崩溃；单条工具结果不得超过
-`TOOL_MAX_OUTPUT`；masking 决策应持久化到 `messages.collapsed`（重启不丢、不重算）。
+`TOOL_MAX_OUTPUT`；masking 决策应持久化到 `runs.metadata.context.collapsed`（重启不丢、不重算）。
 
 ## 工程约定
 
@@ -47,7 +48,7 @@
 - **前端组件**：能用组件库的控件一律用组件库，优先复用 `web/src/components/ui/` 已有 shadcn 组件；缺少组件时按 shadcn/Radix 官方模式补本地封装，不要手写外观相似但行为自造的替代组件。
 - **压缩不变式**（改压缩务必守住，见设计文档 §6）：
   - `tool_call ↔ tool_result` 配对永不破坏；
-  - `messages.content` 永远是原始内容，压缩只派生视图、从不覆盖/删除；
+  - step 聚合响应与工具结果永远保留原文，压缩只派生视图、从不覆盖/删除；
   - 滑动窗口 drop 仅内存安全阀、不落库（落库会真丢数据）。
 
 ## 对话规范

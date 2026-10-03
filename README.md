@@ -47,8 +47,11 @@ docker compose --env-file .env.docker -f deploy/compose.external-postgres.yml up
 还可按模板配置 OpenAI 兼容转写服务的地址、模型和密钥。LLM Provider 在服务启动后由系统管理员
 写入系统设置，再授权给租户使用。镜像版本、端口、工具参数及其他外部服务地址直接在对应 Compose
 文件中修改。`runforge-workspaces`、`runforge-user-files`、`runforge-business-plugins` 和
-`runforge-provider-traces` 分别保存会话文件、用户跨会话文件、业务插件和 Provider 观测记录；自带 PostgreSQL
+`runforge-traces` 分别保存会话文件、用户跨会话文件、业务插件和按 run 分隔的本地 trace；自带 PostgreSQL
 的版本额外使用 `runforge-postgres` 卷保存数据库。
+
+已有部署的 `runforge-provider-traces` 卷保留原有日志，升级不会自动搬移或删除该卷。
+升级后的日志写入 `runforge-traces`；旧日志文件不参与历史对话展示和任务恢复。
 
 业务插件可以直接写入 `runforge-business-plugins` 卷内的 `/app/business-plugins`，也可以在
 Compose 中为该目录增加只读 bind mount。Office 转换服务地址也直接写入 Compose。
@@ -100,7 +103,7 @@ DATABASE_URL=postgres://<user>:<password>@localhost:5432/runforge
 createdb runforge
 ```
 
-Prisma 7 migration 会创建核心执行表：`threads`、`runs`、`steps`、`messages`、`events`、`app_settings`，以及 `subagent_runs`、`shell_sessions`、`shell_commands`、`shell_command_logs`、`shell_session_events` 和数据源账号池相关表。`app_settings` 保存系统资源配置、租户资源授权和租户内业务插件配置。
+Prisma 7 migration 会创建核心执行表：`threads`、`runs`、`steps`、`messages`、`app_settings`，以及 `subagent_runs`、`shell_sessions`、`shell_commands`、`shell_command_logs`、`shell_session_events` 和数据源账号池相关表。`steps.result` 保存一次模型请求完成后的聚合输出；原始流式事件只写本地 trace。`app_settings` 保存系统资源配置、租户资源授权和租户内业务插件配置。
 
 ### 3. 配置 `.env`
 
@@ -159,6 +162,11 @@ pnpm db:migrate
 `db:baseline` 只用于已有完整旧结构的数据库，不能用于空库，否则会登记成功但不会创建表。
 可用 `pnpm --filter server db:status` 检查 migration 状态。
 
+升级到 step 聚合存储前，先备份数据库并停止旧版服务，避免迁移期间继续写入事件。
+使用 `pnpm db:migrate` 或镜像启动入口执行升级：入口会先从旧消息、事件和 Provider
+响应聚合历史 step 与运行元数据，校验归档后再删除旧事件表和原始流字段。
+不要绕过入口直接执行 Prisma migration，否则无法在删除旧表前保存迁移所需的数据。
+
 从 0.5.x 升级到 0.6.0 时还需要调整工作区基础目录，完整步骤见
 [升级到 0.6.0](docs/upgrade-0.6.0.md)。
 
@@ -202,7 +210,7 @@ psql "$DATABASE_URL" -c "select key, value from app_settings order by key;"
 - 任务过程会使用文件读取、grep 或 shell 等工具。
 - 长耗时命令可以走右侧 Shell 面板持续观察；适合拆分的只读检查可以由 subagent 后台执行并回收结果。
 - 最终输出默认使用 Markdown/Mermaid/LaTeX；复杂报告可通过 shell 或文件写入工具生成 HTML artifact，计划收口后直接以最终汇报完成。
-- 数据库中能查到对应 run、step、message 和 event。
+- 数据库中能查到对应 run、完整 step 聚合和消息顺序索引；原始事件在 trace 文件中查看。
 - 人为降低 `LLM_CONTEXT_BUDGET` 时，可以观察到 `compaction` 事件。
 
 测试：

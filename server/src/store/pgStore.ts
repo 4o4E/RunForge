@@ -1,7 +1,8 @@
 import { pool, query } from '../db/pool.js';
 import { prisma } from '../db/prisma.js';
+import { stepMessage } from './stepMessage.js';
 import { Prisma } from '../generated/prisma/client.js';
-import type { AgentEvent, RunStatus } from '../agent/types.js';
+import type { AskUserSpec, RunStatus } from '../agent/types.js';
 import type { LlmMessage } from '../llm/types.js';
 import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
@@ -26,11 +27,13 @@ import type {
   ShellLogStream,
   ShellSessionRow,
   Store,
-  StoredEvent,
+  StepAggregate,
+  RunRuntimeState,
   SpaceRow,
   SpaceWithVisibilityRow,
   SubagentRunRow,
   StepRow,
+  HistoryStepRow,
   StepContextSnapshot,
   StepContextSummaryRow,
   SystemAdminRow,
@@ -45,6 +48,7 @@ import type {
   UpdateSpaceRecordInput,
 } from './types.js';
 import type { TenantUserRole, WebPushSubscriptionInput } from '@runforge/contracts';
+import type { HistoryRunEvent, ThreadHistoryRun } from '@runforge/contracts';
 import {
   newAuthTokenId,
   newRunId,
@@ -74,6 +78,7 @@ import {
   toUserRow,
 } from './prismaRows.js';
 import { attachExternalArtifactTokens } from '../external/artifactProtocol.js';
+import { buildRunHistoryEvents } from './runEventView.js';
 
 function isEphemeralSystemMessage(role: LlmMessage['role'], content: string | null): boolean {
   return role === 'system' && typeof content === 'string' && content.startsWith('已激活 Skill / Activated Skill:');
@@ -438,37 +443,18 @@ export class PgStore implements Store {
   ): Promise<ThreadSearchResultRow[]> {
     const q = searchText.trim();
     if (!q) return [];
-    const rows = await prisma.messages.findMany({
-      where: {
-        content: { not: null, contains: q, mode: 'insensitive' },
-        role: { in: ['user', 'assistant'] },
-        threads: {
-          tenant_id: scope.tenantId,
-          user_id: scope.userId,
-          space_id: options.spaceIds ? { in: options.spaceIds } : undefined,
-        },
-      },
-      select: {
-        thread_id: true,
-        run_id: true,
-        id: true,
-        role: true,
-        content: true,
-        created_at: true,
-        threads: { select: { title: true } },
-      },
-      orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
-      take: Math.min(Math.max(limit, 1), 100),
-    });
-    return rows.map((row) => ({
-      thread_id: row.thread_id,
-      thread_title: row.threads.title,
-      run_id: row.run_id,
-      message_id: serialId(row.id),
-      role: row.role as 'user' | 'assistant',
-      content: row.content!,
-      created_at: row.created_at.toISOString(),
-    }));
+    if (options.spaceIds?.length === 0) return [];
+    const rows = await prisma.$queryRaw<Array<Omit<ThreadSearchResultRow, 'message_id' | 'created_at'> & { message_id: bigint; created_at: Date }>>`
+      SELECT m.thread_id, t.title AS thread_title, m.run_id, m.id AS message_id, m.role,
+        CASE WHEN m.role = 'assistant' THEN s.result->>'output' ELSE m.content END AS content, m.created_at
+      FROM messages m JOIN threads t ON t.id = m.thread_id LEFT JOIN steps s ON s.id = m.step_id
+      WHERE t.tenant_id = ${scope.tenantId} AND t.user_id = ${scope.userId}
+        AND (${options.spaceIds === undefined} OR t.space_id = ANY(${options.spaceIds ?? []}::text[]))
+        AND m.role IN ('user', 'assistant')
+        AND position(lower(${q}) IN lower(CASE WHEN m.role = 'assistant' THEN s.result->>'output' ELSE m.content END)) > 0
+      ORDER BY m.created_at DESC, m.id DESC LIMIT ${Math.min(Math.max(limit, 1), 100)}
+    `;
+    return rows.map((row) => ({ ...row, message_id: serialId(row.message_id), created_at: row.created_at.toISOString() }));
   }
 
   async listThreadNotices(scope: Scope, threadId: string): Promise<ThreadNoticeRow[]> {
@@ -568,9 +554,9 @@ export class PgStore implements Store {
         // fork 只复制历史检查点，不复制执行权。异常旧数据里若祖先仍是非终态，
         // 必须在副本中收口为 error，避免启动恢复把历史副本再次执行。
         const copiedStatus = isSourceRun ? 'done' : isTerminalRunStatus(oldRun.status) ? oldRun.status : 'error';
-        const { rows: runRows } = await client.query<RunRow>(
+        const { rows: runRows } = await client.query<Parameters<typeof toRunRow>[0]>(
           `INSERT INTO runs (
-             id, thread_id, parent_run_id, status, input, model_ref, output, error, goal_state,
+             id, thread_id, parent_run_id, status, input, model_ref, output, error, metadata,
              runtime_capabilities_snapshot, space_config_snapshot, space_config_version, plugin_lock,
              external_input_open, input_version, created_at, updated_at
            )
@@ -588,7 +574,7 @@ export class PgStore implements Store {
             oldRun.model_ref,
             isSourceRun ? null : oldRun.output,
             isSourceRun ? null : copiedStatus === 'error' ? oldRun.error ?? 'fork 时停止了历史非终态 run。' : oldRun.error,
-            oldRun.goal_state ? JSON.stringify(oldRun.goal_state) : null,
+            JSON.stringify({ ...oldRun.metadata, pendingInteraction: null }),
             oldRun.runtime_capabilities_snapshot ? JSON.stringify(oldRun.runtime_capabilities_snapshot) : null,
             oldRun.space_config_snapshot ? JSON.stringify(oldRun.space_config_snapshot) : null,
             oldRun.space_config_version,
@@ -598,7 +584,7 @@ export class PgStore implements Store {
             oldRun.updated_at,
           ],
         );
-        const newRun = runRows[0];
+        const newRun = toRunRow(runRows[0]);
         activeRun = newRun;
 
         if (!isSourceRun) {
@@ -610,8 +596,18 @@ export class PgStore implements Store {
             const newStepIdValue = newStepId();
             stepIdMap.set(oldStep.id, newStepIdValue);
             await client.query(
-              `INSERT INTO steps (id, run_id, idx, created_at) VALUES ($1, $2, $3, $4)`,
-              [newStepIdValue, newRunIdValue, oldStep.idx, oldStep.created_at],
+              `INSERT INTO steps (id, run_id, idx, context_snapshot, result, completed_at, created_at, tool_results)
+               VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8::jsonb)`,
+              [
+                newStepIdValue,
+                newRunIdValue,
+                oldStep.idx,
+                oldStep.context_snapshot ? JSON.stringify(oldStep.context_snapshot) : null,
+                oldStep.result ? JSON.stringify(oldStep.result) : null,
+                oldStep.completed_at,
+                oldStep.created_at,
+                JSON.stringify(oldStep.tool_results),
+              ],
             );
           }
         }
@@ -653,7 +649,7 @@ export class PgStore implements Store {
               oldMessage.tool_calls ? JSON.stringify(oldMessage.tool_calls) : null,
               oldMessage.tool_call_id,
               oldMessage.collapsed,
-              mappedSummaryOf?.length ? mappedSummaryOf : null,
+              mappedSummaryOf ?? [],
               oldMessage.provider_state ? JSON.stringify(oldMessage.provider_state) : null,
               oldMessage.media_refs ? JSON.stringify(oldMessage.media_refs) : null,
               oldMessage.created_at,
@@ -661,32 +657,11 @@ export class PgStore implements Store {
           );
           messageIdMap.set(Number(oldMessage.id), Number(inserted[0].id));
         }
-
-        if (!isSourceRun) {
-          const { rows: oldEvents } = await client.query<{
-            step_id: string | null;
-            idx: number;
-            type: string;
-            data: AgentEvent;
-            created_at: string;
-          }>(
-            `SELECT step_id, idx, type, data, created_at FROM events WHERE run_id = $1 ORDER BY id`,
-            [oldRun.id],
-          );
-          for (const oldEvent of oldEvents) {
-            await client.query(
-              `INSERT INTO events (run_id, step_id, idx, type, data, created_at)
-               VALUES ($1, $2, $3, $4, $5::jsonb, $6)`,
-              [
-                newRunIdValue,
-                oldEvent.step_id ? stepIdMap.get(oldEvent.step_id) ?? null : null,
-                oldEvent.idx,
-                oldEvent.type,
-                JSON.stringify(oldEvent.data),
-                oldEvent.created_at,
-              ],
-            );
-          }
+        if (oldRun.metadata.context) {
+          const collapsed = Object.fromEntries(Object.entries(oldRun.metadata.context.collapsed)
+            .flatMap(([id, kind]) => messageIdMap.has(Number(id)) ? [[String(messageIdMap.get(Number(id))), kind]] : []));
+          newRun.metadata.context = { collapsed };
+          await client.query('UPDATE runs SET metadata = $2::jsonb WHERE id = $1', [newRun.id, JSON.stringify(newRun.metadata)]);
         }
       }
 
@@ -861,6 +836,17 @@ export class PgStore implements Store {
     })).map(toRunRow);
   }
 
+  async listHistoryRuns(scope: Scope, threadId: string): Promise<Array<Omit<ThreadHistoryRun, 'steps'>>> {
+    const rows = await prisma.$queryRaw<Array<Omit<ThreadHistoryRun, 'steps' | 'created_at' | 'updated_at'> & { created_at: Date; updated_at: Date }>>`
+      SELECT r.id,r.thread_id,r.parent_run_id,r.status,r.input,r.model_ref,r.output,r.error,
+        r.metadata->'goal' AS goal_state,r.metadata->'pendingInteraction' AS pending_interaction,r.created_at,r.updated_at
+      FROM runs r JOIN threads t ON t.id=r.thread_id
+      WHERE r.thread_id=${threadId} AND t.tenant_id=${scope.tenantId} AND t.user_id=${scope.userId}
+      ORDER BY r.created_at,r.id
+    `;
+    return rows.map((row) => ({ ...row, created_at: row.created_at.toISOString(), updated_at: row.updated_at.toISOString() }));
+  }
+
   async cancelRunsForDeletion(threadIds: string[]): Promise<RunRow[]> {
     if (!threadIds.length) return [];
     return prisma.$transaction(async (tx) => {
@@ -887,11 +873,13 @@ export class PgStore implements Store {
         where: { id: { in: threadIds }, executing_run_id: { in: ids } },
         data: { executing_run_id: null, updated_at: now },
       });
+      await tx.$executeRaw`UPDATE runs SET metadata = metadata - 'pendingInteraction' WHERE id IN (${Prisma.join(ids)})`;
       return rows.map((row) => toRunRow({
         ...row,
         status: 'canceled',
         error: '所属资源已删除，运行已取消。',
         external_input_open: false,
+        metadata: { ...(row.metadata as Prisma.JsonObject), pendingInteraction: null },
         updated_at: now,
       }));
     });
@@ -941,6 +929,7 @@ export class PgStore implements Store {
       }
 
       if (isTerminalRunStatus(status)) {
+        await tx.$executeRaw`UPDATE runs SET metadata = metadata - 'pendingInteraction' WHERE id = ${id}`;
         // 只允许当前 run 释放自己的槽，旧 run 的迟到收口不能清掉后来启动的 run。
         await tx.threads.updateMany({
           where: { id: run.thread_id, executing_run_id: id },
@@ -1038,6 +1027,7 @@ export class PgStore implements Store {
         },
       });
       if (resumed.count === 0) return null;
+      await tx.$executeRaw`UPDATE runs SET metadata = metadata - 'pendingInteraction' WHERE id = ${id}`;
 
       const claimed = await tx.threads.updateMany({
         where: {
@@ -1068,13 +1058,24 @@ export class PgStore implements Store {
   }
 
   async setGoalState(scope: Scope, runId: string, goal: GoalState): Promise<void> {
-    await prisma.runs.updateMany({
-      where: {
-        id: runId,
-        threads_runs_thread_idTothreads: { tenant_id: scope.tenantId, user_id: scope.userId },
-      },
-      data: { goal_state: requiredJson(goal), updated_at: new Date() },
-    });
+    await this.updateRunMetadata(scope, runId, 'goal', goal);
+  }
+
+  async setRunRuntimeState(scope: Scope, runId: string, state: RunRuntimeState): Promise<void> {
+    await this.updateRunMetadata(scope, runId, 'runtime', state);
+  }
+
+  async setRunPendingInteraction(scope: Scope, runId: string, interaction: AskUserSpec | null): Promise<void> {
+    await this.updateRunMetadata(scope, runId, 'pendingInteraction', interaction);
+  }
+
+  private async updateRunMetadata(scope: Scope, runId: string, key: string, value: unknown): Promise<void> {
+    // 在数据库内合并单个字段，避免并行能力更新覆盖其他跨 step 状态。
+    await prisma.$executeRaw`
+      UPDATE runs r SET metadata = jsonb_set(r.metadata, ARRAY[${key}], ${JSON.stringify(value)}::jsonb), updated_at = now()
+      FROM threads t WHERE r.id = ${runId} AND t.id = r.thread_id
+        AND t.tenant_id = ${scope.tenantId} AND t.user_id = ${scope.userId}
+    `;
   }
 
   async setRuntimeCapabilitiesSnapshot(
@@ -1130,6 +1131,59 @@ export class PgStore implements Store {
     if (updated.count !== 1) {
       throw new Error(`step 不存在、不属于当前用户或上下文已经固定：${stepId}`);
     }
+  }
+
+  async saveStepResult(scope: Scope, stepId: string, result: StepAggregate): Promise<number> {
+    return prisma.$transaction(async (tx) => {
+      const updated = await tx.steps.updateMany({
+        where: {
+          id: stepId,
+          result: { equals: Prisma.DbNull },
+          runs: {
+            threads_runs_thread_idTothreads: {
+              tenant_id: scope.tenantId,
+              user_id: scope.userId,
+            },
+          },
+        },
+        data: {
+          result: requiredJson(result),
+          completed_at: new Date(result.endedAt),
+        },
+      });
+      if (updated.count !== 1) {
+        throw new Error(`step 不存在、不属于当前用户或结果已经固定：${stepId}`);
+      }
+      const step = await tx.steps.findUniqueOrThrow({ where: { id: stepId }, select: { run_id: true, runs: { select: { thread_id: true } } } });
+      // 消息表只索引顺序和压缩范围；模型响应始终读取 step 聚合结果。
+      const message = await tx.messages.create({ data: {
+        thread_id: step.runs.thread_id, run_id: step.run_id, step_id: stepId,
+        role: 'assistant', content: null,
+      }, select: { id: true } });
+      return serialId(message.id);
+    });
+  }
+
+  async getHistorySteps(scope: Scope, runId: string, afterStep = -1): Promise<HistoryStepRow[]> {
+    const rows = await prisma.steps.findMany({
+      where: { run_id: runId, idx: { gt: afterStep }, completed_at: { not: null }, runs: { threads_runs_thread_idTothreads: { tenant_id: scope.tenantId, user_id: scope.userId } } },
+      select: {
+        id: true, run_id: true, idx: true, result: true, tool_results: true, completed_at: true, created_at: true,
+        messages: { where: { role: 'assistant' }, select: { id: true } },
+      },
+      orderBy: { idx: 'asc' },
+    });
+    return rows.map(({ messages, ...row }) => {
+      if (messages.length !== 1) throw new Error(`完成的 step 必须有且仅有一个 assistant 消息索引：${row.id}`);
+      return {
+        ...row,
+        assistantMessageId: serialId(messages[0]!.id),
+        result: row.result as unknown as StepAggregate,
+        tool_results: row.tool_results as unknown as StepRow['tool_results'],
+        completed_at: row.completed_at!.toISOString(),
+        created_at: row.created_at.toISOString(),
+      };
+    });
   }
 
   async listStepContextSummaries(
@@ -1200,30 +1254,12 @@ export class PgStore implements Store {
   }
 
   async getLastCompletedStepIndex(scope: Scope, runId: string): Promise<number> {
-    const owns = await this.runBelongsToScope(scope, runId);
-    if (!owns) return 0;
     let last = 0;
-    const steps = await prisma.steps.findMany({
-      where: { run_id: runId },
-      select: {
-        idx: true,
-        messages: {
-          select: { role: true, tool_calls: true, tool_call_id: true },
-          orderBy: { id: 'asc' },
-        },
-      },
-      orderBy: { idx: 'asc' },
-    });
+    const steps = await this.getHistorySteps(scope, runId);
     for (const step of steps) {
-      const assistantRows = step.messages.filter((row) => row.role === 'assistant');
-      if (!assistantRows.length) continue;
-      const requiredToolIds = assistantRows.flatMap((row) => {
-        const calls = (row.tool_calls ?? []) as unknown as NonNullable<LlmMessage['toolCalls']>;
-        return calls.map((call) => call.id);
-      });
-      const answeredToolIds = new Set(step.messages
-        .filter((row) => row.role === 'tool' && row.tool_call_id)
-        .map((row) => row.tool_call_id as string));
+      if (!step.result) continue;
+      const requiredToolIds = step.result.toolCalls.map((call) => call.id);
+      const answeredToolIds = new Set(step.tool_results.map((tool) => tool.toolCallId));
       if (requiredToolIds.every((id) => answeredToolIds.has(id))) last = Math.max(last, step.idx);
     }
     return last;
@@ -1236,6 +1272,7 @@ export class PgStore implements Store {
       where: { thread_id: threadId, run_id: { in: visibleRunIds } },
       select: {
         id: true,
+        step_id: true,
         role: true,
         content: true,
         tool_calls: true,
@@ -1244,19 +1281,29 @@ export class PgStore implements Store {
         summary_of: true,
         provider_state: true,
         media_refs: true,
+        steps: { select: { result: true, tool_results: true } },
+        runs: { select: { metadata: true } },
       },
       orderBy: { id: 'asc' },
     });
     // Build the compacted LLM-facing view. The original content/tool args stay in
     // the DB; masked rows render placeholders, summarized rows are folded out.
+    for (const row of rows) {
+      row.collapsed = (row.runs.metadata as unknown as RunRow['metadata']).context?.collapsed[String(row.id)] ?? null;
+      if (!row.steps) continue;
+      const payload = stepMessage(row.role as LlmMessage['role'], row.tool_call_id, row.steps.result as unknown as StepAggregate | null, row.steps.tool_results as unknown as StepRow['tool_results']);
+      if (payload) Object.assign(row, { content: payload.content, tool_calls: payload.toolCalls ?? null, provider_state: payload.providerState ?? null, media_refs: payload.mediaRefs ?? null });
+    }
     const summarizedIds = new Set(rows.filter((row) => row.collapsed === 'summarized').map((row) => String(row.id)));
+    const assistantIds = new Map(rows.filter((row) => row.role === 'assistant').map((row) => [row.step_id, Number(row.id)]));
+    // 中断结果可能在后续 run 恢复时补入，模型视图仍把结果紧接在所属 step 的调用后。
     const sortKey = (row: typeof rows[number]) => row.summary_of.length && row.summary_of.every((id) => summarizedIds.has(String(id)))
       ? Number(row.summary_of[0])
-      : Number(row.id);
+      : row.role === 'tool' ? assistantIds.get(row.step_id) ?? Number(row.id) : Number(row.id);
     const messages = rows
       .filter((r) => r.collapsed !== 'summarized'
         && !isEphemeralSystemMessage(r.role as LlmMessage['role'], r.content))
-      .sort((a, b) => sortKey(a) - sortKey(b))
+      .sort((a, b) => sortKey(a) - sortKey(b) || Number(a.id) - Number(b.id))
       .map((r) => ({
         id: serialId(r.id),
         role: r.role as LlmMessage['role'],
@@ -1293,8 +1340,9 @@ export class PgStore implements Store {
       content: string | null;
       created_at: Date;
     }>>(Prisma.sql`
-      SELECT m.id, m.run_id, m.step_id, m.role, m.tool_call_id, m.collapsed, m.summary_of,
-             length(COALESCE(m.content, ''))::int AS content_chars,
+      SELECT m.id, m.run_id, m.step_id, m.role, m.tool_call_id,
+             r.metadata #>> ARRAY['context','collapsed',m.id::text] AS collapsed, m.summary_of,
+             length(COALESCE(CASE m.role WHEN 'assistant' THEN s.result->>'output' WHEN 'tool' THEN tool.content ELSE m.content END, ''))::int AS content_chars,
              CASE WHEN m.role = 'user' THEN m.content ELSE NULL END AS content,
              m.created_at,
              COALESCE((
@@ -1303,12 +1351,18 @@ export class PgStore implements Store {
                  'name', call->>'name',
                  'argumentChars', length(COALESCE(call->>'arguments', ''))
                ))
-               FROM jsonb_array_elements(COALESCE(m.tool_calls, '[]'::jsonb)) call
+               FROM jsonb_array_elements(CASE WHEN m.role='assistant' THEN COALESCE(s.result->'toolCalls','[]'::jsonb) ELSE '[]'::jsonb END) call
              ), '[]'::jsonb) AS tool_calls
       FROM messages m
+      JOIN runs r ON r.id=m.run_id
+      LEFT JOIN steps s ON s.id=m.step_id
+      LEFT JOIN LATERAL (
+        SELECT item->>'content' AS content FROM jsonb_array_elements(COALESCE(s.tool_results,'[]'::jsonb)) item
+        WHERE item->>'toolCallId'=m.tool_call_id LIMIT 1
+      ) tool ON m.role='tool'
       WHERE m.thread_id = ${threadId}
         AND m.run_id IN (${Prisma.join(visibleRunIds)})
-        AND (m.role = 'user' OR m.collapsed IS NOT NULL)
+        AND (m.role = 'user' OR r.metadata #>> ARRAY['context','collapsed',m.id::text] IS NOT NULL)
       ORDER BY m.id
     `);
     return rows.map((row) => ({
@@ -1331,8 +1385,15 @@ export class PgStore implements Store {
     if (!visibleRunIds?.length) return [];
     const rows = await prisma.messages.findMany({
       where: { thread_id: threadId, run_id: { in: visibleRunIds } },
+      include: { steps: { select: { result: true, tool_results: true } }, runs: { select: { metadata: true } } },
       orderBy: { id: 'asc' },
     });
+    for (const row of rows) {
+      row.collapsed = (row.runs.metadata as unknown as RunRow['metadata']).context?.collapsed[String(row.id)] ?? null;
+      if (!row.steps) continue;
+      const payload = stepMessage(row.role as LlmMessage['role'], row.tool_call_id, row.steps.result as unknown as StepAggregate | null, row.steps.tool_results as unknown as StepRow['tool_results']);
+      if (payload) Object.assign(row, { content: payload.content, tool_calls: payload.toolCalls ?? null, provider_state: payload.providerState ?? null, media_refs: payload.mediaRefs ?? null });
+    }
     return rows
       .filter((row) => !isEphemeralSystemMessage(row.role as LlmMessage['role'], row.content))
       .map((row) => ({
@@ -1351,28 +1412,46 @@ export class PgStore implements Store {
       }));
   }
 
-  async addMessage(scope: Scope, threadId: string, runId: string, stepId: string | null, msg: LlmMessage): Promise<number> {
+  async addMessage(scope: Scope, threadId: string, runId: string, stepId: string | null, msg: LlmMessage, timing?: { startedAt: string; endedAt: string; durationMs: number }): Promise<number> {
     if (!(await this.runBelongsToScope(scope, runId, threadId))) {
       throw new Error('threadId/runId 不存在、不匹配或不属于当前用户');
     }
     if (stepId && !await prisma.steps.count({ where: { id: stepId, run_id: runId } })) {
       throw new Error('stepId 不属于当前 run');
     }
-    const row = await prisma.messages.create({
-      data: {
-        thread_id: threadId,
-        run_id: runId,
-        step_id: stepId,
-        role: msg.role,
-        content: msg.content,
-        tool_calls: nullableJson(msg.toolCalls),
-        tool_call_id: msg.toolCallId ?? null,
-        provider_state: nullableJson(msg.providerState),
-        media_refs: nullableJson(msg.mediaRefs),
-      },
-      select: { id: true },
+    if (msg.role === 'assistant') throw new Error('模型响应必须通过 saveStepResult 原子保存');
+    if (msg.role === 'tool' && !stepId) throw new Error('工具结果必须明确指定所属 step');
+    return prisma.$transaction(async (tx) => {
+      if (msg.role === 'tool') {
+        const output = { toolCallId: msg.toolCallId!, content: msg.content ?? '', mediaRefs: msg.mediaRefs, createdAt: timing?.endedAt ?? new Date().toISOString(), startedAt: timing?.startedAt, durationMs: timing?.durationMs };
+        const updated = await tx.$executeRaw`UPDATE steps SET tool_results = tool_results || ${JSON.stringify([output])}::jsonb WHERE id = ${stepId} AND NOT tool_results @> ${JSON.stringify([{ toolCallId: msg.toolCallId }])}::jsonb`;
+        if (updated !== 1) throw new Error(`工具结果已经存在：${msg.toolCallId}`);
+      }
+      const row = await tx.messages.create({
+        data: {
+          thread_id: threadId,
+          run_id: runId,
+          step_id: stepId,
+          role: msg.role,
+          content: msg.role === 'tool' ? null : msg.content,
+          tool_calls: nullableJson(msg.toolCalls),
+          tool_call_id: msg.toolCallId ?? null,
+          provider_state: nullableJson(msg.providerState),
+          media_refs: msg.role === 'tool' ? Prisma.DbNull : nullableJson(msg.mediaRefs),
+        },
+        select: { id: true },
+      });
+      return serialId(row.id);
     });
-    return serialId(row.id);
+  }
+
+  async recordInterruptedToolResult(scope: Scope, assistantMessageId: number, toolCallId: string, content: string): Promise<void> {
+    const source = await prisma.messages.findFirstOrThrow({
+      where: { id: BigInt(assistantMessageId), role: 'assistant', threads: { tenant_id: scope.tenantId, user_id: scope.userId } },
+      select: { thread_id: true, run_id: true, step_id: true },
+    });
+    if (!source.step_id) throw new Error(`模型消息缺少所属 step：${assistantMessageId}`);
+    await this.addMessage(scope, source.thread_id, source.run_id, source.step_id, { role: 'tool', content, toolCallId });
   }
 
   async countRunMessages(scope: Scope, runId: string): Promise<number> {
@@ -1414,44 +1493,49 @@ export class PgStore implements Store {
 
   async markMessagesCollapsed(scope: Scope, ids: number[], kind: 'masked' | 'summarized'): Promise<void> {
     if (!ids.length) return;
-    await prisma.messages.updateMany({
+    await prisma.$executeRaw`
+      WITH changed AS (
+        UPDATE messages m SET collapsed = ${kind} FROM threads t
+        WHERE m.id = ANY(${ids.map(BigInt)}::bigint[]) AND t.id = m.thread_id
+          AND t.tenant_id = ${scope.tenantId} AND t.user_id = ${scope.userId}
+        RETURNING m.run_id, m.id
+      ), grouped AS (SELECT run_id, jsonb_object_agg(id::text, ${kind}::text) AS marks FROM changed GROUP BY run_id)
+      UPDATE runs r SET metadata = jsonb_set(r.metadata, '{context}',
+        COALESCE(r.metadata->'context', '{}'::jsonb) || jsonb_build_object('collapsed',
+          COALESCE(r.metadata #> '{context,collapsed}', '{}'::jsonb) || grouped.marks))
+      FROM grouped WHERE r.id = grouped.run_id
+    `;
+  }
+
+  async getEvents(scope: Scope, runId: string): Promise<HistoryRunEvent[]> {
+    const runRow = await prisma.runs.findFirst({
       where: {
-        id: { in: ids.map(BigInt) },
-        threads: { tenant_id: scope.tenantId, user_id: scope.userId },
+        id: runId,
+        threads_runs_thread_idTothreads: { tenant_id: scope.tenantId, user_id: scope.userId },
       },
-      data: { collapsed: kind },
     });
-  }
-
-  async addEvent(scope: Scope, runId: string, stepId: string | null, event: AgentEvent): Promise<void> {
-    const idx = 'step' in event ? event.step : 0;
-    if (!(await this.runBelongsToScope(scope, runId))) return;
-    if (stepId && !await prisma.steps.count({ where: { id: stepId, run_id: runId } })) {
-      throw new Error('stepId 不属于当前 run');
-    }
-    await prisma.events.create({
-      data: { run_id: runId, step_id: stepId, idx, type: event.type, data: requiredJson(event) },
-    });
-  }
-
-  async getEvents(scope: Scope, runId: string): Promise<AgentEvent[]> {
-    return (await this.getEventsAfterCursor(scope, runId, 0)).map((row) => row.event);
-  }
-
-  async getEventsAfterCursor(scope: Scope, runId: string, cursor: number): Promise<StoredEvent[]> {
-    if (!Number.isSafeInteger(cursor) || cursor < 0) return [];
-    return (await prisma.events.findMany({
-      where: {
-        run_id: runId,
-        id: { gt: BigInt(cursor) },
-        runs: { threads_runs_thread_idTothreads: { tenant_id: scope.tenantId, user_id: scope.userId } },
-      },
-      select: { id: true, data: true },
-      orderBy: { id: 'asc' },
-    })).map((row) => ({
-      cursor: serialId(row.id),
-      event: row.data as unknown as AgentEvent,
-    }));
+    if (!runRow) return [];
+    const [stepRows, messageRows] = await Promise.all([
+      this.getHistorySteps(scope, runId),
+      prisma.messages.findMany({ where: { run_id: runId, role: 'user' }, orderBy: { id: 'asc' } }),
+    ]);
+    const messages: RawThreadMessage[] = messageRows
+      .filter((row) => !isEphemeralSystemMessage(row.role as LlmMessage['role'], row.content))
+      .map((row) => ({
+        id: serialId(row.id),
+        run_id: row.run_id,
+        step_id: row.step_id,
+        role: row.role as LlmMessage['role'],
+        content: row.content,
+        toolCalls: row.tool_calls as unknown as LlmMessage['toolCalls'] ?? undefined,
+        toolCallId: row.tool_call_id ?? undefined,
+        providerState: row.provider_state as unknown as LlmMessage['providerState'] ?? undefined,
+        mediaRefs: row.media_refs as unknown as LlmMessage['mediaRefs'] ?? undefined,
+        collapsed: row.collapsed as RawThreadMessage['collapsed'] ?? undefined,
+        summaryOf: row.summary_of.map(serialId),
+        created_at: row.created_at.toISOString(),
+      }));
+    return buildRunHistoryEvents(toRunRow(runRow), stepRows.map((step) => ({ ...step, context_snapshot: null })), messages);
   }
 
   async createSubagentRun(scope: Scope, input: {

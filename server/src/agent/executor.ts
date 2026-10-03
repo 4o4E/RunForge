@@ -30,7 +30,9 @@ import { finishGoal, initGoal, mergeGoal, parseGoalPatch, renderGoal } from './g
 import { runBus } from './bus.js';
 import type { AgentEvent, FinishReason } from './types.js';
 import { store as defaultStore } from '../store/index.js';
-import { scopeForThread, type AppliedRunInput, type Scope, type Store } from '../store/types.js';
+import { scopeForThread, type AppliedRunInput, type Scope, type StepAggregate, type Store, type ThreadMessage } from '../store/types.js';
+import { redactToolArgs } from '../store/runEventView.js';
+import { historyStepView } from '../store/historyView.js';
 import { getSystemMcpSettings, getSystemToolSettings } from '../settings.js';
 import type { McpSettings, ToolSettings } from '../settings.js';
 import {
@@ -82,7 +84,8 @@ import { readAuditedWorkloadSecrets } from '../businessPlugins/secretService.js'
 import { verifySpaceRuntimeLock } from '../plugins/lock.js';
 import type { JsonValue, SpaceRuntimeLock } from '../plugins/types.js';
 import { materializeWorkloadSdk } from '../workloadSdk/materialize.js';
-import { notifyRunActivity, registerRunExecution, retainRunExecution, waitForRunActivity } from './executionControl.js';
+import { isExecutionShuttingDown, notifyRunActivity, registerRunExecution, retainRunExecution, waitForRunActivity } from './executionControl.js';
+import { runTraceWriter, type RunTraceWriter } from '../observability/runTrace.js';
 
 const ASK_USER_TOOL_NAME = 'ask_user';
 const DATABASE_ACCESS_SKILL_NAME = 'database-access';
@@ -91,7 +94,6 @@ const SUBAGENT_POLL_TOOL_NAME = 'subagent_poll';
 const SUBAGENT_LIST_TOOL_NAME = 'subagent_list';
 const STREAM_STATS_POINTS = 24;
 const STREAM_STATS_MIN_INTERVAL_MS = 250;
-const SECRET_KEY_RE = /(password|passwd|pwd|secret|token|key|credential|connectionurl)/i;
 // 只读调研优先尽早整理已找到的证据，避免反复搜索把上下文耗尽；写作任务保留较多工具轮次。
 // 最后一个模型轮次专门整理结论，防止工具调用耗尽后把空结果误报为成功。
 const SUBAGENT_READONLY_MAX_TURNS = 6;
@@ -154,6 +156,7 @@ export interface ExecutorDeps {
   businessPluginRuntime: Pick<BusinessPluginRuntimeService, 'startRun' | 'syncWorkspace'>;
   businessPluginSecretResolver: TenantSecretResolver;
   releaseRuntimeResources?: (runId: string) => Promise<number>;
+  traceWriter: Pick<RunTraceWriter, 'writeAgentEvent' | 'flushRun'> | null;
 }
 
 interface WorkloadRuntimeEnv {
@@ -201,6 +204,7 @@ class StreamStatsTracker {
   private bucket = { second: Math.floor(Date.now() / 1000), chars: 0 };
   private history: number[] = [];
   private lastPublishMs = 0;
+  private latest: StreamStats | null = null;
 
   constructor(
     private readonly runId: string,
@@ -225,6 +229,10 @@ class StreamStatsTracker {
   startHeartbeat(step: number, stage: () => StreamStage, activeTool?: () => StreamStats['activeTool']): () => void {
     const timer = setInterval(() => this.mark(step, stage(), activeTool?.(), true), 1000);
     return () => clearInterval(timer);
+  }
+
+  snapshot(): StreamStats | null {
+    return this.latest ? structuredClone(this.latest) : null;
   }
 
   private roll() {
@@ -252,6 +260,13 @@ class StreamStatsTracker {
         charsPerSecond: this.bucket.chars,
         history: [...this.history, this.bucket.chars].slice(-STREAM_STATS_POINTS),
       },
+    };
+    this.latest = {
+      stage: event.stage,
+      updatedAt: event.updatedAt,
+      activeTool: event.activeTool,
+      totals: event.totals,
+      rate: event.rate,
     };
     this.publish(this.runId, event);
     this.persist?.(event);
@@ -313,6 +328,9 @@ async function defaultDeps(
       return readAuditedWorkloadSecrets(request.workloadToken, 'backend', request.stepId, request.keys);
     }),
     releaseRuntimeResources: overrides.releaseRuntimeResources,
+    traceWriter: overrides.traceWriter === undefined
+      ? overrides.store === undefined ? runTraceWriter : null
+      : overrides.traceWriter,
   };
 }
 
@@ -327,31 +345,16 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function redactShellCommand(command: string): string {
-  return command
-    .replace(/\b([A-Z0-9_]*(?:PASSWORD|TOKEN|SECRET|KEY)[A-Z0-9_]*)=('[^']*'|"[^"]*"|[^\s;&|]+)/gi, '$1=[redacted]')
-    .replace(/(postgres(?:ql)?:\/\/)([^:\s/@]+):([^@\s]+)@/gi, '$1$2:[redacted]@')
-    .replace(/(--password(?:=|\s+))('[^']*'|"[^"]*"|[^\s;&|]+)/gi, '$1[redacted]');
-}
-
-function redactToolArgs(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redactToolArgs);
-  if (!value || typeof value !== 'object') return value;
-  const out: Record<string, unknown> = {};
-  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-    if (SECRET_KEY_RE.test(key)) out[key] = '[redacted]';
-    else if (key === 'command' && typeof item === 'string') out[key] = redactShellCommand(item);
-    else out[key] = redactToolArgs(item);
-  }
-  return out;
-}
-
 function toolSignature(name: string, args: unknown): string {
   return `${name}:${stableJson(args)}`;
 }
 
 function blockedQuestion(reason: string): string {
   return `我检测到任务可能没有继续取得进展：${reason}\n请补充约束、确认下一步，或回复“按默认假设继续”。`;
+}
+
+function textQuestionSpec(question: string): AskUserSpec {
+  return { question, mode: 'text', options: [], allowCustom: true, required: true };
 }
 
 function detectLoopGuard(signatures: string[], failures: string[]): LoopGuardHit | null {
@@ -554,12 +557,12 @@ async function createDefaultWorkloadRuntimeEnv(scope: Scope, runId: string, allo
   };
 }
 
-function findMissingToolResults(messages: LlmMessage[]): { id: string; name: string }[] {
+function findMissingToolResults(messages: ThreadMessage[]): { id: string; name: string; assistantMessageId: number }[] {
   const answered = new Set(messages.filter((m) => m.role === 'tool' && m.toolCallId).map((m) => m.toolCallId as string));
-  const missing: { id: string; name: string }[] = [];
+  const missing: { id: string; name: string; assistantMessageId: number }[] = [];
   for (const m of messages) {
     for (const call of m.toolCalls ?? []) {
-      if (!answered.has(call.id)) missing.push({ id: call.id, name: call.name });
+      if (!answered.has(call.id)) missing.push({ id: call.id, name: call.name, assistantMessageId: m.id });
     }
   }
   return missing;
@@ -633,6 +636,7 @@ export async function executeRun(runId: string, overrides: Partial<ExecutorDeps>
   try {
     await executeRunControlled(runId, overrides, registration.signal, registration.bindThread);
   } finally {
+    if (overrides.store === undefined) runBus.clear(runId);
     registration.finish();
   }
 }
@@ -689,8 +693,15 @@ async function executeRunControlled(
       store,
       generateThreadTitle,
       releaseRuntimeResources: depOverrides.releaseRuntimeResources ?? (usesDefaultStore ? releaseRunLeases : undefined),
+      traceWriter: depOverrides.traceWriter === undefined
+        ? usesDefaultStore ? runTraceWriter : null
+        : depOverrides.traceWriter,
     }, run.model_ref ?? spaceConfig?.model.modelRef, spaceConfig);
   } catch (err) {
+    if (isExecutionShuttingDown()) {
+      if (usesDefaultStore) await releaseRunLeases(runId);
+      return;
+    }
     const current = await store.getRun(scope, runId);
     if (cancellationSignal.aborted || current?.status === 'canceling' || current?.status === 'canceled') {
       if (current && current.status !== 'canceled') {
@@ -707,7 +718,12 @@ async function executeRunControlled(
     const publish = depOverrides.publish ?? ((targetRunId, event) => runBus.publish(targetRunId, event));
     const event: AgentEvent = { type: 'error', step: 0, message };
     publish(runId, event);
-    await store.addEvent(scope, runId, null, event);
+    const traceWriter = depOverrides.traceWriter === undefined
+      ? usesDefaultStore ? runTraceWriter : null
+      : depOverrides.traceWriter;
+    void traceWriter?.writeAgentEvent(runId, null, event).catch((error) => {
+      console.warn(`写入 run ${runId} trace 失败：${(error as Error).message}`);
+    });
     await store.setRunStatus(scope, runId, 'error', { error: message });
     if (usesDefaultStore) await releaseRunLeases(runId).catch(() => {});
     return;
@@ -749,9 +765,14 @@ async function executeRunControlled(
     };
   };
 
+  const recordTrace = (stepId: string | null, event: AgentEvent) => {
+    void deps.traceWriter?.writeAgentEvent(runId, stepId, event).catch((error) => {
+      console.warn(`写入 run ${runId} trace 失败：${(error as Error).message}`);
+    });
+  };
   const emit = async (stepId: string | null, event: AgentEvent) => {
     publish(runId, event);
-    await store.addEvent(scope, runId, stepId, event);
+    recordTrace(stepId, event);
   };
   const emitUsageUpdate = async (stepId: string, step: number, usage?: LlmUsage) => {
     await emit(stepId, {
@@ -804,12 +825,18 @@ async function executeRunControlled(
   let currentCtx: ContextManager | null = null;
   let currentRequestOverheadTokens = 0;
   let currentStepIdx = 0;
+  const publishCompletedStep = async () => {
+    if (!usesDefaultStore || currentStepIdx === 0) return;
+    const steps = await store.getHistorySteps(scope, runId, currentStepIdx - 1);
+    const step = steps.find((step) => step.idx === currentStepIdx);
+    if (step) runBus.publishStepCompleted(runId, historyStepView(step));
+  };
   const mcpSession = new McpClientSession();
   const runtimeResources: { businessPluginHandle?: BusinessPluginRunHandle } = {};
 
   if (!await store.beginRunExecution(scope, runId)) {
     const current = await store.getRun(scope, runId);
-    if (current?.status === 'canceling') {
+    if (current?.status === 'canceling' && !isExecutionShuttingDown()) {
       await emit(null, { type: 'error', step: 0, message: '用户已取消 run。' });
       await store.setRunStatus(scope, runId, 'canceled');
       await deps.releaseRuntimeResources?.(runId).catch((error) => {
@@ -827,6 +854,7 @@ async function executeRunControlled(
       () => runLoop(),
     );
   } catch (err) {
+    if (isExecutionShuttingDown()) return;
     if (cancellationSignal.aborted) {
       const current = await store.getRun(scope, runId);
       if (current && current.status !== 'canceled') {
@@ -859,19 +887,19 @@ async function executeRunControlled(
   async function runLoop(): Promise<void> {
     const existingMessageCount = await store.countRunMessages(scope, runId);
     const hasPersistedMessages = existingMessageCount > 0;
-    const shouldRecover = resume || hasPersistedMessages;
+    const shouldRecover = resume || hasPersistedMessages || initialRun.parent_run_id !== null;
     let prior = await store.loadThreadMessages(scope, threadId, { runId });
     let nextStepIdx = (await store.getLastStepIndex(scope, runId)) + 1;
 
-    // 恢复时如果进程死在工具执行中间，库里可能只有 assistant tool_call，
-    // 没有对应 tool_result。这里补一条中断结果，保证 provider 消息配对完整。
+    // 当前 run 和祖先历史都可能在工具执行期间中断；进入模型前按原始消息索引
+    // 把中断结果写入所属 step，新用户轮次也不能把祖先的未配对调用直接发给模型。
     if (shouldRecover) {
       const missing = findMissingToolResults(prior);
       for (const call of missing) {
         const content =
           `Tool call "${call.name}" was interrupted before producing a result; continue from the latest durable state or rerun it if still needed.\n` +
           `工具调用 "${call.name}" 在返回结果前被中断；请基于已持久化状态继续，必要时重新执行。`;
-        await store.addMessage(scope, threadId, runId, null, { role: 'tool', content, toolCallId: call.id });
+        await store.recordInterruptedToolResult(scope, call.assistantMessageId, call.id, content);
         await emit(null, { type: 'recovery', step: Math.max(1, nextStepIdx), message: content });
       }
       if (missing.length) prior = await store.loadThreadMessages(scope, threadId, { runId });
@@ -1003,25 +1031,26 @@ async function executeRunControlled(
         ? deps.mcpToolLoader(settings, serverId)
         : mcpSession.activate(settings, serverId, cancellationSignal);
     };
-    const runEvents = await store.getEvents(scope, runId);
     const activeSkills: SkillIndexItem[] = [];
     const activeSkillActivations = new Map<string, SkillActivation>();
     const activeMcp = new Map<string, McpActivation>();
 
-    // 激活状态以 run 事件恢复：同一 run 重启后继续生效，新 run 没有这些事件，天然清空。
-    for (const event of runEvents) {
-      if (event.type === 'skill_activated' && !activeSkills.some((skill) => skill.id === event.skillId)) {
-        const skill = skillIndex.find((item) => item.id === event.skillId);
+    // 激活状态属于 run 当前状态，不从 trace 或历史事件反推。
+    for (const skillId of initialRun.runtime_state.skillIds) {
+      if (!activeSkills.some((skill) => skill.id === skillId)) {
+        const skill = skillIndex.find((item) => item.id === skillId);
         if (skill) {
           activeSkills.push(skill);
           activeSkillActivations.set(skill.id, await activateSkillItem(skill, toolSettings.workspaceRoot));
         }
       }
-      if (event.type === 'mcp_activated' && !activeMcp.has(event.serverId)) {
+    }
+    for (const serverId of initialRun.runtime_state.mcpServerIds) {
+      if (!activeMcp.has(serverId)) {
         try {
-          activeMcp.set(event.serverId, await mcpToolLoader(mcpSettings, event.serverId, null));
+          activeMcp.set(serverId, await mcpToolLoader(mcpSettings, serverId, null));
         } catch (err) {
-          console.warn(`恢复 run ${runId} 的 MCP ${event.serverId} 激活状态失败：${(err as Error).message}`);
+          console.warn(`恢复 run ${runId} 的 MCP ${serverId} 激活状态失败：${(err as Error).message}`);
         }
       }
     }
@@ -1059,13 +1088,9 @@ async function executeRunControlled(
     }
 
     const stepIds = new Map<number, string>();
-    let livePersistQueue = Promise.resolve();
     const persistLiveEvent = (event: AgentEvent) => {
       const stepId = 'step' in event ? stepIds.get(event.step) ?? null : null;
-      // 流式事件需要实时落库，刷新/切换会话时才能从 DB 恢复当前状态。
-      livePersistQueue = livePersistQueue.then(() => store.addEvent(scope, runId, stepId, event)).catch((err) => {
-        console.warn(`persist live event failed for ${runId}: ${(err as Error).message}`);
-      });
+      recordTrace(stepId, event);
     };
     const publishLiveEvent = (event: AgentEvent) => {
       publish(runId, event);
@@ -1074,18 +1099,16 @@ async function executeRunControlled(
     const streamStats = new StreamStatsTracker(runId, publish, persistLiveEvent);
     const recentToolSignatures: string[] = [];
     const recentFailures: string[] = [];
-    const rejectedImageModels = new Set<string>();
-    for (const event of runEvents) {
-      if (event.type === 'media_downgrade' && event.reason === 'provider_rejected') {
-        rejectedImageModels.add(event.model);
-      }
-    }
+    const rejectedImageModels = new Set(initialRun.runtime_state.rejectedImageModels);
     let noActionTurns = 0;
     const acceptsNextStep = spaceConfig?.mode === 'external' && spaceConfig.external.allowNextStep;
-    let lastAppliedExternalInputVersion = runEvents.reduce(
-      (version, event) => event.type === 'external_input_applied' ? Math.max(version, event.version) : version,
-      0,
-    );
+    let lastAppliedExternalInputVersion = initialRun.runtime_state.lastAppliedExternalInputVersion;
+    const persistRuntimeState = () => store.setRunRuntimeState(scope, runId, {
+      skillIds: activeSkills.map((skill) => skill.id),
+      mcpServerIds: [...activeMcp.keys()],
+      rejectedImageModels: [...rejectedImageModels],
+      lastAppliedExternalInputVersion,
+    });
 
     const addAppliedExternalInputs = async (
       inputs: AppliedRunInput[],
@@ -1106,6 +1129,7 @@ async function executeRunControlled(
         lastAppliedExternalInputVersion = Math.max(lastAppliedExternalInputVersion, input.version);
       }
       if (inputs.length) {
+        await persistRuntimeState();
         // 新输入代表调用方提供了新的推进信息，旧的空转/重复检测不能跨边界误判。
         noActionTurns = 0;
         recentToolSignatures.length = 0;
@@ -1506,10 +1530,12 @@ async function executeRunControlled(
 
     // 长任务由完成、取消、上下文预算决定结束；hardStepCap 只是防死循环兜底。
     for (let stepIdx = nextStepIdx; stepIdx < nextStepIdx + hardStepCap; stepIdx++) {
+      await publishCompletedStep();
       currentStepIdx = stepIdx;
       // 取消接口会把状态改成 canceling；每步开头检查后干净退出。
       const current = await store.getRun(scope, runId);
       if (cancellationSignal.aborted || current?.status === 'canceling' || current?.status === 'canceled') {
+        if (isExecutionShuttingDown()) return;
         try {
           await shellManager.killRunCommands(scope, runId, 'run_cancel');
         } catch (err) {
@@ -1524,6 +1550,7 @@ async function executeRunControlled(
       }
 
       const step = await store.createStep(scope, runId, stepIdx);
+      if (usesDefaultStore) runBus.clearBeforeStep(runId, stepIdx);
       stepIds.set(stepIdx, step.id);
       await emit(step.id, { type: 'step_start', step: stepIdx });
       // next_step 只能出现在完整 step 之间；落库事务已经先创建 user message，
@@ -1655,8 +1682,8 @@ async function executeRunControlled(
           console.warn(
             `[agent] run ${runId} step ${stepIdx} provider ${provider.name} 流式请求在首个增量前失败，将保持流式协议重试：${message}`,
           );
-          // 诊断事件只落库，不推给前端，避免一次可恢复重试被显示成失败。
-          await store.addEvent(scope, runId, step.id, {
+          // 诊断事件只写本地 trace，不推给前端，避免一次可恢复重试被显示成失败。
+          recordTrace(step.id, {
             type: 'stream_retry',
             step: stepIdx,
             provider: provider.name,
@@ -1669,6 +1696,7 @@ async function executeRunControlled(
           const prepared = omitImagesForTextContinuation(modelMessages);
           if (publishedLlmDelta || !prepared.omitted.length || !isExplicitImageRejection(error)) throw error;
           rejectedImageModels.add(selectedModel);
+          await persistRuntimeState();
           await emit(step.id, {
             type: 'media_downgrade', step: stepIdx, modality: 'image', model: selectedModel,
             reason: 'provider_rejected', files: prepared.omitted.map((item) => item.name),
@@ -1678,7 +1706,6 @@ async function executeRunControlled(
       } finally {
         stopLlmHeartbeat();
       }
-      await livePersistQueue;
       const llmEndedAt = new Date().toISOString();
 
       // 用真实 token 用量校准估算器，供下一次压缩判断使用。
@@ -1692,6 +1719,26 @@ async function executeRunControlled(
       if (content && !persistedLiveContent) {
         streamStats.add(stepIdx, 'output', 'outputChars', charCount(content), undefined);
       }
+      if (!toolCalls.length && result.finishReason && result.finishReason !== 'stop') {
+        streamStats.mark(stepIdx, 'error', undefined, true);
+      } else if (!toolCalls.length && content?.trim()) {
+        streamStats.mark(stepIdx, 'done', undefined, true);
+      }
+      const stepResult: StepAggregate = {
+        toolCalls,
+        providerState: result.providerState,
+        reasoning: reasoning ?? null,
+        output: content ?? null,
+        usage: result.usage ?? null,
+        streamStats: streamStats.snapshot(),
+        finishReason: result.finishReason ?? null,
+        rawFinishReason: result.rawFinishReason ?? null,
+        startedAt: llmStartedAt,
+        reasoningStartedAt,
+        endedAt: llmEndedAt,
+        durationMs: durationMs(llmStartedAt, llmEndedAt),
+      };
+      const assistantMessageId = await store.saveStepResult(scope, step.id, stepResult);
 
       // reasoning 只给前端展示，不回填到模型上下文。
       if (reasoning) {
@@ -1701,13 +1748,13 @@ async function executeRunControlled(
         if (persistedLiveReasoning) {
           await emit(step.id, { type: 'reasoning_timing', step: stepIdx, ...timing });
         } else {
-          await store.addEvent(scope, runId, step.id, ev);
+          recordTrace(step.id, ev);
           await emit(step.id, { type: 'reasoning_timing', step: stepIdx, ...timing });
         }
       }
 
-      // messages 是 Debug 与恢复的原始日志；普通事件仍走 redactToolArgs，避免默认 UI
-      // 暴露密钥。OpenAI 的加密推理状态只做不透明回放，应用不会尝试解密。
+      // 聚合响应已经持久化；上下文中的 assistant 与消息顺序索引指向同一个 step。
+      // 协议加密推理状态只做不透明回放，普通展示不传输该状态。
       const assistantMsg = {
         role: 'assistant' as const,
         content,
@@ -1715,8 +1762,8 @@ async function executeRunControlled(
         providerState: result.providerState,
       };
       ctx.add(assistantMsg);
-      ctx.setLastDbId(await store.addMessage(scope, threadId, runId, step.id, assistantMsg));
-      // Skill 原始入口继续保留在 messages；模型视图只保留占位符，完整正文由
+      ctx.setLastDbId(assistantMessageId);
+      // Skill 原始入口继续保留在 step 工具结果；模型视图只保留占位符，完整正文由
       // run 级 active Skill 说明重新注入，避免同一正文在上下文中重复占用。
       await persistCompaction(step.id, ctx.collapseConsumedToolResults(['skill_activate'], 'skill-activation-consumed'));
       if (toolCalls.length && result.finishReason && result.finishReason !== 'tool-calls') {
@@ -1726,7 +1773,6 @@ async function executeRunControlled(
             `${result.rawFinishReason ? ` rawFinishReason=${result.rawFinishReason}` : ''} with ${toolCalls.length} tool calls; marking run error.`,
         );
         streamStats.mark(stepIdx, 'error', undefined, true);
-        await livePersistQueue;
         await emit(step.id, {
           type: 'error',
           step: stepIdx,
@@ -1740,7 +1786,7 @@ async function executeRunControlled(
 
       if (content && !persistedLiveContent) {
         const ev = { type: 'llm_delta' as const, step: stepIdx, text: content };
-        await store.addEvent(scope, runId, step.id, ev);
+        recordTrace(step.id, ev);
       }
 
       if (!toolCalls.length) {
@@ -1754,7 +1800,6 @@ async function executeRunControlled(
               `${rawFinishReason ? ` rawFinishReason=${rawFinishReason}` : ''}; marking run error.`,
           );
           streamStats.mark(stepIdx, 'error', undefined, true);
-          await livePersistQueue;
           await emit(step.id, { type: 'error', step: stepIdx, message, finishReason, rawFinishReason });
           await store.setRunStatus(scope, runId, 'error', { error: message });
           return;
@@ -1769,7 +1814,6 @@ async function executeRunControlled(
           if (goal.plan.length) await emit(step.id, { type: 'plan_update', step: stepIdx, goal });
           await persistCompaction(step.id, ctx.compactForHistory());
           streamStats.mark(stepIdx, 'done', undefined, true);
-          await livePersistQueue;
           await emit(step.id, { type: 'final', step: stepIdx, output: finalText, finishReason, rawFinishReason });
           await store.setRunStatus(scope, runId, 'done', { output: finalText });
           if (usesDefaultStore) {
@@ -1803,6 +1847,7 @@ async function executeRunControlled(
           const question = blockedQuestion(reason);
           await emit(step.id, { type: 'progress_stalled', step: stepIdx, reason, question });
           await emit(step.id, { type: 'user_question', step: stepIdx, question });
+          await store.setRunPendingInteraction(scope, runId, textQuestionSpec(question));
           await store.setRunStatus(scope, runId, 'waiting_for_user');
           return;
         }
@@ -1827,6 +1872,7 @@ async function executeRunControlled(
           activeSkills.push(activation.skill);
           activeSkillActivations.set(activation.skill.id, activation);
           ctx.setActiveSkillInstructions([...activeSkillActivations.values()].map((item) => item.systemMessage));
+          await persistRuntimeState();
           await emit(step.id, {
             type: 'skill_activated',
             step: stepIdx,
@@ -1855,6 +1901,7 @@ async function executeRunControlled(
         if (existing) return `MCP ${id} 已在当前 run 激活，共 ${existing.tools.length} 个工具。`;
         const activation = await mcpToolLoader(mcpSettings, id, step.id);
         activeMcp.set(id, activation);
+        await persistRuntimeState();
         await emit(step.id, {
           type: 'mcp_activated',
           step: stepIdx,
@@ -1920,7 +1967,7 @@ async function executeRunControlled(
           });
           const toolMsg = { role: 'tool' as const, content: text, toolCallId: call.id };
           ctx.add(toolMsg);
-          ctx.setLastDbId(await store.addMessage(scope, threadId, runId, step.id, toolMsg));
+          ctx.setLastDbId(await store.addMessage(scope, threadId, runId, step.id, toolMsg, { startedAt, endedAt, durationMs: trace.durationMs! }));
           const signature = toolSignature(call.name, !parsedArgs.ok
             ? { _invalidArgs: call.arguments.slice(0, 240) }
             : { _blockedBySpace: true });
@@ -1949,7 +1996,8 @@ async function executeRunControlled(
           await emit(step.id, { type: 'user_question', step: stepIdx, question: spec.question, toolCallId: call.id, spec });
           const toolMsg = { role: 'tool' as const, content: text, toolCallId: call.id };
           ctx.add(toolMsg);
-          ctx.setLastDbId(await store.addMessage(scope, threadId, runId, step.id, toolMsg));
+          ctx.setLastDbId(await store.addMessage(scope, threadId, runId, step.id, toolMsg, { startedAt, endedAt, durationMs: trace.durationMs! }));
+          await store.setRunPendingInteraction(scope, runId, spec);
           await store.setRunStatus(scope, runId, 'waiting_for_user');
           return;
         }
@@ -2076,7 +2124,7 @@ async function executeRunControlled(
             : []),
         };
         ctx.add(toolMsg);
-        ctx.setLastDbId(await store.addMessage(scope, threadId, runId, step.id, toolMsg));
+        ctx.setLastDbId(await store.addMessage(scope, threadId, runId, step.id, toolMsg, { startedAt, endedAt, durationMs: trace.durationMs! }));
 
         const signature = toolSignature(call.name, args);
         const failure = /^(工具 .* 抛出异常|工具策略已阻止|未知工具：)/.test(result.text)
@@ -2096,6 +2144,7 @@ async function executeRunControlled(
         }
         await emit(step.id, { type: 'progress_stalled', step: stepIdx, reason: guardHit.reason, question: guardHit.question });
         await emit(step.id, { type: 'user_question', step: stepIdx, question: guardHit.question });
+        await store.setRunPendingInteraction(scope, runId, textQuestionSpec(guardHit.question));
         await store.setRunStatus(scope, runId, 'waiting_for_user');
         return;
       }

@@ -7,6 +7,7 @@
 import { startRun, subscribeRun, type AgentEvent } from '../api';
 import type { AskUserSpec } from '../api';
 import type { UiEvent, UiTransport, UserInput } from './types';
+import { historyStepToEvents } from '../historyStepAdapter';
 
 function defaultAskSpec(question: string): AskUserSpec {
   return { question, mode: 'text', options: [], allowCustom: false, required: false };
@@ -117,13 +118,23 @@ export const legacyTransport: UiTransport = {
     return { runId: id };
   },
   subscribe(runId, onEvent, onClose) {
+    const observedSteps = new Set<number>();
+    const emit = (event: AgentEvent) => {
+      if ('step' in event) observedSteps.add(event.step);
+      const ui = toUiEvent(event);
+      if (ui) onEvent(ui);
+    };
     return subscribeRun(
       runId,
-      (e) => {
-        const ui = toUiEvent(e);
-        if (ui) onEvent(ui);
-      },
+      emit,
       onClose,
+      {
+        onStepSnapshot: (snapshot) => snapshot?.events.forEach(emit),
+        onStepCompleted: (step) => {
+          if (observedSteps.has(step.idx)) return;
+          historyStepToEvents(step).forEach(emit);
+        },
+      },
     );
   },
 };

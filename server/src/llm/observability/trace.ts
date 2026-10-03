@@ -1,10 +1,7 @@
-import { appendFile, mkdir, readdir, rm } from 'node:fs/promises';
-import { basename, join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { config } from '../../config.js';
 import type { ProviderAttemptErrorKind } from './repository.js';
-import { sanitizeMediaPayloads } from './mediaPayload.js';
-
-const TRACE_FILE_RE = /^provider-(\d{4}-\d{2}-\d{2})\.jsonl$/;
+import { RunTraceWriter, runTraceWriter } from '../../observability/runTrace.js';
 
 export interface ProviderTraceRecord {
   invocationId: string;
@@ -34,55 +31,29 @@ export interface ProviderTraceRecord {
   endedAt: string;
 }
 
-function utcDate(value: Date): string {
-  return value.toISOString().slice(0, 10);
-}
-
-/** JSONL trace 不写请求头；每行是一整个 HTTP attempt，便于本地按 run/invocation 检索。 */
+/** Provider attempt 与 Agent 流式事件共用按 run/自然日分片的本地 trace。 */
 export class ProviderTraceWriter {
-  private queue: Promise<void> = Promise.resolve();
-  private cleanedDate = '';
-
   constructor(
     readonly directory: string,
-    private readonly retentionDays = 7,
-    private readonly now: () => Date = () => new Date(),
-  ) {}
-
-  write(record: ProviderTraceRecord): Promise<void> {
-    const task = this.queue.then(async () => {
-      const now = this.now();
-      await mkdir(this.directory, { recursive: true });
-      const today = utcDate(now);
-      if (this.cleanedDate !== today) {
-        await this.cleanup(now);
-        this.cleanedDate = today;
-      }
-      const safeRecord = sanitizeMediaPayloads(record) as ProviderTraceRecord;
-      await appendFile(join(this.directory, `provider-${today}.jsonl`), `${JSON.stringify(safeRecord)}\n`, 'utf8');
-    });
-    this.queue = task.catch(() => undefined);
-    return task;
+    retentionDays = 30,
+    now: () => Date = () => new Date(),
+    private readonly writer: RunTraceWriter = new RunTraceWriter(directory, retentionDays, now),
+  ) {
   }
 
-  async cleanup(now = this.now()): Promise<void> {
-    const cutoff = new Date(Date.UTC(
-      now.getUTCFullYear(),
-      now.getUTCMonth(),
-      now.getUTCDate() - (this.retentionDays - 1),
-    ));
-    const entries = await readdir(this.directory, { withFileTypes: true }).catch(() => []);
-    await Promise.all(entries.map(async (entry) => {
-      if (!entry.isFile()) return;
-      const match = TRACE_FILE_RE.exec(basename(entry.name));
-      if (!match) return;
-      const fileDate = new Date(`${match[1]}T00:00:00.000Z`);
-      if (fileDate < cutoff) await rm(join(this.directory, entry.name), { force: true });
-    }));
+  async write(record: ProviderTraceRecord): Promise<void> {
+    await this.writer.write(record.runId, { kind: 'provider_attempt', ...record });
+  }
+
+  async cleanup(now?: Date): Promise<void> {
+    await this.writer.flushAll();
+    await this.writer.cleanup(now);
   }
 }
 
 export const providerTraceWriter = new ProviderTraceWriter(
-  resolve(config.providerTrace.directory),
-  config.providerTrace.retentionDays,
+  resolve(config.trace.directory),
+  config.trace.retentionDays,
+  () => new Date(),
+  runTraceWriter,
 );

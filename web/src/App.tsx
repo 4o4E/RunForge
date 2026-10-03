@@ -24,6 +24,7 @@ import {
   type AskUserAnswer,
   type AskUserSpec,
   type AgentEvent,
+  type HistoryRunEvent,
   type LlmModelOption,
   type PageState,
   type RunWithEvents,
@@ -39,6 +40,7 @@ import {
   runsToUiMessages,
 } from './history';
 import { toUiEvent } from './transport/legacy';
+import { historyStepToEvents } from './historyStepAdapter';
 import { Sidebar } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
 import { RightSidebar, type RightTabId } from './components/RightSidebar';
@@ -384,19 +386,22 @@ function threadDraftsValue(value: unknown): Record<string, string> {
   return drafts;
 }
 
-function assistantMessageFromEvents(runId: string, events: AgentEvent[]): UIMessage {
-  const parts = foldUiEventsToParts(events.map(toUiEvent).filter((e): e is NonNullable<ReturnType<typeof toUiEvent>> => e !== null));
+function assistantMessageFromEvents(runId: string, events: HistoryRunEvent[]): UIMessage {
+  const parts = foldUiEventsToParts(events
+    .filter((event): event is AgentEvent => event.type !== 'history_user_message')
+    .map(toUiEvent)
+    .filter((e): e is NonNullable<ReturnType<typeof toUiEvent>> => e !== null));
   parts.unshift({ type: 'data-run-id', id: runId, data: { runId } } as unknown as UIMessage['parts'][number]);
   return { id: `${runId}:a`, role: 'assistant', parts };
 }
 
-function replaceAssistantMessage(messages: UIMessage[], runId: string, events: AgentEvent[]): UIMessage[] {
+function replaceAssistantMessage(messages: UIMessage[], runId: string, events: HistoryRunEvent[]): UIMessage[] {
   const generatedUserCount = messages.filter((message) => generatedUserRunId(message) === runId).length;
   let boundaryCount = 0;
   let tailStart = 0;
   for (let eventIndex = 0; eventIndex < events.length && boundaryCount < generatedUserCount; eventIndex += 1) {
     const event = events[eventIndex];
-    if (event.type !== 'external_input_applied' && event.type !== 'user_answer') continue;
+    if (event.type !== 'external_input_applied' && event.type !== 'user_answer' && event.type !== 'history_user_message') continue;
     boundaryCount += 1;
     tailStart = eventIndex + 1;
   }
@@ -414,6 +419,57 @@ function replaceAssistantMessage(messages: UIMessage[], runId: string, events: A
   }
   if (index >= 0) return messages.map((m, i) => (i === index ? assistant : m));
   return [...messages, assistant];
+}
+
+function replaceStepEvents(events: HistoryRunEvent[], step: number, replacement: HistoryRunEvent[]): void {
+  const firstMatch = events.findIndex((event) => 'step' in event && event.step === step);
+  const withoutStep = events.filter((event) => !('step' in event) || event.step !== step);
+  const insertion = firstMatch < 0
+    ? withoutStep.findIndex((event) => 'step' in event && event.step > step)
+    : events.slice(0, firstMatch).filter((event) => !('step' in event) || event.step !== step).length;
+  const index = insertion < 0 ? withoutStep.length : insertion;
+  events.splice(0, events.length, ...withoutStep.slice(0, index), ...replacement, ...withoutStep.slice(index));
+}
+
+function mergeHistoryAndLiveSteps(history: HistoryRunEvent[], live: HistoryRunEvent[], isLive: boolean): HistoryRunEvent[] {
+  if (!isLive || !live.length) return history;
+  const latestLiveStep = Math.max(...live.filter((event) => 'step' in event).map((event) => event.step));
+  const historyWithoutCurrent = history.filter((event) => !('step' in event) || event.step !== latestLiveStep);
+  const liveCurrent = live.filter((event) => 'step' in event && event.step === latestLiveStep);
+  return replaceStepGroup(historyWithoutCurrent, latestLiveStep, liveCurrent);
+}
+
+function replaceStepGroup(events: HistoryRunEvent[], step: number, replacement: HistoryRunEvent[]): HistoryRunEvent[] {
+  const first = events.findIndex((event) => 'step' in event && event.step > step);
+  const insertion = first < 0 ? events.length : first;
+  return [...events.slice(0, insertion), ...replacement, ...events.slice(insertion)];
+}
+
+function applyStepSnapshot(events: HistoryRunEvent[], step: number | null, replacement: AgentEvent[]): void {
+  if (step === null) return;
+  replaceStepEvents(events, step, replacement);
+}
+
+function applyCompletedStep(events: HistoryRunEvent[], step: number, replacement: AgentEvent[]): void {
+  const boundary = events.filter((event) => (
+    'step' in event && event.step === step
+    && (event.type === 'user_answer' || event.type === 'external_input_applied' || event.type === 'history_user_message')
+  ));
+  replaceStepEvents(events, step, [...boundary, ...replacement]);
+}
+
+function runStepSocketCallbacks(events: HistoryRunEvent[], render: () => void) {
+  return {
+    onStepSnapshot: (snapshot: { step: number; events: AgentEvent[] } | null) => {
+      if (!snapshot) return;
+      applyStepSnapshot(events, snapshot.step, snapshot.events);
+      render();
+    },
+    onStepCompleted: (step: Parameters<typeof historyStepToEvents>[0]) => {
+      applyCompletedStep(events, step.idx, historyStepToEvents(step));
+      render();
+    },
+  };
 }
 
 export function App() {
@@ -449,6 +505,7 @@ export function App() {
   const [activeThreadModelRef, setActiveThreadModelRef] = useState('');
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [reattachedRunId, setReattachedRunId] = useState<string | null>(null);
+  const [reattachRevision, setReattachRevision] = useState(0);
   const [waitingRun, setWaitingRun] = useState<{ id: string; spec: AskUserSpec } | null>(null);
   const [resumingRunId, setResumingRunId] = useState<string | null>(null);
   const [continuableRunId, setContinuableRunId] = useState<string | null>(null);
@@ -473,7 +530,9 @@ export function App() {
   const draftRef = useRef(route.draft);
   const selectedModelRefRef = useRef(selectedModelRef);
   const spaceIdRef = useRef<string | null>(route.spaceId);
-  const reattachedEventsRef = useRef<AgentEvent[]>([]);
+  const reattachedEventsRef = useRef<HistoryRunEvent[]>([]);
+  const reattachedCompletedThroughRef = useRef(0);
+  const reconnectAttemptRef = useRef(0);
   const draftSyncTimerRef = useRef<number | null>(null);
   const draftRouteTimerRef = useRef<number | null>(null);
   const titleRefreshTimersRef = useRef<number[]>([]);
@@ -977,6 +1036,7 @@ export function App() {
       setComposerDraft(route.draft);
       setMessages([]);
       reattachedEventsRef.current = [];
+      reattachedCompletedThroughRef.current = 0;
       setReattachedRunId(null);
       setContinuableRunId(null);
       setActiveThreadModelRef('');
@@ -1009,11 +1069,15 @@ export function App() {
           });
           const branchRuns = activeBranchRuns(runs, thread.active_run_id);
           setActiveThreadModelRef(latestRunModelRef(branchRuns));
-          setMessages(runsToUiMessages(runs, thread.active_run_id, notices, context_messages, thread.space_id));
+          const historyMessages = runsToUiMessages(runs, thread.active_run_id, notices, context_messages, thread.space_id);
           setWaitingRun(readOnly ? null : waitingRunFrom(branchRuns));
           const liveRun = liveRunFrom(branchRuns);
           const continuableRun = readOnly ? null : continuableRunFrom(branchRuns);
           reattachedEventsRef.current = liveRun?.events ?? [];
+          reattachedCompletedThroughRef.current = liveRun?.completedThrough ?? 0;
+          setMessages(liveRun
+            ? replaceAssistantMessage(historyMessages, liveRun.id, reattachedEventsRef.current)
+            : historyMessages);
           setReattachedRunId(liveRun?.id ?? null);
           setActiveRunId(liveRun?.id ?? null);
           setContinuableRunId(continuableRun?.id ?? null);
@@ -1050,28 +1114,54 @@ export function App() {
     if (!activeThreadId || !reattachedRunId) return;
     let canceled = false;
     let renderFrame = 0;
+    let reconnectTimer: number | null = null;
+    let stableConnectionTimer: number | null = null;
 
     const renderEvents = () => {
       renderFrame = 0;
       setMessages((current) => replaceAssistantMessage(current, reattachedRunId, reattachedEventsRef.current));
     };
-    const refreshLiveRun = () => {
-      void getThread(activeThreadId, { debug: debugMode, spaceId: route.spaceId })
+    const refreshLiveRun = () => getThread(activeThreadId, { debug: debugMode, spaceId: route.spaceId })
         .then(({ thread, runs, notices, context_messages }) => {
           if (canceled) return;
           const branchRuns = activeBranchRuns(runs, thread.active_run_id);
           setActiveThreadModelRef(latestRunModelRef(branchRuns));
-          setMessages(runsToUiMessages(runs, thread.active_run_id, notices, context_messages, thread.space_id));
-          setWaitingRun(readOnly ? null : waitingRunFrom(branchRuns));
           const liveRun = liveRunFrom(branchRuns);
+          const historyMessages = runsToUiMessages(runs, thread.active_run_id, notices, context_messages, thread.space_id);
+          const events = mergeHistoryAndLiveSteps(liveRun?.events ?? [], reattachedEventsRef.current, !!liveRun);
+          if (liveRun) {
+            reattachedEventsRef.current = events;
+            setMessages(replaceAssistantMessage(historyMessages, liveRun.id, events));
+          } else setMessages(historyMessages);
+          setWaitingRun(readOnly ? null : waitingRunFrom(branchRuns));
           const continuableRun = readOnly ? null : continuableRunFrom(branchRuns);
-          reattachedEventsRef.current = liveRun?.events ?? [];
+          reattachedCompletedThroughRef.current = liveRun?.completedThrough ?? 0;
           setReattachedRunId(liveRun?.id ?? null);
           setActiveRunId(liveRun?.id ?? null);
           setContinuableRunId(continuableRun?.id ?? null);
           if (!liveRun) refreshThreads();
+          return !!liveRun;
         })
-        .catch(() => {});
+        .catch(() => null);
+    const scheduleReconnect = () => {
+      if (canceled) return;
+      reconnectAttemptRef.current += 1;
+      const delay = Math.min(500 * 2 ** (reconnectAttemptRef.current - 1), 8000);
+      reconnectTimer = window.setTimeout(() => setReattachRevision((revision) => revision + 1), delay);
+    };
+    const onSocketClose = () => {
+      if (canceled) return;
+      if (stableConnectionTimer !== null) {
+        window.clearTimeout(stableConnectionTimer);
+        stableConnectionTimer = null;
+      }
+      if (renderFrame) {
+        window.cancelAnimationFrame(renderFrame);
+        renderEvents();
+      }
+      void refreshLiveRun().then((stillLive) => {
+        if (stillLive !== false) scheduleReconnect();
+      });
     };
 
     const unsubscribe = subscribeRun(
@@ -1081,18 +1171,34 @@ export function App() {
         if (renderFrame) return;
         renderFrame = window.requestAnimationFrame(renderEvents);
       },
-      refreshLiveRun,
-      { replay: 'none' },
+      onSocketClose,
+      {
+        replay: 'none',
+        completedThrough: reattachedCompletedThroughRef.current,
+        onConnected: () => {
+          if (stableConnectionTimer !== null) return;
+          stableConnectionTimer = window.setTimeout(() => {
+            reconnectAttemptRef.current = 0;
+            stableConnectionTimer = null;
+          }, 15000);
+        },
+        ...runStepSocketCallbacks(reattachedEventsRef.current, renderEvents),
+        onStepCompleted: (step) => {
+          applyCompletedStep(reattachedEventsRef.current, step.idx, historyStepToEvents(step));
+          reattachedCompletedThroughRef.current = Math.max(reattachedCompletedThroughRef.current, step.idx);
+          renderEvents();
+        },
+      },
     );
-    const interval = window.setInterval(refreshLiveRun, 2000);
 
     return () => {
       canceled = true;
       if (renderFrame) window.cancelAnimationFrame(renderFrame);
-      window.clearInterval(interval);
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      if (stableConnectionTimer !== null) window.clearTimeout(stableConnectionTimer);
       unsubscribe();
     };
-  }, [activeThreadId, debugMode, readOnly, reattachedRunId, refreshThreads, route.spaceId, setMessages]);
+  }, [activeThreadId, debugMode, readOnly, reattachedRunId, reattachRevision, refreshThreads, route.spaceId, setMessages]);
 
   const pushNotificationState = !pushState.supported
     ? 'unsupported'
@@ -1224,11 +1330,16 @@ export function App() {
     void getThread(activeThreadId, { debug: debugMode, spaceId: route.spaceId }).then(({ thread, runs, notices, context_messages }) => {
       const branchRuns = activeBranchRuns(runs, thread.active_run_id);
       setActiveThreadModelRef(latestRunModelRef(branchRuns));
-      setMessages(runsToUiMessages(runs, thread.active_run_id, notices, context_messages, thread.space_id));
-      setWaitingRun(readOnly ? null : waitingRunFrom(branchRuns));
       const liveRun = liveRunFrom(branchRuns);
+      const historyMessages = runsToUiMessages(runs, thread.active_run_id, notices, context_messages, thread.space_id);
+      const events = mergeHistoryAndLiveSteps(liveRun?.events ?? [], reattachedEventsRef.current, !!liveRun);
+      if (liveRun) {
+        reattachedEventsRef.current = events;
+        setMessages(replaceAssistantMessage(historyMessages, liveRun.id, events));
+      } else setMessages(historyMessages);
+      setWaitingRun(readOnly ? null : waitingRunFrom(branchRuns));
       const continuableRun = readOnly ? null : continuableRunFrom(branchRuns);
-      reattachedEventsRef.current = liveRun?.events ?? [];
+      reattachedCompletedThroughRef.current = liveRun?.completedThrough ?? 0;
       setReattachedRunId(liveRun?.id ?? null);
       setActiveRunId(liveRun?.id ?? null);
       setContinuableRunId(continuableRun?.id ?? null);
@@ -1273,6 +1384,7 @@ export function App() {
             });
             refreshThreads();
           },
+          runStepSocketCallbacks(events, flushEvents),
         );
       })
       .catch((err) => {
@@ -1331,6 +1443,7 @@ export function App() {
         setContinuableRunId(null);
         refreshThreads();
       },
+      runStepSocketCallbacks(events, flushEvents),
     );
   }, [refreshActiveThread, refreshThreads, setMessages]);
 
@@ -1369,6 +1482,7 @@ export function App() {
             setContinuableRunId(null);
             refreshThreads();
           },
+          runStepSocketCallbacks(events, flushEvents),
         );
       })
       .catch((err) => {

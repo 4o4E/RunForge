@@ -34,8 +34,8 @@ services:
       TOOL_WORKSPACE_ROOT: /w
       # 用户跨会话文件目录，与会话工作区分开挂载。
       RUNFORGE_USER_FILES_ROOT: /u
-      # Provider 调用观测记录目录。
-      RUNFORGE_PROVIDER_TRACE_DIR: /app/provider-traces
+      # Run 原始 trace 目录；每个 run 每个自然日一个 JSONL，保留三十天。
+      RUNFORGE_TRACE_DIR: /app/traces
       # 租户业务插件部署和历史运行快照目录；多个目录时使用逗号分隔。
       RUNFORGE_BUSINESS_PLUGIN_ROOTS: /app/business-plugins
       # 可选：需要代理访问外部网页或 MCP 时，在部署环境配置代理地址。
@@ -57,7 +57,7 @@ services:
       - runforge-workspaces:/w
       - runforge-user-files:/u
       - runforge-business-plugins:/app/business-plugins
-      - runforge-provider-traces:/app/provider-traces
+      - runforge-traces:/app/traces
     depends_on:
       postgres:
         condition: service_healthy
@@ -90,5 +90,5 @@ volumes:
   runforge-workspaces:
   runforge-user-files:
   runforge-business-plugins:
-  runforge-provider-traces:
+  runforge-traces:
   runforge-postgres:

@@ -1,0 +1,94 @@
+name: CI 验证
+
+on:
+  pull_request:
+  push:
+    branches:
+      - '**'
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-unit:
+    name: 构建、类型检查与单元测试
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.3
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 安装系统测试依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y bubblewrap ffmpeg ripgrep util-linux
+
+      - name: 构建全部 TypeScript 与 Web 产物
+        run: pnpm build
+
+      - name: 运行快速单元测试
+        run: pnpm test:ci
+
+  postgres-integration:
+    name: PostgreSQL 真实存储集成验证
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-bookworm
+        env:
+          POSTGRES_USER: runforge
+          POSTGRES_PASSWORD: runforge-ci-only-password
+          POSTGRES_DB: runforge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U runforge -d runforge"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql://runforge:runforge-ci-only-password@127.0.0.1:5432/runforge
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.3
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 构建共享包并生成 Prisma Client
+        run: |
+          pnpm --filter @runforge/contracts build
+          pnpm --filter @runforge/workload-sdk build
+          pnpm --filter server prisma:generate
+
+      - name: 迁移空白 PostgreSQL 并运行存储集成验证
+        run: bash scripts/ci/postgres-integration.sh

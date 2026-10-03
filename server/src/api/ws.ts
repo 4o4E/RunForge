@@ -3,9 +3,15 @@ import { WebSocketServer } from 'ws';
 import type { RawData, WebSocket } from 'ws';
 import {
   externalSubscriptionSchema,
+  completedHistoryThroughStates,
+  isHistoryStepComplete,
+  runSocketFrameSchema,
+  runSocketSubscriptionSchema,
   type ExternalWebSocketFrame,
+  type RunSocketFrame,
 } from '@runforge/contracts';
 import { runBus } from '../agent/bus.js';
+import type { LiveRunEvent } from '../agent/bus.js';
 import { shellBus } from '../shell/bus.js';
 import { store } from '../store/index.js';
 import { tokenFromWebSocketProtocols } from './auth.js';
@@ -17,14 +23,18 @@ import { externalRepository } from '../external/repository.js';
 import type { ExternalRepository } from '../external/types.js';
 import { hashOpaqueToken } from '../auth/tokens.js';
 import { isExternalUuidToken } from '../external/token.js';
+import { historyStepView } from '../store/historyView.js';
+import { selectInitialHistoryStepIndices } from './historyReplay.js';
 
-type ExternalEventStore = Pick<typeof store, 'getEventsAfterCursor'>;
 type ExternalSocketRepository = Pick<ExternalRepository, 'authenticateToken' | 'getRun'>;
+interface ExternalEventSource {
+  eventsAfter(runId: string, cursor: number): LiveRunEvent[];
+  subscribeRows(runId: string, handler: (event: LiveRunEvent) => void): () => void;
+}
 
 export interface WebSocketOptions {
-  externalEventStore?: ExternalEventStore;
+  externalEventSource?: ExternalEventSource;
   externalRepository?: ExternalSocketRepository;
-  externalPollIntervalMs?: number;
   externalSubscribeTimeoutMs?: number;
 }
 
@@ -41,6 +51,10 @@ function externalTokenFromPath(rawUrl: string | undefined): string | null {
 
 function sendExternalFrame(socket: WebSocket, frame: ExternalWebSocketFrame): void {
   if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(frame));
+}
+
+function sendRunFrame(socket: WebSocket, frame: RunSocketFrame): void {
+  if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(runSocketFrameSchema.parse(frame)));
 }
 
 function waitForSubscription(socket: WebSocket, timeoutMs: number): Promise<RawData> {
@@ -116,57 +130,39 @@ async function handleExternalSocket(
     return;
   }
   if (socket.readyState !== socket.OPEN) return;
-  const scope: Scope = { tenantId: access.caller.tenantId, userId: found.executionUserId };
-  const eventStore = options.externalEventStore ?? store;
+  const eventSource = options.externalEventSource ?? runBus;
   let cursor = subscription.cursor;
   let stopped = false;
-  let wakeTimer: ReturnType<typeof setTimeout> | null = null;
-  let flushQueue = Promise.resolve();
 
   const cleanup = () => {
     stopped = true;
-    if (wakeTimer) clearTimeout(wakeTimer);
-    clearInterval(pollTimer);
     unsubscribe();
   };
-  const flush = async () => {
-    if (stopped || socket.readyState !== socket.OPEN) return;
-    const rows = await eventStore.getEventsAfterCursor(scope, subscription.runId, cursor);
-    for (const row of rows) {
-      if (row.cursor <= cursor) continue;
-      sendExternalFrame(socket, {
-        type: 'event',
-        runId: subscription.runId,
-        cursor: row.cursor,
-        event: row.event,
-      });
-      cursor = row.cursor;
-      if (row.event.type === 'final' || row.event.type === 'error' || row.event.type === 'user_question') {
-        socket.close(1000, 'run 已结束');
-        return;
-      }
+  const send = (row: LiveRunEvent) => {
+    if (stopped || socket.readyState !== socket.OPEN || row.cursor <= cursor) return;
+    sendExternalFrame(socket, {
+      type: 'event',
+      runId: subscription.runId,
+      cursor: row.cursor,
+      event: row.event,
+    });
+    cursor = row.cursor;
+    if (row.event.type === 'final' || row.event.type === 'error' || row.event.type === 'user_question') {
+      socket.close(1000, 'run 已结束');
     }
   };
-  const queueFlush = () => {
-    flushQueue = flushQueue.then(flush).catch(() => {
-      if (!stopped) socket.close(1011, '事件读取失败');
-    });
-  };
-  const wake = () => {
-    if (stopped || wakeTimer) return;
-    // executor 当前先发布内存事件、再落库；短暂延后读取，cursor 始终取数据库 events.id。
-    wakeTimer = setTimeout(() => {
-      wakeTimer = null;
-      queueFlush();
-    }, 10);
-  };
 
-  const unsubscribe = runBus.subscribe(subscription.runId, wake);
-  const pollTimer = setInterval(queueFlush, options.externalPollIntervalMs ?? 500);
+  const unsubscribe = eventSource.subscribeRows(subscription.runId, send);
   socket.once('close', cleanup);
   socket.once('error', cleanup);
   sendExternalFrame(socket, { type: 'subscribed', runId: subscription.runId, cursor });
-  queueFlush();
+  for (const row of eventSource.eventsAfter(subscription.runId, cursor)) send(row);
+  if (
+    socket.readyState === socket.OPEN
+    && ['done', 'error', 'canceled', 'waiting_for_user'].includes(found.response.status)
+  ) {
+    socket.close(1000, 'run 已结束');
+  }
 }
 
 async function canViewThreadSpace(
@@ -277,28 +273,79 @@ export function attachWebSocket(server: Server, options: WebSocketOptions = {}):
       return;
     }
 
-    const send = (event: AgentEvent) => {
-      if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(event));
+    const parsedSubscription = runSocketSubscriptionSchema.safeParse({
+      runId,
+      completedThrough: replay === 'none' ? url.searchParams.get('completedThrough') ?? 0 : 0,
+    });
+    if (!parsedSubscription.success) {
+      socket.close(1008, 'run 订阅参数无效');
+      return;
+    }
+    const subscription = parsedSubscription.data;
+    const announcedSteps = new Map<number, boolean>();
+    const sendCompletedStep = (step: ReturnType<typeof historyStepView>) => {
+      announcedSteps.set(step.idx, isHistoryStepComplete(step));
+      sendRunFrame(socket, { type: 'step_completed', runId, step });
+    };
+    const onSettled = () => {
+      void (async () => {
+        const latest = await store.getRun(scope, runId);
+        if (!latest || ['done', 'error', 'canceled', 'waiting_for_user'].includes(latest.status)) {
+          const completed = await store.getHistorySteps(scope, runId, subscription.completedThrough);
+          for (const row of completed) {
+            if (announcedSteps.has(row.idx)) continue;
+            sendCompletedStep(historyStepView(row));
+          }
+          socket.close(1000, 'run 已结束');
+        }
+      })().catch(() => socket.close(1011, 'run 状态读取失败'));
     };
 
-    // 新 run 订阅需要历史回放兜底；刷新/切换后的接管已经从 REST 恢复历史，
-    // 此时只订阅后续 live 事件，避免完成 step 被重复播放。
-    if (replay !== 'none') {
-      try {
-        for (const e of await store.getEvents(scope, runId)) send(e);
-      } catch {
-        /* 忽略回放失败 */
-      }
-    }
-
-    const unsubscribe = runBus.subscribe(runId, (event) => {
-      send(event);
-      if (event.type === 'final' || event.type === 'error' || event.type === 'user_question') {
-        socket.close(1000, 'run 已结束');
-      }
+    const unsubscribeEvents = runBus.subscribeRows(runId, (row) => {
+      sendRunFrame(socket, { type: 'event', runId, cursor: row.cursor, event: row.event });
     });
-
+    const unsubscribeCompleted = runBus.subscribeStepCompleted(runId, (step) => {
+      sendCompletedStep(step);
+    });
+    const unsubscribeSettled = runBus.subscribeSettled(runId, onSettled);
+    const unsubscribe = () => {
+      unsubscribeEvents();
+      unsubscribeCompleted();
+      unsubscribeSettled();
+    };
     socket.on('close', unsubscribe);
     socket.on('error', unsubscribe);
+
+    // 先挂好内存订阅，再读取数据库；期间发生的完成通知可能重复到达，客户端按 step id 覆盖合并。
+    const completedSteps = await store.getHistorySteps(scope, runId, subscription.completedThrough);
+    const activeStepSnapshot = runBus.currentStepSnapshot(runId);
+    const completedRows = new Map(completedSteps.map((step) => [step.idx, step]));
+    const replayedIndices = selectInitialHistoryStepIndices(
+      completedSteps,
+      activeStepSnapshot?.step ?? null,
+      announcedSteps,
+    );
+    for (const idx of replayedIndices) {
+      sendCompletedStep(historyStepView(completedRows.get(idx)!));
+    }
+    const completionStates = new Map(completedSteps.map((step) => {
+      const view = historyStepView(step);
+      return [step.idx, { idx: step.idx, complete: isHistoryStepComplete(view) }] as const;
+    }));
+    for (const [idx, complete] of announcedSteps) completionStates.set(idx, { idx, complete });
+    const completedThrough = completedHistoryThroughStates(
+      [...completionStates.values()].filter((step) => step.idx > subscription.completedThrough).sort((a, b) => a.idx - b.idx),
+      subscription.completedThrough,
+    );
+    sendRunFrame(socket, {
+      type: 'step_snapshot',
+      runId,
+      cursor: runBus.currentCursor(runId),
+      completedThrough,
+      step: activeStepSnapshot,
+    });
+
+    // 权限查询期间 run 可能已经完成；订阅建立后再读状态，覆盖此前错过的 settled 通知。
+    onSettled();
   });
 }

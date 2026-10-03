@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
 import { sanitizeMediaPayloads } from '../llm/observability/mediaPayload.js';
 
-const traceFilePattern = /^provider-\d{4}-\d{2}-\d{2}\.jsonl$/;
+const traceFilePattern = /^\d{4}-\d{2}-\d{2}\.jsonl$/;
 
 async function sanitizeFile(path: string): Promise<boolean> {
   const original = await stat(path);
@@ -42,12 +42,18 @@ async function sanitizeFile(path: string): Promise<boolean> {
   }
 }
 
-await mkdir(config.providerTrace.directory, { recursive: true });
-const files = (await readdir(config.providerTrace.directory, { withFileTypes: true }))
-  .filter((entry) => entry.isFile() && traceFilePattern.test(basename(entry.name)))
-  .map((entry) => join(config.providerTrace.directory, entry.name));
+await mkdir(config.trace.directory, { recursive: true });
+const runDirectories = (await readdir(config.trace.directory, { withFileTypes: true }))
+  .filter((entry) => entry.isDirectory());
+const files = (await Promise.all(runDirectories.map(async (runDirectory) => {
+  const directory = join(config.trace.directory, runDirectory.name);
+  const entries = await readdir(directory, { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile() && traceFilePattern.test(basename(entry.name)))
+    .map((entry) => join(directory, entry.name));
+}))).flat();
 let changedCount = 0;
 for (const file of files) {
   if (await sanitizeFile(file)) changedCount += 1;
 }
-console.log(`已检查 ${files.length} 个 Provider trace 文件，更新 ${changedCount} 个文件。`);
+console.log(`已检查 ${files.length} 个 run trace 文件，更新 ${changedCount} 个文件。`);

@@ -1,6 +1,7 @@
-import type { AgentEvent, RunStatus } from './agent.js';
+import type { RunStatus } from './agent.js';
 import type { GoalState } from './goal.js';
 import type { SpaceSummary } from './spaces.js';
+import type { HistoryRunEvent } from './history.js';
 
 export interface Thread {
   id: string;
@@ -47,7 +48,8 @@ export interface RunWithEvents {
   goal_state?: GoalState | null;
   created_at: string;
   updated_at: string;
-  events: AgentEvent[];
+  events: HistoryRunEvent[];
+  completedThrough?: number;
 }
 
 export interface ThreadContextToolCall {
@@ -139,7 +141,7 @@ export interface ThreadDetailResponse {
   thread: Thread;
   space: SpaceSummary;
   readOnly: boolean;
-  runs: RunWithEvents[];
+  runs: import('./history.js').ThreadHistoryRun[];
   notices: ThreadNotice[];
   context_messages: ThreadContextMessage[];
   debug: boolean;
@@ -147,7 +149,7 @@ export interface ThreadDetailResponse {
 
 export interface ThreadForkResponse {
   thread: Thread;
-  activeRun: RunWithEvents;
+  activeRun: import('./history.js').ThreadHistoryRun;
 }
 
 export interface ThreadSearchResult {

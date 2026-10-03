@@ -11,12 +11,17 @@ import type {
   users,
 } from '../generated/prisma/client.js';
 import { Prisma } from '../generated/prisma/client.js';
+import { runMetadataSchema } from './runMetadata.js';
 import type { GoalState } from '../agent/goal.js';
+import type { AskUserSpec } from '../agent/types.js';
 import type {
   AuthTokenRow,
   RunRow,
   SpaceRow,
   StepRow,
+  StepAggregate,
+  RunRuntimeState,
+  RunMetadata,
   StepContextSnapshot,
   SystemAdminRow,
   SystemAdminTokenRow,
@@ -71,7 +76,9 @@ export function toThreadRow(row: threads, fallbackTitle?: string | null): Thread
 }
 
 export function toRunRow(row: runs): RunRow {
+  const metadata = runMetadataSchema.parse(row.metadata);
   return {
+    metadata,
     id: row.id,
     thread_id: row.thread_id,
     parent_run_id: row.parent_run_id,
@@ -80,13 +87,15 @@ export function toRunRow(row: runs): RunRow {
     model_ref: row.model_ref,
     output: row.output,
     error: row.error,
-    goal_state: row.goal_state as GoalState | null,
+    goal_state: metadata.goal ?? null,
     runtime_capabilities_snapshot: row.runtime_capabilities_snapshot as Record<string, unknown> | null,
     space_config_snapshot: row.space_config_snapshot as Record<string, unknown> | null,
     space_config_version: row.space_config_version,
     plugin_lock: row.plugin_lock as Record<string, unknown> | null,
     external_input_open: row.external_input_open,
     input_version: row.input_version,
+    runtime_state: metadata.runtime,
+    pending_interaction: metadata.pendingInteraction ?? null,
     created_at: timestamp(row.created_at)!,
     updated_at: timestamp(row.updated_at)!,
   };
@@ -98,6 +107,9 @@ export function toStepRow(row: steps): StepRow {
     run_id: row.run_id,
     idx: row.idx,
     context_snapshot: row.context_snapshot as unknown as StepContextSnapshot | null,
+    result: row.result as unknown as StepAggregate | null,
+    tool_results: row.tool_results as unknown as StepRow['tool_results'],
+    completed_at: timestamp(row.completed_at),
     created_at: timestamp(row.created_at)!,
   };
 }

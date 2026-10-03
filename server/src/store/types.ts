@@ -1,7 +1,8 @@
-import type { AgentEvent, RunStatus } from '../agent/types.js';
+import type { AskUserSpec, FinishReason, RunStatus, StreamStats } from '../agent/types.js';
 import type { GoalState } from '../agent/goal.js';
-import type { LlmMessage, LlmTool } from '../llm/types.js';
+import type { LlmMessage, LlmTool, LlmUsage } from '../llm/types.js';
 import type { SpaceMode, TenantUserRole, WebPushSubscriptionInput } from '@runforge/contracts';
+import type { HistoryRunEvent, ThreadHistoryRun } from '@runforge/contracts';
 
 /** 只有这三种状态真正释放 thread 执行槽；canceling 仍由当前 executor 收口。 */
 export function isTerminalRunStatus(status: RunStatus): boolean {
@@ -68,6 +69,7 @@ export interface ThreadNoticeRow {
 }
 
 export interface RunRow {
+  metadata: RunMetadata;
   id: string;
   thread_id: string;
   parent_run_id: string | null;
@@ -83,8 +85,25 @@ export interface RunRow {
   plugin_lock: Record<string, unknown> | null;
   external_input_open: boolean;
   input_version: number;
+  runtime_state: RunRuntimeState;
+  pending_interaction: AskUserSpec | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface RunRuntimeState {
+  skillIds: string[];
+  mcpServerIds: string[];
+  rejectedImageModels: string[];
+  lastAppliedExternalInputVersion: number;
+}
+
+/** 跨请求状态属于 run；恢复不依赖原始请求或 trace。 */
+export interface RunMetadata {
+  runtime: RunRuntimeState;
+  goal?: GoalState | null;
+  pendingInteraction?: AskUserSpec | null;
+  context?: { collapsed: Record<string, 'masked' | 'summarized'> };
 }
 
 /** 已从持久化注入队列转换成 user message 的外部输入。 */
@@ -100,10 +119,41 @@ export interface StepRow {
   run_id: string;
   idx: number;
   context_snapshot: StepContextSnapshot | null;
+  result: StepAggregate | null;
+  tool_results: StepToolResult[];
+  completed_at: string | null;
   created_at: string;
 }
 
-/** 模型调用前固定的协议无关上下文。写入后保持不变，供运行恢复和人工审查使用。 */
+/** 完成响应的历史投影；消息编号来自现有顺序索引，不重复保存到 step。 */
+export type HistoryStepRow = Omit<StepRow, 'context_snapshot'> & { assistantMessageId: number };
+
+/** 一次模型请求完成后的聚合结果；流式分片只存在于内存和本地 trace。 */
+export interface StepAggregate {
+  toolCalls: NonNullable<LlmMessage['toolCalls']>;
+  providerState?: LlmMessage['providerState'];
+  reasoning: string | null;
+  output: string | null;
+  usage: LlmUsage | null;
+  streamStats: StreamStats | null;
+  finishReason: FinishReason | null;
+  rawFinishReason: string | null;
+  startedAt: string | null;
+  reasoningStartedAt: string | null;
+  endedAt: string;
+  durationMs: number | null;
+}
+
+export interface StepToolResult {
+  toolCallId: string;
+  content: string;
+  createdAt: string;
+  mediaRefs?: LlmMessage['mediaRefs'];
+  startedAt?: string;
+  durationMs?: number;
+}
+
+/** 模型调用前固定的请求观测字段，仅供人工审查，不参与上下文恢复。 */
 export interface StepContextSnapshot {
   messages: LlmMessage[];
   tools: LlmTool[];
@@ -119,11 +169,6 @@ export interface StepContextSummaryRow {
   tool_count: number;
   system_prompt: string | null;
   captured_at: string;
-}
-
-export interface StoredEvent {
-  cursor: number;
-  event: AgentEvent;
 }
 
 export type ShellActor = 'agent' | 'user' | 'system';
@@ -460,6 +505,7 @@ export interface Store {
   beginRunExecution(scope: Scope, id: string): Promise<boolean>;
   getRun(scope: Scope, id: string): Promise<RunRow | null>;
   listRuns(scope: Scope, threadId: string): Promise<RunRow[]>;
+  listHistoryRuns(scope: Scope, threadId: string): Promise<Array<Omit<ThreadHistoryRun, 'steps'>>>;
   /** 跨租户扫描,只给启动期后台任务(recovery.ts)用,禁止在 api/*.ts 路由里调用。 */
   listRunsByStatusUnscoped(statuses: RunStatus[]): Promise<RunRow[]>;
   /** 永久删除资源前批量取消目标 thread 的全部非终态 run，并释放执行槽。 */
@@ -485,6 +531,8 @@ export interface Store {
   ): Promise<RunRow | null>;
   /** Persist the run's goal anchor (so it's inspectable and survives a restart). */
   setGoalState(scope: Scope, runId: string, goal: GoalState): Promise<void>;
+  setRunRuntimeState(scope: Scope, runId: string, state: RunRuntimeState): Promise<void>;
+  setRunPendingInteraction(scope: Scope, runId: string, interaction: AskUserSpec | null): Promise<void>;
   /** 固定本次 run 可使用的运行时能力，后续恢复不得重新读取租户当前配置。 */
   setRuntimeCapabilitiesSnapshot(
     scope: Scope,
@@ -507,6 +555,9 @@ export interface Store {
   createStep(scope: Scope, runId: string, idx: number): Promise<StepRow>;
   /** 在 Provider 调用前固定该 step 的最终上下文；同一 step 禁止覆盖。 */
   saveStepContext(scope: Scope, stepId: string, snapshot: StepContextSnapshot): Promise<void>;
+  /** Provider 完整返回后一次性保存聚合结果；未完成请求不写入。 */
+  saveStepResult(scope: Scope, stepId: string, result: StepAggregate): Promise<number>;
+  getHistorySteps(scope: Scope, runId: string, afterStep?: number): Promise<HistoryStepRow[]>;
   /** 读取当前分支中已经固定的 step 上下文摘要，不加载完整消息 JSON。 */
   listStepContextSummaries(scope: Scope, threadId: string, options?: { runId?: string | null }): Promise<StepContextSummaryRow[]>;
   /** 按 step 读取当前分支中的单个完整上下文。 */
@@ -523,8 +574,10 @@ export interface Store {
   /** 返回当前分支的原始持久化消息，只允许受身份校验的 Debug 接口调用。 */
   loadRawThreadMessages(scope: Scope, threadId: string, options?: { runId?: string | null }): Promise<RawThreadMessage[]>;
   countRunMessages(scope: Scope, runId: string): Promise<number>;
+  /** 中断结果写入原始 assistant 索引所属 step，允许恢复当前分支的祖先 run。 */
+  recordInterruptedToolResult(scope: Scope, assistantMessageId: number, toolCallId: string, content: string): Promise<void>;
   /** Append a message; returns its DB id so compaction can reference it later. */
-  addMessage(scope: Scope, threadId: string, runId: string, stepId: string | null, msg: LlmMessage): Promise<number>;
+  addMessage(scope: Scope, threadId: string, runId: string, stepId: string | null, msg: LlmMessage, timing?: { startedAt: string; endedAt: string; durationMs: number }): Promise<number>;
   /** Append an L3 summary message and remember which original rows it replaces. */
   addSummaryMessage(
     scope: Scope,
@@ -537,10 +590,8 @@ export interface Store {
   /** Durably mark messages collapsed (context compaction). Originals are retained. */
   markMessagesCollapsed(scope: Scope, ids: number[], kind: 'masked' | 'summarized'): Promise<void>;
 
-  addEvent(scope: Scope, runId: string, stepId: string | null, event: AgentEvent): Promise<void>;
-  getEvents(scope: Scope, runId: string): Promise<AgentEvent[]>;
-  /** 按数据库 events.id 增量读取，用于可重连的外部事件流。 */
-  getEventsAfterCursor(scope: Scope, runId: string, cursor: number): Promise<StoredEvent[]>;
+  /** 根据 step 聚合结果、messages 和 run 状态生成历史展示事件。 */
+  getEvents(scope: Scope, runId: string): Promise<HistoryRunEvent[]>;
 
   createSubagentRun(scope: Scope, input: {
     parentRunId: string;

@@ -1,10 +1,12 @@
-import type { AgentEvent, RunStatus } from '../agent/types.js';
+import type { AskUserSpec, RunStatus } from '../agent/types.js';
 import type { LlmMessage } from '../llm/types.js';
 import { maskPlaceholder, maskToolCallArguments } from '../agent/compaction.js';
 import type { GoalState } from '../agent/goal.js';
 import { sanitizeThreadMessagesForModel } from './messageView.js';
+import { stepMessage } from './stepMessage.js';
 import { sanitizeMediaPayloads } from '../llm/observability/mediaPayload.js';
 import { mediaRefsFromUserText } from '../llm/attachments.js';
+import { buildRunHistoryEvents } from './runEventView.js';
 import { DeleteConflictError, isTerminalRunStatus, RunActiveError, SpaceConfigChangedError } from './types.js';
 import type {
   AppliedRunInput,
@@ -25,9 +27,11 @@ import type {
   SpaceRow,
   SpaceWithVisibilityRow,
   Store,
-  StoredEvent,
+  StepAggregate,
+  RunRuntimeState,
   SubagentRunRow,
   StepRow,
+  HistoryStepRow,
   StepContextSnapshot,
   StepContextSummaryRow,
   SystemAdminRow,
@@ -42,6 +46,7 @@ import type {
   UpdateSpaceRecordInput,
 } from './types.js';
 import type { TenantUserRole, WebPushSubscriptionInput } from '@runforge/contracts';
+import type { ThreadHistoryRun } from '@runforge/contracts';
 import {
   newAuthTokenId,
   newRunId,
@@ -98,7 +103,6 @@ export class MemoryStore implements Store {
   private runs = new Map<string, RunRow>();
   private steps: StepRow[] = [];
   private messages: StoredMsg[] = [];
-  private events = new Map<string, StoredEvent[]>();
   private shellSessions = new Map<string, ShellSessionRow>();
   private shellCommands = new Map<string, ShellCommandRow>();
   private shellLogs = new Map<string, ShellCommandLogRow[]>();
@@ -114,7 +118,6 @@ export class MemoryStore implements Store {
   private systemAdminTokens = new Map<string, SystemAdminTokenRow>();
   private seq = 0;
   private shellLogSeq = 0;
-  private eventCursor = 0;
   private now = () => new Date().toISOString();
 
   // 多租户改造 Phase 2(docs/multi-tenancy-design.md §5)。这几个私有归属判断函数
@@ -330,7 +333,6 @@ export class MemoryStore implements Store {
     const runIds = new Set([...this.runs.values()].filter((r) => r.thread_id === id).map((r) => r.id));
     for (const runId of runIds) {
       this.runs.delete(runId);
-      this.events.delete(runId);
     }
     for (const [subagentRunId, row] of this.subagentRuns) {
       if (runIds.has(row.parent_run_id)) this.subagentRuns.delete(subagentRunId);
@@ -356,7 +358,7 @@ export class MemoryStore implements Store {
     const q = searchText.trim().toLowerCase();
     if (!q) return [];
     const allowedSpaces = options.spaceIds ? new Set(options.spaceIds) : null;
-    return this.messages
+    return this.messages.map((message) => this.projectMessage(message))
       .filter((message) => this.threadOwnedBy(this.threads.get(message.thread_id), scope))
       .filter((message) => {
         const thread = this.threads.get(message.thread_id);
@@ -455,6 +457,9 @@ export class MemoryStore implements Store {
       newRun.plugin_lock = structuredClone(oldRun.plugin_lock);
       newRun.external_input_open = false;
       newRun.input_version = oldRun.input_version;
+      newRun.runtime_state = structuredClone(oldRun.runtime_state);
+      newRun.metadata = structuredClone({ ...oldRun.metadata, pendingInteraction: null });
+      newRun.pending_interaction = null;
       newRun.created_at = oldRun.created_at;
       newRun.updated_at = oldRun.updated_at;
       runIdMap.set(oldRun.id, newRun.id);
@@ -467,6 +472,8 @@ export class MemoryStore implements Store {
             id: newStepId(),
             run_id: newRun.id,
             context_snapshot: oldStep.context_snapshot ? structuredClone(oldStep.context_snapshot) : null,
+            result: oldStep.result ? structuredClone(oldStep.result) : null,
+            tool_results: structuredClone(oldStep.tool_results),
           };
           this.steps.push(newStep);
           stepIdMap.set(oldStep.id, newStep.id);
@@ -492,10 +499,9 @@ export class MemoryStore implements Store {
         this.messages.push(copied);
         messageIdMap.set(oldMessage.seq, seq);
       }
-
-      if (!isSourceRun) {
-        const oldEvents = this.events.get(oldRun.id) ?? [];
-        this.events.set(newRun.id, [...oldEvents]);
+      if (oldRun.metadata.context) {
+        newRun.metadata.context = { collapsed: Object.fromEntries(Object.entries(oldRun.metadata.context.collapsed)
+          .flatMap(([id, kind]) => messageIdMap.has(Number(id)) ? [[String(messageIdMap.get(Number(id))), kind]] : [])) };
       }
     }
 
@@ -546,6 +552,7 @@ export class MemoryStore implements Store {
       : options.parentRunId;
     if (parentRunId && this.runs.get(parentRunId)?.thread_id !== threadId) throw new Error('parentRunId 不属于当前 thread');
     const row: RunRow = {
+      metadata: { runtime: { skillIds: [], mcpServerIds: [], rejectedImageModels: [], lastAppliedExternalInputVersion: 0 } },
       id: newRunId(),
       thread_id: threadId,
       parent_run_id: parentRunId ?? null,
@@ -561,6 +568,8 @@ export class MemoryStore implements Store {
       plugin_lock: structuredClone(options.pluginLock ?? null) as Record<string, unknown> | null,
       external_input_open: false,
       input_version: 0,
+      runtime_state: { skillIds: [], mcpServerIds: [], rejectedImageModels: [], lastAppliedExternalInputVersion: 0 },
+      pending_interaction: null,
       created_at: this.now(),
       updated_at: this.now(),
     };
@@ -621,6 +630,13 @@ export class MemoryStore implements Store {
     if (!this.threadOwnedBy(this.threads.get(threadId), scope)) return [];
     return [...this.runs.values()].filter((r) => r.thread_id === threadId).sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
   }
+  async listHistoryRuns(scope: Scope, threadId: string): Promise<Array<Omit<ThreadHistoryRun, 'steps'>>> {
+    return (await this.listRuns(scope, threadId)).map((r) => ({
+      id:r.id,thread_id:r.thread_id,parent_run_id:r.parent_run_id,status:r.status,input:r.input,model_ref:r.model_ref,
+      output:r.output,error:r.error,goal_state:r.metadata.goal ?? null,pending_interaction:r.metadata.pendingInteraction ?? null,
+      created_at:r.created_at,updated_at:r.updated_at,
+    }));
+  }
   async listRunsByStatusUnscoped(statuses: RunStatus[]) {
     const set = new Set(statuses);
     return [...this.runs.values()].filter((r) => set.has(r.status));
@@ -633,6 +649,8 @@ export class MemoryStore implements Store {
       run.status = 'canceled';
       run.error = '所属资源已删除，运行已取消。';
       run.external_input_open = false;
+      run.pending_interaction = null;
+      run.metadata.pendingInteraction = null;
       run.updated_at = this.now();
       const thread = this.threads.get(run.thread_id);
       if (thread?.executing_run_id === run.id) thread.executing_run_id = null;
@@ -655,6 +673,10 @@ export class MemoryStore implements Store {
     if (fields.output !== undefined) run.output = fields.output;
     if (fields.error !== undefined) run.error = fields.error;
     if (status !== 'pending' && status !== 'running') run.external_input_open = false;
+    if (isTerminalRunStatus(status)) {
+      run.pending_interaction = null;
+      run.metadata.pendingInteraction = null;
+    }
     run.updated_at = this.now();
     if (isTerminalRunStatus(status) && thread.executing_run_id === id) {
       thread.executing_run_id = null;
@@ -693,6 +715,8 @@ export class MemoryStore implements Store {
       throw new RunActiveError(thread.executing_run_id, current?.status ?? 'running');
     }
     run.status = 'pending';
+    run.pending_interaction = null;
+    run.metadata.pendingInteraction = null;
     if (fields.output !== undefined) run.output = fields.output;
     if (fields.error !== undefined) run.error = fields.error;
     run.updated_at = this.now();
@@ -715,6 +739,21 @@ export class MemoryStore implements Store {
     const run = this.runs.get(runId);
     if (!this.runOwnedBy(run, scope)) return;
     run.goal_state = goal;
+    run.metadata.goal = goal;
+    run.updated_at = this.now();
+  }
+  async setRunRuntimeState(scope: Scope, runId: string, state: RunRuntimeState) {
+    const run = this.runs.get(runId);
+    if (!this.runOwnedBy(run, scope)) return;
+    run.runtime_state = structuredClone(state);
+    run.metadata.runtime = run.runtime_state;
+    run.updated_at = this.now();
+  }
+  async setRunPendingInteraction(scope: Scope, runId: string, interaction: AskUserSpec | null) {
+    const run = this.runs.get(runId);
+    if (!this.runOwnedBy(run, scope)) return;
+    run.pending_interaction = interaction ? structuredClone(interaction) : null;
+    run.metadata.pendingInteraction = run.pending_interaction;
     run.updated_at = this.now();
   }
   async setRuntimeCapabilitiesSnapshot(scope: Scope, runId: string, snapshot: object) {
@@ -738,7 +777,9 @@ export class MemoryStore implements Store {
 
   async createStep(scope: Scope, runId: string, idx: number): Promise<StepRow> {
     if (!this.runOwnedBy(this.runs.get(runId), scope)) throw new Error('runId 不存在或不属于当前用户');
-    const row: StepRow = { id: newStepId(), run_id: runId, idx, context_snapshot: null, created_at: this.now() };
+    const row: StepRow = {
+      id: newStepId(), run_id: runId, idx, context_snapshot: null, result: null, tool_results: [], completed_at: null, created_at: this.now(),
+    };
     this.steps.push(row);
     return row;
   }
@@ -748,6 +789,38 @@ export class MemoryStore implements Store {
       throw new Error(`step 不存在、不属于当前用户或上下文已经固定：${stepId}`);
     }
     step.context_snapshot = structuredClone(sanitizeMediaPayloads(snapshot)) as StepContextSnapshot;
+  }
+  async saveStepResult(scope: Scope, stepId: string, result: StepAggregate): Promise<number> {
+    const step = this.steps.find((item) => item.id === stepId);
+    if (!step || !this.runOwnedBy(this.runs.get(step.run_id), scope) || step.result) {
+      throw new Error(`step 不存在、不属于当前用户或结果已经固定：${stepId}`);
+    }
+    step.result = structuredClone(result);
+    step.completed_at = result.endedAt;
+    const run = this.runs.get(step.run_id)!;
+    const seq = this.seq++;
+    this.messages.push({ thread_id: run.thread_id, run_id: run.id, step_id: stepId, role: 'assistant', content: null, seq, created_at: result.endedAt });
+    return seq;
+  }
+  async getHistorySteps(scope: Scope, runId: string, afterStep = -1): Promise<HistoryStepRow[]> {
+    if (!this.runOwnedBy(this.runs.get(runId), scope)) return [];
+    const assistantIds = new Map(this.messages
+      .filter((message) => message.run_id === runId && message.role === 'assistant')
+      .map((message) => [message.step_id, message.seq]));
+    return this.steps.filter((step) => step.run_id === runId && step.idx > afterStep && step.completed_at)
+      .sort((a, b) => a.idx - b.idx)
+      .map(({ context_snapshot, ...step }) => {
+        const assistantMessageId = assistantIds.get(step.id);
+        if (assistantMessageId === undefined) throw new Error(`完成的 step 缺少 assistant 消息索引：${step.id}`);
+        return structuredClone({ ...step, assistantMessageId });
+      });
+  }
+
+  private projectMessage(message: StoredMsg): StoredMsg {
+    message = { ...message, collapsed: this.runs.get(message.run_id)?.metadata.context?.collapsed[String(message.seq)] };
+    const step = this.steps.find((step) => step.id === message.step_id);
+    if (!step) return message;
+    return { ...message, ...(stepMessage(message.role, message.toolCallId, step.result, step.tool_results) ?? {}) };
   }
   async listStepContextSummaries(
     scope: Scope,
@@ -790,11 +863,9 @@ export class MemoryStore implements Store {
     if (!this.runOwnedBy(this.runs.get(runId), scope)) return 0;
     let last = 0;
     for (const step of this.steps.filter((s) => s.run_id === runId).sort((a, b) => a.idx - b.idx)) {
-      const stepMessages = this.messages.filter((m) => m.step_id === step.id);
-      const assistantMessages = stepMessages.filter((m) => m.role === 'assistant');
-      if (!assistantMessages.length) continue;
-      const requiredToolIds = assistantMessages.flatMap((m) => (m.toolCalls ?? []).map((call) => call.id));
-      const answeredToolIds = new Set(stepMessages.filter((m) => m.role === 'tool' && m.toolCallId).map((m) => m.toolCallId as string));
+      if (!step.result) continue;
+      const requiredToolIds = step.result.toolCalls.map((call) => call.id);
+      const answeredToolIds = new Set(step.tool_results.map((tool) => tool.toolCallId));
       if (requiredToolIds.every((id) => answeredToolIds.has(id))) last = Math.max(last, step.idx);
     }
     return last;
@@ -820,13 +891,14 @@ export class MemoryStore implements Store {
     if (!this.threadOwnedBy(this.threads.get(threadId), scope)) return [];
     const branchRunIds = this.branchRunIds(threadId, options.runId);
     const summarizedIds = new Set(this.messages.filter((message) => message.collapsed === 'summarized').map((message) => message.seq));
-    const messages = this.messages
+    const assistantIds = new Map(this.messages.filter((message) => message.role === 'assistant').map((message) => [message.step_id, message.seq]));
+    // 祖先 step 的中断结果可以晚于新用户消息写入，模型消息仍按调用与结果配对排序。
+    const sortKey = (message: StoredMsg) => message.summaryOf?.length && message.summaryOf.every((id) => summarizedIds.has(id))
+      ? message.summaryOf[0]
+      : message.role === 'tool' ? assistantIds.get(message.step_id) ?? message.seq : message.seq;
+    const messages = this.messages.map((message) => this.projectMessage(message))
       .filter((m) => branchRunIds.has(m.run_id) && m.thread_id === threadId && m.collapsed !== 'summarized' && !isEphemeralSystemMessage(m.role, m.content))
-      .sort((a, b) => (
-        a.summaryOf?.length && a.summaryOf.every((id) => summarizedIds.has(id)) ? a.summaryOf[0] : a.seq
-      ) - (
-        b.summaryOf?.length && b.summaryOf.every((id) => summarizedIds.has(id)) ? b.summaryOf[0] : b.seq
-      ))
+      .sort((a, b) => sortKey(a) - sortKey(b) || a.seq - b.seq)
       .map((m) => ({
         id: m.seq,
         role: m.role,
@@ -845,7 +917,7 @@ export class MemoryStore implements Store {
   async loadRawThreadMessages(scope: Scope, threadId: string, options: { runId?: string | null } = {}): Promise<RawThreadMessage[]> {
     if (!this.threadOwnedBy(this.threads.get(threadId), scope)) return [];
     const branchRunIds = this.branchRunIds(threadId, options.runId);
-    return this.messages
+    return this.messages.map((message) => this.projectMessage(message))
       .filter((message) => branchRunIds.has(message.run_id) && message.thread_id === threadId && !isEphemeralSystemMessage(message.role, message.content))
       .sort((a, b) => a.seq - b.seq)
       .map((message) => ({
@@ -866,7 +938,7 @@ export class MemoryStore implements Store {
   async loadThreadMessageMetadata(scope: Scope, threadId: string, options: { runId?: string | null } = {}): Promise<ThreadMessageMetadata[]> {
     if (!this.threadOwnedBy(this.threads.get(threadId), scope)) return [];
     const branchRunIds = this.branchRunIds(threadId, options.runId);
-    return this.messages
+    return this.messages.map((message) => this.projectMessage(message))
       .filter((message) => (
         branchRunIds.has(message.run_id)
         && message.thread_id === threadId
@@ -892,19 +964,34 @@ export class MemoryStore implements Store {
     if (!this.runOwnedBy(this.runs.get(runId), scope)) return 0;
     return this.messages.filter((m) => m.run_id === runId).length;
   }
-  async addMessage(scope: Scope, threadId: string, runId: string, stepId: string | null, msg: LlmMessage): Promise<number> {
+  async recordInterruptedToolResult(scope: Scope, assistantMessageId: number, toolCallId: string, content: string): Promise<void> {
+    const source = this.messages.find((message) => message.seq === assistantMessageId && message.role === 'assistant'
+      && this.threadOwnedBy(this.threads.get(message.thread_id), scope));
+    if (!source?.step_id) throw new Error(`模型消息缺少所属 step：${assistantMessageId}`);
+    await this.addMessage(scope, source.thread_id, source.run_id, source.step_id, { role: 'tool', content, toolCallId });
+  }
+  async addMessage(scope: Scope, threadId: string, runId: string, stepId: string | null, msg: LlmMessage, timing?: { startedAt: string; endedAt: string; durationMs: number }): Promise<number> {
     if (!this.threadOwnedBy(this.threads.get(threadId), scope)) throw new Error('threadId 不存在或不属于当前用户');
+    if (msg.role === 'assistant') throw new Error('模型响应必须通过 saveStepResult 原子保存');
+    if (msg.role === 'tool') {
+      if (!stepId) throw new Error('工具结果必须明确指定所属 step');
+      const step = this.steps.find((candidate) => candidate.id === stepId && candidate.run_id === runId);
+      if (!step) throw new Error(`找不到工具调用所属 step：${msg.toolCallId}`);
+      stepId = step.id;
+      if (step.tool_results.some((tool) => tool.toolCallId === msg.toolCallId)) throw new Error(`工具结果已经存在：${msg.toolCallId}`);
+      step.tool_results.push({ toolCallId: msg.toolCallId!, content: msg.content ?? '', mediaRefs: msg.mediaRefs, createdAt: timing?.endedAt ?? this.now(), startedAt: timing?.startedAt, durationMs: timing?.durationMs });
+    }
     const seq = this.seq++;
     this.messages.push({
       thread_id: threadId,
       run_id: runId,
       step_id: stepId,
       role: msg.role,
-      content: msg.content,
+      content: msg.role === 'tool' ? null : msg.content,
       toolCalls: msg.toolCalls,
       toolCallId: msg.toolCallId,
       providerState: msg.providerState,
-      mediaRefs: msg.mediaRefs,
+      mediaRefs: msg.role === 'tool' ? undefined : msg.mediaRefs,
       seq,
       created_at: this.now(),
     });
@@ -927,27 +1014,36 @@ export class MemoryStore implements Store {
   async markMessagesCollapsed(scope: Scope, ids: number[], kind: 'masked' | 'summarized'): Promise<void> {
     const set = new Set(ids);
     for (const m of this.messages) {
-      if (set.has(m.seq) && this.threadOwnedBy(this.threads.get(m.thread_id), scope)) m.collapsed = kind;
+      if (set.has(m.seq) && this.threadOwnedBy(this.threads.get(m.thread_id), scope)) {
+        m.collapsed = kind;
+        const metadata = this.runs.get(m.run_id)!.metadata;
+        metadata.context ??= { collapsed: {} };
+        metadata.context.collapsed[String(m.seq)] = kind;
+      }
     }
   }
 
-  async addEvent(scope: Scope, runId: string, _stepId: string | null, event: AgentEvent) {
-    if (!this.runOwnedBy(this.runs.get(runId), scope)) return;
-    const list = this.events.get(runId) ?? [];
-    this.eventCursor += 1;
-    list.push({
-      cursor: this.eventCursor,
-      event,
-    });
-    this.events.set(runId, list);
-  }
   async getEvents(scope: Scope, runId: string) {
-    if (!this.runOwnedBy(this.runs.get(runId), scope)) return [];
-    return (this.events.get(runId) ?? []).map((row) => row.event);
-  }
-  async getEventsAfterCursor(scope: Scope, runId: string, cursor: number): Promise<StoredEvent[]> {
-    if (!this.runOwnedBy(this.runs.get(runId), scope)) return [];
-    return (this.events.get(runId) ?? []).filter((row) => row.cursor > cursor);
+    const run = this.runs.get(runId);
+    if (!this.runOwnedBy(run, scope)) return [];
+    const steps = await this.getHistorySteps(scope, runId);
+    const messages = this.messages
+      .filter((message) => message.run_id === runId && !isEphemeralSystemMessage(message.role, message.content))
+      .map((message): RawThreadMessage => ({
+        id: message.seq,
+        run_id: message.run_id,
+        step_id: message.step_id,
+        role: message.role,
+        content: message.content,
+        toolCalls: message.toolCalls,
+        toolCallId: message.toolCallId,
+        providerState: message.providerState,
+        mediaRefs: message.mediaRefs,
+        collapsed: message.collapsed,
+        summaryOf: message.summaryOf ?? [],
+        created_at: message.created_at,
+      }));
+    return buildRunHistoryEvents(run, steps, messages);
   }
 
   async createSubagentRun(scope: Scope, input: {

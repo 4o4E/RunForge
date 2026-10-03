@@ -5,11 +5,52 @@ import { config } from '../config.js';
 import { MemoryStore } from '../store/memoryStore.js';
 import { maskPlaceholder } from './compaction.js';
 import { RunActiveError } from '../store/types.js';
-import type { Scope, ThreadMessage } from '../store/types.js';
+import type { Scope, StepAggregate, ThreadMessage } from '../store/types.js';
 
 // 持久压缩：mask 决策会落库，重载时 store 返回压缩视图，重启也不会丢原始数据。
 
 const scope: Scope = { tenantId: 'default', userId: 'us_test' };
+
+type TestAssistantResult = Pick<StepAggregate, 'toolCalls'> & Partial<Omit<StepAggregate, 'toolCalls' | 'startedAt' | 'endedAt' | 'durationMs'>>;
+
+async function saveAssistantResult(
+  store: MemoryStore,
+  threadId: string,
+  runId: string,
+  idx: number,
+  result: TestAssistantResult,
+): Promise<{ stepId: string; assistantId: number }> {
+  const step = await store.createStep(scope, runId, idx);
+  const startedAt = new Date().toISOString();
+  const endedAt = new Date().toISOString();
+  const assistantId = await store.saveStepResult(scope, step.id, {
+    ...result,
+    reasoning: result.reasoning ?? null,
+    output: result.output ?? null,
+    usage: result.usage ?? null,
+    streamStats: result.streamStats ?? null,
+    finishReason: result.finishReason ?? null,
+    rawFinishReason: result.rawFinishReason ?? null,
+    startedAt,
+    reasoningStartedAt: result.reasoningStartedAt ?? null,
+    endedAt,
+    durationMs: Date.parse(endedAt) - Date.parse(startedAt),
+  });
+  return { stepId: step.id, assistantId };
+}
+
+test('历史 step 返回真实 assistant 顺序编号并省略请求快照', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread(scope, '历史顺序');
+  const run = await store.createRun(scope, thread.id, '任务');
+  const userId = await store.addMessage(scope, thread.id, run.id, null, { role: 'user', content: run.input });
+  const saved = await saveAssistantResult(store, thread.id, run.id, 1, { toolCalls: [], output: '回应' });
+  const [step] = await store.getHistorySteps(scope, run.id);
+
+  assert.equal(step.assistantMessageId, saved.assistantId);
+  assert.ok(step.assistantMessageId > userId);
+  assert.equal('context_snapshot' in step, false);
+});
 
 test('maybeCompact reports the DB ids of newly-masked tool results', async () => {
   const { contextBudget, keepRecentMessages } = config.agent;
@@ -104,12 +145,10 @@ test('store persists collapsed flag and returns the masked view on reload', asyn
   const run = await store.createRun(scope, thread.id, 'task');
 
   await store.addMessage(scope, thread.id, run.id, null, { role: 'user', content: 'do it' });
-  await store.addMessage(scope, thread.id, run.id, null, {
-    role: 'assistant',
-    content: null,
+  const { stepId } = await saveAssistantResult(store, thread.id, run.id, 1, {
     toolCalls: [{ id: 'c1', name: 'read_file', arguments: '{}' }],
   });
-  const toolId = await store.addMessage(scope, thread.id, run.id, null, {
+  const toolId = await store.addMessage(scope, thread.id, run.id, stepId, {
     role: 'tool',
     content: 'y'.repeat(3000),
     toolCallId: 'c1',
@@ -197,9 +236,7 @@ test('store returns masked assistant tool-call args on reload', async () => {
   const run = await store.createRun(scope, thread.id, 'task');
   const args = JSON.stringify({ path: 'generated/report.txt', content: 'u'.repeat(3000) });
 
-  const assistantId = await store.addMessage(scope, thread.id, run.id, null, {
-    role: 'assistant',
-    content: null,
+  const { stepId, assistantId } = await saveAssistantResult(store, thread.id, run.id, 1, {
     toolCalls: [{ id: 'file1', name: 'file_write', arguments: args }],
     providerState: {
       reasoningParts: [{
@@ -208,7 +245,7 @@ test('store returns masked assistant tool-call args on reload', async () => {
       }],
     },
   });
-  await store.addMessage(scope, thread.id, run.id, null, { role: 'tool', content: '文件已写入。', toolCallId: 'file1' });
+  await store.addMessage(scope, thread.id, run.id, stepId, { role: 'tool', content: '文件已写入。', toolCallId: 'file1' });
   await store.markMessagesCollapsed(scope, [assistantId], 'masked');
 
   const reloaded = await store.loadThreadMessages(scope, thread.id);
@@ -235,7 +272,7 @@ test('summarized rows are omitted from the reloaded view', async () => {
   const run = await store.createRun(scope, thread.id, 'task');
 
   const a = await store.addMessage(scope, thread.id, run.id, null, { role: 'user', content: 'old turn' });
-  await store.addMessage(scope, thread.id, run.id, null, { role: 'assistant', content: 'kept' });
+  await saveAssistantResult(store, thread.id, run.id, 1, { toolCalls: [], output: 'kept' });
   await store.markMessagesCollapsed(scope, [a], 'summarized');
 
   const reloaded = await store.loadThreadMessages(scope, thread.id);
@@ -247,8 +284,8 @@ test('summary messages reload at the position of the folded rows', async () => {
   const thread = await store.createThread(scope);
   const run = await store.createRun(scope, thread.id, 'task');
 
-  const old = await store.addMessage(scope, thread.id, run.id, null, { role: 'assistant', content: 'old detail' });
-  await store.addMessage(scope, thread.id, run.id, null, { role: 'assistant', content: 'recent detail' });
+  const { assistantId: old } = await saveAssistantResult(store, thread.id, run.id, 1, { toolCalls: [], output: 'old detail' });
+  await saveAssistantResult(store, thread.id, run.id, 2, { toolCalls: [], output: 'recent detail' });
   await store.addSummaryMessage(scope, thread.id, run.id, null, { role: 'system', content: 'summary of old detail' }, [old]);
   await store.markMessagesCollapsed(scope, [old], 'summarized');
 
@@ -260,12 +297,11 @@ test('最近工具轮次的摘要重载后保留调用与结果配对', async ()
   const store = new MemoryStore();
   const thread = await store.createThread(scope);
   const run = await store.createRun(scope, thread.id, '读取文档');
-  const assistant = await store.addMessage(scope, thread.id, run.id, null, {
-    role: 'assistant', content: null,
+  const { stepId, assistantId: assistant } = await saveAssistantResult(store, thread.id, run.id, 1, {
     toolCalls: [{ id: 'read-doc', name: 'file_read', arguments: '{"path":"design.md"}' }],
   });
   const original = '真实文档内容。'.repeat(600);
-  const result = await store.addMessage(scope, thread.id, run.id, null, { role: 'tool', content: original, toolCallId: 'read-doc' });
+  const result = await store.addMessage(scope, thread.id, run.id, stepId, { role: 'tool', content: original, toolCallId: 'read-doc' });
   await store.addSummaryMessage(scope, thread.id, run.id, null, { role: 'system', content: '已完成 design.md 读取：文档摘要。' }, [assistant, result]);
   await store.markMessagesCollapsed(scope, [assistant, result], 'masked');
 
@@ -284,12 +320,10 @@ test('L3 summaries are promoted and orphan tool results are removed from model v
   const run = await store.createRun(scope, thread.id, 'task');
 
   await store.addMessage(scope, thread.id, run.id, null, { role: 'user', content: '继续' });
-  const assistant = await store.addMessage(scope, thread.id, run.id, null, {
-    role: 'assistant',
-    content: null,
+  const { stepId, assistantId: assistant } = await saveAssistantResult(store, thread.id, run.id, 1, {
     toolCalls: [{ id: 'search_1', name: 'web_search', arguments: '{}' }],
   });
-  await store.addMessage(scope, thread.id, run.id, null, { role: 'tool', content: '搜索结果', toolCallId: 'search_1' });
+  await store.addMessage(scope, thread.id, run.id, stepId, { role: 'tool', content: '搜索结果', toolCallId: 'search_1' });
   await store.addSummaryMessage(scope, thread.id, run.id, null, { role: 'system', content: 'L3 锚定摘要：\n旧上下文摘要' }, [assistant]);
   await store.markMessagesCollapsed(scope, [assistant], 'summarized');
 
@@ -303,9 +337,7 @@ test('incomplete assistant tool calls stay visible for recovery', async () => {
   const thread = await store.createThread(scope);
   const run = await store.createRun(scope, thread.id, 'task');
 
-  await store.addMessage(scope, thread.id, run.id, null, {
-    role: 'assistant',
-    content: null,
+  await saveAssistantResult(store, thread.id, run.id, 1, {
     toolCalls: [{ id: 'interrupted_1', name: 'shell_exec', arguments: '{}' }],
   });
 
@@ -319,12 +351,12 @@ test('thread message view follows the active run branch only', async () => {
   const thread = await store.createThread(scope);
   const run1 = await store.createRun(scope, thread.id, 'first');
   await store.addMessage(scope, thread.id, run1.id, null, { role: 'user', content: 'first' });
-  await store.addMessage(scope, thread.id, run1.id, null, { role: 'assistant', content: 'answer first' });
+  await saveAssistantResult(store, thread.id, run1.id, 1, { toolCalls: [], output: 'answer first' });
   await store.setRunStatus(scope, run1.id, 'done');
 
   const oldRun = await store.createRun(scope, thread.id, 'second old');
   await store.addMessage(scope, thread.id, oldRun.id, null, { role: 'user', content: 'second old' });
-  await store.addMessage(scope, thread.id, oldRun.id, null, { role: 'assistant', content: 'answer old' });
+  await saveAssistantResult(store, thread.id, oldRun.id, 1, { toolCalls: [], output: 'answer old' });
   await store.setRunStatus(scope, oldRun.id, 'done');
   const oldLeaf = await store.createRun(scope, thread.id, 'third old');
   await store.addMessage(scope, thread.id, oldLeaf.id, null, { role: 'user', content: 'third old' });
@@ -348,12 +380,12 @@ test('forkThreadAtRun copies history up to the selected user message and records
   const thread = await store.createThread(scope, '原对话');
   const run1 = await store.createRun(scope, thread.id, 'first');
   await store.addMessage(scope, thread.id, run1.id, null, { role: 'user', content: 'first' });
-  await store.addMessage(scope, thread.id, run1.id, null, { role: 'assistant', content: 'answer first' });
+  await saveAssistantResult(store, thread.id, run1.id, 1, { toolCalls: [], output: 'answer first' });
   await store.setRunStatus(scope, run1.id, 'done');
 
   const run2 = await store.createRun(scope, thread.id, 'second');
   await store.addMessage(scope, thread.id, run2.id, null, { role: 'user', content: 'second' });
-  await store.addMessage(scope, thread.id, run2.id, null, { role: 'assistant', content: 'answer second should not copy' });
+  await saveAssistantResult(store, thread.id, run2.id, 1, { toolCalls: [], output: 'answer second should not copy' });
   await store.setRunStatus(scope, run2.id, 'done');
 
   const fork = await store.forkThreadAtRun(scope, run2.id);

@@ -32,7 +32,6 @@ export interface ProviderAttemptRecord {
   requestBody: unknown;
   httpStatus: number | null;
   providerResponseId: string | null;
-  rawStream: string | null;
   normalizedResponse: unknown | null;
   finishReason: string | null;
   usage: unknown | null;
@@ -49,10 +48,10 @@ export interface ProviderObservationRepository {
     id: string,
     input: Pick<ProviderInvocationRecord, 'status' | 'normalizedResponse' | 'error' | 'endedAt'>,
   ): Promise<void>;
-  createAttempt(input: Omit<ProviderAttemptRecord, 'id' | 'httpStatus' | 'providerResponseId' | 'rawStream' | 'normalizedResponse' | 'finishReason' | 'usage' | 'status' | 'errorKind' | 'error' | 'endedAt'>): Promise<string>;
+  createAttempt(input: Omit<ProviderAttemptRecord, 'id' | 'httpStatus' | 'providerResponseId' | 'normalizedResponse' | 'finishReason' | 'usage' | 'status' | 'errorKind' | 'error' | 'endedAt'>): Promise<string>;
   finishAttempt(
     id: string,
-    input: Pick<ProviderAttemptRecord, 'httpStatus' | 'providerResponseId' | 'rawStream' | 'normalizedResponse' | 'finishReason' | 'usage' | 'status' | 'errorKind' | 'error' | 'endedAt'>,
+    input: Pick<ProviderAttemptRecord, 'httpStatus' | 'providerResponseId' | 'normalizedResponse' | 'finishReason' | 'usage' | 'status' | 'errorKind' | 'error' | 'endedAt'>,
   ): Promise<void>;
 }
 
@@ -95,7 +94,7 @@ export class PrismaProviderObservationRepository implements ProviderObservationR
   }
 
   async createAttempt(
-    input: Omit<ProviderAttemptRecord, 'id' | 'httpStatus' | 'providerResponseId' | 'rawStream' | 'normalizedResponse' | 'finishReason' | 'usage' | 'status' | 'errorKind' | 'error' | 'endedAt'>,
+    input: Omit<ProviderAttemptRecord, 'id' | 'httpStatus' | 'providerResponseId' | 'normalizedResponse' | 'finishReason' | 'usage' | 'status' | 'errorKind' | 'error' | 'endedAt'>,
   ): Promise<string> {
     const id = newProviderAttemptId();
     await prisma.provider_attempts.create({
@@ -113,14 +112,13 @@ export class PrismaProviderObservationRepository implements ProviderObservationR
 
   async finishAttempt(
     id: string,
-    input: Pick<ProviderAttemptRecord, 'httpStatus' | 'providerResponseId' | 'rawStream' | 'normalizedResponse' | 'finishReason' | 'usage' | 'status' | 'errorKind' | 'error' | 'endedAt'>,
+    input: Pick<ProviderAttemptRecord, 'httpStatus' | 'providerResponseId' | 'normalizedResponse' | 'finishReason' | 'usage' | 'status' | 'errorKind' | 'error' | 'endedAt'>,
   ): Promise<void> {
     await prisma.provider_attempts.update({
       where: { id },
       data: {
         http_status: input.httpStatus,
         provider_response_id: input.providerResponseId,
-        raw_stream: input.rawStream == null ? null : String(sanitizeMediaPayloads(input.rawStream)),
         normalized_response: nullableJson(sanitizeMediaPayloads(input.normalizedResponse)),
         finish_reason: input.finishReason,
         usage: nullableJson(input.usage),
@@ -166,7 +164,7 @@ export class MemoryProviderObservationRepository implements ProviderObservationR
   }
 
   async createAttempt(
-    input: Omit<ProviderAttemptRecord, 'id' | 'httpStatus' | 'providerResponseId' | 'rawStream' | 'normalizedResponse' | 'finishReason' | 'usage' | 'status' | 'errorKind' | 'error' | 'endedAt'>,
+    input: Omit<ProviderAttemptRecord, 'id' | 'httpStatus' | 'providerResponseId' | 'normalizedResponse' | 'finishReason' | 'usage' | 'status' | 'errorKind' | 'error' | 'endedAt'>,
   ): Promise<string> {
     const duplicate = [...this.attempts.values()].some(
       (attempt) => attempt.invocationId === input.invocationId && attempt.attempt === input.attempt,
@@ -178,7 +176,6 @@ export class MemoryProviderObservationRepository implements ProviderObservationR
       id,
       httpStatus: null,
       providerResponseId: null,
-      rawStream: null,
       normalizedResponse: null,
       finishReason: null,
       usage: null,
@@ -192,13 +189,12 @@ export class MemoryProviderObservationRepository implements ProviderObservationR
 
   async finishAttempt(
     id: string,
-    input: Pick<ProviderAttemptRecord, 'httpStatus' | 'providerResponseId' | 'rawStream' | 'normalizedResponse' | 'finishReason' | 'usage' | 'status' | 'errorKind' | 'error' | 'endedAt'>,
+    input: Pick<ProviderAttemptRecord, 'httpStatus' | 'providerResponseId' | 'normalizedResponse' | 'finishReason' | 'usage' | 'status' | 'errorKind' | 'error' | 'endedAt'>,
   ): Promise<void> {
     const current = this.attempts.get(id);
     if (!current) throw new Error(`Provider attempt 不存在：${id}`);
     this.attempts.set(id, { ...current, ...structuredClone({
       ...input,
-      rawStream: input.rawStream == null ? null : String(sanitizeMediaPayloads(input.rawStream)),
       normalizedResponse: sanitizeMediaPayloads(input.normalizedResponse),
       error: input.error == null ? null : String(sanitizeMediaPayloads(input.error)),
     }) });

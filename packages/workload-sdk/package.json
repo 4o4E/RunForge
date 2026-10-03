@@ -1,6 +1,6 @@
 {
   "name": "@runforge/workload-sdk",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -13,7 +13,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "pnpm build && node --test dist/index.test.js",
+    "test": "pnpm build && pnpm test:unit",
+    "test:unit": "node --test dist/index.test.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

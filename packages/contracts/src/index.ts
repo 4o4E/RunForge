@@ -1,6 +1,7 @@
 export type * from './agent.js';
 export type * from './goal.js';
 export type * from './threads.js';
+export type * from './history.js';
 export type * from './files.js';
 export type * from './settings.js';
 export * from './modelCatalog.js';

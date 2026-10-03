@@ -835,7 +835,10 @@ export class PrismaExternalRepository implements ExternalRepository {
           source_caller_id: access.caller.id,
         },
       },
-      include: { threads_runs_thread_idTothreads: { select: { user_id: true } } },
+      include: {
+        threads_runs_thread_idTothreads: { select: { user_id: true } },
+        run_inputs: { where: { status: 'applied' }, orderBy: { version: 'asc' }, select: { id: true, version: true } },
+      },
     });
     const executionUserId = row?.threads_runs_thread_idTothreads.user_id;
     if (!row || !executionUserId) return null;
@@ -851,7 +854,8 @@ export class PrismaExternalRepository implements ExternalRepository {
         output: run.output,
         error: run.error,
         createdAt: run.created_at,
-        updatedAt: run.updated_at,
+          updatedAt: run.updated_at,
+          appliedInputs: row.run_inputs.map((input) => ({ inputId: input.id, version: input.version })),
       },
     };
   }

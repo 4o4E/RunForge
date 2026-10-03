@@ -6,7 +6,7 @@
 
 ## 一句话原则
 
-社区方案负责协议适配、通用消息裁剪和生态接入；RunForge 负责 `thread -> run -> step` 执行状态、事件回放、工具权限、shell 生命周期、数据库凭证和压缩持久化不变式。
+社区方案负责协议适配、通用消息裁剪和生态接入；RunForge 负责 `thread -> run -> step` 执行状态、step 聚合历史、工具权限、shell 生命周期、数据库凭证和压缩持久化不变式。
 
 换句话说：能被替换成库而不影响产品语义的部分尽量外包；一旦涉及执行链、审计、恢复、安全和用户可见状态，就留在 RunForge runtime 内。
 
@@ -102,12 +102,12 @@ RunForge 仍然自己负责：
 
 RunForge 仍然自己负责：
 
-- 业务事件仍写入 `events` 表，并通过 WebSocket 推送给前端。
+- 实时事件通过 WebSocket 推送并写入按 run 分隔的本地 trace；模型请求完成后只保存 step 聚合。
 - OpenTelemetry 是观测补充，不是 RunForge 前端回放的 source of truth。
 
 原因：
 
-OpenTelemetry 面向工程观测，RunForge 的 `events` 面向用户可见执行过程，两者目的不同。
+OpenTelemetry 面向跨服务观测，本地 run trace 面向原始事件排查；两者都不作为业务恢复来源。
 
 相关文件：
 
@@ -150,7 +150,7 @@ OpenTelemetry 面向工程观测，RunForge 的 `events` 面向用户可见执�
 - L1 tool result masking。
 - L3 锚定摘要。
 - L2 内存滑动窗口。
-- `messages.collapsed` 和 `summary_of` 持久化语义。
+- run 元数据中的压缩选择与摘要覆盖索引。
 
 社区接入点：
 
@@ -160,7 +160,7 @@ OpenTelemetry 面向工程观测，RunForge 的 `events` 面向用户可见执�
 必须保持的不变式：
 
 - `tool_call` 和 `tool_result` 配对永不破坏。
-- `messages.content` 保存原始内容，压缩只派生模型视图。
+- step 聚合响应与工具结果保存原始内容，压缩只派生模型视图。
 - masking 决策可以落库，滑动窗口 drop 只在内存发生。
 - summary message 可落库，并回填到工作上下文。
 - 最新 Goal 通过完整 `update_plan` 工具结果进入普通上下文；更早 Goal 更新只在派生视图中缩短。
@@ -216,14 +216,15 @@ OpenTelemetry 面向工程观测，RunForge 的 `events` 面向用户可见执�
 - [server/src/tools/managedShell.ts](../server/src/tools/managedShell.ts)
 - [server/src/api/ws.ts](../server/src/api/ws.ts)
 
-### 持久化和事件回放
+### 持久化和 step 历史
 
 自研范围：
 
 - Prisma schema 与 PostgreSQL migration。
 - Store 抽象。
 - `messages` 原文保留和压缩视图。
-- `events` 作为前端回放 source of truth。
+- `steps.result` 保存单次模型请求聚合，`messages` 和各领域表保存完成态事实。
+- `AgentEvent` 只作为实时传输和历史展示格式；历史事件按需从完成态数据生成。
 - branch / fork / active run 历史视图。
 
 为什么自研：
@@ -283,7 +284,7 @@ AGENT_CONTEXT_STRATEGY=langchain-trim
 
 - 如果只是“怎么更好地按 token 预算保留消息”，优先放进 `ContextCompactor` 策略，允许使用社区库。
 - 如果涉及“哪些消息应落库为 collapsed / summarized”，必须由 RunForge 决定。
-- 如果涉及“前端如何回放执行过程”，必须由 RunForge 的 events 决定。
+- 如果涉及“前端如何显示历史执行过程”，必须从 step 聚合和对应业务表生成，不能恢复逐分片 trace。
 - 如果涉及“工具是否允许执行”，必须由 RunForge 的 tool policy 决定。
 
 ## 不采用整体框架替换的原因
@@ -292,14 +293,14 @@ LangGraph、Mastra、Temporal、Inngest、Trigger.dev 等方案可以在未来�
 
 原因：
 
-- RunForge 已有稳定的 `thread -> run -> step -> messages -> events` 数据模型。
+- RunForge 已有稳定的 `thread -> run -> step -> messages` 数据模型。
 - 前端依赖细粒度事件展示 reasoning、工具调用、工具结果和 final。
 - shell、workspace、数据源凭证、MCP artifact 落盘都有项目特定语义。
 - 个人项目优先降低维护成本，但不能把项目最有区分度的 runtime 边界抹掉。
 
 可以后续评估的接入方式：
 
-- 用 durable workflow 平台承载后台长任务调度，但不替代 `events` 和 `messages`。
+- 用 durable workflow 平台承载后台长任务调度，但不替代 step 聚合和 `messages`。
 - 用更成熟的 memory 服务承载跨 thread 长期偏好和事实，但不替代当前 thread 历史。
 - 用社区 summarization middleware 替换某个 `ContextCompactor` 策略，但不直接写 store。
 

@@ -1,61 +1,22 @@
-# Provider 观测与统一重试实施日志
+# Provider 观测与统一重试
 
-> 日期：2026-09-16 · 状态：✅ 完成
-> 对应 [空间与外部运行平台设计](../space-runtime-design.md) §11、阶段 8。
+## 调用边界
 
-## 目标和边界
+AI SDK 负责协议转换、流解析与工具调用组装，ProviderRunner 负责真实 HTTP 尝试、重试和观测。一次逻辑调用可以有多个 attempt，attempt 不是另一份对话历史。
 
-RunForge 需要在保留现有 run/step/message/event 的基础上，回答一次逻辑模型调用实际产生了
-几次上游 HTTP 请求、每次发送和收到什么，以及为什么重试。AI SDK 继续负责协议转换、
-流解析和工具调用组装，但不负责重试或 RunForge 的审计状态。
+HTTP 408、429、5xx 和可重试传输错误可以触发重试。流式内容已经向 Agent 发布后不自动重试，以免重复输出。主 Agent、压缩、标题、subagent 与 run-scoped 能力调用通过 purpose 区分。
 
-本阶段只观测与 run 关联的模型调用：主 Agent、标题生成、上下文压缩摘要、subagent 和
-run-scoped LLM capability。管理端模型列表探测和测试对话没有 run 归属，不写入 run 关联
-观测表。
+## 存储
 
-## 实现
+- provider_invocations 记录关联身份、用途、模型、逻辑请求、标准化观测结果、状态和时间。
+- provider_attempts 记录尝试序号、脱敏 URL、实际请求体、HTTP 状态、响应标识、标准化观测结果、用量、错误和时间，不保存原始流。
+- 原始 JSON/SSE 仅写入按 run 与 UTC 日期分隔的 trace 文件，保留三十个自然日。
+- 对话响应权威来源为 steps.result，Provider 请求与响应观测不参与上下文构建或正常恢复。
 
-- `ProviderRunner` 在调用 adapter 前创建 `provider_invocations`，并根据租户 Provider 配置
-  执行统一退避重试。
-- AI SDK 固定 `maxRetries=0`。三种协议都接收当前 attempt 的 observing fetch。
-- observing fetch 从克隆的最终 `Request` 读取实际 URL 和序列化 body；请求头既不建模，
-  也不写数据库或文件。URL 中的 API key、裸 `key`、token、secret、signature 等查询参数
-  在持久化前替换为 `[REDACTED]`。
-- 上游响应经透传 `TransformStream` 交给 adapter，同时聚合原始 JSON/SSE。Provider 返回后
-  再保存标准化 content、reasoning、tool calls、finish reason 和 usage。
-- attempt 保存 `http`、`transport`、`parse`、`runtime` 四类错误。HTTP 408/429/5xx 和传输
-  中断可重试；流式内容一旦向 Agent runtime 发布，后续失败不重试，避免重复输出。
-- 主 Agent 的可恢复流式失败继续写原有 `stream_retry` 诊断事件，不改变 Web 回放协议。
-- 每个真实 attempt 另写一行
-  `logs/provider-traces/provider-YYYY-MM-DD.jsonl`；清理器只删除 7 日窗口之外的匹配文件，
-  不触碰数据库记录或目录内其他文件。
+请求头不进入数据库或文件；URL 中凭证查询参数脱敏，媒体载荷按统一观测规则处理。
 
-## 数据模型
+## 日志生命周期
 
-- `provider_invocations`：tenant、space、thread、run、可选 step、purpose、provider、model、
-  逻辑请求、最终标准化结果、状态和时间。
-- `provider_attempts`：invocation 内序号、脱敏 URL、wire body、HTTP 状态、Provider ID、
-  原始流、标准化结果、finish reason、usage、错误类型、错误和时间。
-- 新 migration 为 `provider_attempts.error_kind` 增加字段和四值检查约束；attempt 序号继续
-  使用既有 `(invocation_id, attempt)` 唯一约束。
+日志提交只进入内存队列，由日志组件异步批量写入。正常关闭先停止日志生产并等待执行清理，再排空 trace 和遥测；SIGKILL 不保证日志完整。Compose 映射 /app/traces，容器运行用户需要写入权限。
 
-## 验证证据
-
-- 全仓 typecheck、229/229 单测和生产构建通过；Prisma migration status 为最新。
-- ProviderRunner 定向用例覆盖 503 后重试、wire body 和原始响应保存、请求头不落库、
-  发布部分流后不重试、JSON 解析错误分类，以及 7 日文件清理。
-- Prisma Store 验证使用真实数据库创建 invocation/attempt，确认 Provider ID、URL 脱敏和
-  请求头密钥不落库。
-- Agent Core 真实模型验收 5/5 通过，共 21 个 step；数据库中对应 21 个 invocation 和
-  21 个 attempt，逐 step 一一关联。每个 attempt 都有 HTTP 200、wire body、完整 SSE
-  结束标记、标准化结果、usage、finish reason、Provider ID 和结束时间。
-- 使用当前数据库内的 2 个实际 Provider 密钥扫描这 5 个 run 的逻辑请求、wire body、URL、
-  原始流、标准化结果和本地 trace，所有位置命中数均为 0。
-- 同一批运行生成 21 行 JSONL，与数据库 attempt 数一致。
-
-## 成本和后续观察
-
-为了满足完整复盘要求，原始响应在单次调用期间会在内存中聚合，并同时写入数据库和本地
-JSONL。这里没有增加截断、采样、压缩或对象存储抽象：首版已确认单实例且暂不处理配额，
-提前增加这些策略会改变“完整保存”契约。后续端到端容量验收需要继续观察长响应的峰值内存、
-数据库增长和本地 7 日磁盘占用，再基于真实数据单独决策归档方案。
+清理器在启动和运行期间删除三十日窗口之外的日期文件，不删除目录中其他文件。真实文件测试覆盖并发批次、日期保留与子进程正常退出。

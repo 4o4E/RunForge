@@ -50,14 +50,16 @@ export function initTelemetry(): void {
   });
   sdk.start();
 
-  const shutdown = () => {
-    sdk?.shutdown().catch(() => {}).finally(() => process.exit(0));
-  };
-  process.once('SIGTERM', shutdown);
-  process.once('SIGINT', shutdown);
-
   const target = config.telemetry.otlpEndpoint || 'console';
   console.log(`🔭 OpenTelemetry enabled → ${target}`);
+}
+
+/** 由 index 的统一关闭流程在 run trace 完成排空后调用。 */
+export async function shutdownTelemetry(): Promise<void> {
+  if (!sdk) return;
+  const current = sdk;
+  sdk = null;
+  await current.shutdown();
 }
 
 export function tracer(): Tracer {

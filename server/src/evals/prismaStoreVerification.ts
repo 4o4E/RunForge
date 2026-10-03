@@ -739,26 +739,54 @@ try {
   assert.equal(providerInvocation?.provider_attempts[0].url.includes('verification-query-secret'), false);
   assert.equal(new URL(providerInvocation!.provider_attempts[0].url).searchParams.get('api_key'), '[REDACTED]');
   assert.equal(JSON.stringify(providerInvocation).includes('verification-secret'), false);
-  await store.addMessage(scope, thread.id, run.id, null, { role: 'user', content: '验证输入' });
-  await store.addMessage(scope, thread.id, run.id, step.id, {
-    role: 'assistant',
-    content: null,
-    toolCalls: [{ id: 'call_verify', name: 'verify_tool', arguments: '{"ok":true}' }],
+  const invocationStartedAt = providerInvocation!.started_at.toISOString();
+  const invocationEndedAt = providerInvocation!.ended_at!.toISOString();
+  await store.saveStepResult(scope, step.id, {
+    toolCalls: providerResult.toolCalls,
+    providerState: providerResult.providerState,
+    reasoning: providerResult.reasoning ?? null,
+    output: providerResult.content,
+    usage: providerResult.usage ?? null,
+    streamStats: null,
+    finishReason: providerResult.finishReason ?? null,
+    rawFinishReason: providerResult.rawFinishReason ?? null,
+    startedAt: invocationStartedAt,
+    reasoningStartedAt: null,
+    endedAt: invocationEndedAt,
+    durationMs: invocationEndedAt ? Date.parse(invocationEndedAt) - Date.parse(invocationStartedAt) : null,
   });
-  const toolMessageId = await store.addMessage(scope, thread.id, run.id, step.id, {
+  await store.addMessage(scope, thread.id, run.id, null, { role: 'user', content: '验证输入' });
+  const toolCallStep = await store.createStep(scope, run.id, 2);
+  const toolCallStartedAt = new Date().toISOString();
+  const toolCallEndedAt = new Date().toISOString();
+  await store.saveStepResult(scope, toolCallStep.id, {
+    toolCalls: [{ id: 'call_verify', name: 'verify_tool', arguments: '{"ok":true}' }],
+    reasoning: null,
+    output: null,
+    usage: null,
+    streamStats: null,
+    finishReason: 'tool-calls',
+    rawFinishReason: 'tool_calls',
+    startedAt: toolCallStartedAt,
+    reasoningStartedAt: null,
+    endedAt: toolCallEndedAt,
+    durationMs: Date.parse(toolCallEndedAt) - Date.parse(toolCallStartedAt),
+  });
+  const toolMessageId = await store.addMessage(scope, thread.id, run.id, toolCallStep.id, {
     role: 'tool',
     content: toolResult,
     toolCallId: 'call_verify',
   });
-  await store.addEvent(scope, run.id, step.id, { type: 'step_start', step: 1 });
+  const [{ events_table: eventsTable }] = await prisma.$queryRaw<Array<{ events_table: string | null }>>`
+    SELECT to_regclass('public.events')::text AS events_table
+  `;
+  assert.equal(eventsTable, null);
+  assert.equal((await store.getHistorySteps(scope, run.id)).find((row) => row.id === toolCallStep.id)?.result?.finishReason, 'tool-calls');
 
-  assert.equal(await store.getLastStepIndex(scope, run.id), 1);
-  assert.equal(await store.getLastCompletedStepIndex(scope, run.id), 1);
-  assert.equal(await store.countRunMessages(scope, run.id), 3);
+  assert.equal(await store.getLastStepIndex(scope, run.id), 2);
+  assert.equal(await store.getLastCompletedStepIndex(scope, run.id), 2);
+  assert.equal(await store.countRunMessages(scope, run.id), 4);
   assert.equal((await store.getEvents(scope, run.id))[0]?.type, 'step_start');
-  const persistedEvents = await store.getEventsAfterCursor(scope, run.id, 0);
-  assert.equal(persistedEvents[0]?.event.type, 'step_start');
-  assert.deepEqual(await store.getEventsAfterCursor(scope, run.id, persistedEvents[0].cursor), []);
   assert.equal((await store.searchThreadMessages(scope, '验证输入')).length, 1);
 
   await store.addThreadNotice(scope, {

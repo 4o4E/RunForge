@@ -103,8 +103,8 @@ export type AgentEvent =
   | ({ type: 'reasoning'; step: number; text: string } & Partial<TimedEventFields>)
   | ({ type: 'reasoning_timing'; step: number } & CompletedTimedEventFields)
   | { type: 'llm_delta'; step: number; text: string }
-  | ({ type: 'tool_call'; step: number; name: string; args: unknown; id: string } & Pick<TimedEventFields, 'startedAt'>)
-  | ({ type: 'tool_result'; step: number; id: string; name: string; result: string } & CompletedTimedEventFields)
+  | ({ type: 'tool_call'; step: number; name: string; args: unknown; id: string } & Partial<TimedEventFields>)
+  | ({ type: 'tool_result'; step: number; id: string; name: string; result: string } & Partial<TimedEventFields>)
   | {
       type: 'skill_activated';
       step: number;

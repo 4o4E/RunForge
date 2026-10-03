@@ -17,5 +17,6 @@ for name in "${required[@]}"; do
 done
 
 cd /app/server
+node src/maintenance/prepareStepMigration.mjs
 ./node_modules/.bin/prisma migrate deploy
 exec node dist/index.js

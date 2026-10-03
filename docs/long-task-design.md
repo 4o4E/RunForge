@@ -1,235 +1,56 @@
-# 长任务支持 · Goal 状态 + 上下文压缩级联
+# 长任务、step 聚合与上下文恢复
 
-> 目标：让 agent 稳定支持**长程任务**（数十步工具调用），去掉「固定最大步数」这一硬性
-> 主控制器，引入持久化 **Goal 状态**防止目标漂移，引入**上下文压缩级联**防止撞窗口崩溃与
-> context rot。本文为设计与落地路线，按阶段增量实施，每阶段可独立验证。
+## 权威数据与观测
 
----
+- `steps.result` 是模型完整响应的权威来源，保存正文、推理、工具调用、协议响应状态、用量、结束原因和有记录的时间。
+- `steps.tool_results` 保存该 step 的工具执行结果、媒体引用与有记录的耗时。模型响应完成不代表工具执行完成。
+- `steps.context_snapshot` 只记录实际发送的请求，供管理员按需审查，不参与上下文构建或执行恢复。
+- `messages` 保存用户输入、压缩摘要和消息顺序索引。模型回复与工具结果从对应 step 派生，不读取索引中的响应副本。
+- `runs.metadata` 保存跨 step 状态：`runtime` 为 Skill/MCP 激活、图片拒绝记录和已应用输入版本，`goal` 为计划，`pendingInteraction` 为待回答问题，`context.collapsed` 为压缩选择。
+- 未完成请求的原始流只在进程内存中参与实时显示，不逐片保存到数据库。
 
-## 1. 现状与问题
+## 执行与恢复
 
-改造前实现（[server/src/agent/executor.ts](../server/src/agent/executor.ts)、[context.ts](../server/src/agent/context.ts)）是最简朴的 ReAct 循环：
+模型完整返回后，step 聚合响应和 assistant 顺序索引原子保存；工具执行完成后，工具结果与对应索引原子保存。上下文由当前分支输入、step 响应、工具结果和压缩摘要派生。
 
-- 主循环 `for stepIdx <= maxSteps`（默认 25），步数是**唯一主控制器**。
-- `Context` 每个 run 从 `loadThreadMessages`（**全量**）重建，无截断/摘要/窗口。
-- provider 已返回 `usage`（input/output tokens），但 executor **完全忽略**。
-- 只有工具单条输出有 `TOOL_MAX_OUTPUT=100000` 字符硬截断，不管历史总量；当前默认已降为 `40000`，并保留头尾内容。
-- **没有取消能力**。
+服务启动恢复 pending、running 任务。已经完成模型响应但缺少工具结果的请求，保留工具调用并记录明确的中断结果，不将未执行动作标记成功。正常关闭停止接纳新任务、中止未完成请求并等待资源释放，保留 run 状态供下次启动恢复；用户取消是单独的终态操作。
 
-两个会同时爆的隐患：
+进入模型前检查当前分支中未配对的工具调用。中断结果根据原始 assistant 消息索引写入所属 run/step，包括祖先任务的 step；模型视图始终把工具结果紧接在对应调用之后，不按补入记录的时间把它放到后续用户消息之后。
 
-1. **撞 token 窗口**：thread 一长，拼出的 messages 超模型上下文 → provider 直接报错，run 失败且无降级。
-2. **目标漂移 + context rot**：几十步后没有目标锚点和历史压缩，模型注意力稀释，偏题/返工。
+Skill/MCP 激活状态只属于当前 run，下一次模型请求才生效。新 run 从未激活开始，恢复同一个 run 时读取元数据，不读取 trace。
 
----
+## 上下文压缩
 
-## 2. 业界最佳实践（2025–2026 共识）
+模型压缩阈值、空间预算与实例配置共同限制请求大小，真实用量用于校准估算。工具调用与结果始终配对：
 
-收敛到**分层级联**，而非一上来就 LLM 摘要：
+1. L1 对较早的工具参数和结果生成占位视图，保存 masked 选择，不覆盖 step 原文。
+2. L3 对完整历史轮次生成摘要，保存摘要覆盖的索引与 summarized 选择，并保留最新 Goal。
+3. L2 保留原始用户请求、摘要和最近完整轮次，仅在内存限制窗口，不删除持久化历史。摘要不替代模型协议中的用户角色。
 
-1. **context rot 是真问题**：输入越长质量越差，即使没到窗口上限 → 每个模型配置明确的
-   压缩阈值。目录默认值为上下文长度的 75%；管理员可以把高成本的长上下文 GPT 模型改为
-   200K tokens。成功指标是任务完成率和决策一致性。
-2. **压缩级联，优先保留信息**：① 压工具输出 → ② 对更早区间生成 LLM 摘要 → ③ 仍超阈值时滑动窗口裁剪旧消息。
-3. **Observation masking 性价比最高**：旧工具结果替换为占位符（保留 reasoning 轨迹），SWE-bench 上成本减半、完成率持平 LLM 摘要。
-4. **锚定式增量摘要**（Factory AI）：不重新生成整段，而是扩展结构化锚点 `intent / changes / decisions / next`，对保留文件路径、错误信息等技术细节准确率最高。
-5. **Goal 使用「结构化外部状态 + 工具结果」**：`update_plan` 返回合并后的完整 Goal；触发压缩时，最新 Goal 写入压缩摘要。
-6. **触发使用每模型 token 阈值**：达到阈值后执行压缩级联，空间和实例只能进一步收紧阈值。
+压缩选择以 `runs.metadata.context.collapsed` 为准；索引上的压缩列是查询投影。分叉时同时映射消息标识和压缩引用。协议要求的不透明响应状态随 step 保存，遮蔽、摘要替代或移出窗口后不再向模型发送对应旧状态。
 
-参考来源：
-- [Anthropic — Context engineering: memory, compaction, tool clearing](https://platform.claude.com/cookbook/tool-use-context-engineering-context-engineering-tools)
-- [Factory AI — Evaluating Context Compression Strategies (ZenML)](https://www.zenml.io/llmops-database/evaluating-context-compression-strategies-for-long-running-ai-agent-sessions)
-- [ACON: Optimizing Context Compression for Long-Horizon LLM Agents (arXiv 2510.00615)](https://arxiv.org/pdf/2510.00615)
-- [Arize — Context management in agent harnesses](https://arize.com/blog/context-management-in-agent-harnesses/)
-- [Redis — Context Compaction for AI Agents](https://redis.io/blog/context-compaction/)
+`update_plan` 更新元数据中的 Goal 并返回完整工具结果。较早计划只在派生视图缩短，不覆盖原始响应。普通请求不额外注入重复 Goal，压缩摘要包含最新目标、计划、决定和下一步。
 
----
+## 历史接口与日志
 
-## 3. 设计
+HTTP 返回已完成模型请求的 step 聚合与已经完成的工具结果；WebSocket 重放当前 step 内存流并继续推送增量。完成通知用持久化 step 替换相同 step 的临时显示。订阅携带已取得的完成索引，补齐 HTTP 与订阅之间完成的请求。
 
-### 3.1 去掉 maxSteps —— 改成「健康度 + 预算」终止
+订阅完成索引只跨过工具结果已经配对完整的 step，模型响应保存时间不代表工具执行结束。初始化查询期间已经实时通知完成的 step 不再使用查询旧版本回放；长连接仅记录完成编号与完整性，不累计保存历史正文。
 
-把步数上限从**主控制器**降级为**兜底**，主控制器换成多维终止条件：
+普通接口使用共享 Zod 契约，只返回展示字段。完整请求、协议状态和空间配置不混入聊天响应，管理员通过独立接口按需读取。
 
-| 终止条件 | 机制 |
-|---|---|
-| 正常结束 | 模型不再调用工具 → final（已有） |
-| Token 预算 | 累计超 run 级预算 → 触发压缩；压缩后仍无法推进才停 |
-| 无进展检测 | 连续 N 步重复相同 tool+args，或反复空转 → 警告/停；同一模型轮次的相同调用只计一次；仍在运行的 Shell 和 Subagent 轮询不计作重复操作，其终止由各自超时控制 |
-| 用户取消 | run 状态置 `canceling`，loop 每步检查 |
-| 安全兜底 | 很高的 `hardStepCap`（默认 1000），仅防失控 |
+每个历史 step 返回对应 assistant 消息的顺序编号，页面据此把追加用户输入放在响应之前，不使用 step 创建时间推断消息顺序。普通追加消息只形成历史展示边界；用户回答则从持久化正文恢复完整问答结构，包括选中项、自定义选项和补充说明。
 
-### 3.2 Goal 状态
+原始事件与 Provider 原始流异步写入 `logs/traces/<runId>/<UTC日期>.jsonl`，跨日换文件，自动保留三十个自然日。业务执行不等待文件写入；正常退出统一排空日志队列，不保证 SIGKILL 后的最后一批日志完整。
 
-结构化、跨压缩存活的 Goal 存为 `runs.goal_state` JSONB：
+Trace 缓冲在整个服务内最多保存 32 MiB、十万条记录，正在写入的批次也计入容量。超过任一限制时丢弃新日志并合并告警，不中断业务；写入失败按 1 秒起步、最多 30 秒的指数间隔自动重试。批次保留文件位置和已写字节，重试不重复追加部分记录；日志目录只由当前服务写入。正常关闭立即尝试排空全部文件，失败则明确报告未写入日志，不无限等待重试。排队文件在写完之前不参与过期清理。
 
-```typescript
-interface GoalState {
-  intent: string;        // 几乎不变，最初目标
-  plan: PlanItem[];      // agent 用 update_plan 工具维护
-  decisions: string[];   // 追加式，压缩时必须保留
-  next: string;          // 下一步
-}
-interface PlanItem { id: number; text: string; status: 'todo' | 'doing' | 'done'; }
-```
+正常关闭首先停止接纳 HTTP、Agent 与 Shell 新工作，等待已开始的命令创建结束并终止其子进程；stdout/stderr 关闭、输出写入与命令最终状态完成后，才排空 trace 并退出。前台命令与后台命令使用同一关闭流程。
 
-- run 启动时直接使用 user input 作为 `intent`。
-- 新增轻量 `update_plan` 工具（类似 Claude Code TodoWrite）让 agent 维护 `plan/next/decisions`。
-- `update_plan` 工具结果返回合并后的完整 Goal。新的 Goal 出现后，模型派生视图把更早的
-  `update_plan` 参数和结果替换为短占位内容，原始消息继续保留。
-- 普通模型请求不额外注入 Goal system 消息。触发 L3 压缩时，压缩摘要固定写入最新
-  `runs.goal_state`，随后附加较早历史摘要。
+启动时的历史任务恢复扫描也由服务生命周期持有。开始关闭后，扫描不再启动 executor；关闭流程等待扫描结束后才排空日志。未接纳的任务保留原状态，由下次启动恢复。
 
-### 3.3 上下文压缩级联（核心）
+## 迁移与验证
 
-把 `Context`（纯容器）升级为 `ContextManager`，在**每次 LLM 调用前**跑级联检查。
+旧事件删除前先聚合响应和运行状态，再执行结构迁移。迁移准备程序保存聚合归档，新 migration 消费后删除归档表，已执行 migration 不改写。历史缺少计时或完整响应时保留缺失状态，不从原始请求猜测响应。
 
-**关键约束：不能破坏 `tool_call ↔ tool_result` 配对**（否则 provider 报错）→ 优先 masking（保留消息结构、只替换内容），摘要按「完整轮」边界折叠。
-
-```
-估算 tokens（用上一轮 usage.inputTokens 校准 + 字符/4 兜底）
-  < 当前模型压缩阈值 → 原样
-  ≥ 当前模型压缩阈值 → L1: 对较老的 tool_result 做 observation masking
-                         content → "[tool output elided · N chars · <tool>]"，保留 toolCallId 配对
-  遮蔽后仍达到阈值 → L3: 更早区间送一次 LLM，按锚点四字段生成一条 summary 系统消息替换整段
-  摘要后仍达到阈值 → L2: 保留最新 L3 摘要作为锚点，最近 K 轮逐字保留
-```
-
-- **有效阈值**：`min(模型压缩阈值, 空间上下文预算, LLM_CONTEXT_BUDGET)`；未配置的空间或实例
-  限制不参与计算。
-- **压缩结果持久化**：`masked`/`summarized` 写回 `messages` 表，下个 run 的 `loadThreadMessages` 直接拿压缩视图，不重复压。原始内容不删（`events` 表仍可回放）。
-- **利用已有 `usage`**：executor 接住 `usage.inputTokens` 精确驱动阈值，先用「字符/4」估算兜底。
-
----
-
-## 4. 存储设计
-
-`threads / steps / events` 不变。`runs` 与 `messages` 各加几列：
-
-```sql
-ALTER TABLE runs ADD COLUMN goal_state JSONB;          -- 当前目标锚点
--- runs.status 增加 'canceling' 取值
-
-ALTER TABLE messages ADD COLUMN collapsed TEXT;        -- NULL | 'masked' | 'summarized'
-ALTER TABLE messages ADD COLUMN tokens_est INT;        -- token 估算缓存
-ALTER TABLE messages ADD COLUMN summary_of INT[];      -- 若本行是摘要，记录折叠了哪些 message id
-```
-
-`loadThreadMessages` 返回**压缩后视图**：masked 行 content 已是占位符；summarized 区间只返回 summary 行（原始行 `collapsed='summarized'` 被跳过）。
-
----
-
-## 5. 走查：一段会触发压缩的长任务
-
-任务：「把 server/src 下所有 `console.log` 换成 `logger.info`，然后跑测试确认通过」。
-演示用模型压缩阈值 `12000`。
-
-**Step 0** — 启动，`goal_state` 初始化（intent=用户输入，plan 待填）；messages = `[system, user]`，≈400 tok。
-
-**Step 1–2** — grep 出 23 处命中（~3KB 结果）；调 `update_plan` 写 plan/decisions。≈2800 tok，低于阈值，原样保留。
-
-**Step 3–10** — 逐文件 read→edit→ok。到 Step 11，≈12600（达到阈值）→ **L1 masking**：最老的已完成 tool_result content 替换为 `[tool output elided · 3,021 chars · grep]`，保留 toolCallId。回落到 ≈8200，masked 写回库。
-
-**Step 15** — 又涨到 ≈14600（达到阈值），L1 后仍超阈值 → **L3+L2**：step1–10 区间送 LLM 生成一条 summary，并把最新 Goal 状态固定写入摘要；必要时再裁剪窗口，回到 ≈4500。被折叠原始行标 `collapsed='summarized'`。
-
-**Step 16–18** — 完成剩余文件 → `npm test` → 47 passed → 无 toolCalls → final，run done。
-
-整个 run 走 18 步，终止由 final 自然触发，token 由级联控制在预算内，`hardStepCap` 没碰到。
-
----
-
-## 6. 关键不变式
-
-| 不变式 | 原因 |
-|---|---|
-| `tool_call ↔ tool_result` 配对永不破坏 | masking 改内容不删消息；摘要按完整轮边界折叠 |
-| 最新 `goal_state` 通过工具结果保留，并固定写入 L3 摘要 | 目标漂移防护，同时保持请求前缀稳定 |
-| `decisions` 追加式、摘要时强制保留 | 关键决策丢失会回退返工 |
-| 压缩结果持久化 + `messages.content` 保留原始内容 | LLM 视图省 token；前端回放和审查不丢信息 |
-| 用上一轮 `usage.inputTokens` 校准估算 | provider 已返回，免引 tokenizer |
-
----
-
-## 7. 涉及改动点
-
-| 模块 | 改动 |
-|---|---|
-| [config.ts](../server/src/config.ts) | 加 `contextBudget`、`hardStepCap`、压缩阈值；`maxSteps` 降级为兜底 |
-| [context.ts](../server/src/agent/context.ts) | `Context` → `ContextManager`：token 估算 + `maybeCompact()` + masking/摘要 |
-| [executor.ts](../server/src/agent/executor.ts) | 循环改终止条件；每步前 `maybeCompact()`；接住 `usage`；取消检查；维护完整 Goal 工具结果 |
-| [store/types.ts](../server/src/store/types.ts) + pgStore | runs 加 `goal_state`；messages 加折叠标记；取消状态；`loadThreadMessages` 返回压缩视图 |
-| tools/registry | 新增 `update_plan` 工具 |
-| 新建 `agent/compaction.ts` | 锚定摘要 prompt + masking 逻辑 + token 估算 |
-| prisma/schema.prisma + migration | 上述字段和约束 |
-
----
-
-## 8. 实施阶段（每阶段独立验证）
-
-1. **✅ 阶段 1 — 安全网（已实现）**：取消能力 + 接住 `usage` + `hardStepCap` 替代 maxSteps 主控。解锁长任务最低安全网，改动小。
-2. **✅ 阶段 2 — 压缩级联 L1/L2（已实现）**：token 估算 + observation masking + 滑动窗口。无需额外 LLM，直接解决撞窗口硬伤。
-3. **✅ 阶段 2.5 — 压缩落库（已实现）**：masking 决策持久化到 `messages.collapsed`，`loadThreadMessages` 返回压缩视图，**中途重启零数据丢失、不重算**。
-4. **✅ 阶段 3 — Goal 状态（已实现）**：`runs.goal_state` + 完整 `update_plan` 工具结果 + 历史派生裁剪。
-5. **✅ 阶段 4 — 压缩 L3（已实现）**：锚定 LLM 摘要（`summary_of` 折叠区间）。
-6. **✅ 阶段 5 — 压缩可观测性与 Debug（已实现）**：压缩事件记录时间点、受影响消息与摘要；普通详情只返回压缩元数据，显式 Debug 模式才返回原始工具输入/输出。
-
-### 落地说明
-
-**压缩落库的核心原则**：`messages` 表是**全保真 append-only 日志**（`content/tool_calls` 永远是原始内容，压缩从不覆盖）；压缩是一个**从全量日志派生的视图**，靠 `collapsed` 标记驱动：
-
-- **masking（L1）**：决策持久化为 `collapsed='masked'`。原始 `content` 保留在库，占位符由长度在 `loadThreadMessages` 时派生（`maskPlaceholder(len)`）。重启后视图一致、不丢、不重算。
-- **滑动窗口 drop（L2）**：**仅内存安全阀**，不落库——因为 drop 会丢信息。重启后从全量日志按相同逻辑重新派生，DB 数据从不销毁。
-- **summarized（L3）**：折叠行标 `collapsed='summarized'`，`loadThreadMessages` 跳过、只留摘要行。
-- **最近完整工具轮次**：当整轮结果超预算时，原始调用与结果标为 `collapsed='masked'` 并保留配对占位；另存摘要行供模型继续使用。这样模型仍能辨认用户要求的工具调用已经完成，原始内容仍可从数据库调试视图读取。
-- **压缩事件**：只有真正生成并持久化 L3 摘要时才写入 `events.type='compaction'`，保存发生时间、token 前后值、受影响消息 id、动作和压缩后替代内容；前端按事件顺序显示时间点。L1 masking、L2 内存窗口移除、显示参数裁剪和 run 结束后的历史整理只更新模型视图或持久化标记，不显示为压缩事件。
-- **Debug 原始视图**：`GET /api/threads/:id?debug=1` 才返回原始 `content/tool_calls.arguments`；默认详情只返回长度、工具名和 `collapsed` 状态。
-- **加密推理状态**：OpenAI Responses 的 `encrypted_content` 以不透明 `provider_state` 保存并回放，应用不可解密；消息被 mask、summarize 或窗口移除后，不再把对应旧推理状态发给模型。
-
-已落地文件：
-
-- [config.ts](../server/src/config.ts) — `agent.hardStepCap / contextBudget / keepRecentMessages`
-- [agent/compaction.ts](../server/src/agent/compaction.ts) — `estimateTokens / maskOldToolResults / slidingWindow / maskPlaceholder`（纯函数，有单测）
-- [agent/context.ts](../server/src/agent/context.ts) — `Context` → `ContextManager`：`items` 跟踪 `dbId`；`maybeCompact()` 按工具定义预留预算并返回 `collapsedIds`；`recordUsage()` 校准
-- [agent/executor.ts](../server/src/agent/executor.ts) — 循环遵守 `hardStepCap`；每步顶部检查取消；模型请求前按工具定义和待发送图片压缩上下文，最近的完整工具轮次仍超预算时生成分段摘要，持久化摘要与折叠标记；捕获 `addMessage` 返回的 id 回填 `setLastDbId`；`recordUsage(result.usage)`
-- 对始终启用思考的方舟 `glm-5-3-flash-260828`，摘要请求使用较低思考强度；正式对话继续使用空间选定的模型默认设置。
-- [store/types.ts](../server/src/store/types.ts) + [pgStore.ts](../server/src/store/pgStore.ts) / [memoryStore.ts](../server/src/store/memoryStore.ts) — `ThreadMessage`(带 `id/collapsed`)；`addMessage` 返回 id；`markMessagesCollapsed`；`loadThreadMessages` 返回压缩视图
-- [prisma/schema.prisma](../server/prisma/schema.prisma) + [prisma/migrations](../server/prisma/migrations) — `messages.collapsed / summary_of / provider_state`；migration 是唯一结构来源
-- [api/http.ts](../server/src/api/http.ts) — `POST /runs/:id/cancel`
-- [agent/types.ts](../server/src/agent/types.ts) / [llm/types.ts](../server/src/llm/types.ts) — `RunStatus` 加 `canceling/canceled`；`AgentEvent` 加 `compaction`；`LlmMessage` 加 `collapsed`
-
-> 注：当前 run 仍是进程内 fire-and-forget，服务重启不会自动续跑被中断的 run（数据不丢，但需手动重新触发）。自动续跑是独立 feature，未包含。
-
----
-
-## 9. Run-review 驱动的高价值优化
-
-来自对真实长任务（「读 neko-bot 项目生成报告」）两次 run 的对照分析：
-
-- 旧代码：单条工具结果 **1,617,231 字符**（一次 `Get-ChildItem -Recurse`），上下文 ≈42 万 token，402 中断。
-- 过渡版本：最大单条 **92,417 字符**（≈23k token，几乎顶满 100k 上限），21 步 / 70 次工具调用，
-  step 16 触发 1 次 masking（95k→37.6k token，mask 27 条），任务成功。
-
-暴露的高价值优化点（按 goal / context 两维）：
-
-### 上下文管理
-
-- **✅ C1 — 工具输出上限收紧 + 头尾截断（L0 第一道闸）**
-  - 旧状：`TOOL_MAX_OUTPUT=100000` 太松（≈25k token/条），且 `capOutput` 只留头部、丢尾部。
-  - 改：默认降到 **40000**，`capOutput` 改 **head 70% + tail 30%**（目录列表/日志的尾部常含结论）。
-  - 价值：每条**新鲜**观测在产生时即被合理裁剪，是性价比最高的一层（masking 不该也无法压"最近"的结果）。
-
-- **✅ C2 — masking 保留头部提示，而非全抹**
-  - 现状：占位符 `[tool output elided · N chars]` 丢掉全部内容，模型对"那步查到了什么"失忆 → 可能重复劳动（70 次工具调用偏多）。
-  - 改：占位符保留**前 ~120 字符 + 省略计数**（`<head>…[+N chars elided]`）。store 用保留的原文派生，**零额外存储**。
-
-### Goal 管理（阶段 3）
-
-- **✅ G1 — Goal 状态 + `update_plan` 工具**
-  - 现状：21 步全程**无目标/计划跟踪**；masking 折叠历史后，"做了什么 / 还剩什么"全靠被压缩的历史，易漂移/返工。
-  - 改：`runs.goal_state`(intent/plan/decisions/next) 持久化；`update_plan` 返回完整状态；
-    更早更新只在模型视图中缩短；触发 L3 压缩时把最新状态写入摘要。
-
-### 列出但本次不做（避免过度设计）
-
-- **重复工具调用去重 / 无进展检测**：效率向，非本次 goal/context 重点；可作独立 loop-guard。
-- **L3 锚定摘要**（阶段 4）：当前 masking 已足够把 95k 压到 37.6k，未触及窗口；留待更长任务再做。
+验证覆盖真实数据库迁移、step 原子保存、压缩与分叉恢复、真实长对话、输出期间刷新、正常退出日志排空、跨日文件及三十日清理。

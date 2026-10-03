@@ -81,7 +81,8 @@ Web 创建 thread
 -> 每个 step 调用 LLM
 -> LLM 请求工具时执行工具
 -> 工具结果回填上下文
--> 事件经 WebSocket 实时推送并写入 events
+-> 流式事件经 WebSocket 实时推送并写入本地 run trace
+-> 模型请求完成后把聚合结果一次写入 steps.result
 -> Agent 输出最终汇报且计划已进入 reporting 后 run done
 ```
 
@@ -115,11 +116,11 @@ Web 创建 thread
 
 - `http.ts`：thread、run、取消、settings、files 等 REST API。
 - `http.ts` 还暴露 shell session、subagent 列表和 datasource 管理接口。
-- `ws.ts`：按 runId 订阅事件流，支持历史事件回放后继续推送实时事件；也支持 thread 级 shell 事件。
+- `ws.ts`：按 runId 订阅实时事件；已完成 step 的历史由 REST 从聚合结果生成，也支持 thread 级 shell 事件。
 
 `server/src/agent/`
 
-- `executor.ts`：Agent 主循环，负责 run 状态、step 创建、LLM 调用、工具调度、事件落库。
+- `executor.ts`：Agent 主循环，负责 run 状态、step 创建、LLM 调用、工具调度、step 聚合和实时事件发布。
 - `executor.ts` 内置处理 `skill_activate` 和 `subagent_run` / `subagent_poll` / `subagent_list`，避免这些调度能力退化成普通工具文本。
 - `context.ts`：上下文管理，装配 system prompt、历史消息和当前用户输入，缩短旧 Goal 工具记录。
 - `contextCompactor.ts`：上下文压缩策略端口，默认 `current` 策略保留自研级联，`langchain-trim` 策略通过 LangChain Core 接入普通历史裁剪。
@@ -142,7 +143,7 @@ Web 创建 thread
 - `providerRunner.ts`：创建逻辑 invocation，按统一策略执行 attempt，并聚合 wire body、
   原始响应、标准化结果和错误分类。
 - `observability/repository.ts`：Provider 观测的 Prisma/内存持久化边界。
-- `observability/trace.ts`：按日追加本地 JSONL attempt trace，并保留最近 7 个自然日。
+- `observability/runTrace.ts`：按 run 和 UTC 自然日追加本地 JSONL trace，并保留最近 30 个自然日。
 - `providers/aiSdk.ts`：通过 AI SDK 创建三种受支持协议的模型，并统一转换中立消息、工具调用和响应。
 - `packages/contracts/src/modelCatalog.ts`：浏览器和仓库目录更新脚本共用的模型资料解析、别名匹配规则。
 - `updateModelCatalog.ts`、`model-catalog.json`、`modelCatalog.ts`：初始配置和旧配置升级使用的打包目录，不参与新模型的自动填写或已保存能力的运行时更新。
@@ -223,7 +224,7 @@ AI SDK 的 `maxRetries` 固定为 `0`，重试只由 `ProviderRunner` 决定，�
 
 每个主 Agent step 在调用 Provider 前把最终 `messages` 和 `tools` 固定到
 `steps.context_snapshot`。该快照包含当次实际使用的 system、用户消息、工具 Schema 和压缩后的
-历史上下文，供管理员审查与运行恢复分析；`messages` 继续保存 thread 的对话事实。Provider
+历史上下文，仅供管理员审查，不参与上下文恢复；对话响应由 `steps.result` 与 `steps.tool_results` 提供。Provider
 观测记录保留协议转换和重试诊断，页面展示实际提示词时读取 step 快照。
 
 当前支持：
@@ -245,26 +246,25 @@ LLM 配置保存在系统 `app_settings` 中，租户授权保存可用 provider
 一次运行期模型调用先建立 `provider_invocations`，再为每次真实 HTTP 请求建立
 `provider_attempts`。主 Agent、标题生成、上下文摘要、subagent 和 run-scoped LLM capability
 均接入同一入口。attempt 保存最终 URL、序列化请求 body、HTTP 状态、Provider request/
-response ID、上游原始响应、标准化结果、finish reason、usage 和错误分类；请求头不进入
+response ID、标准化观测结果、finish reason、usage 和错误分类；请求头不进入
 数据库或文件。URL 中常见的 key/token/signature 查询参数会在写入前脱敏。
 
 流式响应通过透传 `TransformStream` 聚合，不提前消费或改写 Provider 响应。只有尚未向
 Agent runtime 发布任何增量的失败才允许重试；一旦发布部分流，本次 invocation 直接失败，
-避免重试造成重复输出。本地 `logs/provider-traces/provider-YYYY-MM-DD.jsonl` 保存同样的
-attempt 诊断记录并固定保留 7 天，数据库记录不由该清理任务删除。
+避免重试造成重复输出。本地 `logs/traces/<runId>/YYYY-MM-DD.jsonl` 保存原始 Agent 事件和
+attempt 诊断记录并固定保留 30 天，跨天直接写入同一 run 目录下的新文件。
 
 ## 数据模型
 
 PostgreSQL 以执行过程为核心建模：
 
 - `threads`：会话容器，包含多轮 run。
-- `runs`：一次用户任务执行，保存状态、输入、输出、错误和 `goal_state`。
-- `steps`：run 内的每次 Agent 循环。
-- `messages`：LLM 对话消息，保存原始内容、tool calls、tool call id 和压缩标记。
-- `events`：前端可回放的执行事件流。
+- `runs`：一次用户任务执行，保存状态、输入、输出投影、错误和扩展 `metadata`。
+- `steps`：run 内的每次模型请求，`result` 一次保存聚合后的 reasoning、正文、usage、结束原因和时间。
+- `messages`：输入、摘要与顺序索引；模型回复和工具结果从 step 权威数据派生。
 - `provider_invocations`：一次逻辑模型调用，关联空间、thread、run、step、用途、模型、
   逻辑请求和最终标准化结果。
-- `provider_attempts`：一次真实上游 HTTP 请求，保存 wire body、原始响应、状态、用量、
+- `provider_attempts`：一次真实上游 HTTP 请求，保存 wire body、标准化观测、状态、用量、
   Provider ID 和错误分类；同一 invocation 内 attempt 序号唯一。
 - `app_settings`：系统资源配置、租户资源授权和租户内业务插件配置；env 只作为系统工具配置的初始默认值或兜底。
 - `subagent_runs`：主 agent 派发的异步子任务，保存 task assignment、运行配置、skill、输出和 usage。
@@ -274,10 +274,10 @@ PostgreSQL 以执行过程为核心建模：
 
 重要约束：
 
-- `messages.content` 保留原始内容，压缩不覆盖原文。
-- `messages.collapsed='masked'` 表示加载上下文时派生短占位符。
-- `messages.collapsed='summarized'` 表示原消息已折叠进摘要消息，后续加载上下文时会跳过原消息。
-- `events` 保存前端回放和审计所需事件。
+- step 响应和工具结果保留原文，压缩不覆盖原文。
+- `runs.metadata.context.collapsed` 中的 `masked` 表示加载上下文时派生短占位符。
+- `runs.metadata.context.collapsed` 中的 `summarized` 表示原消息已折叠进摘要消息，后续加载上下文时会跳过原消息。
+- 未完成 step 的流式分片只保存在当前进程内存；完成后的历史展示由 `steps`、`messages` 和 `runs` 生成。
 
 ## API 概览
 
@@ -291,12 +291,12 @@ Thread API：
 Run API：
 
 - `POST /api/threads/:id/runs`：在指定 thread 内启动 run。
-- `GET /api/runs/:id`：获取 run 详情和事件。
+- `GET /api/runs/:id`：获取 run 详情和已完成 step 的展示字段。
 - `POST /api/runs/:id/cancel`：请求取消 run。
 
 实时事件：
 
-- `WS /ws?runId=<id>`：订阅指定 run 的事件流。连接后先回放历史事件，再推送新事件。
+- `WS /ws?runId=<id>`：订阅指定 run 的实时事件；当前未完成 step 可以在同一服务进程内重放。
 
 辅助 API：
 
@@ -310,7 +310,7 @@ Run API：
 
 ## 事件模型
 
-`AgentEvent` 是前端实时渲染和回放的统一事件类型。
+`AgentEvent` 是前端实时传输格式，不是数据库模型。完成态历史会按相同格式从 step 聚合和业务表生成。
 
 常见事件：
 

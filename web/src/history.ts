@@ -422,7 +422,7 @@ function runUserMessage(
 }
 
 function isUserBoundary(event: RunWithEvents['events'][number]): boolean {
-  return event.type === 'external_input_applied' || event.type === 'user_answer';
+  return event.type === 'external_input_applied' || event.type === 'user_answer' || event.type === 'history_user_message';
 }
 
 /** 把按时间排序的持久化 runs 映射成当前分支的扁平 UIMessage 列表。 */
@@ -459,7 +459,10 @@ export function runsToUiMessages(
     let segmentEvents: RunWithEvents['events'] = [];
     const appendAssistantSegment = (finalSegment: boolean) => {
       const parts = foldUiEventsToParts(
-        segmentEvents.map(toUiEvent).filter((event): event is UiEvent => event !== null),
+        segmentEvents
+          .filter((event) => event.type !== 'history_user_message')
+          .map(toUiEvent)
+          .filter((event): event is UiEvent => event !== null),
       );
       applyContextMessages(parts, runContextMessages);
       if (finalSegment && run.goal_state?.plan?.length && !parts.some((part) => part.type === 'data-plan-state')) {
@@ -484,13 +487,16 @@ export function runsToUiMessages(
 
     for (const event of run.events) {
       if (!isUserBoundary(event) || generatedIndex >= generatedUsers.length) {
-        segmentEvents.push(event);
+        if (event.type !== 'history_user_message') segmentEvents.push(event);
         continue;
       }
       // ask_user 卡片需要读取紧随其后的 user_answer；先把回答事件留在前一段，再切换消息角色。
       if (event.type === 'user_answer') segmentEvents.push(event);
       appendAssistantSegment(false);
       const generated = generatedUsers[generatedIndex];
+      if (event.type === 'history_user_message' && event.messageId !== generated.id) {
+        throw new Error(`历史用户消息顺序不匹配：预期 ${generated.id}，收到 ${event.messageId}`);
+      }
       generatedIndex += 1;
       messages.push(runUserMessage(
         run,

@@ -126,20 +126,6 @@ model datasources {
   @@unique([tenant_id, name], map: "idx_datasources_name_tenant")
 }
 
-model events {
-  id         BigInt   @id @default(autoincrement())
-  run_id     String
-  step_id    String?
-  idx        Int      @default(0)
-  type       String
-  data       Json     @default("{}")
-  created_at DateTime @default(now()) @db.Timestamptz(6)
-  runs       runs     @relation(fields: [run_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  steps      steps?   @relation(fields: [step_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
-
-  @@index([run_id, id], map: "idx_events_run")
-}
-
 model external_callers {
   id                String              @id
   tenant_id         String
@@ -251,7 +237,7 @@ model runs {
   input                                  String
   output                                 String?
   error                                  String?
-  goal_state                             Json?
+  metadata                               Json                          @default("{\"runtime\":{\"skillIds\":[],\"mcpServerIds\":[],\"rejectedImageModels\":[],\"lastAppliedExternalInputVersion\":0}}")
   created_at                             DateTime                      @default(now()) @db.Timestamptz(6)
   updated_at                             DateTime                      @default(now()) @db.Timestamptz(6)
   model_ref                              String?
@@ -269,7 +255,6 @@ model runs {
   datasource_account_leases              datasource_account_leases[]
   workload_secret_access_logs            workload_secret_access_logs[]
   datasource_accounts                    datasource_accounts[]
-  events                                 events[]
   messages                               messages[]
   runs                                   runs?                         @relation("runsToruns", fields: [parent_run_id], references: [id], onUpdate: NoAction)
   other_runs                             runs[]                        @relation("runsToruns")
@@ -367,7 +352,6 @@ model provider_attempts {
   request_body         Json
   http_status          Int?
   provider_response_id String?
-  raw_stream           String?
   normalized_response  Json?
   finish_reason        String?
   usage                Json?
@@ -542,8 +526,10 @@ model steps {
   run_id                      String
   idx                         Int
   context_snapshot            Json?
+  result                      Json?
+  tool_results                Json                          @default("[]")
+  completed_at                DateTime?                     @db.Timestamptz(6)
   created_at                  DateTime                      @default(now()) @db.Timestamptz(6)
-  events                      events[]
   messages                    messages[]
   runtime_capability_calls    runtime_capability_calls[]
   workload_secret_access_logs workload_secret_access_logs[]

@@ -41,7 +41,7 @@ ENV NODE_ENV=production \
     RUNFORGE_WEB_DIST=/app/web \
     TOOL_WORKSPACE_ROOT=/w \
     RUNFORGE_USER_FILES_ROOT=/u \
-    RUNFORGE_PROVIDER_TRACE_DIR=/app/provider-traces \
+    RUNFORGE_TRACE_DIR=/app/traces \
     RUNFORGE_BUSINESS_PLUGIN_ROOTS=/app/business-plugins
 
 RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
@@ -83,9 +83,9 @@ RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.
     && mkdir -p \
       /w \
       /u \
-      /app/provider-traces \
+      /app/traces \
       /app/business-plugins \
-    && chown -R node:node /w /u /app/provider-traces /app/business-plugins
+    && chown -R node:node /w /u /app/traces /app/business-plugins
 ARG NPM_REGISTRY=https://registry.npmjs.org/
 RUN npm install --global pnpm@11.5.3 --registry "${NPM_REGISTRY}"
 COPY --from=uv /uv /uvx /usr/local/bin/
@@ -99,7 +99,7 @@ COPY --from=build --chown=node:node /workspace/web/dist/ /app/web/
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/runforge-entrypoint
 
 EXPOSE 8080
-VOLUME ["/w", "/u", "/app/provider-traces", "/app/business-plugins"]
+VOLUME ["/w", "/u", "/app/traces", "/app/business-plugins"]
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=6 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
 

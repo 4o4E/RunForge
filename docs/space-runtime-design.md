@@ -20,7 +20,7 @@ RunForge 要从仅服务 Web 对话的 Agent 应用，演进为可由多个可�
 - 暂不实现 CPU、内存、磁盘配额、计费和套餐。
 - 继续复用现有 `thread -> run -> step`、Agent loop、上下文压缩、Store、工具、skill、
   MCP、Web 页面和重启恢复能力。
-- 保持压缩不变式：`messages.content` 不覆盖，`tool_call` 与 `tool_result` 不拆对，内存
+- 保持压缩不变式：step 响应与工具结果原文不覆盖，`tool_call` 与 `tool_result` 不拆对，内存
   drop 不落库。
 
 ## 2. 核心模型
@@ -232,19 +232,20 @@ run 仍为活动状态且属于当前 caller 时接受。
 }
 ```
 
-cursor 使用数据库 `events.id`。重连时先回放 cursor 之后的已持久化事件，再接收后端实时
-推送。Web JWT WebSocket 与外部 UUID Token WebSocket 是两套鉴权入口，不能混用。
+cursor 是当前服务进程内该 run 的实时事件序号，只覆盖尚未完成的 step。重连同一进程时
+可以续传内存事件；服务重启后调用方通过 `run.get` 和完成 step 的聚合历史恢复状态，不回放
+原始流式分片。Web JWT WebSocket 与外部 UUID Token WebSocket 是两套鉴权入口，不能混用。
 
-服务端确认订阅后先返回当前位置，再把每条持久化事件连同 cursor 放入统一事件帧：
+服务端确认订阅后先返回当前位置，再把每条实时事件连同 cursor 放入统一事件帧：
 
 ```json
 { "type": "subscribed", "runId": "ru_xxx", "cursor": 123 }
 { "type": "event", "runId": "ru_xxx", "cursor": 124, "event": { "type": "step_start", "step": 2 } }
 ```
 
-首次订阅可省略 cursor，按 `0` 从头回放。调用方只在完整收到事件帧后保存该帧 cursor；
-连接断开后用最后保存值重连。服务端只发送已经写入 `events` 的事件，run 进入 final/error
-终点后以正常关闭帧结束连接。订阅消息无效时返回 `type=error` 并关闭，Token 无效或 run
+首次订阅可省略 cursor，按 `0` 读取当前内存中的未完成 step。调用方只在完整收到事件帧后
+保存该帧 cursor；run 进入 final/error/user_question 终点后以正常关闭帧结束连接。订阅消息无效时返回
+`type=error` 并关闭，Token 无效或 run
 不属于当前 caller 时只按无权访问关闭，不泄露资源是否存在。
 
 ## 6. 附件与 Artifact
@@ -363,28 +364,28 @@ Cordis 只负责业务插件的服务依赖和生命周期，不替换 Agent loo
 - run 的 input、output、status 和 error。
 - step 边界。
 - 实际进入 RunForge 上下文的 message、tool call 和 tool result。
-- 后端给 Web 前端推送并落库的 `llm_delta`、reasoning、工具和 final/error 事件。
+- 每个完成 step 的 reasoning、正文、usage、结束原因和时间聚合。
 
 这些记录可以回答“某个 run/step 在 RunForge 内发生了什么”，但单独使用它们不能完整回答
 “上游 LLM API 每一次 HTTP attempt 实际收到了什么”：
 
 - AI SDK 会把中立 message、tool schema 和 provider options 翻译成供应商 wire body；
-  messages 表保存的是翻译前的逻辑内容。
-- SDK 或调用层发生重试时，一个 step 可能产生多个 HTTP attempt；steps/events 没有 attempt
+  step 聚合保存模型响应，messages 索引组织输入与派生上下文。
+- SDK 或调用层发生重试时，一个 step 可能产生多个 HTTP attempt；step 聚合没有 attempt
   ID，也无法区分各次请求。
 - 当前没有保存最终序列化后的请求 body、Provider response/request ID 和每个 attempt 的
   状态。
-- `llm_delta` 是后端给 Web 前端推送的运行事件，不等同于 LLM API 发给后端的某一次原始
-  流，也不能区分重试前后的流。
+- `llm_delta` 是实时传输分片，只写入本地 run trace，不等同于 LLM API 发给后端的某一次
+  原始流，也不能区分重试前后的流。
 - OpenTelemetry 是外部 trace，不是本项目数据库中的可追溯记录。
 
-因此已在现有 run/step/message/event 之上实现两层 Provider 记录：
+因此已在现有 run/step/message 之上实现两层 Provider 记录：
 
 - `provider_invocations`：一次逻辑模型调用，关联 tenant、space、thread、run、step、调用
   用途、provider、model、逻辑请求和最终标准化聚合结果。调用用途至少区分主 Agent、
   标题、压缩摘要和 subagent。
 - `provider_attempts`：一次由 RunForge 发起的真实 HTTP attempt，保存最终 URL、实际请求
-  body、开始/结束时间、HTTP 状态、Provider response ID、原始流聚合、标准化响应、
+  body、开始/结束时间、HTTP 状态、Provider response ID、标准化观测响应、
   finish reason、usage、错误和关联 invocation；不保存请求头。
 
 AI SDK 的 OpenAI、OpenAI-compatible、Anthropic provider 都支持注入自定义 `fetch`。
@@ -398,31 +399,31 @@ AI SDK 在这里仅负责协议转换、流解析和工具调用组装，不拥�
    observing fetch 从克隆的 Request 读取最终 body，不消费真正发往上游的请求流。
 4. observing fetch 原样发送请求，并以透传式 stream tap 记录 LLM API 返回给后端的原始流；
    tap 不改写数据、不提前消费响应，也不把请求头写入数据库或文件日志。
-5. attempt 保存 HTTP 状态、Provider response ID、原始流聚合、解析错误、传输错误和耗时。
+5. attempt 保存 HTTP 状态、Provider response ID、标准化观测结果、解析错误、传输错误和耗时。
 6. AI SDK 返回后，ProviderRunner 保存标准化的 content、reasoning、tool calls、finish reason
    和 usage，并决定成功、失败或创建下一次 attempt。
 7. 流式请求只有在尚未向 Agent runtime 发布任何增量时才允许自动重试；已经发布部分流后
    的失败作为当前 attempt 和 invocation 失败处理，避免重复输出。
 
 三种协议共用 AI SDK Provider，并接入同一个 ProviderRunner/observer。所有重试都由 RunForge
-统一控制，现有 messages/events 继续承担上下文原文和前端回放。
+统一控制，`steps.result` 与 `steps.tool_results` 是上下文响应的权威来源，`messages` 保留输入、摘要和顺序索引。
 
-本地文件继续记录 LLM API 流式 trace 和运行控制日志，保留 7 天；数据库 invocation/
-attempt 记录不由该清理任务删除。
+本地文件按 `logs/traces/<runId>/YYYY-MM-DD.jsonl` 记录 LLM API trace 和实时运行事件，保留
+30 天；跨天直接写入新文件。数据库 invocation/attempt 记录不由该清理任务删除。
 
 当前实现覆盖主 Agent、标题生成、上下文压缩摘要、subagent 和 run-scoped LLM capability。
 管理端模型列表探测和测试对话不属于 run，不写入这两张 run 关联表。attempt 错误分为
 `http`、`transport`、`parse` 和 `runtime`，便于区分上游状态码、传输中断、响应解析失败和
 本地运行错误。
 
-完整原始流会在单次调用期间于内存中聚合，并同时写入数据库和 7 日 JSONL。这是为了满足
+Provider 完整原始流会在单次调用期间于内存中聚合，仅写入 30 日 JSONL，不进入数据库。这是为了满足
 逐 attempt 完整复盘的已确认要求；首版单实例且暂不做资源配额，因此本阶段不增加截断、
 采样或异步对象存储。该成本必须在后续容量验收中按真实长响应继续观察。
 
 ## 12. Prisma 实施顺序
 
 项目已切换到 Node.js 24 和 Prisma 7.10.0。现有结构已经建立 Prisma baseline，空间改造会
-触及的 thread/run/message/event/settings/auth 查询已迁到 Prisma；fork 历史复制、subagent、
+触及的 thread/run/message/settings/auth 查询已迁到 Prisma；fork 历史复制、subagent、
 shell、push subscription、数据源账号池及 runtime capability 的原生 SQL 暂时保留，并与
 Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范围继续收口。
 
@@ -507,7 +508,7 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
 
 - 实现 UUID Token 单入口和 command 协议。
 - 实现幂等回执、`RUN_ACTIVE`、artifact 上传/materialize。
-- 实现基于数据库 event cursor 的外部 WebSocket 回放和实时推送。
+- 实现进程内 cursor 的外部 WebSocket 实时推送；完成态由 `run.get` 和 step 聚合恢复。
 
 ### 阶段 5：运行时装配与恢复
 
@@ -532,7 +533,7 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
 - ✅ 实现 RunForge 自己的 ProviderRunner 重试状态机，并关闭 SDK 内部重试。
 - ✅ 三种 AI SDK 协议接入 observing fetch 和流式 tap。
 - ✅ 保存逻辑请求、invocation/attempt、wire body、原始流聚合和标准化响应，不保存请求头。
-- ✅ 实现本地 JSONL attempt trace 和 7 天清理；数据库记录独立保留。
+- ✅ 实现按 run/自然日分片的本地 JSONL trace 和 30 天清理；数据库记录独立保留。
 
 ### 阶段 9：端到端验收与文档更新
 
@@ -541,7 +542,7 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
   Cordis 并发空间验收覆盖，其余边界由空间运行端到端脚本覆盖。
 - ✅ 验证 `RUN_ACTIVE`、幂等并发、可靠 `next_step`、取消和重启恢复。
 - ✅ 验证外部空间不出现 `ask_user`。
-- ✅ 验证 WebSocket cursor、artifact、Provider attempt 和 7 天 trace。
+- ✅ 验证进程内 WebSocket cursor、artifact、Provider attempt 和 30 天 trace。
 - ✅ 更新系统设计、空间运行设计和分阶段实施记录。
 
 可重复执行入口为 `pnpm --filter server verify:space-runtime`；验收矩阵和证据见
@@ -560,7 +561,7 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
 - 已确认的 `next_step` 在服务重启后不丢失、不重复应用。
 - Provider 记录能够回答每个 step 实际产生了几次 LLM API 请求、每次发送了什么 wire
   body、收到哪些原始流、标准化结果是什么以及 RunForge 为什么重试。
-- 本地 trace 超过 7 天被清理，数据库审计记录不受影响。
+- 本地 trace 超过 30 天被清理，数据库完成态记录不受影响。
 
 ## 16. 改动点与对应决策索引
 
@@ -574,7 +575,7 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
 8. 空间删除：永久删除全部关联记录和文件；删除当前 default 空间时原子切换新的 default Web 空间。
 9. 外部鉴权：单一 UUID 秘密 URL，Token hash 落库，不在 URL 增加 tenant/space/run。
 10. 外部 HTTP：单端点 command 协议，写操作强制幂等。
-11. 外部 WebSocket：同一 UUID URL upgrade，订阅消息携带 run ID 和数据库 cursor。
+11. 外部 WebSocket：同一 UUID URL upgrade，订阅消息携带 run ID 和当前进程内 cursor。
 12. 后续 run：caller 自己排队；服务端不维护 `next_run`，活动冲突返回 `RUN_ACTIVE`。
 13. `next_step`：使用持久化 `run_inputs`，支持幂等、终态竞态和重启恢复。
 14. 外部问答：外部空间从 schema 和执行入口双重禁用 `ask_user`。
@@ -586,8 +587,8 @@ Prisma 共用同一个 `pg.Pool`。这些边界会按空间阶段实际涉及范
     使用同一 `WORKLOAD_TOKEN` 按 key 获取 Secret 和短期资源，插件声明只用于配置提示，
     更新后立即生效。
 20. Store 权限：拆开执行归属和查看授权，禁止通过冒充 execution user 读取。
-21. Provider 观测：保留现有 run/step/message/event，由 RunForge ProviderRunner 控制重试，
-    invocation/attempt 完整记录逻辑请求、wire body、原始流和标准化响应。
+21. Provider 观测：使用 run 元数据、step 聚合与消息索引，由 RunForge ProviderRunner 控制重试，
+    invocation/attempt 记录逻辑请求、wire body 和标准化观测，原始流仅进入文件日志。
 22. 部署：首版单实例、可信应用，不做多 worker、配额和计费。
 23. Prisma：在 Cordis 原型后、空间数据模型前完成 baseline；唯一性和并发优先使用 Prisma
     约束、状态槽和 CAS，不预设依赖手写 SQL 或显式行锁。

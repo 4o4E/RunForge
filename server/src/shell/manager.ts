@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { readFile, rm, unlink } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { runBus } from '../agent/bus.js';
+import { runTraceWriter } from '../observability/runTrace.js';
 import type { AgentEvent } from '../agent/types.js';
 import { shellPathForSettings, type ToolSettings } from '../settings.js';
 import { store } from '../store/index.js';
@@ -47,17 +48,23 @@ interface ActiveCommand {
   hardTimer?: NodeJS.Timeout;
   killRequested?: boolean;
   finishStarted?: boolean;
+  processError?: string;
+  outputWriteFailure?: unknown;
   writeChain: Promise<void>;
   done: Promise<ShellCommandRow>;
   resolveDone: (row: ShellCommandRow) => void;
+  rejectDone: (error: unknown) => void;
 }
 
-function deferredCommand(): Pick<ActiveCommand, 'done' | 'resolveDone'> {
+function deferredCommand(): Pick<ActiveCommand, 'done' | 'resolveDone' | 'rejectDone'> {
   let resolveDone!: (row: ShellCommandRow) => void;
-  const done = new Promise<ShellCommandRow>((resolve) => {
+  let rejectDone!: (error: unknown) => void;
+  const done = new Promise<ShellCommandRow>((resolve, reject) => {
     resolveDone = resolve;
+    rejectDone = reject;
   });
-  return { done, resolveDone };
+  void done.catch(() => undefined);
+  return { done, resolveDone, rejectDone };
 }
 
 function nowIso(): string {
@@ -68,8 +75,17 @@ function futureIso(ms: number | null): string | null {
   return ms == null ? null : new Date(Date.now() + ms).toISOString();
 }
 
-function sleep(ms: number): Promise<'timeout'> {
-  return new Promise((resolveSleep) => setTimeout(() => resolveSleep('timeout'), ms));
+function raceWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<{ type: 'completed'; value: T } | { type: 'timeout' }> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<{ type: 'timeout' }>((resolveTimeout) => {
+    timer = setTimeout(() => resolveTimeout({ type: 'timeout' }), timeoutMs);
+  });
+  return Promise.race([
+    promise.then((value) => ({ type: 'completed' as const, value })),
+    timeout,
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 function numericBytes(value: string | number): number {
@@ -172,6 +188,58 @@ function fallbackName(owner: ShellSessionRow['owner'], index: number): string {
 
 export class ShellManager {
   private active = new Map<string, ActiveCommand>();
+  private readonly outputWriteFailures: unknown[] = [];
+  private readonly commandFinishFailures: unknown[] = [];
+  private acceptingCommands = true;
+  private startingCommands = 0;
+  private readonly commandStartsDrained = new Set<() => void>();
+  private shutdownPromise: Promise<void> | null = null;
+
+  stopAcceptingCommands(): void {
+    this.acceptingCommands = false;
+  }
+
+  shutdown(): Promise<void> {
+    this.stopAcceptingCommands();
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.shutdownPromise = this.stopAndWaitForCommands();
+    return this.shutdownPromise;
+  }
+
+  private async stopAndWaitForCommands(): Promise<void> {
+    await this.waitForCommandStarts();
+    const activeCommands = [...this.active.values()];
+    const results = await Promise.allSettled(activeCommands.map(async (active) => {
+      const processEnded = active.process.exitCode !== null || active.process.signalCode !== null || !!active.processError;
+      if (!active.finishStarted && !processEnded) {
+        await this.kill(active.scope, active.commandId, 'server_shutdown');
+      }
+      await active.done;
+    }));
+    const failures = [
+      ...results.flatMap((result) => result.status === 'rejected' ? [result.reason] : []),
+      ...this.outputWriteFailures,
+      ...this.commandFinishFailures,
+    ];
+    if (failures.length) throw new AggregateError(failures, '关闭期间 shell 命令或输出写入未能完整结束');
+  }
+
+  private beginCommandStart(): void {
+    if (!this.acceptingCommands) throw new Error('服务正在关闭，暂时不能启动新的 shell 命令');
+    this.startingCommands += 1;
+  }
+
+  private finishCommandStart(): void {
+    this.startingCommands -= 1;
+    if (this.startingCommands !== 0) return;
+    for (const resolve of this.commandStartsDrained) resolve();
+    this.commandStartsDrained.clear();
+  }
+
+  private waitForCommandStarts(): Promise<void> {
+    if (this.startingCommands === 0) return Promise.resolve();
+    return new Promise((resolve) => this.commandStartsDrained.add(resolve));
+  }
 
   async openSession(input: {
     scope: Scope;
@@ -267,7 +335,14 @@ export class ShellManager {
     pluginRoots?: string[];
     managedReadRoots?: string[];
   }): Promise<{ command: ShellCommandRow; timedOutWaiting: boolean; tail: string }> {
-    const admission = deletionGate.enter({ tenantId: input.scope.tenantId, threadId: input.context.threadId });
+    this.beginCommandStart();
+    let admission: ReturnType<typeof deletionGate.enter>;
+    try {
+      admission = deletionGate.enter({ tenantId: input.scope.tenantId, threadId: input.context.threadId });
+    } catch (error) {
+      this.finishCommandStart();
+      throw error;
+    }
     let command!: ShellCommandRow;
     let active!: ActiveCommand;
     const waitMode = input.waitMode ?? 'foreground';
@@ -323,14 +398,15 @@ export class ShellManager {
       });
     } finally {
       admission.finish();
+      this.finishCommandStart();
     }
     if (waitMode === 'background') {
       return { command: await store.getShellCommand(input.scope, command.id) ?? command, timedOutWaiting: false, tail: '' };
     }
 
     const waitMs = input.waitTimeoutMs ?? DEFAULT_WAIT_MS;
-    const completed = await Promise.race([active.done, sleep(waitMs)]);
-    if (completed === 'timeout') {
+    const waitResult = await raceWithTimeout(active.done, waitMs);
+    if (waitResult.type === 'timeout') {
       const logs = await store.getShellCommandLogs(input.scope, command.id, 0, 50);
       return {
         command: await store.getShellCommand(input.scope, command.id) ?? command,
@@ -339,7 +415,7 @@ export class ShellManager {
       };
     }
     const logs = await store.getShellCommandLogs(input.scope, command.id, 0, 200);
-    return { command: completed, timedOutWaiting: false, tail: redactShellOutput(tailText(logs, 4000)) };
+    return { command: waitResult.value, timedOutWaiting: false, tail: redactShellOutput(tailText(logs, 4000)) };
   }
 
   async poll(scope: Scope, id: string, sinceSeq = 0): Promise<{ session?: ShellSessionRow; command?: ShellCommandRow; logs: Awaited<ReturnType<typeof store.getShellCommandLogs>> }> {
@@ -372,8 +448,8 @@ export class ShellManager {
     setTimeout(() => {
       if (this.active.has(commandId)) this.killProcess(active, 'SIGKILL');
     }, KILL_GRACE_MS).unref();
-    const completed = await Promise.race([active.done, sleep(1_000)]);
-    if (completed !== 'timeout') return completed;
+    const waitResult = await raceWithTimeout(active.done, 1_000);
+    if (waitResult.type === 'completed') return waitResult.value;
     return (await store.getShellCommand(scope, commandId)) ?? command;
   }
 
@@ -476,9 +552,17 @@ export class ShellManager {
     });
     child.stdout?.on('data', (chunk) => this.enqueueOutput(active, 'stdout', chunk));
     child.stderr?.on('data', (chunk) => this.enqueueOutput(active, 'stderr', chunk));
-    child.on('error', (err) => void this.finishCommand(active, 'failed', null, null, err.message));
-    child.on('exit', (code, signal) => void this.finishCommand(active, code === 0 ? 'succeeded' : 'failed', code, signal ?? null));
-    child.on('close', (code, signal) => void this.finishCommand(active, code === 0 ? 'succeeded' : 'failed', code, signal ?? null));
+    child.once('error', (err) => {
+      active.processError = err.message;
+    });
+    child.once('close', (code, signal) => {
+      const status = active.processError ? 'failed' : code === 0 ? 'succeeded' : 'failed';
+      void this.finishCommand(active, status, code, signal ?? null, active.processError).catch((error) => {
+        this.commandFinishFailures.push(error);
+        this.active.delete(active.commandId);
+        active.rejectDone(error);
+      });
+    });
 
     await this.emitCommandEvent(active, {
       type: 'shell_command_started',
@@ -507,6 +591,10 @@ export class ShellManager {
     active.writeChain = active.writeChain
       .then(() => this.recordOutput(active, stream, raw))
       .catch((err) => {
+        if (!active.outputWriteFailure) {
+          active.outputWriteFailure = err;
+          this.outputWriteFailures.push(err);
+        }
         console.warn(`shell output write failed for ${active.commandId}: ${(err as Error).message}`);
       });
   }
@@ -573,10 +661,8 @@ export class ShellManager {
     active.finishStarted = true;
     if (active.softTimer) clearTimeout(active.softTimer);
     if (active.hardTimer) clearTimeout(active.hardTimer);
-    // exit 可能早于最后一段 stdout/stderr data，到这里稍等一拍再收尾。
-    await sleep(25);
+    // close 在进程退出且 stdout/stderr 流关闭后触发；等待完整写链，避免截断末尾输出。
     await active.writeChain;
-    this.active.delete(active.commandId);
     await Promise.all(active.cleanupPaths.map((path) => rm(path, { recursive: true, force: true }).catch(() => undefined)));
 
     const rowBefore = await store.getShellCommand(active.scope, active.commandId);
@@ -610,6 +696,7 @@ export class ShellManager {
       durationMs: Date.now() - active.startedAt,
     });
     if (row) active.resolveDone(row);
+    this.active.delete(active.commandId);
   }
 
   private killProcess(active: ActiveCommand, signal: NodeJS.Signals): void {
@@ -634,7 +721,9 @@ export class ShellManager {
   private async emit(scope: Scope, threadId: string, runId: string | undefined, stepId: string | null, event: AgentEvent): Promise<void> {
     shellBus.publish(threadId, event);
     if (runId) {
-      await store.addEvent(scope, runId, stepId, event);
+      void runTraceWriter.writeAgentEvent(runId, stepId, event).catch((error) => {
+        console.warn(`写入 run ${runId} shell trace 失败：${(error as Error).message}`);
+      });
       runBus.publish(runId, event);
     }
   }

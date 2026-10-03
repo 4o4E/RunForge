@@ -30,7 +30,7 @@ Prisma invocation/attempt 和本地 JSONL trace。这样协议与隔离验收可
   持久化输入在 Provider 调用前进入消息和模型 wire body，并产生 `external_input_applied` 事件。
 - run A 在空间配置 V1 接纳后把空间更新为 V2：运行 A 仍使用 V1 提示词和可信指令，后续
   append run 使用 V2，数据库 `space_config_version` 与各自 Provider wire body 同时验证。
-- 数据库 event cursor 从 0 完整回放到 final，使用最后 cursor 续读返回空集。
+- 完成 step 由数据库聚合历史生成，外部实时 cursor 只覆盖当前进程内尚未完成的 step。
 - 每个验收 run 对应一个成功 invocation 和一个成功 attempt；URL 裸 `key` 已脱敏，请求头
   密钥不出现在数据库或 JSONL，本地 trace 行数与 attempt 数一致。
 - 永久删除空间 B 后 Token、调用方和运行记录一并删除；空间 A 不受影响。

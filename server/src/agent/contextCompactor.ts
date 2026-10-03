@@ -370,18 +370,20 @@ function leadingSystemEnd(items: WorkingMessage[]): number {
 
 function protectedContext(items: WorkingMessage[]): { prefix: WorkingMessage[]; body: WorkingMessage[] } {
   const sysEnd = leadingSystemEnd(items);
+  const firstUserIdx = items.findIndex((item, i) => i >= sysEnd && item.msg.role === 'user');
   let summaryIndex = -1;
   for (let index = sysEnd; index < items.length; index += 1) {
     const message = items[index].msg;
     if (message.role === 'system' && message.collapsed === 'summarized') summaryIndex = index;
   }
   if (summaryIndex >= 0) {
+    // 摘要不能取代 user 角色；前缀同时保留实际请求，并避免它在正文中重复出现。
+    const protectedIndexes = new Set([firstUserIdx, summaryIndex]);
     return {
-      prefix: [...items.slice(0, sysEnd), items[summaryIndex]],
-      body: items.slice(summaryIndex + 1),
+      prefix: items.filter((_item, index) => index < sysEnd || protectedIndexes.has(index)),
+      body: items.filter((_item, index) => index > summaryIndex && !protectedIndexes.has(index)),
     };
   }
-  const firstUserIdx = items.findIndex((item, i) => i >= sysEnd && item.msg.role === 'user');
   const prefixEnd = firstUserIdx >= 0 ? firstUserIdx + 1 : sysEnd;
   return { prefix: items.slice(0, prefixEnd), body: items.slice(prefixEnd) };
 }

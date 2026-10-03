@@ -40,7 +40,8 @@ const suffix = randomUUID().replaceAll('-', '').slice(0, 12);
 const tenantId = `space-e2e-${suffix}`;
 const runtimeRoot = join(tmpdir(), `runforge-space-e2e-${suffix}`);
 const artifactRoot = join(runtimeRoot, 'artifact-storage');
-const traceRoot = join(runtimeRoot, 'provider-traces');
+const traceRoot = join(runtimeRoot, 'traces');
+const providerTraceWriter = new ProviderTraceWriter(traceRoot);
 const startedAt = new Date().toISOString();
 const reportDirectory = join(process.cwd(), '..', 'workspace', 'space-runtime-verification', startedAt.replaceAll(':', '-'));
 const reportPath = join(reportDirectory, 'report.md');
@@ -91,7 +92,7 @@ const provider: Provider = {
 
 const providerRunner = new ProviderRunner(
   new PrismaProviderObservationRepository(),
-  new ProviderTraceWriter(traceRoot),
+  providerTraceWriter,
   async () => {},
   () => 0,
   async (input, init) => {
@@ -398,7 +399,7 @@ try {
   assert.equal(invocations.every((invocation) => invocation.provider_attempts.length === 1), true);
   const attempts = invocations.flatMap((invocation) => invocation.provider_attempts);
   assert.equal(attempts.every((attempt) => attempt.status === 'success' && attempt.http_status === 200), true);
-  assert.equal(attempts.every((attempt) => attempt.raw_stream?.includes('resp_space_e2e_')), true);
+  assert.equal(attempts.every((attempt) => !('raw_stream' in attempt)), true);
   assert.equal(attempts.every((attempt) => attempt.normalized_response != null), true);
   assert.equal(attempts.every((attempt) => attempt.usage != null && attempt.finish_reason === 'stop'), true);
   assert.equal(attempts.every((attempt) => Boolean(attempt.provider_response_id) && attempt.ended_at != null), true);
@@ -425,7 +426,7 @@ try {
   const defaultWorkspace = resolveWorkspaceRootForThread(webThread, runtimeRoot);
   const externalWorkspace = resolveWorkspaceRootForThread(externalThreadA, runtimeRoot);
   assert.notEqual(defaultWorkspace.root, externalWorkspace.root);
-  assert.match(defaultWorkspace.root, new RegExp(`${webThread.space_id}/${webThread.id}$`));
+  assert.match(defaultWorkspace.root, new RegExp(`${webThread.space_id}/c/${webThread.id}$`));
   assert.match(externalWorkspace.root, new RegExp(`${runA.threadId}$`));
 
   const ownerSpaces = await spaceAccess.list(ownerActor);
@@ -442,14 +443,9 @@ try {
   assert.equal(viewerThreads.some((thread) => thread.id === runB.threadId), true);
   assert.equal(viewerThreads.some((thread) => thread.id === webThread.id), false);
 
-  const replayedEvents = await store.getEventsAfterCursor(scheduledRuns.get(runA.runId)!, runA.runId, 0);
-  assert.equal(replayedEvents.some((item) => item.event.type === 'external_input_applied'), true);
-  assert.equal(replayedEvents.some((item) => item.event.type === 'final'), true);
-  assert.equal(replayedEvents.every((item, index) => index === 0 || item.cursor > replayedEvents[index - 1].cursor), true);
-  assert.deepEqual(
-    await store.getEventsAfterCursor(scheduledRuns.get(runA.runId)!, runA.runId, replayedEvents.at(-1)!.cursor),
-    [],
-  );
+  const replayedEvents = await store.getEvents(scheduledRuns.get(runA.runId)!, runA.runId);
+  assert.equal(replayedEvents.some((item) => item.type === 'user_answer'), true);
+  assert.equal(replayedEvents.some((item) => item.type === 'final'), true);
 
   await spaceAccess.delete(ownerActor, spaceB.id, {});
   await expectExternalError(
@@ -461,9 +457,13 @@ try {
     'done',
   );
 
-  const traceFiles = await readdir(traceRoot);
-  const traceLines = (await Promise.all(traceFiles.map(async (name) => (
-    (await readFile(join(traceRoot, name), 'utf8')).trim().split('\n').filter(Boolean)
+  await providerTraceWriter.cleanup();
+  const traceRunDirectories = await readdir(traceRoot);
+  const traceFiles = (await Promise.all(traceRunDirectories.map(async (runId) => (
+    (await readdir(join(traceRoot, runId))).map((name) => join(traceRoot, runId, name))
+  )))).flat();
+  const traceLines = (await Promise.all(traceFiles.map(async (path) => (
+    (await readFile(path, 'utf8')).trim().split('\n').filter(Boolean)
   )))).flat();
   assert.equal(traceLines.length, attempts.length);
   assert.equal(traceLines.some((line) => line.includes('space-runtime-header-secret')), false);
@@ -486,7 +486,7 @@ try {
     `- maxConcurrentUpstreamRequests: ${maxConcurrentUpstreamRequests}`,
     '',
     '通过项：default Web 运行、两个外部调用方隔离、幂等重放、持久化 next_step、Artifact materialize、',
-    '配置副本版本隔离、普通用户可见名单、workspace 映射、数据库 event cursor 回放、',
+    '配置副本版本隔离、普通用户可见名单、workspace 映射、step 聚合历史回放、',
     'Provider invocation/attempt 关联、URL/请求头密钥不落库、空间永久删除后关联凭证失效。',
     '',
   ].join('\n');

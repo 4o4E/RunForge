@@ -217,7 +217,7 @@ test('slidingWindow keeps system + first user anchor and cuts on a safe boundary
   assert.ok(totalChars(messages) < totalChars(msgs));
 });
 
-test('slidingWindow keeps the latest L3 summary instead of an obsolete first user anchor', () => {
+test('slidingWindow 保留最新摘要及原始用户请求角色', () => {
   const olderSummary: LlmMessage = {
     role: 'system',
     content: 'L3 锚定摘要：旧状态',
@@ -231,7 +231,7 @@ test('slidingWindow keeps the latest L3 summary instead of an obsolete first use
   const msgs: LlmMessage[] = [
     { role: 'system', content: 'sys' },
     olderSummary,
-    { role: 'user', content: 'obsolete request' },
+    { role: 'user', content: 'original request' },
     summary,
     ...round('c1', 100),
     ...round('c2', 100),
@@ -242,7 +242,7 @@ test('slidingWindow keeps the latest L3 summary instead of an obsolete first use
   assert.ok(dropped > 0);
   assert.ok(messages.includes(summary));
   assert.equal(messages.includes(olderSummary), false);
-  assert.equal(messages.some((message) => message.content === 'obsolete request'), false);
+  assert.ok(messages.some((message) => message.role === 'user' && message.content === 'original request'));
   for (const message of messages.filter((item) => item.role === 'tool')) {
     assert.ok(messages.some((parent) => parent.toolCalls?.some((call) => call.id === message.toolCallId)));
   }
@@ -331,7 +331,7 @@ test('current compaction keeps the latest Goal summary when L2 follows L3', asyn
     assert.ok(context.all().some((message) => (
       message.collapsed === 'summarized' && (message.content ?? '').includes('LATEST GOAL STATE')
     )));
-    assert.equal(context.all().some((message) => message.content === 'original request'), false);
+    assert.ok(context.all().some((message) => message.role === 'user' && message.content === 'original request'));
     assert.ok(context.all().some((message) => message.content === 'continue'));
   } finally {
     config.agent.contextBudget = contextBudget;

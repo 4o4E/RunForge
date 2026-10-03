@@ -342,8 +342,6 @@ async function scanDatabaseLogicalUsage(map: Map<string, StorageBucket>): Promis
       UNION ALL
       SELECT th.tenant_id, th.user_id, th.space_id, pg_column_size(to_jsonb(m))::bigint FROM messages m JOIN threads th ON th.id = m.thread_id
       UNION ALL
-      SELECT th.tenant_id, th.user_id, th.space_id, pg_column_size(to_jsonb(e))::bigint FROM events e JOIN runs r ON r.id = e.run_id JOIN threads th ON th.id = r.thread_id
-      UNION ALL
       SELECT th.tenant_id, th.user_id, th.space_id, pg_column_size(to_jsonb(s))::bigint FROM steps s JOIN runs r ON r.id = s.run_id JOIN threads th ON th.id = r.thread_id
       UNION ALL
       SELECT pi.tenant_id, th.user_id, pi.space_id, pg_column_size(to_jsonb(pi))::bigint FROM provider_invocations pi JOIN threads th ON th.id = pi.thread_id

@@ -290,7 +290,6 @@ export class ProviderRunner {
           await this.repository.finishAttempt(snapshot.id, {
             httpStatus: snapshot.httpStatus,
             providerResponseId: snapshot.providerResponseId,
-            rawStream: snapshot.rawResponse ? String(sanitizeMediaPayloads(snapshot.rawResponse)) : null,
             normalizedResponse: sanitizeMediaPayloads(normalizedResponse),
             finishReason: result.finishReason ?? null,
             usage: result.usage ?? null,
@@ -340,7 +339,6 @@ export class ProviderRunner {
           await this.repository.finishAttempt(snapshot.id, {
             httpStatus: snapshot.httpStatus,
             providerResponseId: snapshot.providerResponseId,
-            rawStream: snapshot.rawResponse ? String(sanitizeMediaPayloads(snapshot.rawResponse)) : null,
             normalizedResponse: null,
             finishReason: null,
             usage: null,

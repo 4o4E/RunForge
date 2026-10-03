@@ -160,12 +160,12 @@ test('websocket auth accepts a valid JWT and rejects missing or opaque tokens', 
   }
 });
 
-test('external websocket: UUID Token 鉴权后按 events.id 回放并从 cursor 续传', async () => {
+test('external websocket: UUID Token 鉴权后从进程内 run cursor 续传', async () => {
   const eventStore = new MemoryStore();
   const externalScope = { tenantId: 'tn_external_ws', userId: 'us_external_ws' };
   const thread = await eventStore.createThread(externalScope, 'external websocket');
   const run = await eventStore.createRun(externalScope, thread.id, 'stream events');
-  await eventStore.addEvent(externalScope, run.id, null, { type: 'step_start', step: 1 });
+  runBus.publish(run.id, { type: 'step_start', step: 1 });
   const uuidToken = '123e4567-e89b-42d3-a456-426614174000';
   const access: ExternalCallerAccess = {
     caller: {
@@ -226,9 +226,8 @@ test('external websocket: UUID Token 鉴权后按 events.id 回放并从 cursor 
   };
   const server = createServer();
   attachWebSocket(server, {
-    externalEventStore: eventStore,
+    externalEventSource: runBus,
     externalRepository: repository,
-    externalPollIntervalMs: 20,
   });
   const port = await listen(server);
 
@@ -263,7 +262,6 @@ test('external websocket: UUID Token 鉴权后按 events.id 回放并从 cursor 
       if (frame.type !== 'event' || frame.event.type !== 'step_start' || finalAdded) return;
       finalAdded = true;
       const final = { type: 'final' as const, step: 1, output: 'done' };
-      await eventStore.addEvent(externalScope, run.id, null, final);
       runBus.publish(run.id, final);
     });
     assert.equal(observedHash, hashOpaqueToken(uuidToken));
@@ -283,6 +281,7 @@ test('external websocket: UUID Token 鉴权后按 events.id 回放并从 cursor 
       ['event', 2, 'final'],
     ]);
   } finally {
+    runBus.clear(run.id);
     server.close();
   }
 });

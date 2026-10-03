@@ -128,6 +128,8 @@ export interface ExternalRunView {
   error: string | null;
   createdAt: string;
   updatedAt: string;
+  /** 已经进入模型上下文的追加输入；断线恢复不依赖历史流式事件。 */
+  appliedInputs?: Array<{ inputId: string; version: number }>;
 }
 
 export interface ExternalCancelReceipt {

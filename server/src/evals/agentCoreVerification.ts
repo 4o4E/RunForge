@@ -8,7 +8,7 @@ import { executeRun } from '../agent/executor.js';
 import { pool, query } from '../db/pool.js';
 import { prisma } from '../db/prisma.js';
 import { PgStore } from '../store/pgStore.js';
-import type { AgentEvent } from '../agent/types.js';
+import type { HistoryRunEvent } from '@runforge/contracts';
 import type { LlmMessage } from '../llm/types.js';
 import type { Scope, Store, ThreadRow } from '../store/types.js';
 import {
@@ -58,7 +58,7 @@ interface ScenarioRunResult {
   status: string;
   error: string | null;
   output: string | null;
-  events: AgentEvent[];
+  events: HistoryRunEvent[];
   rawMessages: RawMessage[];
 }
 
@@ -98,19 +98,19 @@ async function readText(path: string): Promise<string> {
   return readFile(path, 'utf8');
 }
 
-function hasTool(events: AgentEvent[], name: string): boolean {
+function hasTool(events: HistoryRunEvent[], name: string): boolean {
   return events.some((event) => event.type === 'tool_call' && event.name === name);
 }
 
-function hasShellExecution(events: AgentEvent[]): boolean {
+function hasShellExecution(events: HistoryRunEvent[]): boolean {
   return hasTool(events, 'shell') || hasTool(events, 'shell_exec');
 }
 
-function toolNames(events: AgentEvent[]): string[] {
-  return events.filter((event): event is Extract<AgentEvent, { type: 'tool_call' }> => event.type === 'tool_call').map((event) => event.name);
+function toolNames(events: HistoryRunEvent[]): string[] {
+  return events.filter((event): event is Extract<HistoryRunEvent, { type: 'tool_call' }> => event.type === 'tool_call').map((event) => event.name);
 }
 
-function stepCount(events: AgentEvent[]): number {
+function stepCount(events: HistoryRunEvent[]): number {
   return new Set(events.filter((event) => 'step' in event).map((event) => event.step)).size;
 }
 
@@ -141,15 +141,12 @@ function assertFinalAssistantHasNoToolCall(messages: RawMessage[]): AssertionRes
   return last.content?.trim() ? ok('最终 assistant 是无工具正文') : fail('最终 assistant 是无工具正文', '最终 assistant content 为空');
 }
 
-async function rawMessagesForThread(threadId: string): Promise<RawMessage[]> {
-  const { rows } = await query<RawMessage>(
-    `SELECT role, content, tool_calls, tool_call_id, collapsed, summary_of
-     FROM messages
-     WHERE thread_id = $1
-     ORDER BY id`,
-    [threadId],
-  );
-  return rows;
+async function rawMessagesForThread(store: Store, scope: Scope, threadId: string): Promise<RawMessage[]> {
+  return (await store.loadRawThreadMessages(scope, threadId)).map((message) => ({
+    role: message.role, content: message.content, tool_calls: message.toolCalls ?? null,
+    tool_call_id: message.toolCallId ?? null, collapsed: message.collapsed ?? null,
+    summary_of: message.summaryOf.map(BigInt),
+  }));
 }
 
 async function loadRunResult(store: Store, scope: Scope, threadId: string, runId: string): Promise<ScenarioRunResult> {
@@ -161,7 +158,7 @@ async function loadRunResult(store: Store, scope: Scope, threadId: string, runId
     error: run.error,
     output: run.output,
     events: await store.getEvents(scope, runId),
-    rawMessages: await rawMessagesForThread(threadId),
+    rawMessages: await rawMessagesForThread(store, scope, threadId),
   };
 }
 
@@ -366,7 +363,6 @@ const scenarios: Scenario[] = [
         assertRunDone(result),
         assertNoBrokenToolPairs(result.rawMessages),
         assertFinalAssistantHasNoToolCall(result.rawMessages),
-        result.events.some((event) => event.type === 'compaction') ? ok('产生 compaction 事件') : fail('产生 compaction 事件'),
         collapsed.length ? ok('messages.collapsed 有记录', `collapsed=${collapsed.length}`) : fail('messages.collapsed 有记录'),
         contextSnapshots.length && contextSnapshots.every((snapshot) => snapshot.message_count > 0)
           ? ok('每次 Provider 调用前的 step 上下文已固定', `snapshots=${contextSnapshots.length}`)

@@ -286,15 +286,14 @@ export function slidingWindow(
 ): { messages: LlmMessage[]; dropped: number } {
   const sysEnd = leadingSystem(messages);
   const head = messages.slice(0, sysEnd);
-  // L3 摘要已经包含最新 Goal 和旧上下文摘要，后续 L2 必须保留它；没有 L3 时
-  // 才继续使用首条用户消息作为低成本锚点。
+  // 摘要保留任务进度，首条用户消息保留真实请求角色；两者都不能被窗口移除。
+  // 只有 system 摘要和 assistant/tool 的消息序列不满足模型服务的对话要求。
   let summaryIdx = -1;
   for (let i = sysEnd; i < messages.length; i += 1) {
     if (messages[i].role === 'system' && messages[i].collapsed === 'summarized') summaryIdx = i;
   }
   const firstUserIdx = messages.findIndex((m, i) => i >= sysEnd && m.role === 'user');
-  const anchorIdx = summaryIdx >= 0 ? summaryIdx : firstUserIdx;
-  const anchor = anchorIdx >= 0 ? [messages[anchorIdx]] : [];
+  const anchor = [firstUserIdx, summaryIdx].filter((index) => index >= 0).map((index) => messages[index]);
 
   const desiredStart = Math.max(sysEnd, messages.length - opts.keepRecent);
   // Walk forward to a safe boundary: a 'user' or 'assistant' message. Never start a

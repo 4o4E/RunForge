@@ -12,7 +12,7 @@ import { config } from '../config.js';
 import { maskPlaceholder } from './compaction.js';
 import type { ToolSettings } from '../settings.js';
 import { maybeGenerateThreadTitleAfterFirstRun } from './threadTitle.js';
-import type { AppliedRunInput, Scope } from '../store/types.js';
+import type { AppliedRunInput, Scope, StepAggregate } from '../store/types.js';
 import { ProviderRunner } from '../llm/providerRunner.js';
 import { MemoryProviderObservationRepository } from '../llm/observability/repository.js';
 import { BusinessPluginRegistry } from '../businessPlugins/registry.js';
@@ -56,6 +56,34 @@ async function waitUntil(predicate: () => boolean | Promise<boolean>, timeoutMs 
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.fail('等待条件超时');
+}
+
+type TestAssistantResult = Pick<StepAggregate, 'toolCalls'> & Partial<Omit<StepAggregate, 'toolCalls' | 'startedAt' | 'endedAt' | 'durationMs'>>;
+
+async function saveAssistantResult(
+  store: MemoryStore,
+  threadId: string,
+  runId: string,
+  idx: number,
+  result: TestAssistantResult,
+): Promise<{ stepId: string; assistantId: number }> {
+  const step = await store.createStep(scope, runId, idx);
+  const startedAt = new Date().toISOString();
+  const endedAt = new Date().toISOString();
+  const assistantId = await store.saveStepResult(scope, step.id, {
+    ...result,
+    reasoning: result.reasoning ?? null,
+    output: result.output ?? null,
+    usage: result.usage ?? null,
+    streamStats: result.streamStats ?? null,
+    finishReason: result.finishReason ?? null,
+    rawFinishReason: result.rawFinishReason ?? null,
+    startedAt,
+    reasoningStartedAt: result.reasoningStartedAt ?? null,
+    endedAt,
+    durationMs: Date.parse(endedAt) - Date.parse(startedAt),
+  });
+  return { stepId: step.id, assistantId };
 }
 
 async function captureWarnings(fn: () => Promise<void>): Promise<string[]> {
@@ -333,9 +361,7 @@ test('executeRun: 按 plugin_lock 装配并激活 tenant 业务 Skill', async ()
       await readFile(join(workspaceRoot, '.agents/runforge-workload-sdk/index.mjs'), 'utf8'),
       /RunForgeWorkloadClient/,
     );
-    assert.equal((await store.getEvents(scope, run.id)).some((event) => (
-      event.type === 'skill_activated' && event.skillId === 'business:crm/customer-query'
-    )), true);
+    assert.deepEqual((await store.getRun(scope, run.id))?.runtime_state.skillIds, ['business:crm/customer-query']);
   } finally {
     await runtime.dispose();
     await rm(sourceRoot, { recursive: true, force: true });
@@ -763,10 +789,9 @@ test('executeRun: persists streamed text and terminal stream status for replay',
 
   const events = await store.getEvents(scope, run.id);
   const textEvents = events.filter((e): e is Extract<AgentEvent, { type: 'llm_delta' }> => e.type === 'llm_delta');
-  assert.deepEqual(textEvents.map((e) => e.text), ['he', 'llo']);
+  assert.deepEqual(textEvents.map((e) => e.text), ['hello']);
   assert.equal(textEvents.map((e) => e.text).join(''), 'hello');
   assert.equal(events.filter((e) => e.type === 'reasoning').length, 1);
-  assert.ok(events.some((e) => e.type === 'reasoning_timing'));
   assert.ok(events.some((e) => e.type === 'stream_stats' && e.stage === 'done' && e.totals.outputChars === 5));
   assert.equal(events.at(-1)?.type, 'final');
   assert.ok(published.some((e) => e.type === 'llm_delta' && e.text === 'he'));
@@ -800,7 +825,7 @@ test('executeRun: retries a pre-delta stream failure without switching to non-st
   const events = await store.getEvents(scope, run.id);
   assert.equal(streamCalls, 2);
   assert.equal((await store.getRun(scope, run.id))?.status, 'done');
-  assert.ok(events.some((event) => event.type === 'stream_retry' && event.message === 'first stream request failed'));
+  assert.equal(events.some((event) => event.type === 'stream_retry'), false);
   assert.equal(published.some((event) => event.type === 'stream_retry'), false);
   assert.ok(published.some((event) => event.type === 'llm_delta' && event.text === 'recovered'));
   assert.ok(warnings.some((line) => line.includes('首个增量前失败') && line.includes('first stream request failed')));
@@ -1141,7 +1166,7 @@ test('executeRun: MCP tools load only after current-run activation and unload in
   assert.doesNotMatch(run1SystemText, /当前 run 已激活能力/);
   assert.equal(activationResult.length, 1_000);
   assert.match(activationResult, /工具策略已截断/);
-  assert.equal((await store.getEvents(scope, run1.id)).some((event) => event.type === 'mcp_activated' && event.serverId === 'browser'), true);
+  assert.deepEqual((await store.getRun(scope, run1.id))?.runtime_state.mcpServerIds, ['browser']);
 
   const run2 = await store.createRun(scope, thread.id, '下一轮不使用浏览器');
   let run2Tools: string[] = [];
@@ -1626,12 +1651,10 @@ test('executeRun: 新 run 切换模型后在首次请求前按新模型阈值压
     const store = new MemoryStore();
     const thread = await store.createThread(scope);
     const oldRun = await store.createRun(scope, thread.id, 'old model request', { modelRef: 'main:model-a' });
-    await store.addMessage(scope, thread.id, oldRun.id, null, {
-      role: 'assistant',
-      content: null,
+    const { stepId } = await saveAssistantResult(store, thread.id, oldRun.id, 1, {
       toolCalls: [{ id: 'old-tool-call', name: 'file_read', arguments: '{"path":"old.txt"}' }],
     });
-    await store.addMessage(scope, thread.id, oldRun.id, null, {
+    await store.addMessage(scope, thread.id, oldRun.id, stepId, {
       role: 'tool',
       content: 'x'.repeat(20_000),
       toolCallId: 'old-tool-call',
@@ -1675,12 +1698,10 @@ test('executeRun: compacts bulky old history when finishing a run', async () => 
     const thread = await store.createThread(scope);
     const oldRun = await store.createRun(scope, thread.id, 'old');
     const bigArgs = JSON.stringify({ path: 'generated/old.txt', content: 'r'.repeat(3000) });
-    await store.addMessage(scope, thread.id, oldRun.id, null, {
-      role: 'assistant',
-      content: null,
+    const { stepId } = await saveAssistantResult(store, thread.id, oldRun.id, 1, {
       toolCalls: [{ id: 'file-old', name: 'file_write', arguments: bigArgs }],
     });
-    await store.addMessage(scope, thread.id, oldRun.id, null, { role: 'tool', content: 'x'.repeat(4000), toolCallId: 'file-old' });
+    await store.addMessage(scope, thread.id, oldRun.id, stepId, { role: 'tool', content: 'x'.repeat(4000), toolCallId: 'file-old' });
     await store.setRunStatus(scope, oldRun.id, 'done');
 
     const run = await store.createRun(scope, thread.id, 'new');
@@ -1717,10 +1738,12 @@ test('executeRun: records L3 summary and main model calls as separate provider p
     const thread = await store.createThread(scope);
     const oldRun = await store.createRun(scope, thread.id, 'old anchor');
     for (let index = 0; index < 8; index += 1) {
-      await store.addMessage(scope, thread.id, oldRun.id, null, {
-        role: index % 2 === 0 ? 'assistant' : 'user',
-        content: `history-${index}-${'x'.repeat(1200)}`,
-      });
+      const content = `history-${index}-${'x'.repeat(1200)}`;
+      if (index % 2 === 0) {
+        await saveAssistantResult(store, thread.id, oldRun.id, index / 2 + 1, { toolCalls: [], output: content });
+      } else {
+        await store.addMessage(scope, thread.id, oldRun.id, null, { role: 'user', content });
+      }
     }
     await store.setRunStatus(scope, oldRun.id, 'done');
 
@@ -2114,7 +2137,6 @@ test('memory store: deleteThread removes dependent run data', async () => {
   const thread = await store.createThread(scope);
   const run = await store.createRun(scope, thread.id, 'delete me');
   await store.addMessage(scope, thread.id, run.id, null, { role: 'user', content: 'delete me' });
-  await store.addEvent(scope, run.id, null, { type: 'final', step: 1, output: 'done' });
   const session = await store.createShellSession(scope, { threadId: thread.id, name: 'Default', owner: 'system', workspaceRoot: '/tmp/ws', backend: 'none' });
   const command = await store.createShellCommand(scope, {
     sessionId: session.id,

@@ -12,8 +12,13 @@ env:
   DOCKER_BUILD_SUMMARY: false
 
 jobs:
+  ci:
+    name: 运行 CI 验证
+    uses: ./.github/workflows/ci.yml
+
   build:
     name: 构建、验证并发布容器
+    needs: ci
     runs-on: ubuntu-latest
     permissions:
       contents: write

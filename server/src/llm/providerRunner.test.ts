@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { LlmResult, Provider } from './types.js';
@@ -84,6 +84,7 @@ test('ProviderRunner: 由 RunForge 重试并保存每个真实 HTTP attempt', as
     messages: [{ role: 'user', content: 'hello' }],
     tools: [],
   });
+  await trace.cleanup();
   assert.equal(output.content, 'done');
   assert.equal(calls, 2);
   assert.deepEqual(delays, [800]);
@@ -106,11 +107,11 @@ test('ProviderRunner: 由 RunForge 重试并保存每个真实 HTTP attempt', as
     model: 'fake-model',
     messages: [{ role: 'user', content: 'hello' }],
   });
-  assert.match(attempts[0].rawStream ?? '', /busy/);
+  assert.equal('rawStream' in attempts[0], false);
   assert.equal(JSON.stringify(attempts).includes('Bearer must-not-persist'), false);
 
-  const traceFiles = await readdir(traceDir);
-  const lines = (await readFile(join(traceDir, traceFiles[0]), 'utf8')).trim().split('\n')
+  const traceFiles = await readdir(join(traceDir, context.runId));
+  const lines = (await readFile(join(traceDir, context.runId, traceFiles[0]), 'utf8')).trim().split('\n')
     .map((line) => JSON.parse(line) as ProviderTraceRecord);
   assert.equal(lines.length, 2);
   assert.equal(lines[0].retryScheduled, true);
@@ -269,16 +270,18 @@ test('ProviderRunner: 保存响应解析错误且不把它当成可重试传输�
   assert.equal(calls, 1);
   const attempt = [...repository.attempts.values()][0];
   assert.equal(attempt.errorKind, 'parse');
-  assert.equal(attempt.rawStream, '{invalid json');
+  assert.equal('rawStream' in attempt, false);
 });
 
-test('ProviderTraceWriter: 只清理七日窗口之外的 provider trace', async () => {
+test('ProviderTraceWriter: 按 run 和日期分片并清理三十日窗口之外的 trace', async () => {
   const traceDir = await mkdtemp(join(tmpdir(), 'runforge-provider-retention-'));
-  await writeFile(join(traceDir, 'provider-2026-09-09.jsonl'), '{}\n');
-  await writeFile(join(traceDir, 'provider-2026-09-10.jsonl'), '{}\n');
+  const runDir = join(traceDir, context.runId);
+  await mkdir(runDir);
+  await writeFile(join(runDir, '2026-08-17.jsonl'), '{}\n');
+  await writeFile(join(runDir, '2026-08-18.jsonl'), '{}\n');
   await writeFile(join(traceDir, 'keep.txt'), 'keep');
   const now = () => new Date('2026-09-16T08:00:00.000Z');
-  const writer = new ProviderTraceWriter(traceDir, 7, now);
+  const writer = new ProviderTraceWriter(traceDir, 30, now);
   await writer.write({
     invocationId: 'pi_1',
     attemptId: 'pa_1',
@@ -299,10 +302,11 @@ test('ProviderTraceWriter: 只清理七日窗口之外的 provider trace', async
     startedAt: now().toISOString(),
     endedAt: now().toISOString(),
   });
-  const files = (await readdir(traceDir)).sort();
+  await writer.cleanup(now());
+  const files = (await readdir(runDir)).sort();
   assert.deepEqual(files, [
-    'keep.txt',
-    'provider-2026-09-10.jsonl',
-    'provider-2026-09-16.jsonl',
+    '2026-08-18.jsonl',
+    '2026-09-16.jsonl',
   ]);
+  assert.equal((await readdir(traceDir)).includes('keep.txt'), true);
 });

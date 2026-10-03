@@ -23,9 +23,10 @@ import {
   type Scope,
   type ShellSessionRow,
   type StepContextSnapshot,
+  type ThreadRow,
 } from '../store/types.js';
 import { releaseRunLeases } from '../datasources/accountPool.js';
-import type { AskUserAnswer, AskUserOption, AskUserSpec } from '../agent/types.js';
+import type { AgentEvent, AskUserAnswer, AskUserOption, AskUserSpec } from '../agent/types.js';
 import { shellManager } from '../shell/manager.js';
 import { shellBus } from '../shell/bus.js';
 import { getSystemToolSettings, type ToolSettings } from '../settings.js';
@@ -44,9 +45,59 @@ import { deletionGate } from '../deletion/gate.js';
 import { stopThreadsForDeletion } from '../deletion/runtime.js';
 import { removeExternalArtifacts } from '../deletion/files.js';
 import { abortRunExecution } from '../agent/executionControl.js';
+import { runBus } from '../agent/bus.js';
+import { runTraceWriter } from '../observability/runTrace.js';
 import { usageApi } from './usage.js';
+import { threadHistoryResponseSchema, threadHistoryRunSchema, type ThreadHistoryRun } from '@runforge/contracts';
+import { historyStepView } from '../store/historyView.js';
 
 export const api = Router();
+
+function publishRunEvent(runId: string, event: AgentEvent): void {
+  runBus.publish(runId, event);
+  void runTraceWriter.writeAgentEvent(runId, null, event).catch((error) => {
+    console.warn(`写入 run ${runId} trace 失败：${(error as Error).message}`);
+  });
+}
+
+async function threadHistoryRun(
+  scope: Scope,
+  run: Pick<ThreadHistoryRun, 'id' | 'thread_id' | 'parent_run_id' | 'status' | 'input' | 'model_ref' | 'output' | 'error' | 'goal_state' | 'pending_interaction' | 'created_at' | 'updated_at'>,
+): Promise<ThreadHistoryRun> {
+  const steps = await store.getHistorySteps(scope, run.id);
+  return threadHistoryRunSchema.parse({
+    id: run.id,
+    thread_id: run.thread_id,
+    parent_run_id: run.parent_run_id,
+    status: run.status,
+    input: run.input,
+    model_ref: run.model_ref,
+    output: run.output,
+    error: run.error,
+    goal_state: run.goal_state,
+    pending_interaction: run.pending_interaction,
+    created_at: run.created_at,
+    updated_at: run.updated_at,
+    steps: steps.map(historyStepView),
+  });
+}
+
+function threadHistoryThread(thread: ThreadRow) {
+  return {
+    id: thread.id,
+    space_id: thread.space_id,
+    source_type: thread.source_type,
+    source_caller_id: thread.source_caller_id,
+    source_ref: thread.source_ref,
+    title: thread.title,
+    fallback_title: thread.fallback_title ?? null,
+    active_run_id: thread.active_run_id,
+    pinned_at: thread.pinned_at,
+    archived_at: thread.archived_at,
+    created_at: thread.created_at,
+    updated_at: thread.updated_at,
+  };
+}
 
 function scopeOrReject(res: Response): Scope | null {
   const scope = requireScope();
@@ -385,11 +436,9 @@ api.get('/threads/:id', async (req, res) => {
     sendThreadReadError(res, error);
     return;
   }
-  const { thread, space, executionScope: scope, readOnly } = access;
-  const runs = await store.listRuns(scope, thread.id);
-  const withEvents = await Promise.all(
-    runs.map(async (run) => ({ ...run, events: await store.getEvents(scope, run.id) })),
-  );
+  const { thread, executionScope: scope, readOnly } = access;
+  const runs = await store.listHistoryRuns(scope, thread.id);
+  const historyRuns = await Promise.all(runs.map((run) => threadHistoryRun(scope, run)));
   const contextMessages = debug
     ? (await store.loadRawThreadMessages(scope, thread.id)).map((message) => {
         const encrypted = encryptedReasoningStats(message.providerState);
@@ -414,28 +463,28 @@ api.get('/threads/:id', async (req, res) => {
           created_at: message.created_at,
         };
       })
-    : (await store.loadThreadMessageMetadata(scope, thread.id)).map((message) => ({
+    : (await store.loadThreadMessageMetadata(scope, thread.id)).filter((message) => message.role === 'user').map((message) => ({
         id: message.id,
         run_id: message.run_id,
         step_id: message.step_id,
         role: message.role,
-        tool_calls: message.toolCalls,
-        tool_call_id: message.toolCallId,
-        collapsed: message.collapsed,
-        summary_of: message.summaryOf,
+        tool_calls: [],
+        tool_call_id: null,
+        collapsed: null,
+        summary_of: [],
         content_chars: message.contentChars,
         content: message.role === 'user' ? message.content : undefined,
         created_at: message.created_at,
       }));
-  res.json({
-    thread,
-    space,
+  res.json(threadHistoryResponseSchema.parse({
+    thread: threadHistoryThread(thread),
+    space: { id: thread.space_id, name: access.space.name, mode: access.space.mode },
     readOnly,
-    runs: withEvents,
+    runs: historyRuns,
     notices: await store.listThreadNotices(scope, thread.id),
     context_messages: contextMessages,
     debug,
-  });
+  }));
 });
 
 // 更新 thread 元信息：重命名、置顶/取消置顶、归档/取消归档。
@@ -545,7 +594,7 @@ api.post('/threads/:id/runs', async (req, res) => {
 
 // --- Runs ---
 
-// run 详情：包含事件，前端按 step 分组展示。
+// run 详情只返回已完成模型请求的 step 聚合结果。
 api.get('/runs/:id', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
@@ -555,8 +604,7 @@ api.get('/runs/:id', async (req, res) => {
   if (!run) return res.status(404).json({ error: 'run 不存在' });
   const thread = await store.getThread(scope, run.thread_id);
   if (!thread || !await checkThreadSpaceAccess(res, identity, thread.space_id, false)) return;
-  const events = await store.getEvents(scope, run.id);
-  res.json({ run, events });
+  res.json({ run: await threadHistoryRun(scope, run) });
 });
 
 // 从某条历史 run 的父节点创建新分支。旧 run 和其后续分支都保留，但不会进入新 run 上下文。
@@ -623,8 +671,8 @@ api.post('/runs/:id/fork', async (req, res) => {
   }
   if (!fork) return res.status(404).json({ error: 'run 不存在' });
   res.status(201).json({
-    thread: fork.thread,
-    activeRun: { ...fork.activeRun, events: await store.getEvents(scope, fork.activeRun.id) },
+    thread: threadHistoryThread(fork.thread),
+    activeRun: await threadHistoryRun(scope, fork.activeRun),
   });
 });
 
@@ -642,7 +690,8 @@ api.post('/runs/:id/cancel', async (req, res) => {
   if (run.status === 'waiting_for_user') {
     const step = (await store.getLastStepIndex(scope, run.id)) + 1;
     await killRunShellCommands(scope, run.id);
-    await store.addEvent(scope, run.id, null, { type: 'user_cancel', step, reason: '用户已取消 run。' });
+    const event = { type: 'user_cancel' as const, step, reason: '用户已取消 run。' };
+    publishRunEvent(run.id, event);
     await store.setRunStatus(scope, run.id, 'canceled', { error: '用户已取消 run。' });
     await releaseRunLeases(run.id);
     return res.json({ id: run.id, status: 'canceled' });
@@ -657,7 +706,7 @@ api.post('/runs/:id/cancel', async (req, res) => {
 });
 
 // 继续同一个 run：用于网络错误、服务重启后恢复失败等场景。
-// 模型上下文只使用已完整落库的 messages；半截流式事件保留审计，不作为续跑输入。
+// 模型上下文从完整 step 聚合与用户输入构建；未完成请求的流式事件只在 trace 中审计，不作为续跑输入。
 api.post('/runs/:id/continue', async (req, res) => {
   const scope = scopeOrReject(res);
   if (!scope) return;
@@ -678,14 +727,15 @@ api.post('/runs/:id/continue', async (req, res) => {
   const lastStep = await store.getLastStepIndex(scope, run.id);
   const lastCompletedStep = await store.getLastCompletedStepIndex(scope, run.id);
   const message = lastStep > lastCompletedStep
-    ? `正在继续生成：从第 ${lastCompletedStep} 个完整 step 后恢复；未完整落库的 step 只保留为事件审计，不进入模型上下文。`
+    ? `正在继续生成：从第 ${lastCompletedStep} 个完整 step 后恢复；未完成的 step 只保留在本地 trace，不进入模型上下文。`
     : '正在继续生成：从最近的持久化检查点恢复。';
   try {
     const admission = deletionGate.enter({ tenantId: scope.tenantId, spaceId: thread.space_id, threadId: thread.id });
     try {
       const resumed = await store.resumeRun(scope, run.id, ['error', 'pending'], { output: null, error: null });
       if (!resumed) return res.status(409).json({ error: 'run 状态已变化，不能重复继续生成' });
-      await store.addEvent(scope, run.id, null, { type: 'recovery', step: lastStep + 1, message });
+      const event = { type: 'recovery' as const, step: lastStep + 1, message };
+      publishRunEvent(run.id, event);
       void executeRun(run.id, { resume: true, scope });
     } finally {
       admission.finish();
@@ -709,7 +759,7 @@ api.post('/runs/:id/answer', async (req, res) => {
   if (!thread || !await checkThreadSpaceAccess(res, identity, thread.space_id, true)) return;
   if (run.status !== 'waiting_for_user') return res.status(409).json({ error: `run 当前状态为 ${run.status}，不是 waiting_for_user` });
 
-  const spec = latestAskUserSpec(await store.getEvents(scope, run.id));
+  const spec = run.pending_interaction;
   const answer = normalizeAnswer(req.body?.answer, spec);
   const invalid = validateAnswer(answer, spec);
   if (invalid) return res.status(400).json({ error: invalid });
@@ -726,7 +776,8 @@ api.post('/runs/:id/answer', async (req, res) => {
       if (!userMessage || userMessage.content == null) {
         throw new Error(`恢复 run ${run.id} 后缺少持久化用户消息`);
       }
-      await store.addEvent(scope, run.id, null, { type: 'user_answer', step: (await store.getLastStepIndex(scope, run.id)) + 1, answer });
+      const event = { type: 'user_answer' as const, step: (await store.getLastStepIndex(scope, run.id)) + 1, answer };
+      publishRunEvent(run.id, event);
       void executeRun(run.id, { resume: true, scope });
     } finally {
       admission.finish();
@@ -1005,14 +1056,6 @@ api.post('/shell-commands/:id/kill', async (req, res) => {
   const command = await shellManager.kill(scope, req.params.id, String(req.body?.reason ?? 'user_requested_kill'), signal);
   res.json({ command });
 });
-
-function latestAskUserSpec(events: Awaited<ReturnType<typeof store.getEvents>>): AskUserSpec | null {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i];
-    if (event.type === 'user_question' && event.spec) return event.spec;
-  }
-  return null;
-}
 
 function normalizeAnswer(value: unknown, spec: AskUserSpec | null = null): AskUserAnswer {
   if (!value || typeof value !== 'object') {

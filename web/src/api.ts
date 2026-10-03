@@ -39,7 +39,12 @@ import type {
   WebPushPublicKeyResponse,
   WebPushSubscriptionInput,
   WebPushSubscriptionRecord,
+  RunWithEvents,
+  HistoryStep,
+  LiveStepSnapshot,
 } from '@runforge/contracts';
+import { completedHistoryThrough, runSocketFrameSchema, threadHistoryResponseSchema } from '@runforge/contracts';
+import { historyStepEvents } from './historyStepAdapter';
 export type { RuntimeImageCapabilityModel, RuntimeLlmCapabilityModel, RuntimeVideoCapabilityModel } from '@runforge/contracts';
 
 export type * from '@runforge/contracts';
@@ -300,7 +305,17 @@ export const getThread = (id: string, options: { debug?: boolean; spaceId?: stri
   if (options.debug) params.set('debug', '1');
   if (options.spaceId) params.set('spaceId', options.spaceId);
   const query = params.toString();
-  return authFetch(`/api/threads/${id}${query ? `?${query}` : ''}`).then(json<ThreadDetailResponse>);
+  return authFetch(`/api/threads/${id}${query ? `?${query}` : ''}`).then(json<unknown>).then((raw) => {
+    const response = threadHistoryResponseSchema.parse(raw) as ThreadDetailResponse;
+    return {
+      ...response,
+    runs: response.runs.map((run): RunWithEvents => ({
+      ...run,
+      completedThrough: completedHistoryThrough(run.steps),
+      events: historyStepEvents(run, response.context_messages.filter((message) => message.run_id === run.id)),
+    })),
+    };
+  });
 };
 
 export const getThreadStepContexts = (id: string, spaceId?: string | null) => {
@@ -663,17 +678,39 @@ export function subscribeRun(
   runId: string,
   onEvent: (e: AgentEvent) => void,
   onClose?: () => void,
-  options: { replay?: 'all' | 'none' } = {},
+  options: {
+    replay?: 'all' | 'none';
+    completedThrough?: number;
+    onConnected?: () => void;
+    onStepSnapshot?: (step: LiveStepSnapshot | null, completedThrough: number, cursor: number) => void;
+    onStepCompleted?: (step: HistoryStep) => void;
+  } = {},
 ): () => void {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const params = new URLSearchParams({ runId });
   if (options.replay) params.set('replay', options.replay);
+  if (options.completedThrough !== undefined) params.set('completedThrough', String(options.completedThrough));
   const ws = new WebSocket(`${proto}://${location.host}/ws?${params.toString()}`, websocketProtocols());
+  let snapshotReceived = false;
+  const pendingEvents: Array<{ cursor: number; event: AgentEvent }> = [];
   ws.onmessage = (m) => {
-    try {
-      onEvent(JSON.parse(m.data) as AgentEvent);
-    } catch {
-      /* 忽略格式错误的帧 */
+    const parsed = runSocketFrameSchema.safeParse(JSON.parse(m.data));
+    if (!parsed.success) throw parsed.error;
+    options.onConnected?.();
+    const frame = parsed.data;
+    if (frame.type === 'event') {
+      const event = frame.event as AgentEvent;
+      if (snapshotReceived) onEvent(event);
+      else pendingEvents.push({ cursor: frame.cursor, event });
+    } else if (frame.type === 'step_completed') {
+      options.onStepCompleted?.(frame.step);
+    } else {
+      options.onStepSnapshot?.(frame.step as LiveStepSnapshot | null, frame.completedThrough, frame.cursor);
+      snapshotReceived = true;
+      for (const pending of pendingEvents.sort((left, right) => left.cursor - right.cursor)) {
+        if (pending.cursor > frame.cursor) onEvent(pending.event);
+      }
+      pendingEvents.length = 0;
     }
   };
   ws.onclose = () => onClose?.();

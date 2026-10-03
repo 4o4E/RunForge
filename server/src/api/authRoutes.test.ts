@@ -374,12 +374,13 @@ test('GET /api/threads/:id: 用户正文始终返回，原始工具载荷只在�
     role: 'user',
     content: '持久化用户消息',
   });
-  const assistantId = await store.addMessage(scope, thread.id, run.id, null, {
-    role: 'assistant',
-    content: null,
+  const assistantId = await store.saveStepResult(scope, step.id, {
+    output: null,
     toolCalls: [{ id: 'call_debug', name: 'shell', arguments: '{"command":"echo raw"}' }],
+    reasoning: null, usage: null, streamStats: null, finishReason: 'tool-calls', rawFinishReason: null,
+    startedAt: null, reasoningStartedAt: null, endedAt: new Date().toISOString(), durationMs: null,
   });
-  await store.addMessage(scope, thread.id, run.id, null, {
+  await store.addMessage(scope, thread.id, run.id, step.id, {
     role: 'tool',
     content: 'raw output',
     toolCallId: 'call_debug',
@@ -392,7 +393,7 @@ test('GET /api/threads/:id: 用户正文始终返回，原始工具载荷只在�
     const normal = await fetch(`http://127.0.0.1:${port}/api/threads/${thread.id}`, { headers });
     const normalBody = (await normal.json()) as { debug: boolean; context_messages: Array<{ content?: string; tool_calls: Array<{ arguments?: string }> }> };
     assert.equal(normalBody.debug, false);
-    assert.equal(normalBody.context_messages.length, 2);
+    assert.equal(normalBody.context_messages.length, 1);
     assert.equal(normalBody.context_messages.some((message) => message.content === '持久化用户消息'), true);
     assert.equal(normalBody.context_messages.some((message) => message.content === 'raw output'), false);
     assert.equal(normalBody.context_messages.some((message) => message.tool_calls.some((call) => call.arguments !== undefined)), false);

@@ -9,6 +9,31 @@ interface ActiveRunExecution {
 
 const activeExecutions = new Map<string, ActiveRunExecution>();
 const runActivityWaiters = new Map<string, Set<() => void>>();
+let acceptingNewRunExecutions = true;
+let executionShuttingDown = false;
+
+/** 正常退出时停止新 run，并中止当前请求以保留运行中状态供重启恢复。 */
+export function stopAcceptingNewRunExecutions(): void {
+  acceptingNewRunExecutions = false;
+  executionShuttingDown = true;
+  for (const entry of activeExecutions.values()) {
+    entry.controller.abort(new Error('服务正在关闭，当前 run 将由服务重启后恢复。'));
+  }
+}
+
+export function isAcceptingNewRunExecutions(): boolean {
+  return acceptingNewRunExecutions;
+}
+
+export function isExecutionShuttingDown(): boolean {
+  return executionShuttingDown;
+}
+
+export async function waitForAllRunExecutions(): Promise<void> {
+  while (activeExecutions.size) {
+    await Promise.all([...activeExecutions.values()].map((entry) => entry.done));
+  }
+}
 
 /** 唤醒等待当前 run 新输入或子任务状态变化的 executor。 */
 export function notifyRunActivity(runId: string): void {
@@ -82,6 +107,7 @@ function registration(
 export function registerRunExecution(runId: string): RunExecutionRegistration {
   const existing = activeExecutions.get(runId);
   if (existing) return registration(runId, existing, true);
+  if (!acceptingNewRunExecutions) throw new Error('服务正在关闭，暂时不能启动新的 run');
   const controller = new AbortController();
   let resolveDone!: () => void;
   const done = new Promise<void>((resolve) => {
