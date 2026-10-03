@@ -5,6 +5,7 @@ set -Eeuo pipefail
 
 pnpm db:migrate
 pnpm --filter server exec tsx src/evals/preparePostgresVerification.ts
+STORE=postgres pnpm --filter server exec tsx --test src/api/system.postgres.test.ts
 pnpm --filter server exec tsx src/evals/prismaStoreVerification.ts
 pnpm --filter server exec tsx src/evals/spaceRuntimeVerification.ts
 pnpm --filter server exec tsx src/evals/stepHistoryVerification.ts

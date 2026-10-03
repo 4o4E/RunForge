@@ -5,7 +5,7 @@
 `.github/workflows/ci.yml` 执行两类验证：
 
 - 构建与单元测试：`pnpm build` 检查并构建 contracts、workload SDK、server 和 web；随后 `pnpm test:ci` 直接运行 workload SDK、server 和 web 的单元测试，不重复构建已准备好的包。开发者本机仍可运行 `pnpm test`，该命令会自行构建测试依赖并生成 Prisma Client。`pnpm build` 已执行所有包的 TypeScript 编译，因此 CI 不再重复运行耗时相同的 `pnpm typecheck`。
-- PostgreSQL 集成：使用本次作业创建的 PostgreSQL 16 临时数据库执行迁移，再运行 `verify:prisma-store`、`verify:space-runtime`、`verify:step-history` 和 `verify:shell-shutdown` 对应验证。
+- PostgreSQL 集成：使用本次作业创建的 PostgreSQL 16 临时数据库执行迁移和启动引导，再运行真实 PostgreSQL HTTP 用例 `api/system.postgres.test.ts`、`verify:prisma-store`、`verify:space-runtime`、`verify:step-history` 和 `verify:shell-shutdown`。
 
 数据库集成会调用真实 `PgStore`、Prisma、迁移和应用服务，不使用本机历史数据，也不连接生产或开发数据库。`prismaStoreVerification` 与 `spaceRuntimeVerification` 中的 provider fetch 响应是本地确定性协议输入，用于验证请求适配、数据库持久化和服务边界；它们不是实际模型调用，也不代表模型质量、供应商连通性或完整浏览器链路通过。`stepHistoryVerification` 不调用模型，直接使用真实 PostgreSQL 检验 step 权威数据、上下文观测隔离、祖先工具恢复、消息索引、跨租户隔离及 fork 元数据。
 
@@ -24,7 +24,7 @@ bash scripts/ci/postgres-integration.sh
 
 | 关键业务 | 自动化覆盖入口 | 覆盖边界 |
 | --- | --- | --- |
-| 租户、身份与权限 | `server` 的 `auth`、`tenants`、`authRoutes` 单元测试；`verify:prisma-store` PostgreSQL 集成 | 单元覆盖边界与拒绝路径；PG 验证实际关系约束与存储行为 |
+| 租户、身份与权限 | `server` 的 `auth`、`tenants`、`authRoutes`、`api/system.test.ts` 单元测试；`api/system.postgres.test.ts`、`verify:prisma-store` PostgreSQL 集成 | 系统设置与租户授权用真实 PgStore、真实 HTTP 路由和系统数据源目录验证；PG 同时验证实际关系约束与存储行为 |
 | 空间配置与隔离 | `spaces/config`、`spaces/access` 单元测试；`verify:prisma-store`、`verify:space-runtime` | 空间设置使用确定性协议响应；不代表真实供应商调用 |
 | 业务插件 | `businessPlugins/registry`、`api/businessPluginImport` 单元测试 | 校验协议、导入和清理边界，不启动真实浏览器 |
 | Workload SDK | `packages/workload-sdk` 的 `test:unit` | Node 单元测试，不调用外部服务 |

@@ -5,10 +5,10 @@ import { api } from './http.js';
 import { store } from '../store/index.js';
 import { hashPassword } from '../auth/passwords.js';
 
-// STORE=memory(见 package.json test 脚本)让 ./http.js 里的路由触达的单例 store
-// 解析成 MemoryStore，不依赖真实 Postgres。每个用例用独立的 tenant/email，避免
-// node:test 并发跑同文件顶层用例时互相踩踏共享的 store 状态。
-// tenants.test.ts / system.test.ts 共用这份 helper，避免三份文件各自复制一份。
+// store/index.js 按 STORE 选择 MemoryStore 或 PgStore。单元测试使用 STORE=memory，
+// PostgreSQL 集成测试使用真实 PgStore；路由、认证和数据库访问始终经过同一份 helper。
+// 每个用例用独立的 tenant/email，避免 node:test 并发跑同文件用例时互相踩踏共享状态。
+// tenants.test.ts / system.test.ts / system.postgres.test.ts 共用这份 helper。
 
 export function buildApp() {
   const app = express();
@@ -17,12 +17,17 @@ export function buildApp() {
   return app;
 }
 
-export function listen(app: express.Express): Promise<{ port: number; close: () => void }> {
+export function listen(app: express.Express): Promise<{ port: number; close: () => Promise<void> }> {
   const server = createServer(app);
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
       const address = server.address() as AddressInfo;
-      resolve({ port: address.port, close: () => server.close() });
+      resolve({
+        port: address.port,
+        close: () => new Promise((resolveClose, rejectClose) => {
+          server.close((error) => error ? rejectClose(error) : resolveClose());
+        }),
+      });
     });
   });
 }

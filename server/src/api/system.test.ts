@@ -5,8 +5,6 @@ import { buildApp, listen, seedOwner, seedSystemAdmin } from './testHelpers.js';
 import { signTenantAccessToken } from '../auth/jwt.js';
 import { hashPassword } from '../auth/passwords.js';
 import { store } from '../store/index.js';
-import { saveTenantResourceAuthorization } from '../settings.js';
-import { findSetting } from '../store/settingsRepository.js';
 
 test.before(() => {
   config.auth.jwtSecret = config.auth.jwtSecret || 'test-jwt-secret';
@@ -305,126 +303,6 @@ test('DELETE /api/system/tenants/:id: 永久删除普通租户并保护 default 
     assert.equal(await store.findTenant(removableTenant.tenant.id), null);
     assert.equal(await store.findUserById(removableTenant.owner.id), null);
     assert.equal(await store.findSpace(removableTenant.tenant.id, removableTenant.defaultSpace.id), null);
-  } finally {
-    close();
-  }
-});
-
-test('系统设置与租户授权接口: system admin 可管理，租户身份不能越权，未知租户返回 404', async () => {
-  await seedSystemAdmin('sysadmin@settings.test', 'sys-pw');
-  const owner = await seedOwner('tn_system_settings', 'owner@settings.test', 'pw');
-  const ownerJwt = signTenantAccessToken({ id: owner.id, tenantId: 'tn_system_settings', role: 'owner' });
-  const { port, close } = await listen(buildApp());
-  try {
-    const base = `http://127.0.0.1:${port}/api`;
-    const { accessToken } = await systemLogin(base, 'sysadmin@settings.test', 'sys-pw');
-
-    const systemRead = await fetch(`${base}/system/settings/llm`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    assert.equal(systemRead.status, 200);
-
-    const systemToolsRead = await fetch(`${base}/system/settings/tools`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    assert.equal(systemToolsRead.status, 200);
-    const systemTools = (await systemToolsRead.json()) as { workspaceRoot?: unknown };
-    assert.equal(systemTools.workspaceRoot, config.tools.workspaceRoot);
-    assert.equal(await findSetting('default', 'tools.workspaceRoot'), undefined);
-
-    const systemToolsWrite = await fetch(`${base}/system/settings/tools`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-      body: JSON.stringify({ ...systemTools, workspaceRoot: '/tmp/request-workspace' }),
-    });
-    assert.equal(systemToolsWrite.status, 200);
-    assert.equal(((await systemToolsWrite.json()) as { workspaceRoot?: unknown }).workspaceRoot, config.tools.workspaceRoot);
-    assert.equal(await findSetting('default', 'tools.workspaceRoot'), undefined);
-
-    const systemUsers = await fetch(`${base}/system/tenants/tn_system_settings/users`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    assert.equal(systemUsers.status, 200);
-    const systemUsersText = await systemUsers.text();
-    assert.equal(systemUsersText.includes('password_hash'), false);
-    assert.deepEqual(
-      (JSON.parse(systemUsersText) as { users: Array<{ id: string }> }).users.map((user) => user.id),
-      [owner.id],
-    );
-
-    const tenantEscalation = await fetch(`${base}/system/settings/llm`, {
-      headers: { Authorization: `Bearer ${ownerJwt}` },
-    });
-    assert.equal(tenantEscalation.status, 403);
-
-    const tenantUsersEscalation = await fetch(`${base}/system/tenants/tn_system_settings/users`, {
-      headers: { Authorization: `Bearer ${ownerJwt}` },
-    });
-    assert.equal(tenantUsersEscalation.status, 403);
-
-    const tenantWrite = await fetch(`${base}/settings/llm`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ownerJwt}` },
-      body: JSON.stringify({ providers: [] }),
-    });
-    assert.equal(tenantWrite.status, 403);
-
-    const tenantFullRead = await fetch(`${base}/settings/llm`, {
-      headers: { Authorization: `Bearer ${ownerJwt}` },
-    });
-    assert.equal(tenantFullRead.status, 403);
-
-    const tenantToolsRead = await fetch(`${base}/settings/tools`, {
-      headers: { Authorization: `Bearer ${ownerJwt}` },
-    });
-    assert.equal(tenantToolsRead.status, 403);
-
-    const tenantDatasourceDetail = await fetch(`${base}/datasources/ds_not_exposed`, {
-      headers: { Authorization: `Bearer ${ownerJwt}` },
-    });
-    assert.equal(tenantDatasourceDetail.status, 403);
-
-    const tenantModelOptions = await fetch(`${base}/settings/llm/options`, {
-      headers: { Authorization: `Bearer ${ownerJwt}` },
-    });
-    assert.equal(tenantModelOptions.status, 200);
-    const modelOptionsText = await tenantModelOptions.text();
-    assert.equal(modelOptionsText.includes('apiKey'), false);
-    assert.equal(modelOptionsText.includes('baseUrl'), false);
-
-    const tenantAccess = await fetch(`${base}/system/tenant-access/tn_system_settings`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    assert.equal(tenantAccess.status, 200);
-    assert.deepEqual(
-      (await tenantAccess.json() as { authorization: { llmProviderIds: string[]; datasourceIds: string[] } }).authorization,
-      { llmProviderIds: [], datasourceIds: [] },
-    );
-
-    await saveTenantResourceAuthorization('tn_system_settings', {
-      llmProviderIds: ['deleted-provider'],
-      datasourceIds: ['deleted-datasource'],
-    });
-    const staleAuthorization = await fetch(`${base}/system/tenant-access/tn_system_settings`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    assert.equal(staleAuthorization.status, 200);
-    assert.deepEqual(
-      (await staleAuthorization.json() as { authorization: { llmProviderIds: string[]; datasourceIds: string[] } }).authorization,
-      { llmProviderIds: [], datasourceIds: [] },
-    );
-
-    const invalidAuthorization = await fetch(`${base}/system/tenant-access/tn_system_settings`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-      body: JSON.stringify({ llmProviderIds: ['missing-provider'], datasourceIds: [] }),
-    });
-    assert.equal(invalidAuthorization.status, 400);
-
-    const missingTenant = await fetch(`${base}/system/tenant-access/not_found`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    assert.equal(missingTenant.status, 404);
   } finally {
     close();
   }
