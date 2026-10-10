@@ -118,6 +118,7 @@ try {
   assert.deepEqual(forkedAncestor?.runtime_state, {
     skillIds: ['skill-history-check'],
     mcpServerIds: ['mcp-history-check'],
+    activatedToolNames: [],
     rejectedImageModels: ['image-history-check'],
     lastAppliedExternalInputVersion: 4,
   });
