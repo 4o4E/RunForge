@@ -19,6 +19,7 @@ import { skillActivateTool } from './skillActivate.js';
 import { mcpActivateTool } from './mcpActivate.js';
 import { subagentListTool, subagentPollTool, subagentRunTool } from './subagentRun.js';
 import { managedShellTools } from './managedShell.js';
+import { toolsActivateTool } from './toolsActivate.js';
 
 const TOOLS: Tool[] = [
   shellTool,
@@ -61,7 +62,10 @@ export async function toolSchemas(
 ): Promise<LlmTool[]> {
   const builtinTools = !profileTools ? TOOLS.map(toLlmTool) : (() => {
     const selected = new Set(includeCoreTools ? [...profileTools, ...CORE_TOOL_NAMES] : profileTools);
-    return TOOLS.filter((tool) => selected.has(tool.name)).map(toLlmTool);
+    return [
+      ...TOOLS.filter((tool) => selected.has(tool.name)).map(toLlmTool),
+      ...(selected.has('tools_activate') ? [toLlmTool(toolsActivateTool)] : []),
+    ];
   })();
   const mcpTools = mcpToolSchemas(activeMcpTools);
   if (!profileTools) return [...builtinTools, ...mcpTools];

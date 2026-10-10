@@ -16,6 +16,7 @@ import { shellExecTool } from './managedShell.js';
 import { requiresDatabaseAccess } from './databaseAccessGuard.js';
 import type { ToolResult, ToolRunContext } from './types.js';
 import { normalizeMcpSettings, normalizeToolSettings } from '../settings.js';
+import { resolveToolActivation } from './onDemand.js';
 import { mcpToolName, parseMcpToolName } from '../mcp/client.js';
 import type { Scope } from '../store/types.js';
 
@@ -51,9 +52,28 @@ test('registry exposes neutral tool schemas and dispatches by name', async () =>
   assert.equal(schemas.some((s) => s.name === 'datasource_list'), false);
   assert.ok((await toolSchemas(['file_read'])).some((s) => s.name === 'file_read'));
   assert.equal((await toolSchemas(['file_read'])).some((s) => s.name === 'shell'), false);
+  assert.equal(schemas.some((s) => s.name === 'tools_activate'), false);
+  const onDemandSchemas = await toolSchemas(['shell', 'tools_activate'], [], false);
+  assert.deepEqual(onDemandSchemas.map((schema) => schema.name), ['shell', 'tools_activate']);
   assert.ok((await toolSchemas(['file_read'])).some((s) => s.name === 'update_plan'));
   assert.ok(getTool('glob'));
   assert.match((await runTool('does_not_exist', {}, { scope: TEST_SCOPE })).text, /未知工具/);
+});
+
+test('on-demand tool activation stays inside the allowed tool set', () => {
+  const active = new Set(['file_read']);
+  assert.deepEqual(
+    resolveToolActivation(['file_read', 'glob', 'glob'], ['file_read', 'glob', 'shell'], ['file_read'], active),
+    { additions: ['glob'], error: null },
+  );
+  assert.deepEqual(
+    resolveToolActivation(['shell', 'mcp__hidden__query'], ['file_read', 'shell'], ['file_read'], active),
+    { additions: [], error: '工具未获当前空间授权：mcp__hidden__query' },
+  );
+  assert.deepEqual(
+    resolveToolActivation(['ask_user'], ['file_read', 'shell'], ['file_read'], active),
+    { additions: [], error: '工具未获当前空间授权：ask_user' },
+  );
 });
 
 test('mcp tool names are mapped into a separate namespace', () => {

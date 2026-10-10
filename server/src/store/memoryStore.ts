@@ -552,7 +552,7 @@ export class MemoryStore implements Store {
       : options.parentRunId;
     if (parentRunId && this.runs.get(parentRunId)?.thread_id !== threadId) throw new Error('parentRunId 不属于当前 thread');
     const row: RunRow = {
-      metadata: { runtime: { skillIds: [], mcpServerIds: [], rejectedImageModels: [], lastAppliedExternalInputVersion: 0 } },
+      metadata: { runtime: { skillIds: [], mcpServerIds: [], activatedToolNames: [], rejectedImageModels: [], lastAppliedExternalInputVersion: 0 } },
       id: newRunId(),
       thread_id: threadId,
       parent_run_id: parentRunId ?? null,
@@ -568,7 +568,7 @@ export class MemoryStore implements Store {
       plugin_lock: structuredClone(options.pluginLock ?? null) as Record<string, unknown> | null,
       external_input_open: false,
       input_version: 0,
-      runtime_state: { skillIds: [], mcpServerIds: [], rejectedImageModels: [], lastAppliedExternalInputVersion: 0 },
+      runtime_state: { skillIds: [], mcpServerIds: [], activatedToolNames: [], rejectedImageModels: [], lastAppliedExternalInputVersion: 0 },
       pending_interaction: null,
       created_at: this.now(),
       updated_at: this.now(),

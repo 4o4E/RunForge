@@ -6,7 +6,8 @@ import type { LlmDelta, LlmMessage, LlmUsage, Provider } from '../llm/types.js';
 import { parseToolArguments } from '../llm/toolArgs.js';
 import { hydrateImageAttachments, mediaRefsFromUserText } from '../llm/attachments.js';
 import { isExplicitImageRejection, omitImagesForTextContinuation } from '../llm/mediaFallback.js';
-import { runTool, toolSchemas } from '../tools/registry.js';
+import { getTool, runTool, toolSchemas } from '../tools/registry.js';
+import { resolveToolActivation } from '../tools/onDemand.js';
 import type { ToolResult } from '../tools/types.js';
 import { createPolicy } from '../tools/policy.js';
 import { ContextManager } from './context.js';
@@ -475,6 +476,22 @@ function runSpaceConfigSnapshot(value: unknown): RunSpaceConfigSnapshot | null {
     || typeof raw.external.allowNextStep !== 'boolean'
   ) {
     throw new Error('run 的空间配置副本无效，拒绝回退到当前空间配置');
+  }
+  if (raw.external.toolLoading !== undefined) {
+    const loading = raw.external.toolLoading;
+    if (
+      raw.mode !== 'external'
+      || !loading
+      || typeof loading !== 'object'
+      || loading.mode !== 'on_demand'
+      || !Array.isArray(loading.initialTools)
+      || new Set(loading.initialTools).size !== loading.initialTools.length
+      || loading.initialTools.some((name) => (
+        typeof name !== 'string' || name === ASK_USER_TOOL_NAME || !raw.capabilities!.tools.includes(name)
+      ))
+    ) {
+      throw new Error('run 的按需工具加载配置无效，或包含空间未授权的工具');
+    }
   }
   return {
     ...raw,
@@ -1034,6 +1051,23 @@ async function executeRunControlled(
     const activeSkills: SkillIndexItem[] = [];
     const activeSkillActivations = new Map<string, SkillActivation>();
     const activeMcp = new Map<string, McpActivation>();
+    if (new Set(initialRun.runtime_state.activatedToolNames).size !== initialRun.runtime_state.activatedToolNames.length) {
+      throw new Error('run runtime metadata 的按需工具激活状态包含重复名称');
+    }
+    const activatedToolNames = new Set(initialRun.runtime_state.activatedToolNames);
+    const onDemandToolLoading = spaceConfig?.mode === 'external' ? spaceConfig.external.toolLoading : undefined;
+    const allowedOnDemandToolNames = spaceConfig?.capabilities.tools
+      .filter((name) => spaceConfig?.mode !== 'external' || name !== ASK_USER_TOOL_NAME) ?? [];
+    if (onDemandToolLoading) {
+      const allowed = new Set(allowedOnDemandToolNames);
+      for (const name of activatedToolNames) {
+        if (!allowed.has(name) || onDemandToolLoading.initialTools.includes(name)) {
+          throw new Error(`run runtime metadata 包含无效的按需工具激活状态：${name}`);
+        }
+      }
+    } else if (activatedToolNames.size) {
+      throw new Error('run runtime metadata 存在按需工具激活状态，但空间配置未启用按需加载');
+    }
 
     // 激活状态属于 run 当前状态，不从 trace 或历史事件反推。
     for (const skillId of initialRun.runtime_state.skillIds) {
@@ -1070,7 +1104,18 @@ async function executeRunControlled(
       'runtime.capabilityDetails': runtimeCapabilityValues.capabilityDetails,
       'external.trustedPrompt': spaceConfig?.external.trustedPrompt ?? '',
     });
-    const prompt = `${basePrompt}\n\n${renderFileLinkRules(userFiles?.mountPath ?? null)}`;
+    const onDemandToolPrompt = onDemandToolLoading
+      ? [
+          '按需工具加载：先判断当前资料和已提供工具是否足以完成任务；足够时直接给出完整答复。只有缺少明确能力时，才调用 tools_activate，并从下方目录请求所需工具。激活的工具从下一次模型请求开始提供。',
+          '可按需加载的空间授权工具：',
+          ...allowedOnDemandToolNames.map((name) => {
+            const tool = getTool(name);
+            const description = tool?.description.split(/[。.!?]/, 1)[0]?.slice(0, 96) ?? '空间授权工具';
+            return `- ${name}: ${description}`;
+          }),
+        ].join('\n')
+      : '';
+    const prompt = [basePrompt, onDemandToolPrompt, renderFileLinkRules(userFiles?.mountPath ?? null)].filter(Boolean).join('\n\n');
     const userMediaRefs = mediaRefsFromUserText(runtimeUserInput);
     const ctx = new ContextManager(prior, runtimeUserInput, renderGoal(goal), {
       appendUserInput: !hasPersistedMessages,
@@ -1106,6 +1151,7 @@ async function executeRunControlled(
     const persistRuntimeState = () => store.setRunRuntimeState(scope, runId, {
       skillIds: activeSkills.map((skill) => skill.id),
       mcpServerIds: [...activeMcp.keys()],
+      activatedToolNames: [...activatedToolNames],
       rejectedImageModels: [...rejectedImageModels],
       lastAppliedExternalInputVersion,
     });
@@ -1578,7 +1624,12 @@ async function executeRunControlled(
       try {
         const activeMcpTools = [...activeMcp.values()].flatMap((activation) => activation.tools);
         const selectedToolNames = allowedBuiltinToolNames
-          ? [...allowedBuiltinToolNames, ...activeMcpTools.map((tool) => tool.mappedName)]
+          ? [
+              ...(onDemandToolLoading
+                ? [...onDemandToolLoading.initialTools, ...activatedToolNames, 'tools_activate']
+                : [...allowedBuiltinToolNames]),
+              ...activeMcpTools.map((tool) => tool.mappedName),
+            ]
           : undefined;
         const tools = await toolSchemas(selectedToolNames, activeMcpTools, !spaceConfig);
         requestAllowedToolNames = new Set(tools.map((tool) => tool.name));
@@ -1915,6 +1966,27 @@ async function executeRunControlled(
         return toolPolicy.capOutput(`已激活 MCP ${activation.server.id}。从当前 run 的下一次模型请求开始加载 ${activation.tools.length} 个工具：${names}`);
       };
 
+      const applyToolActivation = async (names: unknown): Promise<string> => {
+        if (!onDemandToolLoading) {
+          throw new Error('当前 run 未启用按需工具加载。');
+        }
+        const decision = resolveToolActivation(
+          names,
+          allowedOnDemandToolNames,
+          onDemandToolLoading.initialTools,
+          activatedToolNames,
+        );
+        if (decision.error) throw new Error(decision.error);
+        const additions = decision.additions;
+        if (additions.length) {
+          for (const name of additions) activatedToolNames.add(name);
+          await persistRuntimeState();
+        }
+        return additions.length
+          ? `已请求加载工具：${additions.join(', ')}。这些工具从下一次模型请求开始提供。`
+          : '请求的工具已经提供。';
+      };
+
       // 同一轮模型请求可能并列调用相同工具；重复限制按轮次计数，避免一次并列调用被误判为连续重复。
       const stepGuardSignatures = new Set<string>();
       const stepGuardFailures = new Set<string>();
@@ -2031,6 +2103,11 @@ async function executeRunControlled(
                   span.setAttribute('tool.result.length', out.text.length);
                   return out;
                 }
+              }
+              if (call.name === 'tools_activate') {
+                const out = { text: await applyToolActivation(args.names) };
+                span.setAttribute('tool.result.length', out.text.length);
+                return out;
               }
               if (call.name === SUBAGENT_RUN_TOOL_NAME) {
                 const out = await startSubagent(args, step.id, stepIdx, startedAt);

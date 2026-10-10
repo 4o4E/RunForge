@@ -96,6 +96,7 @@ export interface RunSpaceConfigSnapshot {
     allowUserFiles?: boolean;
     userFilesUserId?: string | null;
     trustedPrompt?: string;
+    toolLoading?: { mode: 'on_demand'; initialTools: string[] };
   };
 }
 

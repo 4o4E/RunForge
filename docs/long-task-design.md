@@ -6,7 +6,7 @@
 - `steps.tool_results` 保存该 step 的工具执行结果、媒体引用与有记录的耗时。模型响应完成不代表工具执行完成。
 - `steps.context_snapshot` 只记录实际发送的请求，供管理员按需审查，不参与上下文构建或执行恢复。
 - `messages` 保存用户输入、压缩摘要和消息顺序索引。模型回复与工具结果从对应 step 派生，不读取索引中的响应副本。
-- `runs.metadata` 保存跨 step 状态：`runtime` 为 Skill/MCP 激活、图片拒绝记录和已应用输入版本，`goal` 为计划，`pendingInteraction` 为待回答问题，`context.collapsed` 为压缩选择。
+- `runs.metadata` 保存跨 step 状态：`runtime` 为 Skill/MCP/按需工具激活、图片拒绝记录和已应用输入版本，`goal` 为计划，`pendingInteraction` 为待回答问题，`context.collapsed` 为压缩选择。
 - 未完成请求的原始流只在进程内存中参与实时显示，不逐片保存到数据库。
 
 ## 执行与恢复
@@ -17,7 +17,7 @@
 
 进入模型前检查当前分支中未配对的工具调用。中断结果根据原始 assistant 消息索引写入所属 run/step，包括祖先任务的 step；模型视图始终把工具结果紧接在对应调用之后，不按补入记录的时间把它放到后续用户消息之后。
 
-Skill/MCP 激活状态只属于当前 run，下一次模型请求才生效。新 run 从未激活开始，恢复同一个 run 时读取元数据，不读取 trace。
+Skill/MCP/按需工具激活状态只属于当前 run，下一次模型请求才生效。新 run 从未激活开始，恢复同一个 run 时读取元数据，不读取 trace。按需工具激活名必须由该 run 的空间配置副本授权；恢复时不从 trace、消息或模型历史推断激活状态。
 
 ## 上下文压缩
 

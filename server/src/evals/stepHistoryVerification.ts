@@ -58,6 +58,7 @@ try {
   await store.setRunRuntimeState(scope, ancestor.id, {
     skillIds: ['skill-history-check'],
     mcpServerIds: ['mcp-history-check'],
+    activatedToolNames: [],
     rejectedImageModels: ['image-history-check'],
     lastAppliedExternalInputVersion: 4,
   });

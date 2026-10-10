@@ -6,6 +6,7 @@ export const runMetadataSchema = z.object({
   runtime: z.object({
     skillIds: z.array(z.string()),
     mcpServerIds: z.array(z.string()),
+    activatedToolNames: z.array(z.string()).default([]),
     rejectedImageModels: z.array(z.string()),
     lastAppliedExternalInputVersion: z.number().int().nonnegative(),
   }),

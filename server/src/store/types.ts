@@ -94,6 +94,7 @@ export interface RunRow {
 export interface RunRuntimeState {
   skillIds: string[];
   mcpServerIds: string[];
+  activatedToolNames: string[];
   rejectedImageModels: string[];
   lastAppliedExternalInputVersion: number;
 }

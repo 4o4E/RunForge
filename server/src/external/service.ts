@@ -95,6 +95,22 @@ function snapshotWithTrustedPrompt(
   };
 }
 
+function snapshotWithToolLoading(
+  base: RunSpaceConfigSnapshot,
+  toolLoading: { mode: 'on_demand'; initialTools: string[] } | undefined,
+): RunSpaceConfigSnapshot {
+  if (!toolLoading) return base;
+  const allowed = new Set(base.capabilities.tools);
+  const invalid = toolLoading.initialTools.find((name) => !allowed.has(name) || name === 'ask_user');
+  if (invalid) {
+    throw new ExternalApiError(400, 'TOOL_NOT_ALLOWED', `initialTools 包含空间未授权的工具：${invalid}`);
+  }
+  if (base.mode !== 'external') {
+    throw new ExternalApiError(400, 'TOOL_LOADING_UNSUPPORTED', '按需工具加载只支持 external 空间');
+  }
+  return { ...base, external: { ...base.external, toolLoading: structuredClone(toolLoading) } };
+}
+
 type StartRun = (runId: string, scope: Scope) => void;
 type CancelRunShells = (scope: Scope, runId: string) => Promise<void>;
 
@@ -228,6 +244,9 @@ export class ExternalCommandService {
       return canceled.response;
     }
     if (command.operation === 'run.append' && command.delivery === 'next_step') {
+      if (command.toolLoading) {
+        throw new ExternalApiError(400, 'TOOL_LOADING_IMMUTABLE', 'next_step 不能修改当前 run 的工具加载策略');
+      }
       const appended = await this.repository.appendNextStep(access, {
         idempotencyKey: command.idempotencyKey,
         requestHash: commandHash(command),
@@ -242,7 +261,7 @@ export class ExternalCommandService {
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        const snapshot = await this.resolveSnapshot(access, command.modelRef, command.trustedPrompt);
+        const snapshot = await this.resolveSnapshot(access, command.modelRef, command.trustedPrompt, command.toolLoading);
         const result = command.operation === 'run.create'
           ? await this.repository.createRun(access, {
               idempotencyKey: command.idempotencyKey,
@@ -283,6 +302,7 @@ export class ExternalCommandService {
     access: ExternalCallerAccess,
     modelRef: string | undefined,
     trustedPrompt: string | undefined,
+    toolLoading: { mode: 'on_demand'; initialTools: string[] } | undefined,
   ): Promise<ExternalRunSnapshot> {
     try {
       const resolved = await this.configService.resolveForRun(
@@ -293,7 +313,7 @@ export class ExternalCommandService {
       return {
         configVersion: resolved.configVersion,
         modelRef: resolved.modelRef,
-        spaceConfig: snapshotWithTrustedPrompt(resolved.snapshot, trustedPrompt),
+        spaceConfig: snapshotWithToolLoading(snapshotWithTrustedPrompt(resolved.snapshot, trustedPrompt), toolLoading),
         runtimeCapabilities: resolved.runtimeCapabilitiesSnapshot,
         pluginLock: resolved.pluginLock,
       };

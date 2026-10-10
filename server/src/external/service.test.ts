@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { externalCommandSchema } from '@runforge/contracts';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -125,6 +126,22 @@ test('external command: run.create 必须由调用方提供标题', async () => 
       && error.code === 'INVALID_REQUEST'
       && /title/.test(error.message),
   );
+});
+
+test('external command contract accepts on-demand loading and rejects duplicate initial tools', () => {
+  const command = {
+    operation: 'run.append',
+    idempotencyKey: 'append-on-demand',
+    threadId: 'th_123',
+    input: '检查文件',
+    source: {},
+    toolLoading: { mode: 'on_demand', initialTools: ['skill_activate', 'shell'] },
+  };
+  assert.equal(externalCommandSchema.safeParse(command).success, true);
+  assert.equal(externalCommandSchema.safeParse({
+    ...command,
+    toolLoading: { mode: 'on_demand', initialTools: ['shell', 'shell'] },
+  }).success, false);
 });
 
 test('external command: run.create 固化可信提示词，只启动一次 executor', async () => {

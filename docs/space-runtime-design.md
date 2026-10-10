@@ -166,6 +166,14 @@ Token hash 反查 caller、tenant、space 和权限。
 操作语义固定为：
 
 - `run.create`：创建新 thread 和首个 run；`title` 必填并由调用方维护，外部 thread 不执行模型标题生成。
+- `run.create` 与普通 `run.append` 可选携带 `toolLoading: { mode: 'on_demand', initialTools: string[] }`。
+  服务端只接受属于该 space `capabilities.tools` 的初始工具，并把策略写入本次 run 的空间配置副本；
+  不增加数据库字段。启用后每轮只向模型提供初始工具、已按需激活工具和 `tools_activate`，
+  系统提示只列工具名称及简短用途，不携带未激活工具 schema。模型在已有资料和工具足够时直接答复，
+  只有缺少明确能力时才按目录请求工具；激活状态写入 `runs.metadata.runtime.activatedToolNames`，
+  下一轮才生效，恢复时按 run 配置副本重新校验。MCP 仍通过原有 `mcp_activate` 流程激活。
+  普通 Web、未指定该字段的 external run 保持原工具 schema 行为。`next_step` 不能修改当前 run 策略。
+  external 空间的 `ask_user` 仍由 schema 和执行入口双重禁用，不能通过按需加载启用。
 - `run.append`：向已有 thread 创建下一 run；如果指定 `delivery=next_step`，则改为向当前
   活动 run 持久化待注入输入。
 - `run.get`：读取 caller 有权访问的 run、状态和结果。

@@ -23,6 +23,11 @@ const runInputFields = {
   input: z.string().trim().min(1),
   modelRef: z.string().trim().min(1).optional(),
   trustedPrompt: z.string().trim().min(1).optional(),
+  toolLoading: z.object({
+    mode: z.literal('on_demand'),
+    initialTools: z.array(z.string().trim().min(1)).max(100)
+      .refine((tools) => new Set(tools).size === tools.length, 'initialTools 不能重复'),
+  }).strict().optional(),
   source: externalSourceSchema,
 };
 
