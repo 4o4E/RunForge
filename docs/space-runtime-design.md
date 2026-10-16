@@ -172,6 +172,7 @@ Token hash 反查 caller、tenant、space 和权限。
   系统提示只列工具名称及简短用途，不携带未激活工具 schema。模型在已有资料和工具足够时直接答复，
   只有缺少明确能力时才按目录请求工具；激活状态写入 `runs.metadata.runtime.activatedToolNames`，
   下一轮才生效，恢复时按 run 配置副本重新校验。MCP 仍通过原有 `mcp_activate` 流程激活。
+  `tools_activate.names` 只能使用当前目录中的 RunForge 工具名；Skill、调用方资料或 SDK 中的业务能力名称不属于该目录，应按对应 Skill 的说明通过脚本或 SDK 调用。无效格式或未授权名称以工具错误结果返回模型，整批不激活，模型可修正后继续；不扩大空间授权，运行环境与存储异常仍向外传播。
   普通 Web、未指定该字段的 external run 保持原工具 schema 行为。`next_step` 不能修改当前 run 策略。
   external 空间的 `ask_user` 仍由 schema 和执行入口双重禁用，不能通过按需加载启用。
 - `run.append`：向已有 thread 创建下一 run；如果指定 `delivery=next_step`，则改为向当前

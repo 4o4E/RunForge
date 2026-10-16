@@ -30,6 +30,8 @@ Issue 中的 v0.2 草案是协议基线；本文记录仓库当前已经实现�
 - 调用方或部署流水线把完整目录原子地放到上述位置，再由管理员执行“重新加载目录”。
 - tenant owner/admin 或 system admin 在业务插件管理页手动导入 ZIP、TGZ 或 `.tar.gz`。
 
+在 RunForge 仓库根目录执行 `pnpm package:business-plugin <插件ID>`，读取 `plugins/business/<插件ID>`。调用方在其他仓库维护源码时，使用 `pnpm package:business-plugin <插件ID> --source <源码目录>`；相对目录以 RunForge 仓库根目录为基准。两种方式都校验 manifest ID 与版本，并通过实际压缩包导入复核后写入 `build/business-plugins/<插件ID>-<manifest.version>.zip`，不修改已部署插件。
+
 手动导入使用第一个配置根目录；未配置环境变量时使用仓库下的 `business-plugins`。压缩包
 可以直接以 `runforge.plugin.yaml` 为根，也可以只包含一个顶层插件目录。RunForge 会先在
 临时目录解压和校验，再按 manifest ID 安装；ID 已存在时原子替换当前目录并重新加载索引，

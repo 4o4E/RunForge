@@ -6,6 +6,7 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { finished } from 'node:stream/promises';
 import { ZipFile } from 'yazl';
+import { parseArgs } from 'node:util';
 import { BusinessPluginRegistry, loadBusinessPlugin } from '../businessPlugins/registry.js';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -44,10 +45,10 @@ async function writeZip(root: string, target: string): Promise<void> {
  * 业务插件交付物统一写入 build/business-plugins/<id>-<version>.zip。
  * 打包前验证源码，打包后再走一次真实导入，避免目录层级或权限错误留到生产才发现。
  */
-export async function packageBusinessPlugin(pluginId: string): Promise<{ path: string; sha256: string; bytes: number }> {
+export async function packageBusinessPlugin(pluginId: string, sourcePath = join(pluginSourceRoot, pluginId)): Promise<{ path: string; sha256: string; bytes: number }> {
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(pluginId)) throw new Error(`业务插件 ID 无效：${pluginId}`);
-  const source = await loadBusinessPlugin(join(pluginSourceRoot, pluginId));
-  if (source.manifest.id !== pluginId) throw new Error(`目录名与业务插件 ID 不一致：${pluginId} != ${source.manifest.id}`);
+  const source = await loadBusinessPlugin(resolve(projectRoot, sourcePath));
+  if (source.manifest.id !== pluginId) throw new Error(`源码插件 ID 不一致：${pluginId} != ${source.manifest.id}`);
   const version = source.manifest.version?.trim();
   if (!version) throw new Error(`业务插件 ${pluginId} 必须声明 version，才能生成稳定文件名`);
 
@@ -74,9 +75,15 @@ export async function packageBusinessPlugin(pluginId: string): Promise<{ path: s
   }
 }
 
-const pluginId = process.argv.slice(2).find((argument) => argument !== '--');
-if (!pluginId) throw new Error('用法：pnpm package:business-plugin <插件ID>');
-const result = await packageBusinessPlugin(pluginId);
+// 调用方可以维护仓库外的业务插件；源码目录可选，输出和导入校验仍由本命令统一管理。
+const { values, positionals } = parseArgs({
+  args: process.argv.slice(2).filter((argument) => argument !== '--'),
+  options: { source: { type: 'string' } },
+  allowPositionals: true,
+});
+const [pluginId] = positionals;
+if (!pluginId || positionals.length !== 1) throw new Error('用法：pnpm package:business-plugin <插件ID> [--source <源码目录>]');
+const result = await packageBusinessPlugin(pluginId, values.source);
 console.log(`业务插件已打包：${result.path}`);
 console.log(`大小：${result.bytes} bytes`);
 console.log(`SHA-256：${result.sha256}`);

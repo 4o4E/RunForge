@@ -1107,6 +1107,7 @@ async function executeRunControlled(
     const onDemandToolPrompt = onDemandToolLoading
       ? [
           '按需工具加载：先判断当前资料和已提供工具是否足以完成任务；足够时直接给出完整答复。只有缺少明确能力时，才调用 tools_activate，并从下方目录请求所需工具。激活的工具从下一次模型请求开始提供。',
+          'tools_activate.names 只能填写下方目录中逐字匹配的工具名称。Skill 或调用方资料中的业务能力名、HTTP 接口名和 SDK 操作名不是 RunForge 工具，不得传入 tools_activate；应激活对应 Skill，再按其说明使用已有工具执行脚本或 SDK。',
           '可按需加载的空间授权工具：',
           ...allowedOnDemandToolNames.map((name) => {
             const tool = getTool(name);
@@ -1976,7 +1977,10 @@ async function executeRunControlled(
           onDemandToolLoading.initialTools,
           activatedToolNames,
         );
-        if (decision.error) throw new Error(decision.error);
+        // 请求格式或名称错误属于模型可修正的工具结果，不中断 run，也不部分激活工具。
+        if (decision.error) {
+          return `工具激活失败：${decision.error}。未激活任何新工具。请仅使用按需工具目录中的名称；业务能力按对应 Skill 的说明通过脚本或 SDK 调用。`;
+        }
         const additions = decision.additions;
         if (additions.length) {
           for (const name of additions) activatedToolNames.add(name);
