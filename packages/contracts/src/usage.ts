@@ -25,6 +25,22 @@ export interface TokenUsageBreakdown extends TokenUsageTotals {
   tenantId?: string;
 }
 
+export interface TaskTokenUsageTotals {
+  taskCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  totalTokens: number;
+  averageTokens: number;
+  maxTokens: number;
+  minTokens: number;
+  cacheRate: number | null;
+}
+
+export interface TaskTokenUsagePoint extends TaskTokenUsageTotals {
+  date: string;
+}
+
 export interface StorageUsageTotals {
   logicalBytes: number;
   allocatedBytes: number;
@@ -65,6 +81,10 @@ export interface UsageAggregateResponse {
     bySpace: TokenUsageBreakdown[];
     byModel: TokenUsageBreakdown[];
     byPurpose: TokenUsageBreakdown[];
+  };
+  tasks: {
+    totals: TaskTokenUsageTotals;
+    daily: TaskTokenUsagePoint[];
   };
   storage: {
     capturedAt: string | null;

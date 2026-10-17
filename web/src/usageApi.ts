@@ -11,7 +11,13 @@ export interface UsageQuery {
 
 function usageParams(query: UsageQuery): URLSearchParams {
   const to = new Date();
-  const from = new Date(to.getTime() - query.rangeDays * 24 * 60 * 60 * 1_000);
+  // 统计按北京时间自然日归属，包含今天，首日从零点开始而不是截取半天。
+  const shanghaiDate = new Date(to.getTime() + 8 * 60 * 60 * 1_000);
+  const from = new Date(Date.UTC(
+    shanghaiDate.getUTCFullYear(),
+    shanghaiDate.getUTCMonth(),
+    shanghaiDate.getUTCDate() - query.rangeDays + 1,
+  ) - 8 * 60 * 60 * 1_000);
   const params = new URLSearchParams({ from: from.toISOString(), to: to.toISOString() });
   if (query.tenantId) params.set('tenantId', query.tenantId);
   if (query.userId) params.set('userId', query.userId);

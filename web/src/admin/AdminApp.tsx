@@ -152,6 +152,7 @@ export function AdminApp() {
           {route.page === 'section' && route.section === 'spaces' && spaceControlApi && (
             <SpaceManagementPanel
               api={spaceControlApi}
+              loadUsage={getTenantUsage}
               onManagePrompt={(spaceId) => navigate({ page: 'prompt', spaceId })}
             />
           )}

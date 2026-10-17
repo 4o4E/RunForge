@@ -4,6 +4,7 @@ import type {
   StorageUsageBreakdown,
   StorageUsagePoint,
   StorageUsageTotals,
+  TaskTokenUsageTotals,
   TokenUsageBreakdown,
   TokenUsagePoint,
   TokenUsageTotals,
@@ -60,6 +61,18 @@ interface TokenRow {
   cached_input_tokens: string;
   attempts: string;
   attempts_with_usage: string;
+}
+
+interface TaskTokenRow {
+  day: string | null;
+  task_count: string;
+  input_tokens: string;
+  output_tokens: string;
+  cached_input_tokens: string;
+  total_tokens: string;
+  average_tokens: string;
+  max_tokens: string;
+  min_tokens: string;
 }
 
 interface StorageSampleRow {
@@ -514,6 +527,71 @@ async function tokenRows(filter: UsageFilter): Promise<TokenRow[]> {
     ORDER BY day`, params)).rows;
 }
 
+/** 每次发起的 run 独立计数，其主 Agent、子 Agent 和压缩调用共同归入该 run 的创建日。 */
+async function taskTokenUsage(filter: UsageFilter): Promise<UsageAggregateResponse['tasks']> {
+  const params: unknown[] = [filter.from, filter.to];
+  // 分支复制的历史运行保留原日期，早于新会话创建；只有在当前会话实际发起的运行参与计数。
+  const conditions = ['r.created_at >= $1', 'r.created_at < $2', 'r.created_at >= th.created_at'];
+  if (filter.tenantId) {
+    params.push(filter.tenantId);
+    conditions.push(`th.tenant_id = $${params.length}`);
+  }
+  if (filter.userId) {
+    params.push(filter.userId);
+    conditions.push(`th.user_id = $${params.length}`);
+  }
+  if (filter.spaceId) {
+    params.push(filter.spaceId);
+    conditions.push(`th.space_id = $${params.length}`);
+  }
+  if (filter.availableSpaceIds) {
+    params.push(filter.availableSpaceIds);
+    conditions.push(`th.space_id = ANY($${params.length}::text[])`);
+  }
+  const rows = (await query<TaskTokenRow>(`WITH per_task AS (
+      SELECT to_char(r.created_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD') AS day,
+        COALESCE(sum(COALESCE((pa.usage->>'inputTokens')::bigint, 0)), 0) AS input_tokens,
+        COALESCE(sum(COALESCE((pa.usage->>'outputTokens')::bigint, 0)), 0) AS output_tokens,
+        COALESCE(sum(COALESCE((pa.usage->>'cachedInputTokens')::bigint, 0)), 0) AS cached_input_tokens
+      FROM runs r
+      JOIN threads th ON th.id = r.thread_id
+      LEFT JOIN provider_invocations pi ON pi.run_id = r.id
+      LEFT JOIN provider_attempts pa ON pa.invocation_id = pi.id AND pa.started_at < $2
+      WHERE ${conditions.join(' AND ')}
+      GROUP BY r.id, r.created_at
+    )
+    SELECT day, count(*)::text AS task_count,
+      COALESCE(sum(input_tokens), 0)::text AS input_tokens,
+      COALESCE(sum(output_tokens), 0)::text AS output_tokens,
+      COALESCE(sum(cached_input_tokens), 0)::text AS cached_input_tokens,
+      COALESCE(sum(input_tokens + output_tokens), 0)::text AS total_tokens,
+      COALESCE(avg(input_tokens + output_tokens), 0)::text AS average_tokens,
+      COALESCE(max(input_tokens + output_tokens), 0)::text AS max_tokens,
+      COALESCE(min(input_tokens + output_tokens), 0)::text AS min_tokens
+    FROM per_task
+    GROUP BY GROUPING SETS ((day), ())
+    ORDER BY day NULLS FIRST`, params)).rows;
+  function totals(row: TaskTokenRow): TaskTokenUsageTotals {
+    const inputTokens = Number(row.input_tokens);
+    const cachedInputTokens = Number(row.cached_input_tokens);
+    return {
+      taskCount: Number(row.task_count),
+      inputTokens,
+      outputTokens: Number(row.output_tokens),
+      cachedInputTokens,
+      totalTokens: Number(row.total_tokens),
+      averageTokens: Number(row.average_tokens),
+      maxTokens: Number(row.max_tokens),
+      minTokens: Number(row.min_tokens),
+      cacheRate: inputTokens > 0 ? cachedInputTokens / inputTokens : null,
+    };
+  }
+  return {
+    totals: totals(rows[0]!),
+    daily: rows.filter((row) => row.day !== null).map((row) => ({ date: row.day!, ...totals(row) })),
+  };
+}
+
 async function storageRows(filter: UsageFilter): Promise<{ current: StorageSampleRow[]; history: StorageSampleRow[]; capturedAt: Date | null }> {
   const params: unknown[] = [];
   const conditions: string[] = [];
@@ -591,7 +669,9 @@ async function scopeOptions(filter: UsageFilter): Promise<UsageAggregateResponse
 }
 
 export async function aggregateUsage(filter: UsageFilter): Promise<UsageAggregateResponse> {
-  const [tokens, storage, options] = await Promise.all([tokenRows(filter), storageRows(filter), scopeOptions(filter)]);
+  const [tokens, tasks, storage, options] = await Promise.all([
+    tokenRows(filter), taskTokenUsage(filter), storageRows(filter), scopeOptions(filter),
+  ]);
   const tokenTotal = { ...EMPTY_TOKEN };
   tokens.forEach((row) => addToken(tokenTotal, tokenTotals(row)));
   const dailyMap = new Map<string, TokenUsagePoint>();
@@ -628,6 +708,7 @@ export async function aggregateUsage(filter: UsageFilter): Promise<UsageAggregat
       byModel: tokenBreakdown(tokens, (row) => ({ id: `${row.provider}:${row.model}`, label: `${row.provider} · ${row.model}` })),
       byPurpose: tokenBreakdown(tokens, (row) => ({ id: row.purpose, label: row.purpose })),
     },
+    tasks,
     storage: {
       capturedAt: storage.capturedAt?.toISOString() ?? null,
       totals: storageTotal,

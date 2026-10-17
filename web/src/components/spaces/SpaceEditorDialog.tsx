@@ -191,6 +191,7 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
     (options?.models ?? []).map((model) => ({ id: model.ref, label: model.label })),
     draft.allowedModelRefs,
   );
+  const defaultModelValues = (options?.models ?? []).filter((model) => draft.allowedModelRefs.includes(model.ref));
   const toolValues = includeUnavailable(
     availableTools.map((tool) => ({ id: tool, label: tool })),
     draft.tools,
@@ -344,10 +345,10 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
           >
             <div className="grid gap-3 sm:grid-cols-2">
               <Select value={draft.defaultModelRef} onValueChange={(defaultModelRef) => setDraft({ ...draft, defaultModelRef })}>
-                <SelectTrigger><SelectValue placeholder="默认模型" /></SelectTrigger>
+                <SelectTrigger aria-label="默认模型"><SelectValue placeholder="选择默认模型" /></SelectTrigger>
                 <SelectContent>
-                  {modelValues.map((model) => (
-                    <SelectItem key={model.id} value={model.id}>{model.label}</SelectItem>
+                  {defaultModelValues.map((model) => (
+                    <SelectItem key={model.ref} value={model.ref}>{model.label}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -359,10 +360,25 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
                 placeholder="上下文预算（自动）"
               />
             </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs text-muted-foreground">允许使用的模型 · 已选 {draft.allowedModelRefs.length} 项</span>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={!options?.models.length || (unavailableModels.length === 0 && defaultModelValues.length === options.models.length)}
+                onClick={() => setDraft({ ...draft, allowedModelRefs: options!.models.map((model) => model.ref) })}
+              >全选可用模型</Button>
+            </div>
             <OptionGrid
               values={modelValues}
               selected={draft.allowedModelRefs}
-              onChange={(allowedModelRefs) => setDraft({ ...draft, allowedModelRefs })}
+              onChange={(allowedModelRefs) => setDraft({
+                ...draft,
+                allowedModelRefs,
+                // 移除默认模型后由管理员重新选择，不能静默切换任务使用的模型。
+                defaultModelRef: allowedModelRefs.includes(draft.defaultModelRef) ? draft.defaultModelRef : '',
+              })}
             />
             {(defaultModelInvalid || explicitModelsEmpty) && (
               <div className="text-xs text-destructive">

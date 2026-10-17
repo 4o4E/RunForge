@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Activity, ArrowLeft, Bot, Database, Image, KeyRound, Layers3, LogOut, Package, Shield, ShieldCheck, Users, Wifi, Wrench } from 'lucide-react';
-import type { TenantSummary } from '@runforge/contracts';
+import type { TenantSummary, UsageAggregateResponse } from '@runforge/contracts';
 import { listSystemTenants, sysAdminLogout } from '../sysAdminApi';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -22,7 +22,7 @@ import { createSystemBusinessPluginControlApi } from '@/businessPluginControlApi
 import { TenantUsersPanel } from '@/components/tenants/TenantUsersPanel';
 import { createSystemTenantUsersControlApi } from '@/tenantUsersControlApi';
 import { UsageAnalyticsPanel } from '@/components/usage/UsageAnalyticsPanel';
-import { getSystemUsage, refreshSystemStorageUsage } from '@/usageApi';
+import { getSystemUsage, refreshSystemStorageUsage, type UsageQuery } from '@/usageApi';
 
 type TenantSection = 'users' | 'spaces' | 'business-plugins';
 type SystemSection =
@@ -158,6 +158,10 @@ export function SysAdminApp() {
   const datasourceControlApi = useMemo(() => createSystemDatasourceControlApi(), []);
   const spaceControlApi = useMemo(
     () => tenantId ? createSystemSpaceControlApi(tenantId) : null,
+    [tenantId],
+  );
+  const loadSpaceUsage = useCallback(
+    (query: UsageQuery): Promise<UsageAggregateResponse> => getSystemUsage({ ...query, tenantId }),
     [tenantId],
   );
   const businessPluginControlApi = useMemo(
@@ -316,6 +320,7 @@ export function SysAdminApp() {
             <SpaceManagementPanel
               key={`${tenantId}:spaces`}
               api={spaceControlApi}
+              loadUsage={loadSpaceUsage}
               onManagePrompt={(spaceId) => navigate({ page: 'prompt', tenantId, spaceId })}
             />
           )}

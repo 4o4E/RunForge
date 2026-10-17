@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import type { StorageUsageBreakdown, TokenUsageBreakdown, UsageAggregateResponse } from '@runforge/contracts';
 import type { UsageQuery } from '@/usageApi';
@@ -7,6 +7,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { cn } from '@/lib/utils';
+import { formatBytes, formatMetric, shanghaiTime } from './UsageChart';
+import { CATEGORY_LABELS, DailyTokenChart, ModelUsageChart, StorageCategoryChart, StorageHistoryChart } from './UsageAnalyticsCharts';
 
 interface UsageAnalyticsPanelProps {
   load: (query: UsageQuery) => Promise<UsageAggregateResponse>;
@@ -15,56 +17,25 @@ interface UsageAnalyticsPanelProps {
   refreshStorage?: () => Promise<void>;
 }
 
-const CATEGORY_LABELS: Record<string, string> = {
-  thread_uploads: '会话上传文件',
-  thread_agent_runtime: 'Agent 运行目录',
-  thread_plugins: '会话插件入口',
-  thread_workspace: '会话工作目录',
-  external_artifacts: '外部调用产物',
-  business_plugin_current: '业务插件当前版本',
-  business_plugin_snapshots: '业务插件历史快照',
-  database_logical: '数据库逻辑数据',
-};
-
-function formatMetric(value: number): string {
-  return value.toLocaleString();
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) return `${value} B`;
-  const units = ['KB', 'MB', 'GB', 'TB'];
-  let amount = value;
-  let unit = -1;
-  do {
-    amount /= 1024;
-    unit += 1;
-  } while (amount >= 1024 && unit < units.length - 1);
-  return `${amount.toFixed(amount >= 10 ? 1 : 2)} ${units[unit]}`;
-}
-
-function localDateKey(date: Date): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
-
 function TokenBreakdownTable({ title, rows }: { title: string; rows: TokenUsageBreakdown[] }) {
   return (
     <Card className="rounded-lg shadow-sm">
       <CardHeader className="pb-2"><CardTitle className="text-base">{title}</CardTitle></CardHeader>
       <CardContent>
         <Table>
-          <TableHeader><TableRow><TableHead>项目</TableHead><TableHead className="text-right">有效 Token</TableHead><TableHead className="text-right">尝试 Token</TableHead></TableRow></TableHeader>
+          <TableHeader><TableRow><TableHead>项目</TableHead><TableHead className="text-right">输入</TableHead><TableHead className="text-right">输出</TableHead><TableHead className="text-right">缓存输入</TableHead><TableHead className="text-right">有效 Token</TableHead><TableHead className="text-right">尝试 Token</TableHead></TableRow></TableHeader>
           <TableBody>
-            {rows.slice(0, 12).map((row) => (
+            {rows.map((row) => (
               <TableRow key={`${row.tenantId ?? ''}:${row.id}`}>
                 <TableCell className="max-w-64 truncate" title={row.label}>{row.label}</TableCell>
+                <TableCell className="text-right tabular-nums">{formatMetric(row.inputTokens)}</TableCell>
+                <TableCell className="text-right tabular-nums">{formatMetric(row.outputTokens)}</TableCell>
+                <TableCell className="text-right tabular-nums">{formatMetric(row.cachedInputTokens)}</TableCell>
                 <TableCell className="text-right tabular-nums">{formatMetric(row.effectiveTokens)}</TableCell>
                 <TableCell className="text-right tabular-nums">{formatMetric(row.attemptedTokens)}</TableCell>
               </TableRow>
             ))}
-            {rows.length === 0 && <TableRow><TableCell colSpan={3} className="text-center text-muted-foreground">暂无数据</TableCell></TableRow>}
+            {rows.length === 0 && <TableRow><TableCell colSpan={6} className="text-center text-muted-foreground">暂无数据</TableCell></TableRow>}
           </TableBody>
         </Table>
       </CardContent>
@@ -133,34 +104,18 @@ export function UsageAnalyticsPanel({
     }
   }, [load, query, refreshStorage]);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    setData(null);
+    void refresh();
+    return () => { requestSequence.current += 1; };
+  }, [refresh]);
 
-  const dailyMap = useMemo(() => new Map(data?.tokens.daily.map((day) => [day.date, day]) ?? []), [data]);
-  const heatmapDays = useMemo(() => {
-    const weekCount = Math.ceil(rangeDays / 7);
-    const today = new Date();
-    const end = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    end.setDate(end.getDate() + (6 - end.getDay()));
-    const start = new Date(end);
-    start.setDate(start.getDate() - (weekCount * 7 - 1));
-    return Array.from({ length: weekCount * 7 }, (_, index) => {
-      const date = new Date(start);
-      date.setDate(start.getDate() + index);
-      const key = localDateKey(date);
-      return { date: key, tokens: dailyMap.get(key)?.attemptedTokens ?? 0, future: date > today };
-    });
-  }, [dailyMap, rangeDays]);
-  const heatmapWeekCount = Math.ceil(heatmapDays.length / 7);
-  const heatmapWeeks = Array.from({ length: heatmapWeekCount }, (_, week) => heatmapDays.slice(week * 7, week * 7 + 7));
-  const maxDaily = Math.max(1, ...heatmapDays.map((day) => day.tokens));
   const options = data?.options;
   const users = options?.users.filter((option) => tenantId === 'all' || option.tenantId === tenantId) ?? [];
   const spaces = options?.spaces.filter((option) => tenantId === 'all' || option.tenantId === tenantId) ?? [];
-  const storageHistory = data?.storage.history ?? [];
-  const maxStorage = Math.max(1, ...storageHistory.map((point) => point.logicalBytes));
 
   return (
-    <div className="grid h-full min-h-0 content-start gap-4 overflow-y-auto pr-1">
+    <div className="grid h-full min-h-0 min-w-0 content-start gap-4 overflow-y-auto pr-1">
       <div className="flex flex-wrap items-center gap-2">
         <Select value={String(rangeDays)} onValueChange={(value) => setRangeDays(Number(value))}>
           <SelectTrigger className="w-36"><SelectValue /></SelectTrigger>
@@ -193,27 +148,17 @@ export function UsageAnalyticsPanel({
         <Card className="rounded-lg shadow-sm"><CardHeader className="pb-2"><CardDescription>有效 Token</CardDescription><CardTitle>{formatMetric(data?.tokens.totals.effectiveTokens ?? 0)}</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">成功请求的输入与输出</CardContent></Card>
         <Card className="rounded-lg shadow-sm"><CardHeader className="pb-2"><CardDescription>尝试 Token</CardDescription><CardTitle>{formatMetric(data?.tokens.totals.attemptedTokens ?? 0)}</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">包含失败和重试，共 {formatMetric(data?.tokens.totals.attempts ?? 0)} 次尝试</CardContent></Card>
         <Card className="rounded-lg shadow-sm"><CardHeader className="pb-2"><CardDescription>缓存输入</CardDescription><CardTitle>{formatMetric(data?.tokens.totals.cachedInputTokens ?? 0)}</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">属于输入 Token 的缓存部分</CardContent></Card>
-        <Card className="rounded-lg shadow-sm"><CardHeader className="pb-2"><CardDescription>当前存储</CardDescription><CardTitle>{formatBytes(data?.storage.totals.logicalBytes ?? 0)}</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">磁盘分配 {formatBytes(data?.storage.totals.allocatedBytes ?? 0)} · {data?.storage.capturedAt ? new Date(data.storage.capturedAt).toLocaleString() : '等待扫描'}</CardContent></Card>
+        <Card className="rounded-lg shadow-sm"><CardHeader className="pb-2"><CardDescription>当前存储</CardDescription><CardTitle>{formatBytes(data?.storage.totals.logicalBytes ?? 0)}</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">磁盘分配 {formatBytes(data?.storage.totals.allocatedBytes ?? 0)} · {data?.storage.capturedAt ? `${shanghaiTime(data.storage.capturedAt)}（北京时间）` : '等待扫描'}</CardContent></Card>
       </div>
 
       <Card className="rounded-lg shadow-sm">
-        <CardHeader><CardTitle>每日 Token</CardTitle><CardDescription>当前时间范围；失败和重试也会消耗供应商额度，因此热力图展示尝试 Token</CardDescription></CardHeader>
-        <CardContent className="grid gap-3 overflow-x-auto">
-          <div className="grid w-max gap-1" style={{ gridTemplateColumns: `auto repeat(${heatmapWeekCount}, 0.875rem)` }}>
-            <div />
-            {heatmapWeeks.map((week, index) => <div key={week[0]?.date ?? index} className="h-3 text-[10px] tabular-nums text-muted-foreground">{index % 3 === 0 ? week[0]?.date.slice(5) : ''}</div>)}
-            {['日', '一', '二', '三', '四', '五', '六'].map((weekday, row) => (
-              <Fragment key={weekday}>
-                <div className="flex h-3 items-center pr-1 text-[10px] text-muted-foreground">{row % 2 === 1 ? weekday : ''}</div>
-                {heatmapWeeks.map((week, column) => {
-                  const day = week[row];
-                  const ratio = (day?.tokens ?? 0) / maxDaily;
-                  return <div key={`${day?.date ?? column}-${row}`} className={cn('size-3 rounded-[2px] border border-border/60', day?.future && 'opacity-35')} style={{ backgroundColor: day?.future ? 'transparent' : day?.tokens ? `hsl(var(--primary) / ${Math.max(0.18, ratio).toFixed(2)})` : 'hsl(var(--muted))' }} title={day ? `${day.date} · ${formatMetric(day.tokens)} Token` : '暂无数据'} />;
-                })}
-              </Fragment>
-            ))}
-          </div>
-        </CardContent>
+        <CardHeader><CardTitle>每日 Token</CardTitle><CardDescription>按实际模型请求日期（北京时间）记录；输入与输出包含失败、重试，缓存输入是输入的子集，不重复相加。拖动底部滑块缩放日期，点击图例切换序列。</CardDescription></CardHeader>
+        <CardContent className="min-w-0"><DailyTokenChart data={data} /></CardContent>
+      </Card>
+
+      <Card className="min-w-0 rounded-lg shadow-sm">
+        <CardHeader><CardTitle>按模型消耗</CardTitle><CardDescription>全部供应商与模型的输入、输出 Token；超过 12 项时拖动右侧滑块或在图内滚动查看，明细表保留全部项目。</CardDescription></CardHeader>
+        <CardContent className="min-w-0"><ModelUsageChart data={data} /></CardContent>
       </Card>
 
       <div className="grid gap-4 xl:grid-cols-2">
@@ -223,21 +168,12 @@ export function UsageAnalyticsPanel({
         <TokenBreakdownTable title="按模型" rows={data?.tokens.byModel ?? []} />
       </div>
       <Card className="rounded-lg shadow-sm">
-        <CardHeader><CardTitle>存储趋势</CardTitle><CardDescription>每日时点逻辑大小；历史从启用采样后开始积累</CardDescription></CardHeader>
-        <CardContent className="overflow-x-auto">
-          {storageHistory.length > 0 ? (
-            <div className="flex h-36 min-w-max items-end gap-1 border-b pb-1">
-              {storageHistory.map((point) => (
-                <div
-                  key={point.at}
-                  className="w-2 shrink-0 rounded-t-sm bg-primary/75"
-                  style={{ height: `${Math.max(3, (point.logicalBytes / maxStorage) * 132)}px` }}
-                  title={`${new Date(point.at).toLocaleDateString()} · ${formatBytes(point.logicalBytes)}`}
-                />
-              ))}
-            </div>
-          ) : <div className="py-10 text-center text-sm text-muted-foreground">日样本将在首次扫描后显示</div>}
-        </CardContent>
+        <CardHeader><CardTitle>存储趋势</CardTitle><CardDescription>每日采样桶的逻辑大小与磁盘分配；北京时间展示。缺少样本的日期保留断点，不补零、不跨缺样连线。</CardDescription></CardHeader>
+        <CardContent className="min-w-0"><StorageHistoryChart data={data} /></CardContent>
+      </Card>
+      <Card className="min-w-0 rounded-lg shadow-sm">
+        <CardHeader><CardTitle>存储分类对比</CardTitle><CardDescription>最新扫描的逻辑大小和磁盘分配，不相加；悬浮查看精确字节数。</CardDescription></CardHeader>
+        <CardContent className="min-w-0"><StorageCategoryChart rows={data?.storage.byCategory ?? []} /></CardContent>
       </Card>
       <StorageBreakdownTable rows={data?.storage.byCategory ?? []} />
     </div>

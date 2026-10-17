@@ -131,12 +131,12 @@ function addProviderAliases(
   owners: Map<string, ModelCatalogEntry>,
 ): void {
   if (!isRecord(input)) throw new Error('models.dev api.json 顶层必须是对象');
-  const byIdentity = new Map<string, ModelCatalogEntry>();
+  const byIdentity = new Map<string, ModelCatalogEntry | null>();
   for (const row of rows) {
     const identity = modelIdentity(row.source);
     if (!identity) continue;
-    if (byIdentity.has(identity)) throw new Error(`models.dev 规范模型身份重复：${row.entry.model}`);
-    byIdentity.set(identity, row.entry);
+    // 同名、同系列、同发布日期仍可能对应不同规格；保留完整模型，只停止推断这组身份的供应商别名。
+    byIdentity.set(identity, byIdentity.has(identity) ? null : row.entry);
   }
 
   const candidates = new Map<string, Array<{ alias: string; entry: ModelCatalogEntry }>>();
