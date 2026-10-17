@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type {
   CreateSpaceInput,
   RuntimeCapabilityName,
@@ -35,13 +35,12 @@ interface Draft {
 }
 
 interface Props {
-  open: boolean;
   space: SpaceSummary | null;
   options: SpaceOptions | null;
   users: TenantUserSummary[];
   saving: boolean;
   error: string;
-  onOpenChange: (open: boolean) => void;
+  onCancel: () => void;
   onSave: (input: CreateSpaceInput | UpdateSpaceInput) => void;
 }
 
@@ -175,11 +174,27 @@ function CapabilitySection({
   );
 }
 
-export function SpaceEditorDialog({ open, space, options, users, saving, error, onOpenChange, onSave }: Props) {
+export function SpaceEditor({ space, options, users, saving, error, onCancel, onSave }: Props) {
   const [draft, setDraft] = useState<Draft>(() => initialDraft(space, options));
+  const baseline = useRef(draft);
   useEffect(() => {
-    if (open) setDraft(initialDraft(space, options));
-  }, [open, options, space]);
+    const incoming = initialDraft(space, options);
+    const previous = baseline.current;
+    baseline.current = incoming;
+    // 同一空间其他标签页保存时，只接收未编辑字段的新值，保留当前草稿。
+    setDraft((current) => {
+      const merged = { ...incoming } as Record<keyof Draft, Draft[keyof Draft]>;
+      for (const field of Object.keys(incoming) as Array<keyof Draft>) {
+        const value = current[field];
+        const original = previous[field];
+        const unchanged = Array.isArray(value) && Array.isArray(original)
+          ? value.length === original.length && value.every((item, index) => item === original[index])
+          : value === original;
+        if (!unchanged) merged[field] = value;
+      }
+      return merged as Draft;
+    });
+  }, [options, space]);
 
   const activeUsers = users.filter((user) => user.status === 'active');
   const visibleMembers = users.filter((user) => user.role === 'member');
@@ -271,15 +286,7 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[92vh] max-w-3xl overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>{space ? '编辑空间' : '新建空间'}</DialogTitle>
-          <DialogDescription>
-            新建时会复制租户当前可用能力，保存后由空间独立维护选择列表。
-          </DialogDescription>
-        </DialogHeader>
-
+    <div className="grid gap-4">
         <div className="grid gap-4">
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="grid gap-1.5 text-sm">
@@ -485,9 +492,25 @@ export function SpaceEditorDialog({ open, space, options, users, saving, error, 
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button variant="outline" onClick={() => { setDraft(initialDraft(space, options)); onCancel(); }}>{space ? '重置修改' : '取消'}</Button>
           <Button onClick={submit} disabled={!canSave}>{saving ? '保存中…' : '保存'}</Button>
         </DialogFooter>
+    </div>
+  );
+}
+
+export function SpaceEditorDialog({ open, onOpenChange, ...props }: Omit<Props, 'onCancel'> & {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[92vh] max-w-3xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>新建空间</DialogTitle>
+          <DialogDescription>新建时复制租户当前可用能力，保存后由空间独立维护。</DialogDescription>
+        </DialogHeader>
+        <SpaceEditor {...props} onCancel={() => onOpenChange(false)} />
       </DialogContent>
     </Dialog>
   );

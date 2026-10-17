@@ -127,7 +127,7 @@ function allocatedBytes(info: Awaited<ReturnType<typeof lstat>>): number {
 }
 
 /** 统计一个路径；符号链接只计算链接本身，绝不进入链接指向的共享目录。 */
-export async function scanStoragePath(path: string): Promise<StorageMetric> {
+export async function scanStoragePath(path: string, options: { includeSymlinks?: boolean } = {}): Promise<StorageMetric> {
   const total = { ...EMPTY_STORAGE };
   let info;
   try {
@@ -137,6 +137,7 @@ export async function scanStoragePath(path: string): Promise<StorageMetric> {
     throw error;
   }
   if (info.isSymbolicLink()) {
+    if (options.includeSymlinks === false) return total;
     total.logicalBytes = info.size;
     total.allocatedBytes = allocatedBytes(info);
     total.symlinkCount = 1;
@@ -159,7 +160,7 @@ export async function scanStoragePath(path: string): Promise<StorageMetric> {
     throw error;
   }
   for (const entry of entries) {
-    addStorage(total, await scanStoragePath(join(path, entry.name)));
+    addStorage(total, await scanStoragePath(join(path, entry.name), options));
   }
   return total;
 }

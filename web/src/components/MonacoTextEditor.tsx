@@ -10,20 +10,24 @@ interface Props {
   language: string;
   theme: string;
   value: string;
-  onChange: (value: string) => void;
+  readOnly?: boolean;
+  onChange?: (value: string) => void;
   onSave?: () => void;
+  onReachEnd?: () => void;
 }
 
 type WordWrapMode = 'off' | 'on';
 
-export function MonacoTextEditor({ path, language, theme, value, onChange, onSave }: Props) {
+export function MonacoTextEditor({ path, language, theme, value, readOnly = false, onChange, onSave, onReachEnd }: Props) {
   const saveRef = useRef(onSave);
+  const reachEndRef = useRef(onReachEnd);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const [wordWrap, setWordWrap] = useState<WordWrapMode>('off');
 
   useEffect(() => {
     saveRef.current = onSave;
-  }, [onSave]);
+    reachEndRef.current = onReachEnd;
+  }, [onSave, onReachEnd]);
 
   function toggleWordWrap() {
     setWordWrap((current) => {
@@ -40,14 +44,19 @@ export function MonacoTextEditor({ path, language, theme, value, onChange, onSav
       path={path}
       theme={theme}
       value={value}
-      onChange={(nextValue) => onChange(nextValue ?? '')}
+      onChange={(nextValue) => { if (!readOnly) onChange?.(nextValue ?? ''); }}
       onMount={(editor) => {
         editorRef.current = editor;
         editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveRef.current?.());
         editor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.KeyZ, toggleWordWrap);
+        editor.onDidScrollChange(() => {
+          if (editor.getScrollTop() + editor.getLayoutInfo().height >= editor.getScrollHeight() - 120) reachEndRef.current?.();
+        });
       }}
       options={{
         automaticLayout: true,
+        readOnly,
+        domReadOnly: readOnly,
         fontSize: 13,
         minimap: { enabled: true },
         scrollBeyondLastLine: false,

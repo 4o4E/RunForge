@@ -9,12 +9,16 @@ export interface RemoteFileEntry {
 export interface RemoteFileList {
   path: string;
   parent: string | null;
+  /** 当前目录可见内容的递归逻辑字节数，不计符号链接。 */
+  totalSize: number;
   entries: RemoteFileEntry[];
 }
 
 export interface FilePreview {
   path: string;
   size: number;
+  updatedAt: string;
+  binary?: true;
   mode: 'full' | 'chunk';
   startLine: number;
   lines: string[];
@@ -50,6 +54,7 @@ export interface FileHexRow {
 export interface FileHexPreview {
   path: string;
   size: number;
+  updatedAt: string;
   offset: number;
   limit: number;
   rows: FileHexRow[];

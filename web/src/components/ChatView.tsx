@@ -10,6 +10,7 @@ import type { AskUserDraft } from './AskUserCard';
 import { TableOfContents } from './TableOfContents';
 import { cn } from '@/lib/utils';
 import type { LlmModelOption } from '@/api';
+import { ThreadStorageUsage } from './ThreadInspection';
 
 function latestUsageFromMessages(messages: UIMessage[]) {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -129,7 +130,7 @@ export function ChatView({
           : '开启后台通知';
   return (
     <main className="app-main-surface relative flex h-full min-w-0 flex-1 flex-col">
-      <header className="app-topbar-surface flex h-14 shrink-0 items-center border-b px-3 sm:px-6">
+      <header className="app-topbar-surface flex min-h-14 shrink-0 flex-wrap items-center border-b px-3 py-2 sm:h-14 sm:flex-nowrap sm:px-6 sm:py-0">
         {mobile && (
           <Button
             type="button"
@@ -142,13 +143,14 @@ export function ChatView({
             <Menu className="size-4" />
           </Button>
         )}
-        <h1 className="truncate text-sm font-semibold">{title}</h1>
+        <h1 className="min-w-0 flex-1 truncate text-sm font-semibold sm:flex-initial">{title}</h1>
         {space && <span className="ml-2 hidden truncate text-xs text-muted-foreground sm:inline">{space.name}</span>}
-        {readOnly && space && <Badge variant="outline" className="ml-3">外部只读</Badge>}
-        <Badge variant={busy ? 'default' : 'secondary'} className="ml-3">
+        {readOnly && space && <Badge variant="outline" className="ml-3 shrink-0 whitespace-nowrap">内容只读</Badge>}
+        <Badge variant={busy ? 'default' : 'secondary'} className="ml-3 shrink-0 whitespace-nowrap">
           {busy ? '运行中' : '空闲'}
         </Badge>
-        <div className="ml-auto flex items-center gap-2">
+        <span className="order-last w-full pt-1 pl-10 sm:order-none sm:ml-3 sm:w-auto sm:shrink-0 sm:pt-0 sm:pl-0"><ThreadStorageUsage thread={thread} /></span>
+        <div className="ml-auto flex shrink-0 items-center gap-2">
           {!readOnly && canContinueRun && (
             <Button
               type="button"
@@ -207,17 +209,6 @@ export function ChatView({
         </div>
       </header>
 
-      {readOnly && thread && (
-        <div className="shrink-0 border-b bg-muted/20 px-3 py-2 text-xs text-muted-foreground sm:px-6">
-          <span className="font-medium text-foreground">外部来源</span>
-          <span className="ml-2">调用方 {thread.source_caller_id ?? '未知'}</span>
-          {Object.keys(thread.source_ref).length > 0 && (
-            <span className="ml-2 break-all" title={JSON.stringify(thread.source_ref)}>
-              {JSON.stringify(thread.source_ref)}
-            </span>
-          )}
-        </div>
-      )}
 
       {!rightPanelOpen && (
         <div

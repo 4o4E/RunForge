@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 import { init, use, type EChartsType } from 'echarts/core';
 import type { DataZoomComponentOption, EChartsOption } from 'echarts';
 import { BarChart, LineChart } from 'echarts/charts';
@@ -69,6 +69,13 @@ export const dateZoom: DataZoomComponentOption[] = [
   { type: 'slider', xAxisIndex: 0, bottom: 4, height: 22, filterMode: 'none' },
 ];
 
+export function categoryZoom(count: number): DataZoomComponentOption[] {
+  return count > 12 ? [
+    { type: 'slider', yAxisIndex: 0, right: 2, width: 20, startValue: 0, endValue: 11, filterMode: 'none' },
+    { type: 'inside', yAxisIndex: 0, startValue: 0, endValue: 11, filterMode: 'none', zoomOnMouseWheel: false, moveOnMouseWheel: true },
+  ] : [];
+}
+
 export function UsageChart({ option, label, empty = false, emptyText = '当前范围暂无数据', height = 340 }: {
   option: EChartsOption;
   label: string;
@@ -80,7 +87,7 @@ export function UsageChart({ option, label, empty = false, emptyText = '当前�
   const { theme } = useThemeCtx();
   const instance = useRef<EChartsType | null>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!container.current || empty) return;
     const chart = init(container.current, theme === 'dark' ? 'dark' : undefined, { renderer: 'canvas' });
     instance.current = chart;
@@ -115,7 +122,11 @@ export function UsageChart({ option, label, empty = false, emptyText = '当前�
     }, { notMerge: true });
   }, [empty, label, option, theme]);
 
-  return empty ? (
-    <div className="flex items-center justify-center text-sm text-muted-foreground" style={{ height }} role="status">{emptyText}</div>
-  ) : <div ref={container} className="w-full min-w-0" style={{ height }} role="img" aria-label={label} />;
+  // 图表独占内部 DOM；空态使用独立节点，React 不写入 ECharts 管理的容器。
+  return (
+    <div className="w-full min-w-0" style={{ height }}>
+      <div ref={container} className={empty ? 'hidden' : 'h-full w-full min-w-0'} role="img" aria-label={label} aria-hidden={empty} />
+      {empty && <div className="flex h-full items-center justify-center text-sm text-muted-foreground" role="status">{emptyText}</div>}
+    </div>
+  );
 }

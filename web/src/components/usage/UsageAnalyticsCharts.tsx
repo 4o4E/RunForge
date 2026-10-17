@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import type { EChartsOption } from 'echarts';
-import type { StorageUsageBreakdown, TokenUsageTotals, UsageAggregateResponse } from '@runforge/contracts';
-import { UsageChart, dateZoom, exactBytes, formatBytes, formatMetric, shanghaiDate, shanghaiTime, tooltipIndex, tooltipRows, usageDates } from './UsageChart';
+import type { StorageUsageBreakdown, TokenUsageBreakdown, TokenUsageTotals, UsageAggregateResponse } from '@runforge/contracts';
+import { UsageChart, categoryZoom, dateZoom, exactBytes, formatBytes, formatMetric, shanghaiDate, shanghaiTime, tooltipIndex, tooltipRows, usageDates } from './UsageChart';
 
 export const CATEGORY_LABELS: Record<string, string> = {
   thread_uploads: '会话上传文件',
@@ -12,6 +12,12 @@ export const CATEGORY_LABELS: Record<string, string> = {
   business_plugin_current: '业务插件当前版本',
   business_plugin_snapshots: '业务插件历史快照',
   database_logical: '数据库逻辑数据',
+  user_files: '用户文件（非空间）',
+  legacy_thread_workspace: '旧版会话工作目录',
+  orphan_legacy_thread_workspace: '旧版会话遗留目录',
+  space_skills: '空间技能',
+  space_plugins: '空间插件',
+  space_agents: '空间 Agent',
 };
 
 function tokenTooltip(title: string, row: TokenUsageTotals | undefined): string {
@@ -49,26 +55,22 @@ export function DailyTokenChart({ data }: { data: UsageAggregateResponse | null 
   return <UsageChart option={option} label="每日实际 Token 消耗，输入输出堆叠柱形与缓存、有效 Token 折线" empty={!data || data.tokens.daily.length === 0} height={360} />;
 }
 
-export function ModelUsageChart({ data }: { data: UsageAggregateResponse | null }) {
-  const rows = data?.tokens.byModel ?? [];
+export function TokenBreakdownChart({ rows, label }: { rows: TokenUsageBreakdown[]; label: string }) {
   const option = useMemo<EChartsOption>(() => ({
     grid: { top: 48, bottom: 36, left: 12, right: rows.length > 12 ? 48 : 24, containLabel: true },
     xAxis: { type: 'value', name: 'Token', axisLabel: { formatter: (value: number) => formatMetric(value) } },
     yAxis: { type: 'category', inverse: true, data: rows.map((row) => row.label), axisLabel: { width: 180, overflow: 'truncate', fontSize: 11 } },
-    dataZoom: rows.length > 12 ? [
-      { type: 'slider', yAxisIndex: 0, right: 2, width: 20, startValue: 0, endValue: 11, filterMode: 'none' },
-      { type: 'inside', yAxisIndex: 0, startValue: 0, endValue: 11, filterMode: 'none', zoomOnMouseWheel: false, moveOnMouseWheel: true },
-    ] : [],
+    dataZoom: categoryZoom(rows.length),
     tooltip: { axisPointer: { type: 'shadow' }, formatter: (params) => {
       const row = rows[tooltipIndex(params)];
-      return row ? tokenTooltip(row.label, row) : '';
+      return row ? tokenTooltip(`${row.label}${row.tenantId ? ` · 租户 ${row.tenantId}` : ''} · ${row.id}`, row) : '';
     } },
     series: [
       { name: '输入', type: 'bar', stack: 'tokens', barMaxWidth: 26, data: rows.map((row) => row.inputTokens) },
       { name: '输出', type: 'bar', stack: 'tokens', barMaxWidth: 26, data: rows.map((row) => row.outputTokens) },
     ],
   }), [rows]);
-  return <UsageChart option={option} label="所有供应商与模型的实际 Token 消耗，可拖动右侧缩放条查看全部模型" empty={rows.length === 0} height={Math.max(300, Math.min(12, rows.length) * 34 + 90)} />;
+  return <UsageChart option={option} label={`${label}，可拖动右侧滑块或滚动查看全部项目，悬浮查看精确用量与尝试次数`} empty={rows.length === 0} height={Math.max(300, Math.min(12, rows.length) * 34 + 90)} />;
 }
 
 export function StorageHistoryChart({ data }: { data: UsageAggregateResponse | null }) {
@@ -98,14 +100,15 @@ export function StorageHistoryChart({ data }: { data: UsageAggregateResponse | n
   return <UsageChart option={option} label="存储逻辑大小与磁盘分配历史，缺少采样的日期保留断点" empty={!data || data.storage.history.length === 0} emptyText="等待首次存储日样本" />;
 }
 
-export function StorageCategoryChart({ rows }: { rows: StorageUsageBreakdown[] }) {
+function StorageComparisonChart({ rows, label }: { rows: StorageUsageBreakdown[]; label: string }) {
   const option = useMemo<EChartsOption>(() => ({
-    grid: { top: 48, bottom: 30, left: 12, right: 24, containLabel: true },
+    grid: { top: 48, bottom: 30, left: 12, right: rows.length > 12 ? 48 : 24, containLabel: true },
     xAxis: { type: 'value', axisLabel: { formatter: (value: number) => formatBytes(value) } },
-    yAxis: { type: 'category', inverse: true, data: rows.map((row) => CATEGORY_LABELS[row.id] ?? row.label), axisLabel: { width: 160, overflow: 'truncate', fontSize: 11 } },
+    yAxis: { type: 'category', inverse: true, data: rows.map((row) => row.label), axisLabel: { width: 180, overflow: 'truncate', fontSize: 11 } },
+    dataZoom: categoryZoom(rows.length),
     tooltip: { axisPointer: { type: 'shadow' }, formatter: (params) => {
       const row = rows[tooltipIndex(params)];
-      return row ? tooltipRows(CATEGORY_LABELS[row.id] ?? row.label, [
+      return row ? tooltipRows(`${row.label}${row.tenantId ? ` · 租户 ${row.tenantId}` : ''} · ${row.id}`, [
         ['逻辑大小', exactBytes(row.logicalBytes)], ['磁盘分配', exactBytes(row.allocatedBytes)],
         ['文件', formatMetric(row.fileCount)], ['符号链接', formatMetric(row.symlinkCount)],
       ]) : '';
@@ -115,5 +118,39 @@ export function StorageCategoryChart({ rows }: { rows: StorageUsageBreakdown[] }
       { name: '磁盘分配', type: 'bar', barMaxWidth: 18, data: rows.map((row) => row.allocatedBytes) },
     ],
   }), [rows]);
-  return <UsageChart option={option} label="各存储分类的逻辑大小和磁盘分配比较" empty={rows.length === 0} emptyText="等待首次存储扫描" height={Math.max(300, rows.length * 46 + 80)} />;
+  return <UsageChart option={option} label={label} empty={rows.length === 0} emptyText="等待首次存储扫描" height={Math.max(300, Math.min(12, rows.length) * 46 + 80)} />;
+}
+
+export function StorageCategoryChart({ rows }: { rows: StorageUsageBreakdown[] }) {
+  const categories = useMemo(() => rows.map((row) => ({ ...row, label: CATEGORY_LABELS[row.id] ?? row.label })), [rows]);
+  return <StorageComparisonChart rows={categories} label="各存储分类的逻辑大小和磁盘分配比较，可滚动查看全部分类" />;
+}
+
+export function StorageSpaceChart({ data }: { data: UsageAggregateResponse | null }) {
+  const rows = useMemo<StorageUsageBreakdown[]>(() => {
+    if (!data) return [];
+    const spaces = data.storage.bySpace;
+    const userFiles = data.storage.byCategory.find((row) => row.id === 'user_files');
+    // 空间汇总不含用户文件或租户共享数据，差额只能标为非空间存储。
+    const nonSpace = spaces.reduce((remaining, row) => ({
+      logicalBytes: remaining.logicalBytes - row.logicalBytes,
+      allocatedBytes: remaining.allocatedBytes - row.allocatedBytes,
+      fileCount: remaining.fileCount - row.fileCount,
+      symlinkCount: remaining.symlinkCount - row.symlinkCount,
+    }), { ...data.storage.totals });
+    const other = {
+      id: 'non-space-other',
+      label: '其他非空间存储（租户共享等）',
+      logicalBytes: nonSpace.logicalBytes - (userFiles?.logicalBytes ?? 0),
+      allocatedBytes: nonSpace.allocatedBytes - (userFiles?.allocatedBytes ?? 0),
+      fileCount: nonSpace.fileCount - (userFiles?.fileCount ?? 0),
+      symlinkCount: nonSpace.symlinkCount - (userFiles?.symlinkCount ?? 0),
+    };
+    return [
+      ...spaces,
+      ...(userFiles ? [{ ...userFiles, label: CATEGORY_LABELS.user_files! }] : []),
+      ...(other.logicalBytes || other.allocatedBytes || other.fileCount || other.symlinkCount ? [other] : []),
+    ];
+  }, [data]);
+  return <StorageComparisonChart rows={rows} label="按空间比较逻辑大小和磁盘分配，用户文件及其他非空间存储独立列出，可滚动查看全部项目" />;
 }

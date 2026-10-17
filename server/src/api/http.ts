@@ -50,6 +50,7 @@ import { runTraceWriter } from '../observability/runTrace.js';
 import { usageApi } from './usage.js';
 import { threadHistoryResponseSchema, threadHistoryRunSchema, type ThreadHistoryRun } from '@runforge/contracts';
 import { historyStepView } from '../store/historyView.js';
+import { threadInspectionApi } from './threadInspection.js';
 
 export const api = Router();
 
@@ -133,6 +134,22 @@ async function checkThreadSpaceAccess(
   }
 }
 
+// 外部空间只允许租户管理员维护共享对话；这不授予消息、运行或文件的写入权限。
+async function resolveThreadManagementAccess(
+  res: Response,
+  identity: Extract<IdentityContext, { scope: 'tenant' }>,
+  threadId: string,
+) {
+  try {
+    const access = await threadReadAccess.resolve(identity, threadId);
+    if (access.readOnly) await spaceAccess.requireManagedSpace(identity, access.thread.space_id);
+    return access;
+  } catch (error) {
+    sendThreadReadError(res, error);
+    return null;
+  }
+}
+
 function sendRunActiveConflict(res: Response, err: unknown): boolean {
   if (err instanceof DeleteConflictError) {
     res.status(409).json({ error: err.message, code: err.code });
@@ -187,6 +204,7 @@ api.use('/settings', settingsApi);
 api.use('/datasources', datasourcesApi);
 api.use('/notifications', notificationsApi);
 api.use('/usage', usageApi);
+api.use('/threads', threadInspectionApi);
 
 async function killRunShellCommands(scope: Scope, runId: string): Promise<void> {
   try {
@@ -489,13 +507,14 @@ api.get('/threads/:id', async (req, res) => {
 
 // 更新 thread 元信息：重命名、置顶/取消置顶、归档/取消归档。
 api.patch('/threads/:id', async (req, res) => {
-  const scope = scopeOrReject(res);
-  if (!scope) return;
   const identity = tenantIdentityOrReject(res);
   if (!identity) return;
-  const existing = await store.getThread(scope, req.params.id);
-  if (!existing) return res.status(404).json({ error: 'thread 不存在' });
-  if (!await checkThreadSpaceAccess(res, identity, existing.space_id, true)) return;
+  const access = await resolveThreadManagementAccess(res, identity, req.params.id);
+  if (!access) return;
+  const { executionScope: scope } = access;
+  if (access.readOnly && Object.prototype.hasOwnProperty.call(req.body ?? {}, 'activeRunId')) {
+    return res.status(403).json({ error: '外部任务不能通过 Web 切换运行分支', code: 'SPACE_READ_ONLY' });
+  }
   const fields: { title?: string | null; pinned?: boolean; archived?: boolean; activeRunId?: string | null } = {};
   if (Object.prototype.hasOwnProperty.call(req.body ?? {}, 'title')) {
     const title = typeof req.body.title === 'string' ? req.body.title.trim() : '';
@@ -532,13 +551,11 @@ api.get('/threads/:id/subagents', async (req, res) => {
 
 // 归档后的 thread 才能永久删除；活动任务先停止，数据库删除后直接清理文件。
 api.delete('/threads/:id', async (req, res) => {
-  const scope = scopeOrReject(res);
-  if (!scope) return;
   const identity = tenantIdentityOrReject(res);
   if (!identity) return;
-  const thread = await store.getThread(scope, req.params.id);
-  if (!thread) return res.status(404).json({ error: 'thread 不存在' });
-  if (!await checkThreadSpaceAccess(res, identity, thread.space_id, true)) return;
+  const access = await resolveThreadManagementAccess(res, identity, req.params.id);
+  if (!access) return;
+  const { thread, executionScope: scope } = access;
   if (!thread.archived_at) {
     return res.status(409).json({ error: '只能永久删除已经归档的对话', code: 'THREAD_NOT_ARCHIVED' });
   }

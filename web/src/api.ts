@@ -29,6 +29,7 @@ import type {
   SubagentRun,
   TenantUserSummary,
   Thread,
+  ThreadInspection,
   ThreadDetailResponse,
   ThreadForkResponse,
   ThreadSearchResponse,
@@ -294,6 +295,9 @@ export const listThreads = (options: { archived?: boolean; spaceId?: string | nu
   return authFetch(`/api/threads${query ? `?${query}` : ''}`).then(json<Thread[]>);
 };
 
+export const getThreadInspection = (id: string) =>
+  authFetch(`/api/threads/${encodeURIComponent(id)}/inspection`).then(json<ThreadInspection>);
+
 export const searchThreads = (query: string, limit = 50, spaceId?: string | null) => {
   const params = new URLSearchParams({ q: query, limit: String(limit) });
   if (spaceId) params.set('spaceId', spaceId);
@@ -374,7 +378,7 @@ export const getRemoteFileInfo = (threadId?: string | null) => {
   return authFetch(`/api/files/info${query ? `?${query}` : ''}`).then(json<RemoteFileInfo>);
 };
 
-export const previewRemoteFile = (path: string, startLine = 1, limit = 200, options: { render?: boolean; share?: FileShareAccess; threadId?: string | null } = {}) => {
+export const previewRemoteFile = (path: string, startLine = 1, limit = 200, options: { render?: boolean; source?: boolean; share?: FileShareAccess; threadId?: string | null } = {}) => {
   const params = new URLSearchParams({
     path,
     startLine: String(startLine),
@@ -383,6 +387,7 @@ export const previewRemoteFile = (path: string, startLine = 1, limit = 200, opti
   if (options.threadId === '@user') params.set('location', 'user');
   else if (options.threadId) params.set('threadId', options.threadId);
   if (options.render) params.set('render', '1');
+  if (options.source) params.set('source', '1');
   if (options.share) {
     params.set('tenant', options.share.tenant);
     params.set('user', options.share.user);
@@ -454,8 +459,16 @@ export const createRemoteFileShareLink = (path: string, ttlSeconds: number, thre
 export const signedRemoteFileRawUrl = (path: string, ttlSeconds = 24 * 60 * 60, threadId?: string | null) =>
   createRemoteFileShareLink(path, ttlSeconds, threadId).then((link) => link.rawUrl);
 
-export const getRemoteFileContent = (path: string, threadId?: string | null) => {
+export const getRemoteFileContent = (path: string, threadId?: string | null, share?: FileShareAccess) => {
   const params = fileQuery(path, threadId);
+  if (share) {
+    params.set('tenant', share.tenant);
+    params.set('user', share.user);
+    params.set('spaceId', share.spaceId);
+    params.set('expires', share.expires);
+    params.set('sig', share.sig);
+    params.set('threadId', share.threadId);
+  }
   return authFetch(`/api/files/content?${params.toString()}`).then(json<FileTextContent>);
 };
 

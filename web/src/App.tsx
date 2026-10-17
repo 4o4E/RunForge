@@ -9,6 +9,7 @@ import {
   cancelRun,
   continueRun,
   createThread,
+  deleteThread,
   forkThreadFromRun,
   getCurrentUser,
   getLlmSettingsOptions,
@@ -53,6 +54,8 @@ import { WorkspaceFileContextProvider } from './components/WorkspaceFileContext'
 import { useNotifications } from './components/GlobalNotifications';
 import { browserPushSupported, currentBrowserPushPermission, disableBrowserPush, enableBrowserPush, readBrowserPushState, type BrowserPushState } from './notifications';
 import { attachmentToken, parseFileTokens } from './messageInput';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -499,6 +502,8 @@ export function App() {
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
   const [userFilesRoot, setUserFilesRoot] = useState<string | null>(null);
   const [currentUserRole, setCurrentUserRole] = useState<'owner' | 'admin' | 'member' | null>(null);
+  const [deleteThreadTarget, setDeleteThreadTarget] = useState<Thread | null>(null);
+  const [deletingThread, setDeletingThread] = useState(false);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [modelOptions, setModelOptions] = useState<LlmModelOption[]>([]);
   const [selectedModelRef, setSelectedModelRef] = useState(() => readStoredModelRef());
@@ -522,6 +527,7 @@ export function App() {
   const activeThreadId = route.threadId;
   const activeSpace = spaces.find((space) => space.id === route.spaceId) ?? null;
   const readOnly = !activeSpace || activeSpace.mode === 'external';
+  const canManageThreads = !readOnly || currentUserRole === 'owner' || currentUserRole === 'admin';
   const sidebarFrameRef = useRef<HTMLDivElement>(null);
   const conversationContentRef = useRef<HTMLDivElement>(null);
   const previousPanelThreadIdRef = useRef(activeThreadId);
@@ -1289,7 +1295,7 @@ export function App() {
   }
 
   async function renameThread(id: string) {
-    if (readOnly) return;
+    if (!canManageThreads) return;
     const current = threads.find((thread) => thread.id === id);
     const nextTitle = window.prompt('重命名会话', current?.title ?? '');
     if (nextTitle === null) return;
@@ -1298,14 +1304,14 @@ export function App() {
   }
 
   async function toggleThreadPin(id: string) {
-    if (readOnly) return;
+    if (!canManageThreads) return;
     const current = threads.find((thread) => thread.id === id);
     await updateThread(id, { pinned: !current?.pinned_at });
     refreshThreads();
   }
 
   async function archiveThread(id: string) {
-    if (readOnly) return;
+    if (!canManageThreads) return;
     stop();
     await updateThread(id, { archived: true });
     setThreads((current) => current.filter((thread) => thread.id !== id));
@@ -1313,6 +1319,28 @@ export function App() {
       setContinuableRunId(null);
       navigateChatRoute({ draft: '', spaceId: route.spaceId, threadId: null });
       setMessages([]);
+    }
+  }
+
+  async function permanentlyDeleteThread() {
+    if (!deleteThreadTarget || deletingThread) return;
+    setDeletingThread(true);
+    try {
+      // 保留服务端“先归档后删除”的约束，确认后一起清理消息、运行和工作目录。
+      await updateThread(deleteThreadTarget.id, { archived: true });
+      await deleteThread(deleteThreadTarget.id);
+      setThreads((current) => current.filter((thread) => thread.id !== deleteThreadTarget.id));
+      if (activeThreadId === deleteThreadTarget.id) {
+        stop();
+        navigateChatRoute({ draft: '', spaceId: route.spaceId, threadId: null });
+        setMessages([]);
+      }
+      setDeleteThreadTarget(null);
+    } catch (error) {
+      notify({ variant: 'error', title: '删除对话失败', description: (error as Error).message });
+      refreshThreads();
+    } finally {
+      setDeletingThread(false);
     }
   }
 
@@ -1738,6 +1766,7 @@ export function App() {
           spaces={spaces}
           activeSpaceId={route.spaceId}
           readOnly={readOnly}
+          canManageThreads={canManageThreads}
           threads={threads}
           activeId={activeThreadId}
           activeView={activeView}
@@ -1755,6 +1784,7 @@ export function App() {
           onRename={(id) => void renameThread(id)}
           onTogglePin={(id) => void toggleThreadPin(id)}
           onArchive={(id) => void archiveThread(id)}
+          onDelete={(id) => setDeleteThreadTarget(threads.find((thread) => thread.id === id) ?? null)}
         />
       </div>
       <div
@@ -1887,6 +1917,7 @@ export function App() {
               spaces={spaces}
               activeSpaceId={route.spaceId}
               readOnly={readOnly}
+              canManageThreads={canManageThreads}
               threads={threads}
               activeId={activeThreadId}
               activeView={activeView}
@@ -1904,6 +1935,7 @@ export function App() {
               onRename={(id) => void renameThread(id)}
               onTogglePin={(id) => void toggleThreadPin(id)}
               onArchive={(id) => void archiveThread(id)}
+              onDelete={(id) => setDeleteThreadTarget(threads.find((thread) => thread.id === id) ?? null)}
             />
           </div>
         </div>
@@ -1942,6 +1974,18 @@ export function App() {
         </div>
       )}
     </div>
+    <Dialog open={Boolean(deleteThreadTarget)} onOpenChange={(open) => { if (!open && !deletingThread) setDeleteThreadTarget(null); }}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>永久删除对话</DialogTitle>
+          <DialogDescription>将归档并永久删除“{deleteThreadTarget?.title || deleteThreadTarget?.fallback_title || '新会话'}”的全部消息、运行记录和工作目录，无法恢复。</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" disabled={deletingThread} onClick={() => setDeleteThreadTarget(null)}>取消</Button>
+          <Button variant="destructive" disabled={deletingThread} onClick={() => void permanentlyDeleteThread()}>{deletingThread ? '删除中…' : '永久删除'}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
     </WorkspaceFileContextProvider>
   );
 }

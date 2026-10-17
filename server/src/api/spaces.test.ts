@@ -173,12 +173,19 @@ test('space API: 管理权限、可见名单、execution user 和永久删除语
       { headers: bearer(hiddenToken) },
     );
     assert.equal(hiddenExternalDetail.status, 404);
-    const ownerCannotMutateExternal = await fetch(`${base}/threads/${externalStoredThread.id}`, {
+    const ownerRenamesExternal = await fetch(`${base}/threads/${externalStoredThread.id}`, {
       method: 'PATCH',
       headers: bearer(ownerToken),
-      body: JSON.stringify({ title: 'forbidden' }),
+      body: JSON.stringify({ title: '管理员维护共享对话', pinned: true }),
     });
-    assert.equal(ownerCannotMutateExternal.status, 403);
+    assert.equal(ownerRenamesExternal.status, 200);
+    const managedExternal = await ownerRenamesExternal.json() as { title: string; pinned_at: string | null };
+    assert.equal(managedExternal.title, '管理员维护共享对话');
+    assert.ok(managedExternal.pinned_at);
+    const staleRoleMutation = await fetch(`${base}/threads/${externalStoredThread.id}`, {
+      method: 'PATCH', headers: bearer(staleElevatedToken), body: JSON.stringify({ title: '不能信任旧管理员身份' }),
+    });
+    assert.equal(staleRoleMutation.status, 403);
 
     const staleRoleCreate = await fetch(`${base}/spaces`, {
       method: 'POST',

@@ -25,9 +25,9 @@ export interface ThreadReadResolution {
 }
 
 /**
- * 统一解析 Web 会话查看权限。空间可见性只授予 external 会话的只读查看权，
- * 不会让用户看到同一 Web 空间中其他用户的会话。executionScope 只在授权完成后
- * 用于读取既有持久化数据，绝不能被写接口复用成查看者的执行身份。
+ * 统一解析 Web 会话查看权限。空间可见性不会让用户看到同一 Web 空间中其他用户的会话。
+ * executionScope 不代表查看者的执行身份，运行及文件写入不得复用它；
+ * 外部共享对话的元信息维护和删除必须另外验证租户管理员身份。
  */
 export class ThreadReadAccessService {
   constructor(

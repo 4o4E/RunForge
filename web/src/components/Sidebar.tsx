@@ -1,5 +1,5 @@
 import type { MouseEvent } from 'react';
-import { Archive, Bot, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, PinOff, Search, Settings, ShieldCheck, SquarePen } from 'lucide-react';
+import { Archive, Bot, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Pin, PinOff, Search, Settings, ShieldCheck, SquarePen, Trash2 } from 'lucide-react';
 import type { SpaceSummary, Thread } from '../api';
 import { Button } from '@/components/ui/button';
 import {
@@ -12,10 +12,12 @@ import { Separator } from '@/components/ui/separator';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 
+import { ThreadHoverPreview } from './ThreadInspection';
 interface Props {
   spaces: SpaceSummary[];
   activeSpaceId: string | null;
   readOnly: boolean;
+  canManageThreads: boolean;
   threads: Thread[];
   activeId: string | null;
   activeView: 'chat' | 'search';
@@ -34,6 +36,7 @@ interface Props {
   onRename: (id: string) => void;
   onTogglePin: (id: string) => void;
   onArchive: (id: string) => void;
+  onDelete: (id: string) => void;
 }
 
 function threadLabel(t: Thread): string {
@@ -50,6 +53,7 @@ export function Sidebar({
   spaces,
   activeSpaceId,
   readOnly,
+  canManageThreads,
   threads,
   activeId,
   activeView,
@@ -67,6 +71,7 @@ export function Sidebar({
   onRename,
   onTogglePin,
   onArchive,
+  onDelete,
 }: Props) {
   const activeSpace = spaces.find((space) => space.id === activeSpaceId) ?? null;
 
@@ -237,6 +242,7 @@ export function Sidebar({
                   : 'text-foreground hover:bg-accent/60',
               )}
             >
+              <ThreadHoverPreview thread={t}>
               <a
                 href={threadHref(t.id)}
                 onClick={(event) => {
@@ -244,13 +250,13 @@ export function Sidebar({
                   event.preventDefault();
                   onSelect(t.id);
                 }}
-                title={threadLabel(t)}
                 className="flex min-w-0 flex-1 items-center gap-1.5 py-2 pl-2 pr-3 text-left text-sm transition-[padding] group-hover/thread:pr-9"
               >
                 {t.pinned_at && <Pin className="size-3 shrink-0 text-muted-foreground" />}
                 <span className="min-w-0 truncate">{threadLabel(t)}</span>
               </a>
-              {!readOnly && <DropdownMenu>
+              </ThreadHoverPreview>
+              {canManageThreads && <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button
                     type="button"
@@ -274,6 +280,9 @@ export function Sidebar({
                   <DropdownMenuItem onSelect={() => onArchive(t.id)}>
                     <Archive className="size-4" />
                     归档
+                  </DropdownMenuItem>
+                  <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => onDelete(t.id)}>
+                    <Trash2 className="size-4" />永久删除
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>}

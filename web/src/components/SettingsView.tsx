@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Activity, ArchiveRestore, Moon, Palette, Plus, RefreshCw, Save, Sun, Trash2 } from 'lucide-react';
+import { Activity, ArchiveRestore, HardDrive, Moon, Palette, Plus, RefreshCw, Save, Sun, Trash2 } from 'lucide-react';
 import {
   deleteThread,
+  getCurrentUser,
   listThreads,
   updateThread,
   type LlmSettings,
@@ -41,6 +42,7 @@ import { getPersonalUsage } from '@/usageApi';
 type SettingsPanel =
   | 'appearance'
   | 'usage-stats'
+  | 'storage'
   | 'archived-threads';
 
 function listToText(items: string[]): string {
@@ -246,14 +248,14 @@ function AppearanceSettingsPanel() {
   );
 }
 
-function UsageStatsSettingsPanel() {
+function UsageStatsSettingsPanel({ view }: { view: 'usage' | 'storage' }) {
   return (
     <SettingsPanelShell
-      title="用量统计"
-      description="由服务端统一统计当前用户的 Token 消耗与存储占用"
+      title={view === 'usage' ? '用量' : '存储'}
+      description={view === 'usage' ? '由服务端统一统计当前用户的 Token 消耗' : '当前用户授权范围内的空间与非空间存储占用'}
       contentClassName="min-h-0"
     >
-      <UsageAnalyticsPanel load={getPersonalUsage} showUserFilter={false} />
+      <UsageAnalyticsPanel view={view} load={getPersonalUsage} showUserFilter={false} />
     </SettingsPanelShell>
   );
 }
@@ -269,6 +271,7 @@ function ArchivedThreadsSettingsPanel({ onThreadsChanged }: { onThreadsChanged?:
   const [deleteTarget, setDeleteTarget] = useState<Thread | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [message, setMessage] = useState('');
+  const [canManageExternal, setCanManageExternal] = useState(false);
 
   const refreshArchivedThreads = () => {
     setLoading(true);
@@ -280,6 +283,10 @@ function ArchivedThreadsSettingsPanel({ onThreadsChanged }: { onThreadsChanged?:
   };
 
   useEffect(refreshArchivedThreads, []);
+  useEffect(() => {
+    void getCurrentUser().then((user) => setCanManageExternal(user.role === 'owner' || user.role === 'admin'))
+      .catch((error) => setMessage(`读取权限失败：${(error as Error).message}`));
+  }, []);
 
   async function restoreThread(id: string) {
     setRestoringId(id);
@@ -340,7 +347,7 @@ function ArchivedThreadsSettingsPanel({ onThreadsChanged }: { onThreadsChanged?:
                 归档：{shortTime(thread.archived_at)} · 更新：{shortTime(thread.updated_at)}
               </div>
             </div>
-            <div className="flex gap-2">
+            {thread.source_type !== 'external' || canManageExternal ? <div className="flex gap-2">
               <Button variant="outline" size="sm" onClick={() => void restoreThread(thread.id)} disabled={restoringId === thread.id}>
                 {restoringId === thread.id ? <Spinner className="h-4 w-4" /> : <ArchiveRestore className="h-4 w-4" />}
                 取消归档
@@ -348,7 +355,7 @@ function ArchivedThreadsSettingsPanel({ onThreadsChanged }: { onThreadsChanged?:
               <Button variant="destructive" size="sm" onClick={() => setDeleteTarget(thread)}>
                 <Trash2 className="h-4 w-4" />永久删除
               </Button>
-            </div>
+            </div> : <span className="text-xs text-muted-foreground">外部任务只读</span>}
           </CardContent>
         </Card>
       ))}
@@ -992,9 +999,12 @@ export function SettingsView() {
                   外观
                 </SectionButton>
               </NavGroup>
-              <NavGroup label="用量">
+              <NavGroup label="统计">
                 <SectionButton active={panel === 'usage-stats'} icon={<Activity className="h-4 w-4" />} onClick={() => setPanel('usage-stats')}>
-                  用量统计
+                  用量
+                </SectionButton>
+                <SectionButton active={panel === 'storage'} icon={<HardDrive className="h-4 w-4" />} onClick={() => setPanel('storage')}>
+                  存储
                 </SectionButton>
               </NavGroup>
               <NavGroup label="会话">
@@ -1007,7 +1017,8 @@ export function SettingsView() {
 
           <div className="h-full min-h-0 min-w-0 overflow-hidden pr-1">
             {panel === 'appearance' && <AppearanceSettingsPanel />}
-            {panel === 'usage-stats' && <UsageStatsSettingsPanel />}
+            {panel === 'usage-stats' && <UsageStatsSettingsPanel key="usage" view="usage" />}
+            {panel === 'storage' && <UsageStatsSettingsPanel key="storage" view="storage" />}
             {panel === 'archived-threads' && <ArchivedThreadsSettingsPanel />}
           </div>
       </div>

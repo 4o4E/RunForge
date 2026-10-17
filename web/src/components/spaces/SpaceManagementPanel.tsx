@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { CreateSpaceInput, SpaceOptions, SpaceSummary, TenantUserSummary, UpdateSpaceInput, UsageAggregateResponse } from '@runforge/contracts';
-import { FileText, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { Plus, RefreshCw, Trash2 } from 'lucide-react';
 import type { SpaceControlApi } from '@/spaceControlApi';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -9,9 +9,11 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { ExternalCallersPanel } from './ExternalCallersPanel';
-import { SpaceEditorDialog } from './SpaceEditorDialog';
+import { SpaceEditor, SpaceEditorDialog } from './SpaceEditorDialog';
 import { SpaceTaskUsagePanel } from '@/components/usage/SpaceTaskUsagePanel';
 import type { UsageQuery } from '@/usageApi';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { SpacePromptPanel } from './SpacePromptPanel';
 
 function userLabel(users: TenantUserSummary[], id: string | null): string {
   if (!id) return '无';
@@ -21,12 +23,10 @@ function userLabel(users: TenantUserSummary[], id: string | null): string {
 
 export function SpaceManagementPanel({
   api,
-  onManagePrompt,
   loadUsage,
 }: {
   api: SpaceControlApi;
   loadUsage: (query: UsageQuery) => Promise<UsageAggregateResponse>;
-  onManagePrompt: (spaceId: string) => void;
 }) {
   const [spaces, setSpaces] = useState<SpaceSummary[]>([]);
   const [users, setUsers] = useState<TenantUserSummary[]>([]);
@@ -35,7 +35,6 @@ export function SpaceManagementPanel({
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [editorOpen, setEditorOpen] = useState(false);
-  const [editingSpace, setEditingSpace] = useState<SpaceSummary | null>(null);
   const [saving, setSaving] = useState(false);
   const [editorError, setEditorError] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<SpaceSummary | null>(null);
@@ -77,27 +76,21 @@ export function SpaceManagementPanel({
   }, [api]);
 
   function openCreate() {
-    setEditingSpace(null);
     setEditorError('');
     setEditorOpen(true);
   }
 
-  function openEdit(space: SpaceSummary) {
-    setEditingSpace(space);
-    setEditorError('');
-    setEditorOpen(true);
-  }
 
-  async function saveSpace(input: CreateSpaceInput | UpdateSpaceInput) {
+  async function saveSpace(input: CreateSpaceInput | UpdateSpaceInput, target: SpaceSummary | null) {
     setSaving(true);
     setEditorError('');
     try {
-      const saved = editingSpace
-        ? await api.updateSpace(editingSpace.id, input as UpdateSpaceInput)
+      const saved = target
+        ? await api.updateSpace(target.id, input as UpdateSpaceInput)
         : await api.createSpace(input as CreateSpaceInput);
       setEditorOpen(false);
-      setEditingSpace(null);
       await refresh(saved.id);
+      setMessage('空间配置已保存，将用于后续新任务。');
     } catch (error) {
       setEditorError((error as Error).message);
     } finally {
@@ -197,15 +190,20 @@ export function SpaceManagementPanel({
                   <h2 className="truncate text-lg font-semibold">{selected.name}</h2>
                   <p className="mt-1 text-xs text-muted-foreground">{selected.id} · 创建 {new Date(selected.createdAt).toLocaleString()} · 更新 {new Date(selected.updatedAt).toLocaleString()}</p>
                 </div>
-                <Button variant="outline" size="sm" onClick={() => onManagePrompt(selected.id)}>
-                  <FileText className="size-4" />提示词
-                </Button>
-                <Button variant="outline" size="sm" disabled={savingModel} onClick={() => openEdit(selected)}><Pencil className="size-4" />编辑</Button>
                 <Button variant="destructive" size="sm" disabled={savingModel} onClick={() => openDelete(selected)}>
                   <Trash2 className="size-4" />永久删除
                 </Button>
               </div>
 
+              <Tabs key={selected.id} defaultValue="overview" className="min-w-0">
+                <TabsList className="max-w-full overflow-x-auto" aria-label="空间设置">
+                  <TabsTrigger value="overview">概览</TabsTrigger>
+                  <TabsTrigger value="edit">编辑</TabsTrigger>
+                  <TabsTrigger value="prompt">提示词</TabsTrigger>
+                  <TabsTrigger value="usage">任务用量</TabsTrigger>
+                  {selected.mode === 'external' && <TabsTrigger value="callers">调用方</TabsTrigger>}
+                </TabsList>
+                <TabsContent value="overview" className="grid gap-4">
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">模式</div><div className="mt-1 text-sm font-medium">{selected.mode === 'external' ? '外部运行 · Web 只读' : 'Web 对话'}</div></div>
                 <div className="rounded-md border p-3"><div className="text-xs text-muted-foreground">执行用户</div><div className="mt-1 truncate text-sm font-medium" title={selected.executionUserId ?? ''}>{userLabel(users, selected.executionUserId)}</div></div>
@@ -245,12 +243,26 @@ export function SpaceManagementPanel({
                   </ol>
                 ) : <p className="text-sm text-muted-foreground">未启用业务插件</p>}
               </div>
+                </TabsContent>
+                <TabsContent value="edit" forceMount>
+                  <SpaceEditor
+                    space={selected} options={options} users={users} saving={saving || savingModel}
+                    error={editorError} onCancel={() => setEditorError('')}
+                    onSave={(input) => void saveSpace(input, selected)}
+                  />
+                </TabsContent>
+                <TabsContent value="prompt" forceMount className="min-h-[36rem]">
+                  <SpacePromptPanel api={api} spaceId={selected.id} configVersion={selected.configVersion} onSaved={(saved) => setSpaces((current) => current.map((space) => space.id === saved.id ? saved : space))} />
+                </TabsContent>
+                <TabsContent value="usage">
 
               <SpaceTaskUsagePanel key={selected.id} spaceId={selected.id} load={loadUsage} />
+                </TabsContent>
 
-              {selected.mode === 'external' && (
-                <ExternalCallersPanel key={selected.id} api={api} space={selected} />
-              )}
+                {selected.mode === 'external' && (
+                  <TabsContent value="callers"><ExternalCallersPanel api={api} space={selected} /></TabsContent>
+                )}
+              </Tabs>
             </div>
           ) : (
             <div className="flex h-full items-center justify-center rounded-md border border-dashed text-sm text-muted-foreground">选择或创建一个空间</div>
@@ -260,16 +272,15 @@ export function SpaceManagementPanel({
 
       <SpaceEditorDialog
         open={editorOpen}
-        space={editingSpace}
+        space={null}
         options={options}
         users={users}
         saving={saving}
         error={editorError}
         onOpenChange={(open) => {
           setEditorOpen(open);
-          if (!open) setEditingSpace(null);
         }}
-        onSave={saveSpace}
+        onSave={(input) => void saveSpace(input, null)}
       />
 
       <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}>

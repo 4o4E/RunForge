@@ -18,6 +18,18 @@ export interface Thread {
   updated_at: string;
 }
 
+export interface ThreadInspection {
+  threadId: string;
+  storage: {
+    logicalBytes: number;
+    allocatedBytes: number;
+    fileCount: number;
+    symlinkCount: number;
+  };
+  /** 当前可见分支最早的三条真实用户消息，每条至多 240 个字符。 */
+  userMessages: Array<{ content: string; createdAt: string }>;
+}
+
 export interface ThreadUpdateInput {
   title?: string | null;
   pinned?: boolean;

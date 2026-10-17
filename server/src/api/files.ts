@@ -17,6 +17,7 @@ import { requireTenantScope } from '../auth/guards.js';
 import { getSystemToolSettings } from '../settings.js';
 import { deletionGate } from '../deletion/gate.js';
 import { DeleteConflictError } from '../store/types.js';
+import { scanStoragePath } from '../usage/service.js';
 
 const SMALL_FILE_BYTES = 200 * 1024;
 const MAX_RENDER_FILE_BYTES = 2 * 1024 * 1024;
@@ -251,12 +252,12 @@ filesApi.get('/list', requireTenantScope, async (req, res) => {
         const abs = join(dir, name);
         const linkInfo = await lstat(abs);
         if (linkInfo.isSymbolicLink()) return null;
-        const s = await stat(abs);
+        const s = linkInfo;
         return {
           name,
           path: toRemotePath(abs, access.workspaceRoot),
           type: s.isDirectory() ? 'dir' : 'file',
-          size: s.size,
+          size: s.isDirectory() ? (await scanStoragePath(abs, { includeSymlinks: false })).logicalBytes : s.size,
           updatedAt: s.mtime.toISOString(),
         };
       }),
@@ -264,7 +265,8 @@ filesApi.get('/list', requireTenantScope, async (req, res) => {
 
     const visibleEntries = entries.filter((entry): entry is NonNullable<typeof entry> => entry !== null);
     visibleEntries.sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1));
-    res.json({ path: toRemotePath(dir, access.workspaceRoot), parent: parentRemotePath(dir, access.workspaceRoot), entries: visibleEntries });
+    const totalSize = visibleEntries.reduce((total, entry) => total + entry.size, 0);
+    res.json({ path: toRemotePath(dir, access.workspaceRoot), parent: parentRemotePath(dir, access.workspaceRoot), totalSize, entries: visibleEntries });
   } catch (err) {
     sendFileError(res, err);
   }
@@ -377,7 +379,7 @@ filesApi.post('/upload', requireTenantScope, async (req, res) => {
   }
 });
 
-filesApi.get('/content', requireTenantScope, async (req, res) => {
+filesApi.get('/content', async (req, res) => {
   try {
     const access = await resolveFileAccess(req, res, req.query.path);
     if (!access) return;
@@ -467,18 +469,27 @@ filesApi.get('/preview', async (req, res) => {
     const startLine = Math.max(1, Number(req.query.startLine ?? 1) || 1);
     const limit = Math.min(MAX_LINE_LIMIT, Math.max(1, Number(req.query.limit ?? DEFAULT_LINE_LIMIT) || DEFAULT_LINE_LIMIT));
     const renderMode = req.query.render === '1';
+    const sourceMode = req.query.source === '1';
 
     if (renderMode && info.size > MAX_RENDER_FILE_BYTES) {
       return res.status(413).json({ error: `文件超过渲染上限 ${MAX_RENDER_FILE_BYTES} 字节` });
     }
 
     if (info.size <= SMALL_FILE_BYTES || renderMode) {
-      const text = await readFile(file, 'utf8');
+      const buffer = await readFile(file);
+      if (isLikelyBinary(buffer)) {
+        return res.json({
+          path: toRemotePath(file, root), size: info.size, updatedAt: info.mtime.toISOString(),
+          binary: true, mode: 'full', startLine: 1, lines: [], totalLines: 0, nextLine: null, hasMore: false,
+        });
+      }
+      const text = buffer.toString('utf8');
       // 渲染模式必须使用原文；截断后的 HTML/Markdown 会变成另一份损坏内容。
-      const lines = previewTextLines(text, { truncateLongLines: !renderMode });
+      const lines = previewTextLines(text, { truncateLongLines: !renderMode && !sourceMode });
       return res.json({
         path: toRemotePath(file, root),
         size: info.size,
+        updatedAt: info.mtime.toISOString(),
         mode: 'full',
         startLine: 1,
         lines,
@@ -493,9 +504,15 @@ filesApi.get('/preview', async (req, res) => {
     const rl = createInterface({ input: createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity });
     for await (const line of rl) {
       lineNo += 1;
+      if (line.includes('\0')) {
+        return res.json({
+          path: toRemotePath(file, root), size: info.size, updatedAt: info.mtime.toISOString(),
+          binary: true, mode: 'full', startLine: 1, lines: [], totalLines: 0, nextLine: null, hasMore: false,
+        });
+      }
       if (lineNo < startLine) continue;
       // 继续读完整个文件以返回真实总行数，前端才能可靠停止触底加载。
-      if (lines.length < limit) lines.push(previewLine(line));
+      if (lines.length < limit) lines.push(sourceMode ? line : previewLine(line));
     }
 
     const nextLine = startLine + lines.length;
@@ -503,6 +520,7 @@ filesApi.get('/preview', async (req, res) => {
     res.json({
       path: toRemotePath(file, root),
       size: info.size,
+      updatedAt: info.mtime.toISOString(),
       mode: 'chunk',
       startLine,
       lines,
@@ -545,6 +563,7 @@ filesApi.get('/hex', async (req, res) => {
     res.json({
       path: toRemotePath(file, access.workspaceRoot),
       size: info.size,
+      updatedAt: info.mtime.toISOString(),
       offset,
       limit: bytesRead,
       rows: formatHexRows(buffer.subarray(0, bytesRead), offset),

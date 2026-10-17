@@ -20,7 +20,6 @@ import {
   type RemoteFileEntry,
 } from '@/api';
 import { useNotifications } from '@/components/GlobalNotifications';
-import { CodeBlock } from '@/components/ai-elements/code-block';
 import { MarkdownContent } from '@/components/MarkdownContent';
 import { OfficePreview, officePreviewKindForPath } from '@/components/OfficePreview';
 import { Button } from '@/components/ui/button';
@@ -29,6 +28,8 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { useWorkspaceFileContext } from '@/components/WorkspaceFileContext';
+import { formatFileDate, formatFileSize } from '@/lib/fileMetadata';
+import { DelimitedTextPreview } from '@/components/DelimitedTextPreview';
 
 const MonacoTextEditor = lazy(() => import('@/components/MonacoTextEditor').then((module) => ({ default: module.MonacoTextEditor })));
 
@@ -108,6 +109,7 @@ const INITIAL_PREVIEW_LINES = 80;
 const MORE_PREVIEW_LINES = 240;
 const INITIAL_HEX_BYTES = 4 * 1024;
 const MORE_HEX_BYTES = 16 * 1024;
+const MAX_TEXT_FILE_BYTES = 1024 * 1024;
 const RAW_URL_TTL_SECONDS = 24 * 60 * 60;
 const SHARE_PRESETS = [
   { label: '1 天', seconds: 24 * 60 * 60 },
@@ -177,12 +179,6 @@ function ancestorDirsForPath(path: string): string[] {
   return dirs;
 }
 
-function formatSize(size?: number): string {
-  if (size == null) return '';
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-  return `${(size / 1024 / 1024).toFixed(1)} MB`;
-}
 
 function extOf(path: string): string {
   const name = fileName(path);
@@ -198,9 +194,6 @@ function editorLanguageForPath(path: string): string {
   return PREVIEW_LANGUAGE_BY_EXT[extension] ?? 'plaintext';
 }
 
-function previewLanguageForPath(path: string): BundledLanguage {
-  return PREVIEW_LANGUAGE_BY_EXT[extOf(path)] ?? 'log';
-}
 
 function mediaKindForPath(path: string): MediaKind | null {
   const ext = extOf(path);
@@ -212,7 +205,7 @@ function mediaKindForPath(path: string): MediaKind | null {
 
 function shouldUseHexPreview(path: string): boolean {
   const ext = extOf(path);
-  return mediaKindForPath(path) != null || BINARY_EXTENSIONS.has(ext);
+  return (mediaKindForPath(path) != null && ext !== 'svg') || BINARY_EXTENSIONS.has(ext);
 }
 
 function formatHexOffset(offset: number): string {
@@ -294,8 +287,10 @@ export function RemoteFilesPanel({
   const [showTree, setShowTree] = useState(() => !compact || !previewPath);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(['.']));
   const [treeEntries, setTreeEntries] = useState<Record<string, RemoteFileEntry[]>>({});
+  const [directorySizes, setDirectorySizes] = useState<Record<string, number>>({});
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [selectedSize, setSelectedSize] = useState<number | undefined>();
+  const [selectedUpdatedAt, setSelectedUpdatedAt] = useState<string | null>(null);
   const [preview, setPreview] = useState<FilePreview | null>(null);
   const [chunks, setChunks] = useState<PreviewChunk[]>([]);
   const [hexPreview, setHexPreview] = useState<FileHexPreview | null>(null);
@@ -319,10 +314,15 @@ export function RemoteFilesPanel({
   const treeScrollRef = useRef<HTMLDivElement | null>(null);
   const pendingPreviewStartsRef = useRef<Set<number>>(new Set());
   const pendingHexOffsetsRef = useRef<Set<number>>(new Set());
+  const textRequest = useRef<{ id: number; path: string | null }>({ id: 0, path: null });
+  const currentThreadRef = useRef(threadId);
+  currentThreadRef.current = threadId;
 
   async function loadTreeDir(path: string) {
     const data = await listRemoteFiles(path, threadId);
+    if (currentThreadRef.current !== threadId) return data;
     setTreeEntries((current) => ({ ...current, [data.path]: data.entries }));
+    setDirectorySizes((current) => ({ ...current, [data.path]: data.totalSize }));
     return data;
   }
 
@@ -339,7 +339,7 @@ export function RemoteFilesPanel({
     }
   }
 
-  async function openFile(path: string, size?: number, startLine = 1) {
+  async function openFile(path: string, size?: number, startLine = 1, requestedMode?: 'source') {
     if (startLine > 1 && pendingPreviewStartsRef.current.has(startLine)) return;
     if (startLine === 1 && editorDirty && selectedPath && path !== selectedPath) {
       setError('当前文件有未保存修改，请先保存或重新加载');
@@ -349,13 +349,17 @@ export function RemoteFilesPanel({
     previewRequestRef.current = requestId;
     const mediaKind = mediaKindForPath(path);
     const hexPreviewFile = shouldUseHexPreview(path);
-    const renderable = ['html', 'htm', 'md'].includes(extOf(path));
+    const renderable = ['html', 'htm', 'md', 'csv', 'tsv'].includes(extOf(path));
     if (startLine === 1) {
+      textRequest.current.id += 1;
+      textRequest.current.path = null;
+      setEditLoading(false);
       if (compact) setShowTree(false);
       pendingPreviewStartsRef.current.clear();
       pendingHexOffsetsRef.current.clear();
       setSelectedPath(path);
       setSelectedSize(size);
+      setSelectedUpdatedAt(null);
       setPreview(null);
       setChunks([]);
       setHexPreview(null);
@@ -367,21 +371,9 @@ export function RemoteFilesPanel({
       setRawUrl('');
       setDownloadUrl('');
       setShareOpen(false);
-      setPreviewMode(
-        renderable || mediaKind || officePreviewKindForPath(path)
-          ? 'preview'
-          : !readOnly && !shareAccess && !hexPreviewFile
-            ? 'edit'
-            : 'source',
-      );
+      setPreviewMode(requestedMode ?? (renderable || mediaKind || officePreviewKindForPath(path) ? 'preview' : 'source'));
     } else {
       pendingPreviewStartsRef.current.add(startLine);
-    }
-    if (!readOnly && !shareAccess && !hexPreviewFile && !mediaKind && !officePreviewKindForPath(path) && !renderable) {
-      setLoading(false);
-      setError(null);
-      void openEditor(path);
-      return;
     }
     setLoading(true);
     setError(null);
@@ -391,19 +383,30 @@ export function RemoteFilesPanel({
         if (previewRequestRef.current !== requestId) return;
         setSelectedPath(data.path);
         setSelectedSize(size ?? data.size);
+        setSelectedUpdatedAt(data.updatedAt);
         setHexPreview(data);
         setHexRows(data.rows);
         return;
       }
 
       const limit = startLine === 1 ? INITIAL_PREVIEW_LINES : MORE_PREVIEW_LINES;
-      const data = await previewRemoteFile(path, startLine, limit, { render: startLine === 1 && renderable, share: shareAccess, threadId });
+      const data = await previewRemoteFile(path, startLine, limit, { render: startLine === 1 && renderable && requestedMode !== 'source', source: true, share: shareAccess, threadId });
       if (previewRequestRef.current !== requestId) return;
       setSelectedPath(data.path);
       setSelectedSize(size ?? data.size);
+      setSelectedUpdatedAt(data.updatedAt);
+      if (data.binary) {
+        const hex = await previewRemoteFileHex(path, 0, INITIAL_HEX_BYTES, { share: shareAccess, threadId });
+        if (previewRequestRef.current !== requestId) return;
+        setHexPreview(hex);
+        setHexRows(hex.rows);
+        setPreviewMode('source');
+        return;
+      }
       setPreview(data);
       const nextChunk = { startLine: data.startLine, lines: data.lines };
       setChunks((current) => startLine === 1 ? [nextChunk] : [...current, nextChunk]);
+      if (startLine === 1 && !renderable && !mediaKind && !officePreviewKindForPath(path) && data.size <= MAX_TEXT_FILE_BYTES) void openText(path, 'source');
     } catch (err) {
       if (previewRequestRef.current !== requestId) return;
       setError((err as Error).message);
@@ -435,22 +438,31 @@ export function RemoteFilesPanel({
     }
   }
 
-  async function openEditor(path = selectedPath) {
-    if (readOnly || !path || editLoading) return;
-    setPreviewMode('edit');
+  async function openText(path = selectedPath, mode: 'source' | 'edit' = 'edit', reload = false) {
+    if (!path || (mode === 'edit' && (readOnly || shareAccess))) return;
+    setPreviewMode(mode);
+    if (!reload && editVersion && path === selectedPath) return;
+    if (textRequest.current.path === path) return;
+    const textRequestId = ++textRequest.current.id;
+    textRequest.current.path = path;
+    const requestId = previewRequestRef.current;
     setEditLoading(true);
     setEditError(null);
     try {
-      const data = await getRemoteFileContent(path, threadId);
-      setSelectedPath(data.path);
+      const data = await getRemoteFileContent(path, threadId, shareAccess);
+      if (textRequest.current.id !== textRequestId || previewRequestRef.current !== requestId || currentThreadRef.current !== threadId) return;
       setSelectedSize(data.version.size);
+      setSelectedUpdatedAt(new Date(data.version.mtimeMs).toISOString());
       setEditContent(data.content);
       setEditOriginal(data.content);
       setEditVersion(data.version);
     } catch (err) {
-      setEditError((err as Error).message);
+      if (textRequest.current.id === textRequestId) setEditError((err as Error).message);
     } finally {
-      setEditLoading(false);
+      if (textRequest.current.id === textRequestId) {
+        textRequest.current.path = null;
+        setEditLoading(false);
+      }
     }
   }
 
@@ -463,11 +475,13 @@ export function RemoteFilesPanel({
       const lines = editContent.split(/\r?\n/);
       setSelectedPath(saved.path);
       setSelectedSize(saved.size);
+      setSelectedUpdatedAt(new Date(saved.version.mtimeMs).toISOString());
       setEditOriginal(editContent);
       setEditVersion(saved.version);
       setPreview({
         path: saved.path,
         size: saved.size,
+        updatedAt: new Date(saved.version.mtimeMs).toISOString(),
         mode: 'full',
         startLine: 1,
         lines,
@@ -479,6 +493,7 @@ export function RemoteFilesPanel({
       notify({ variant: 'success', title: '文件已保存', description: saved.path });
       setPreviewMode('edit');
       if (showBrowser) void loadDir(currentPath, false);
+      window.dispatchEvent(new CustomEvent('runforge:files-changed', { detail: { threadId } }));
     } catch (err) {
       setEditError((err as Error).message);
     } finally {
@@ -541,6 +556,9 @@ export function RemoteFilesPanel({
     setCurrentPath('.');
     setExpanded(new Set(['.']));
     setTreeEntries({});
+    setDirectorySizes({});
+    previewRequestRef.current += 1;
+    setEditLoading(false);
     if (previewPath) void loadTreeDir('.');
     else void loadDir('.');
     // thread 切换必须清空旧目录缓存，避免在新 workspace 面板里短暂展示上一会话文件。
@@ -566,7 +584,7 @@ export function RemoteFilesPanel({
         if (canceled) return;
         const entry = parent.entries.find((item) => item.path === path);
         if (entry?.type !== 'dir') {
-          void openFile(path);
+          void openFile(path, entry?.size);
           return;
         }
         const dirs = [...ancestorDirsForPath(path), path];
@@ -590,23 +608,25 @@ export function RemoteFilesPanel({
   }, [compact, previewPath]);
 
   const editorLanguage = selectedPath ? editorLanguageForPath(selectedPath) : 'plaintext';
-  const previewLanguage = selectedPath ? previewLanguageForPath(selectedPath) : 'log';
   const selectedExt = selectedPath ? extOf(selectedPath) : '';
   const selectedMediaKind = selectedPath ? mediaKindForPath(selectedPath) : null;
   const selectedOfficeKind = selectedPath ? officePreviewKindForPath(selectedPath) : null;
-  const selectedUsesHexPreview = selectedPath ? shouldUseHexPreview(selectedPath) : false;
+  const selectedUsesHexPreview = Boolean(hexPreview) || Boolean(selectedPath && shouldUseHexPreview(selectedPath));
   const selectedIsHtml = ['html', 'htm'].includes(selectedExt);
   const selectedIsMarkdown = selectedExt === 'md';
-  const selectedCanRender = selectedIsHtml || selectedIsMarkdown || selectedMediaKind != null || selectedOfficeKind != null;
+  const selectedTableFormat = selectedExt === 'csv' || selectedExt === 'tsv' ? selectedExt : null;
+  const selectedCanRender = (!selectedUsesHexPreview && (selectedIsHtml || selectedIsMarkdown || selectedTableFormat != null)) || selectedMediaKind != null || selectedOfficeKind != null;
   const selectedCanSource = Boolean(selectedPath);
   const selectedCanEdit = Boolean(
     selectedPath
+    && preview && !preview.binary
+    && (selectedSize ?? Infinity) <= MAX_TEXT_FILE_BYTES
     && !readOnly
     && !shareAccess
     && selectedPath !== 'plugins'
     && !selectedPath.startsWith('plugins/')
     && !selectedUsesHexPreview
-    && !selectedMediaKind
+    && (!selectedMediaKind || selectedExt === 'svg')
     && !selectedOfficeKind,
   );
   const selectedCanPreview = Boolean(selectedPath && selectedCanRender);
@@ -630,7 +650,6 @@ export function RemoteFilesPanel({
     return rows;
   }, [chunks]);
   const previewCode = useMemo(() => previewRows.map((row) => row.text).join('\n'), [previewRows]);
-  const previewStartLine = previewRows[0]?.lineNumber ?? 1;
   const totalLines = preview?.totalLines ?? null;
 
   useEffect(() => {
@@ -727,7 +746,7 @@ export function RemoteFilesPanel({
         <button
           key={entry.path}
           className={cn(
-            'group/file flex h-7 w-full min-w-0 items-center gap-1.5 px-2 text-left text-[13px] hover:bg-accent/70',
+            'group/file flex min-h-11 w-full min-w-0 items-center gap-1.5 px-2 py-1 text-left text-[13px] hover:bg-accent/70',
             selected && 'bg-accent text-accent-foreground',
           )}
           style={{ paddingLeft: 8 + depth * 14 }}
@@ -745,8 +764,13 @@ export function RemoteFilesPanel({
           ) : (
             <FileText className={cn('size-4 shrink-0', fileTone(entry.path))} />
           )}
-          <span className="min-w-0 flex-1 truncate">{entry.name}</span>
-          {!isDir && <span className="hidden shrink-0 text-[11px] text-muted-foreground group-hover/file:inline">{formatSize(entry.size)}</span>}
+          <span className="min-w-0 flex-1">
+            <span className="block truncate">{entry.name}</span>
+            <span className="flex items-center justify-between gap-2 text-[10px] leading-4 text-muted-foreground">
+              <span className="shrink-0">{formatFileSize(entry.size)}</span>
+              <time className="min-w-0 truncate text-right" dateTime={entry.updatedAt} title={formatFileDate(entry.updatedAt)}>{formatFileDate(entry.updatedAt)}</time>
+            </span>
+          </span>
         </button>
       );
       if (!isDir || !isOpen) return [row];
@@ -797,6 +821,7 @@ export function RemoteFilesPanel({
           <ChevronRight className={cn('size-3.5 shrink-0 text-muted-foreground transition-transform', expanded.has('.') && 'rotate-90')} />
           {expanded.has('.') ? <FolderOpen className="size-4 shrink-0 text-foreground" /> : <Folder className="size-4 shrink-0 text-muted-foreground" />}
         <span className="min-w-0 flex-1 truncate">{fileScope === 'user' ? '我的文件' : '工作区'}</span>
+          <span className="shrink-0 text-[11px] text-muted-foreground">{directorySizes['.'] == null ? '' : formatFileSize(directorySizes['.'])}</span>
         </button>
         {expanded.has('.') && renderRows(treeEntries['.'], 1)}
       </div>
@@ -839,11 +864,12 @@ export function RemoteFilesPanel({
             renderTreeBrowser(false)
           ) : selectedPath ? (
             <div className="flex h-full min-h-0 flex-col gap-3">
-              <div className="flex shrink-0 items-center gap-2">
-                <div className="min-w-0 flex-1">
+              <div className="flex shrink-0 flex-wrap items-center gap-2">
+                <div className="min-w-48 flex-1">
                   <div className="truncate text-sm font-medium">{selectedPath}</div>
-                  <div className="text-xs text-muted-foreground">
-                    {formatSize(selectedSize)}{!selectedUsesHexPreview && totalLines != null ? ` · ${totalLines} 行` : ''}
+                  <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                    <span>{selectedSize == null ? '' : formatFileSize(selectedSize)}{!selectedUsesHexPreview && totalLines != null ? ` · ${totalLines} 行` : ''}</span>
+                    {selectedUpdatedAt && <time className="shrink-0 whitespace-nowrap text-right" dateTime={selectedUpdatedAt}>{formatFileDate(selectedUpdatedAt)}</time>}
                   </div>
                 </div>
                 {(selectedCanPreview || selectedCanSource || selectedCanEdit) && (
@@ -853,10 +879,14 @@ export function RemoteFilesPanel({
                         variant={previewMode === 'preview' ? 'secondary' : 'ghost'}
                         size="sm"
                         className="h-8 px-2"
-                        onClick={() => setPreviewMode('preview')}
-                        title={selectedOfficeKind ? '预览文档' : selectedMediaKind ? '预览媒体' : selectedIsHtml ? '渲染 HTML' : '渲染 Markdown'}
+                        onClick={() => {
+                          if (selectedTableFormat && (!chunks.length || preview?.hasMore)) void openFile(selectedPath, selectedSize);
+                          else setPreviewMode('preview');
+                        }}
+                        title={selectedOfficeKind ? '预览文档' : selectedMediaKind ? '预览媒体' : selectedTableFormat ? '预览表格' : selectedIsHtml ? '渲染 HTML' : '渲染 Markdown'}
                       >
                         <Eye className="size-4" />
+                        <span>预览</span>
                       </Button>
                     )}
                     {selectedCanSource && (
@@ -864,11 +894,16 @@ export function RemoteFilesPanel({
                         variant={previewMode === 'source' ? 'secondary' : 'ghost'}
                         size="sm"
                         className="h-8 px-2"
-                        onClick={() => setPreviewMode('source')}
-                        title="查看原文"
-                        aria-label="查看原文"
+                        onClick={() => {
+                          setPreviewMode('source');
+                          if (!selectedUsesHexPreview && (selectedSize ?? Infinity) <= MAX_TEXT_FILE_BYTES) void openText(selectedPath, 'source');
+                          else if (!selectedUsesHexPreview && !chunks.length) void openFile(selectedPath, selectedSize, 1, 'source');
+                        }}
+                        title={selectedUsesHexPreview ? '查看二进制' : '查看原文'}
+                        aria-label={selectedUsesHexPreview ? '查看二进制' : '查看原文'}
                       >
                         <Code2 className="size-4" />
+                        <span>{selectedUsesHexPreview ? '二进制' : '原文'}</span>
                       </Button>
                     )}
                     {selectedCanEdit && (
@@ -876,10 +911,11 @@ export function RemoteFilesPanel({
                         variant={previewMode === 'edit' ? 'secondary' : 'ghost'}
                         size="sm"
                         className="h-8 px-2"
-                        onClick={() => void openEditor()}
+                        onClick={() => void openText()}
                         title="编辑文件"
                       >
                         <Pencil className="size-4" />
+                        <span>编辑</span>
                       </Button>
                     )}
                   </div>
@@ -899,7 +935,7 @@ export function RemoteFilesPanel({
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      onClick={() => void openEditor()}
+                      onClick={() => void openText(selectedPath, 'edit', true)}
                       disabled={editLoading || editSaving}
                       title="重新加载"
                       aria-label="重新加载"
@@ -1030,7 +1066,7 @@ export function RemoteFilesPanel({
                         <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-muted-foreground">正在加载编辑器…</div>}>
                           <MonacoTextEditor
                             language={editorLanguage}
-                            path={selectedPath}
+                            path={`${threadId}/${selectedPath}`}
                             theme={editorTheme}
                             value={editContent}
                             onChange={setEditContent}
@@ -1085,11 +1121,11 @@ export function RemoteFilesPanel({
                   </div>
                 ) : selectedUsesHexPreview && previewMode === 'source' && hexPreview ? (
                   <div className="flex h-full items-center justify-center rounded-md border bg-muted/20 px-3 py-8 text-center text-sm text-muted-foreground">
-                    暂无 Hex 内容
+                    暂无二进制内容
                   </div>
                 ) : selectedUsesHexPreview && previewMode === 'source' ? (
                   <div className="flex h-full items-center justify-center rounded-md border bg-muted/20 px-3 py-8 text-center text-sm text-muted-foreground">
-                    正在加载 Hex 原文…
+                    正在加载二进制内容…
                   </div>
                 ) : loading && chunks.length === 0 ? (
                   <div className="flex h-full items-center justify-center rounded-md border bg-muted/20 px-3 py-8 text-center text-sm text-muted-foreground">
@@ -1107,26 +1143,23 @@ export function RemoteFilesPanel({
                   <div className="h-full overflow-auto rounded-md border bg-background px-5 py-4">
                     <MarkdownContent text={previewCode} />
                   </div>
-                ) : chunks.length > 0 && previewMode === 'source' ? (
-                  <CodeBlock
-                    className="h-full"
-                    code={previewCode}
-                    fillHeight
-                    language={previewLanguage}
-                    loadingMore={loading && chunks.length > 0}
-                    onReachEnd={selectedPath && preview?.nextLine
-                      ? () => void openFile(selectedPath, selectedSize, preview.nextLine ?? 1)
-                      : undefined}
-                    showLineNumbers
-                    startLineNumber={previewStartLine}
-                    showGlance
-                    showRenderToggle={false}
-                    showWrapToggle
-                    maxHighlightChars={80_000}
-                  />
-                ) : loading && previewMode === 'source' && chunks.length > 0 ? (
-                  <div className="flex h-full items-center justify-center rounded-md border bg-muted/20 px-3 py-8 text-center text-sm text-muted-foreground">
-                    正在加载更多内容…
+                ) : selectedTableFormat && chunks.length > 0 && previewMode === 'preview' ? (
+                  <DelimitedTextPreview key={`${threadId}:${selectedPath}`} source={previewCode} format={selectedTableFormat} />
+                ) : previewMode === 'source' && !selectedUsesHexPreview ? (
+                  <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-md border bg-background">
+                    {editError && <div className="border-b px-3 py-2 text-xs text-destructive">{editError}</div>}
+                    <div className="min-h-0 flex-1">
+                      <MonacoErrorBoundary key={`source:${threadId}:${selectedPath}`}>
+                        <Suspense fallback={<div className="p-3 text-sm text-muted-foreground">正在加载原文…</div>}>
+                          <MonacoTextEditor
+                            path={`${threadId}/${selectedPath}`} language={editorLanguage} theme={editorTheme}
+                            value={editVersion ? editOriginal : previewCode} readOnly
+                            onReachEnd={preview?.nextLine ? () => void openFile(selectedPath, selectedSize, preview.nextLine ?? 1) : undefined}
+                          />
+                        </Suspense>
+                      </MonacoErrorBoundary>
+                    </div>
+                    {preview?.hasMore && <Button variant="ghost" size="sm" disabled={loading} onClick={() => void openFile(selectedPath, selectedSize, preview.nextLine ?? 1)}>{loading ? '正在加载…' : '加载更多原文'}</Button>}
                   </div>
                 ) : (
                   <div className="flex h-full items-center justify-center rounded-md border bg-muted/20 text-sm text-muted-foreground">

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { PromptPlaceholder, SpaceSummary } from '@runforge/contracts';
-import { ArrowLeft, Save } from 'lucide-react';
+import { Save } from 'lucide-react';
 import type { SpaceControlApi } from '@/spaceControlApi';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -10,7 +10,8 @@ import { SpacePromptEditor } from './SpacePromptEditor';
 interface Props {
   api: SpaceControlApi;
   spaceId: string;
-  onBack: () => void;
+  configVersion: number;
+  onSaved: (space: SpaceSummary) => void;
 }
 
 const PLACEHOLDER_PATTERN = /{{\s*([A-Za-z][A-Za-z0-9_.]*)\s*}}/g;
@@ -25,11 +26,11 @@ function promptContent(
     .trim();
 }
 
-export function SpacePromptManagementPage({ api, spaceId, onBack }: Props) {
+export function SpacePromptPanel({ api, spaceId, configVersion, onSaved }: Props) {
   const [space, setSpace] = useState<SpaceSummary | null>(null);
   const [placeholders, setPlaceholders] = useState<PromptPlaceholder[]>([]);
-  const [template, setTemplate] = useState('');
-  const [savedTemplate, setSavedTemplate] = useState('');
+  const [draft, setDraft] = useState({ template: '', savedTemplate: '' });
+  const { template, savedTemplate } = draft;
   const [loadingError, setLoadingError] = useState('');
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState('');
@@ -51,8 +52,11 @@ export function SpacePromptManagementPage({ api, spaceId, onBack }: Props) {
         if (!active) return;
         setSpace(loadedSpace);
         setPlaceholders(loadedPlaceholders.placeholders);
-        setTemplate(loadedSpace.config.promptTemplate);
-        setSavedTemplate(loadedSpace.config.promptTemplate);
+        // 其他标签保存配置时刷新动态占位符，但不覆盖正在编辑的模板。
+        setDraft((current) => ({
+          template: current.template === current.savedTemplate ? loadedSpace.config.promptTemplate : current.template,
+          savedTemplate: loadedSpace.config.promptTemplate,
+        }));
       })
       .catch((error) => {
         if (active) setLoadingError((error as Error).message);
@@ -60,7 +64,7 @@ export function SpacePromptManagementPage({ api, spaceId, onBack }: Props) {
     return () => {
       active = false;
     };
-  }, [api, spaceId]);
+  }, [api, spaceId, configVersion]);
 
   async function save() {
     if (!space || !dirty || saving) return;
@@ -72,9 +76,12 @@ export function SpacePromptManagementPage({ api, spaceId, onBack }: Props) {
         config: { schemaVersion: 3, promptTemplate: template },
       });
       setSpace(updated);
-      setSavedTemplate(updated.config.promptTemplate);
-      setTemplate((current) => current === submittedTemplate ? updated.config.promptTemplate : current);
+      setDraft((current) => ({
+        template: current.template === submittedTemplate ? updated.config.promptTemplate : current.template,
+        savedTemplate: updated.config.promptTemplate,
+      }));
       setSaveMessage('提示词已保存。');
+      onSaved(updated);
     } catch (error) {
       setSaveMessage(`保存失败：${(error as Error).message}`);
     } finally {
@@ -88,7 +95,6 @@ export function SpacePromptManagementPage({ api, spaceId, onBack }: Props) {
         <CardHeader><CardTitle className="text-base">提示词管理</CardTitle></CardHeader>
         <CardContent className="grid gap-4">
           <div className="text-sm text-destructive">读取空间失败：{loadingError}</div>
-          <Button className="w-fit" variant="outline" onClick={onBack}><ArrowLeft className="size-4" />返回空间管理</Button>
         </CardContent>
       </Card>
     );
@@ -108,7 +114,6 @@ export function SpacePromptManagementPage({ api, spaceId, onBack }: Props) {
               <div className="mt-1 truncate font-mono text-xs text-muted-foreground">{space.id}</div>
             </div>
             <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" onClick={onBack}><ArrowLeft className="size-4" />返回</Button>
               <Button size="sm" onClick={() => void save()} disabled={!dirty || saving}>
                 <Save className="size-4" />{saving ? '保存中…' : '保存'}
               </Button>
@@ -122,7 +127,7 @@ export function SpacePromptManagementPage({ api, spaceId, onBack }: Props) {
             template={template}
             placeholders={placeholders}
             onTemplateChange={(nextTemplate) => {
-              setTemplate(nextTemplate);
+              setDraft((current) => ({ ...current, template: nextTemplate }));
               setSaveMessage('');
             }}
           />
