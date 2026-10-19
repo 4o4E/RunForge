@@ -24,6 +24,8 @@ RunForge 在共享的 Linux 运行容器中启动服务。所有 Linux Shell 命
 
 Shell 默认不继承服务端密钥。数据库访问需要正式的 workload token；直接数据库 CLI 仍由工具层阻止。工具输出继续进行脱敏和长度限制。
 
+完整隔离只投射系统目录和明确配置的 PATH 目录。安装在系统目录之外的 Node、pnpm 等工具，其启动脚本或符号链接可能依赖相邻目录；这些运行目录也需要通过 `SHELL_PATH` 明确配置。CI 显式提供 Node 安装根目录和 pnpm 的 `node_modules` 目录，不自动扩大到用户主目录或其他父目录。
+
 ## 网络与执行方式
 
 - 所有 Linux 执行范围都要求可用的 `bwrap`；缺失或无法创建 namespace 时明确失败，不直接执行 Shell。

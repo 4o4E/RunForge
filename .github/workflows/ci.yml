@@ -48,6 +48,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y bubblewrap ffmpeg ripgrep util-linux
 
+      - name: 配置隔离 Shell 的工具运行目录
+        run: |
+          node_root="$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")"
+          pnpm_root="$(dirname "${PNPM_HOME}")"
+          printf 'SHELL_PATH=%s:%s:%s\n' "$node_root" "$pnpm_root" "$PATH" >> "$GITHUB_ENV"
+
       - name: 构建全部 TypeScript 与 Web 产物
         run: pnpm build
 
@@ -94,6 +100,17 @@ jobs:
 
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
+
+      - name: 安装 Shell 集成验证依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y bubblewrap
+
+      - name: 配置隔离 Shell 的工具运行目录
+        run: |
+          node_root="$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")"
+          pnpm_root="$(dirname "${PNPM_HOME}")"
+          printf 'SHELL_PATH=%s:%s:%s\n' "$node_root" "$pnpm_root" "$PATH" >> "$GITHUB_ENV"
 
       - name: 构建共享包并生成 Prisma Client
         run: |
