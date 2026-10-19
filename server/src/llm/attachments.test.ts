@@ -275,3 +275,41 @@ test('hydrateImageAttachments: 已回答的用户图片保留引用但不重复�
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('hydrateImageAttachments: 上传引用和原始附件都逐图检查，超限不影响正常图片或后续裁剪图', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runforge-image-dimensions-'));
+  try {
+    const normal = await sharp({ create: { width: 1, height: 1, channels: 3, background: '#ff0000' } }).jpeg().toBuffer();
+    await writeFile(join(root, 'normal.jpg'), normal);
+    const oversized = '<svg xmlns="http://www.w3.org/2000/svg" width="1027" height="15000"><rect width="1" height="1"/></svg>';
+    const cropped = '<svg xmlns="http://www.w3.org/2000/svg" width="1027" height="1500"><rect width="1" height="1"/></svg>';
+    for (const useRefs of [false, true]) {
+      await writeFile(join(root, 'long.svg'), oversized);
+      const message: LlmMessage = useRefs
+        ? { role: 'user', content: '查看上传的图片', mediaRefs: [
+          { type: 'image', path: 'long.svg', name: '长截图', mimeType: 'image/svg+xml' },
+          { type: 'image', path: 'normal.jpg', mimeType: 'image/jpeg' },
+        ] }
+        : { role: 'user', content: '[[file:{"path":"long.svg","name":"长截图","mimeType":"image/svg+xml"}]]\n[[file:{"path":"normal.jpg","mimeType":"image/jpeg"}]]' };
+      const issues: Array<{ path: string; name: string; reason: string }> = [];
+      const hydrated = await hydrateImageAttachments([message], root, undefined, { issues });
+      assert.equal(issues.length, 1);
+      assert.equal(issues[0]?.path, 'long.svg');
+      assert.match(issues[0]?.reason ?? '', /1027×15000.*8000.*24000000.*裁剪或缩放/);
+      assert.match(hydrated[0]?.contentParts?.find((part) => part.type === 'text')?.text ?? '', /长截图.*未进入模型.*请勿推断其内容/);
+      const images = hydrated[0]?.contentParts?.filter((part) => part.type === 'image') ?? [];
+      assert.equal(images.length, 1);
+      assert.equal(images[0]?.path, 'normal.jpg');
+      assert.equal(images[0]?.data, normal.toString('base64'));
+      assert.equal(message.contentParts, undefined);
+
+      await writeFile(join(root, 'long.svg'), cropped);
+      const nextIssues: Array<{ path: string; name: string; reason: string }> = [];
+      const next = await hydrateImageAttachments([message], root, undefined, { issues: nextIssues });
+      assert.deepEqual(nextIssues, []);
+      assert.deepEqual(next[0]?.contentParts?.filter((part) => part.type === 'image').map((part) => part.path), ['long.svg', 'normal.jpg']);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

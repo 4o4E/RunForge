@@ -88,16 +88,12 @@ server.listen(config.port, config.host, () => {
   console.log(`   WebSocket: ws://${displayHost}:${config.port}/ws?runId=<id>`);
   void getSystemToolSettings().then((settings) => {
     console.log(
-      `   Tool sandbox: ${settings.sandbox}` +
-        (settings.sandbox === 'enforce'
-          ? ` (workspace 基础目录: ${settings.workspaceRoot}; 会话按 space/c/thread 隔离, shell: ${describeShellSandbox({
-              policyMode: settings.sandbox,
-              backend: settings.sandboxBackend,
-              workspaceRoot: settings.workspaceRoot,
-              useHostPath: settings.shellUseHostPath,
-              shareNet: settings.network === 'enabled',
-            })})`
-          : ''),
+      `   Tool access: ${describeShellSandbox({
+        backend: settings.sandboxBackend,
+        workspaceRoot: settings.workspaceRoot,
+        useHostPath: settings.shellUseHostPath,
+        shareNet: settings.network === 'enabled',
+      })}; workspace 基础目录: ${settings.workspaceRoot}`,
     );
   });
   if (isAcceptingNewRunExecutions()) {

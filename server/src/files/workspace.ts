@@ -51,9 +51,6 @@ export async function resolveWorkspaceFilePath(
   const allowedRoots = options.access === 'read'
     ? await Promise.all([...(options.managedReadRoots ?? []), ...(options.pluginRoots ?? [])].map((path) => realpath(path)))
     : [];
-  if (options.access === 'write' && isReservedThreadPath(root, target)) {
-    throw new WorkspacePathAccessError(`托管资源只读：${relative(root, target)}`);
-  }
 
   const parts = relative(root, target).split(sep).filter(Boolean);
   let current = root;

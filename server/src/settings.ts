@@ -21,7 +21,7 @@ import type {
   ToolSettings,
 } from '@runforge/contracts';
 export type { LlmModelOption, LlmProviderSettings, LlmSettings, McpServerSettings, McpSettings, RuntimeCapabilitiesSettings, ToolSettings } from '@runforge/contracts';
-import { config } from './config.js';
+import { config, packageRegistryUrl } from './config.js';
 import type { Scope, TenantScope } from './store/types.js';
 import { findSetting, findSettings, insertMissingSettings, upsertSettings } from './store/settingsRepository.js';
 import { resolveWorkspaceRoot } from './files/workspaceRoot.js';
@@ -43,6 +43,8 @@ const TOOL_SETTING_KEYS = [
   'tools.shellUseHostPath',
   'tools.shellPathMode',
   'tools.shellPath',
+  'tools.pipIndexUrl',
+  'tools.npmRegistry',
   'tools.network',
   'tools.shellDeny',
   'tools.maxOutput',
@@ -263,6 +265,8 @@ function defaultToolSettings(): ToolSettings {
     shellUseHostPath: config.tools.shellUseHostPath,
     shellPathMode: config.tools.shellPathMode,
     shellPath: config.tools.shellPath,
+    pipIndexUrl: config.tools.pipIndexUrl,
+    npmRegistry: config.tools.npmRegistry,
     network: config.tools.network,
     shellDeny: config.tools.shellDeny,
     maxOutput: config.tools.maxOutput,
@@ -343,6 +347,8 @@ function mergeToolSettings(values: Map<string, unknown>, workspaceRoot = config.
     shellUseHostPath: boolValue(values.get('tools.shellUseHostPath'), defaults.shellUseHostPath),
     shellPathMode: shellPathModeValue(values.get('tools.shellPathMode'), defaults.shellPathMode),
     shellPath: stringValue(values.get('tools.shellPath'), defaults.shellPath),
+    pipIndexUrl: packageRegistryUrl(values.get('tools.pipIndexUrl'), defaults.pipIndexUrl, 'Python 镜像源'),
+    npmRegistry: packageRegistryUrl(values.get('tools.npmRegistry'), defaults.npmRegistry, 'Node 镜像源'),
     network: networkValue(values.get('tools.network'), defaults.network),
     shellDeny: stringList(values.get('tools.shellDeny'), defaults.shellDeny),
     maxOutput: outputLimitValue(values.get('tools.maxOutput'), defaults.maxOutput),
@@ -396,6 +402,8 @@ function toolSettingsToEntries(settings: ToolSettings): Array<[string, unknown]>
     ['tools.shellUseHostPath', settings.shellUseHostPath],
     ['tools.shellPathMode', settings.shellPathMode],
     ['tools.shellPath', settings.shellPath],
+    ['tools.pipIndexUrl', settings.pipIndexUrl],
+    ['tools.npmRegistry', settings.npmRegistry],
     ['tools.network', settings.network],
     ['tools.shellDeny', settings.shellDeny],
     ['tools.maxOutput', settings.maxOutput],
@@ -413,6 +421,19 @@ export function normalizeToolSettings(input: unknown): ToolSettings {
 
 export function shellPathForSettings(settings: ToolSettings): string {
   return settings.shellPathMode === 'custom' ? settings.shellPath : process.env.PATH ?? '';
+}
+
+/** 每次启动命令读取当前系统镜像源；不继承宿主环境，也不被旧 run/session 快照固定。 */
+export async function shellEnvironment(env?: Record<string, string>): Promise<Record<string, string>> {
+  const settings = await getSystemToolSettings();
+  return {
+    ...env,
+    PIP_INDEX_URL: settings.pipIndexUrl,
+    UV_DEFAULT_INDEX: settings.pipIndexUrl,
+    NPM_CONFIG_REGISTRY: settings.npmRegistry,
+    // 容器固定使用 pnpm 11，独立的 PNPM_CONFIG_* 优先于工作区和 .npmrc 中的默认 registry。
+    PNPM_CONFIG_REGISTRY: settings.npmRegistry,
+  };
 }
 
 export async function saveToolSettings(scope: TenantScope, input: unknown): Promise<ToolSettings> {

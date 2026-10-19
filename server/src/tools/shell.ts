@@ -1,4 +1,4 @@
-import { getToolSettings, shellPathForSettings } from '../settings.js';
+import { getToolSettings, shellEnvironment, shellPathForSettings } from '../settings.js';
 import { formatCommandResult, shellManager } from '../shell/manager.js';
 import { redactShellOutput } from '../shell/redact.js';
 import { runShellCommand } from './sandbox.js';
@@ -61,13 +61,12 @@ export const shellTool: Tool = {
         return formatCommandResult(result);
       }
       const { stdout, stderr } = await runShellCommand(command, timeout, {
-        policyMode: settings.sandbox,
         backend: settings.sandboxBackend,
         workspaceRoot: settings.workspaceRoot,
         useHostPath: settings.shellUseHostPath,
         envPath: shellPathForSettings(settings),
         shareNet: settings.network === 'enabled',
-        env: ctx?.env,
+        env: await shellEnvironment(ctx?.env),
         pluginExecutables: ctx?.pluginExecutables,
         pluginRoots: ctx?.pluginRoots,
         managedReadRoots: ctx?.managedReadRoots,

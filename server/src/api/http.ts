@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
+import { usesShellSessionIsolation } from '@runforge/contracts';
 import { executeRun } from '../agent/executor.js';
 import { store } from '../store/index.js';
 import { filesApi } from './files.js';
@@ -853,7 +854,7 @@ async function webShellSessionSettings(
 }
 
 async function webUserFiles(identity: Extract<IdentityContext, { scope: 'tenant' }>, settings: ToolSettings) {
-  if (settings.sandbox !== 'enforce' || settings.sandboxBackend !== 'bwrap' || settings.shellUseHostPath) return undefined;
+  if (process.platform !== 'linux' || !usesShellSessionIsolation(settings.sandboxBackend, settings.shellUseHostPath)) return undefined;
   const root = resolveUserFilesRoot(identity.userId);
   await mkdir(root, { recursive: true });
   return { source: root, mountPath: root };

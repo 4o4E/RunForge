@@ -4,10 +4,63 @@ import {
   normalizeLlmSettings,
   normalizeRuntimeCapabilitiesSettings,
   normalizeTenantResourceAuthorization,
+  normalizeToolSettings,
+  getSystemToolSettings,
+  saveToolSettings,
 } from './settings.js';
 import { renderPromptTemplate, runtimeCapabilityPromptValues } from './spaces/prompt.js';
-import { agentContextSettings } from './config.js';
+import { agentContextSettings, config } from './config.js';
 import { createProviderFromSettings } from './llm/index.js';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { findSettings } from './store/settingsRepository.js';
+
+test('工具镜像源拒绝非 HTTP(S) 和坏 URL，空值恢复实例默认', () => {
+  const settings = normalizeToolSettings({ pipIndexUrl: '  ', npmRegistry: '' });
+  assert.equal(settings.pipIndexUrl, config.tools.pipIndexUrl);
+  assert.equal(settings.npmRegistry, config.tools.npmRegistry);
+  for (const field of ['pipIndexUrl', 'npmRegistry']) {
+    for (const value of ['file:///tmp/registry', 'ftp://example.com', 'https://', 'https:/example.com', 'not-a-url', 'https://exa mple.com', 'https://example.com\\bad', null, 42]) {
+      assert.throws(() => normalizeToolSettings({ [field]: value }), /HTTP\(S\) URL/);
+    }
+    const privateUrl = 'https://user:pass@packages.example.com:8443/private/simple';
+    assert.equal(normalizeToolSettings({ [field]: ` ${privateUrl} ` })[field as 'pipIndexUrl' | 'npmRegistry'], privateUrl);
+  }
+});
+
+test('系统工具镜像源保存后重新读取，并通过既有设置仓储持久化', async () => {
+  const original = await getSystemToolSettings();
+  const originalRoot = config.tools.workspaceRoot;
+  const root = await mkdtemp(join(tmpdir(), 'runforge-settings-mirrors-'));
+  config.tools.workspaceRoot = root;
+  try {
+    const saved = await saveToolSettings({ tenantId: 'default' }, {
+      ...original,
+      pipIndexUrl: 'https://pypi.org/simple',
+      npmRegistry: 'https://registry.npmjs.org/',
+    });
+    const reread = await getSystemToolSettings();
+    assert.equal(saved.pipIndexUrl, 'https://pypi.org/simple');
+    assert.equal(saved.npmRegistry, 'https://registry.npmjs.org/');
+    assert.equal(reread.pipIndexUrl, saved.pipIndexUrl);
+    assert.equal(reread.npmRegistry, saved.npmRegistry);
+    assert.deepEqual(await findSettings('default', ['tools.pipIndexUrl', 'tools.npmRegistry']), [
+      { key: 'tools.pipIndexUrl', value: saved.pipIndexUrl },
+      { key: 'tools.npmRegistry', value: saved.npmRegistry },
+    ]);
+    await assert.rejects(saveToolSettings({ tenantId: 'other' }, saved), /只能由系统管理员/);
+    await assert.rejects(saveToolSettings({ tenantId: 'default' }, { ...saved, npmRegistry: 'file:///tmp/npm' }), /HTTP\(S\) URL/);
+    assert.equal((await getSystemToolSettings()).npmRegistry, saved.npmRegistry);
+    const reset = await saveToolSettings({ tenantId: 'default' }, { ...saved, pipIndexUrl: '', npmRegistry: ' ' });
+    assert.equal(reset.pipIndexUrl, config.tools.pipIndexUrl);
+    assert.equal(reset.npmRegistry, config.tools.npmRegistry);
+  } finally {
+    await saveToolSettings({ tenantId: 'default' }, original);
+    config.tools.workspaceRoot = originalRoot;
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('agent context settings: 使用模型压缩阈值，环境变量只能进一步收紧', () => {
   const original = process.env.LLM_CONTEXT_BUDGET;

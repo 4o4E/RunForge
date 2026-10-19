@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { resolveWebWorkspaceFilePath, resolveWorkspaceFilePath, WorkspacePathAccessError } from './workspace.js';
+import { ensureManagedDirectory, ensureManagedLink } from './managedResources.js';
+import { removeSpaceWorkspace, removeThreadWorkspace, resolveThreadWorkspaceRoot } from './workspaceRoot.js';
 
 test('Agent file paths allow ordinary thread files and only selected resource links', async () => {
   const base = await mkdtemp(join(tmpdir(), 'runforge-workspace-path-'));
@@ -64,6 +66,10 @@ test('Agent file paths allow ordinary thread files and only selected resource li
       resolveWorkspaceFilePath(thread, 'plugins/crm/index.ts', { access: 'write', pluginRoots: [pluginRoot] }),
       WorkspacePathAccessError,
     );
+    await assert.rejects(
+      resolveWorkspaceFilePath(thread, 'plugins/other/index.ts', { access: 'write', pluginRoots: [pluginRoot] }),
+      WorkspacePathAccessError,
+    );
   } finally {
     await rm(base, { recursive: true, force: true });
   }
@@ -89,6 +95,60 @@ test('Web file paths reject managed resources and every symbolic link', async ()
     assert.equal(await resolveWebWorkspaceFilePath(thread, 'note.txt'), join(thread, 'note.txt'));
     await assert.rejects(resolveWebWorkspaceFilePath(thread, '.agents/flow.md'), WorkspacePathAccessError);
     await assert.rejects(resolveWebWorkspaceFilePath(thread, 'private-link/secret.txt'), WorkspacePathAccessError);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('并发发布只读版本后可重复准备，替换旧入口时不会修改被链接的旧版本', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'runforge-managed-publish-'));
+  const version = join(base, 'space', '.skills', 'sample', 'v1');
+  const next = join(base, 'space', '.skills', 'sample', 'v2');
+  const entry = join(base, 'space', 'c', 'thread', '.agents', 'skills', 'sample');
+  try {
+    const materialize = async (staging: string) => {
+      await mkdir(staging, { recursive: true });
+      await writeFile(join(staging, 'SKILL.md'), '第一版');
+    };
+    await Promise.all([ensureManagedDirectory(version, materialize), ensureManagedDirectory(version, materialize)]);
+    await ensureManagedDirectory(version, async () => { throw new Error('已有版本不应再次复制'); });
+    assert.deepEqual(await readdir(join(base, 'space', '.skills', 'sample')), ['v1']);
+    await ensureManagedLink(version, entry);
+    await ensureManagedDirectory(next, async (staging) => {
+      await mkdir(staging, { recursive: true });
+      await writeFile(join(staging, 'SKILL.md'), '第二版');
+    });
+    await ensureManagedLink(next, entry);
+    assert.equal(await readFile(join(entry, 'SKILL.md'), 'utf8'), '第二版');
+    assert.equal(await readFile(join(version, 'SKILL.md'), 'utf8'), '第一版');
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('线程清理保留共享版本，空间清理不跟随用户原目录链接', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'runforge-managed-cleanup-'));
+  const space = join(base, 'sp_test');
+  const thread = resolveThreadWorkspaceRoot('sp_test', 'th_test', base);
+  const shared = join(space, '.skills', 'selected');
+  const original = join(base, 'user-original');
+  try {
+    await mkdir(shared, { recursive: true });
+    await writeFile(join(shared, 'SKILL.md'), '共享版本');
+    await ensureManagedLink(shared, join(thread, '.agents', 'skills', 'selected'));
+    await mkdir(original);
+    await chmod(original, 0o750);
+    await writeFile(join(original, 'note.txt'), '用户原文件');
+    await chmod(join(original, 'note.txt'), 0o640);
+    await symlink(original, join(space, 'user-link'), 'dir');
+    await removeThreadWorkspace('sp_test', 'th_test', base);
+    await assert.rejects(lstat(thread), { code: 'ENOENT' });
+    assert.equal(await readFile(join(shared, 'SKILL.md'), 'utf8'), '共享版本');
+    await removeSpaceWorkspace('sp_test', base);
+    await assert.rejects(lstat(space), { code: 'ENOENT' });
+    assert.equal((await stat(original)).mode & 0o777, 0o750);
+    assert.equal((await stat(join(original, 'note.txt'))).mode & 0o777, 0o640);
+    assert.equal(await readFile(join(original, 'note.txt'), 'utf8'), '用户原文件');
   } finally {
     await rm(base, { recursive: true, force: true });
   }

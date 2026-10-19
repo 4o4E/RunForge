@@ -116,7 +116,7 @@ async function loadImageToken(token: FileToken, workspaceRoot: string, userFiles
   if (!prepared) return null;
   return {
     type: 'image',
-    data: prepared.data,
+    data: prepared.bytes.toString('base64'),
     mimeType: prepared.mimeType,
     path: userFilesRoot && isWithin(userFilesRoot, absolute) ? absolute : toRemotePath(absolute, workspaceRoot),
     name: token.name,
@@ -206,7 +206,7 @@ export async function hydrateImageAttachments(
       if (options.allowImages === false) {
         const mimeType = token.mimeType?.trim() || mediaTypeFromPath(token.path);
         if (!isImageMediaType(mimeType)) continue;
-        localIssues.push({ path: token.path, name: token.name ?? token.path, reason: '当前模型未启用图片输入' });
+        localIssues.push({ path: token.path, name: token.name ?? token.path, reason: '当前模型未启用图片输入，请选择支持图片的多模态模型后重新读取' });
         continue;
       }
       try {

@@ -2,12 +2,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { isExplicitImageRejection, omitImagesForTextContinuation } from './mediaFallback.js';
 
-test('仅明确拒绝图片输入时才允许纯文本重试', () => {
+test('仅明确否定模型图片能力时才允许纯文本重试', () => {
   assert.equal(isExplicitImageRejection({ statusCode: 400, responseBody: '{"error":{"message":"This model does not support image inputs"}}' }), true);
-  assert.equal(isExplicitImageRejection({ statusCode: 422, responseBody: 'unsupported image format' }), true);
+  assert.equal(isExplicitImageRejection({ statusCode: 422, responseBody: 'unsupported image format' }), false);
   assert.equal(isExplicitImageRejection({ statusCode: 401, responseBody: 'This model does not support image inputs' }), false);
   assert.equal(isExplicitImageRejection({ statusCode: 400, responseBody: 'invalid image payload' }), false);
   assert.equal(isExplicitImageRejection(new Error('This model does not support image inputs')), false);
+  assert.equal(isExplicitImageRejection({ statusCode: 400, message: 'unsupported image' }), false);
+  assert.equal(isExplicitImageRejection({ statusCode: 400, responseBody: '{"error":{"message":"unsupported image","type":"invalid_request_error"}}' }), false);
+  assert.equal(isExplicitImageRejection({ statusCode: 400, responseBody: 'This model does not support image format JPEG' }), false);
+  assert.equal(isExplicitImageRejection({ statusCode: 400, responseBody: 'This model does not support images larger than 8000 pixels' }), false);
+  assert.equal(isExplicitImageRejection({ statusCode: 415, responseBody: 'Image inputs are not supported by this model.' }), true);
+  assert.equal(isExplicitImageRejection({ statusCode: 400, responseBody: '当前模型不支持图片输入。' }), true);
 });
 
 test('图片降级保留原始请求，并向模型标明图片内容不可见', () => {

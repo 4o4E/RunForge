@@ -138,6 +138,8 @@ function toolSettings(workspaceRoot: string): ToolSettings {
     shellUseHostPath: true,
     shellPathMode: 'system',
     shellPath: process.env.PATH ?? '',
+    pipIndexUrl: 'https://pypi.tuna.tsinghua.edu.cn/simple',
+    npmRegistry: 'https://registry.npmmirror.com/',
     network: 'disabled',
     shellDeny: [],
     maxOutput: 40_000,

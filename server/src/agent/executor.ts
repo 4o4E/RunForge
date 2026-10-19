@@ -43,7 +43,7 @@ import {
   renderMcpSystemRules,
   type McpActivation,
 } from '../mcp/client.js';
-import type { RuntimeCapabilityName } from '@runforge/contracts';
+import { usesShellSessionIsolation, type RuntimeCapabilityName } from '@runforge/contracts';
 import { withSpan } from '../telemetry.js';
 import type { AskUserAnswer, AskUserMode, AskUserOption, AskUserSpec, StreamStage, StreamStats } from './types.js';
 import { shellManager } from '../shell/manager.js';
@@ -58,6 +58,7 @@ import {
 } from '../spaces/config.js';
 import {
   defaultPromptTemplate,
+  IMAGE_INPUT_PROMPT,
   renderFileLinkRules,
   renderPromptTemplate,
   runtimeCapabilityPromptValues,
@@ -938,9 +939,8 @@ async function executeRunControlled(
       const allowedBySpace = spaceConfig?.mode === 'web'
         || (!spaceConfig && initialThread.source_type === 'web')
         || (spaceConfig?.mode === 'external' && spaceConfig.external.allowUserFiles === true);
-      const hasBwrapMapping = toolSettings.sandbox === 'enforce'
-        && toolSettings.sandboxBackend === 'bwrap'
-        && !toolSettings.shellUseHostPath;
+      const hasBwrapMapping = process.platform === 'linux'
+        && usesShellSessionIsolation(toolSettings.sandboxBackend, toolSettings.shellUseHostPath);
       const selectedExecutionUser = spaceConfig?.mode === 'external'
         ? spaceConfig.external.userFilesUserId === scope.userId
         : initialThread.source_type === 'web';
@@ -1116,7 +1116,7 @@ async function executeRunControlled(
           }),
         ].join('\n')
       : '';
-    const prompt = [basePrompt, onDemandToolPrompt, renderFileLinkRules(userFiles?.mountPath ?? null)].filter(Boolean).join('\n\n');
+    const prompt = [basePrompt, IMAGE_INPUT_PROMPT, onDemandToolPrompt, renderFileLinkRules(userFiles?.mountPath ?? null)].filter(Boolean).join('\n\n');
     const userMediaRefs = mediaRefsFromUserText(runtimeUserInput);
     const ctx = new ContextManager(prior, runtimeUserInput, renderGoal(goal), {
       appendUserInput: !hasPersistedMessages,
@@ -1291,6 +1291,7 @@ async function executeRunControlled(
               '不要调用 subagent_*、ask_user、update_plan 或 skill_activate；需要额外 skill 时由主 agent 调度。',
               `用户跨会话文件目录：${userFiles?.mountPath ?? '已禁用'}。仅在任务需要持久保存个人数据时使用。`,
               'Do not call subagent_*, ask_user, update_plan, or skill_activate; the main agent schedules extra skills.',
+              IMAGE_INPUT_PROMPT,
             ].join('\n'),
           },
           {

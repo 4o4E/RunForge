@@ -35,7 +35,7 @@ async function readFileContent(path: string, inputPath: string, options: FileRea
   if (info.size > MAX_MEDIA_FILE_BYTES) throw new Error(`文件超过 ${MAX_MEDIA_FILE_BYTES} 字节读取上限`);
 
   if (mediaType.startsWith('image/')) {
-    const image = await sharp(path).metadata();
+    const image = await sharp(path, { limitInputPixels: false }).metadata();
     if ((image.pages ?? 1) > 1) {
       return readAnimatedImage(path, { ...options, mode }, ctx);
     }

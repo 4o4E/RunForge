@@ -7,8 +7,7 @@
 
 - **所有 shell 都走托管资源。** 不再把 `shell(command)` 当一次性黑盒；先有 `shell_session`，
   再有 `shell_exec` 产生的 `shell_command`。
-- **bwrap 可作为隔离后端，不是任务调度器。** 它负责构造受限进程树；session/command 生命周期由
-  后端 `ShellManager` 管。
+- **Linux Shell 始终通过 bwrap 保护资源。** bwrap 构造受限进程树；session/command 生命周期由后端 `ShellManager` 管理，后台可选择容器范围访问或完整会话隔离。
 - **命令可前台也可后台。** `shell_exec(wait=foreground)` 等待完成或超时；`wait=background`
   立即返回 `commandId`，后续用 `poll/kill` 管理。
 - **LLM 只观察，不保活。** 定时、超时、进程回收由后端 `ShellManager` 做；LLM 通过工具轮询状态并决策下一步。
@@ -38,7 +37,7 @@
 - Claude Code：后台 PTY job 与 Bash sandbox 分层；权限先判定，OS 沙箱约束子进程。
 - Codex / Copilot cloud agent / Cursor / Devin：任务拥有独立环境，用户能看日志、状态、diff、测试证据，并可中断错误操作。
 
-落到本项目：实现**本地 bwrap/host 托管 shell 后端**，接口按 E2B 风格设计，未来可替换为 Docker/E2B。
+本项目使用本地托管 Shell；Linux 通过 bwrap 支持两种访问范围，非 Linux 保持现有执行方式。接口按 E2B 风格设计。
 
 ## 4. 核心模型
 
@@ -106,14 +105,14 @@ queued -> running -> succeeded | failed | killed | timed_out | orphaned
 - `server/src/tools/managedShell.ts`：托管 shell 工具定义。
 - `server/src/shell/manager.ts`：session/command 生命周期、日志写入、软/硬超时和进程终止。
 - `server/src/shell/bus.ts`：thread 级 shell 事件推送，驱动右侧 Shell 面板刷新。
-- `server/src/tools/sandbox.ts`：复用 host/bwrap 后端选择、挂载、网络和环境变量逻辑。
+- `server/src/tools/sandbox.ts`：访问范围、只读挂载、网络和进程环境。
 
 bwrap 启动方式：
 
 - 用 `spawn(...)` 执行 command，不再用 `execFileAsync`。
 - 复用现有 `buildBwrapArgs` 的挂载、网络和环境变量逻辑。
-- 保留 `--new-session` 和 `--die-with-parent`，终止时杀 bwrap 进程组。
-- `TOOL_NETWORK=enabled` 时才 `--share-net`，否则后台 `git clone` 应明确失败。
+- 保留 `--new-session` 和 `--die-with-parent`；通过 `--json-status-fd` 获取隔离进程组 PID，先向该进程组发送终止信号，等待退出处理、日志写入及 bwrap 监控进程正常结束。启动期间的终止请求等待 PID；宽限期结束仍未退出则强制终止。
+- 完整会话隔离按 `TOOL_NETWORK` 决定是否 `--share-net`；容器范围访问保留原容器网络。所有 Linux 范围都在 bwrap 缺失或不可用时明确失败。
 
 超时与回收：
 
@@ -251,13 +250,13 @@ PTY 模式需要新增：
 - 原始 transcript 日志：保留 raw bytes，同时派生给 LLM 的短摘要
 - 输入锁：同一个 shell 同时只能有一个 running/queued command
 
-安全边界不变：PTY 只是 I/O 形态，命令仍走同一套 tool policy 和 bwrap/host 后端。
+安全边界不变：PTY 只是 I/O 形态，命令仍走同一套工具策略和当前平台的执行边界。
 
 ## 10. 安全边界
 
-- 后台 shell 仍走 `createPolicy(settings)`，不能绕过工具 allow/deny。
-- bwrap 只约束 shell 子进程；进程内 file tools 仍靠应用层路径策略。
-- `shellUseHostPath=true` 时无法获得 bwrap 文件隔离，应在 UI/事件里显式标注。
+- 后台 Shell 仍调用 `createPolicy(settings)`；工具策略与操作系统资源只读保护分别处理，工具策略不决定 Shell 隔离范围。
+- bwrap 只约束 shell 子进程；文件工具继续使用身份、真实路径和选中资源授权。
+- 容器范围访问保留原容器文件与网络范围，但当前资源的逻辑入口和真实目标始终由 bwrap 只读保护。
 - shell command 默认不继承后端密钥；数据库 CLI 仍必须走 workload token。
 - 输出继续走脱敏和大小限制；完整日志也要做 secret redaction。
 - 用户和 LLM 共享同一个 shell 时必须有命令写入锁；同一时刻只能一个 actor 启动命令。
@@ -269,7 +268,7 @@ PTY 模式需要新增：
 
 - `shell_session_open/reuse/list/close`
 - `shell_exec(wait=foreground|background)`、`shell_poll`、`shell_kill`
-- host + bwrap 后端，旧 `shell` 作为兼容包装
+- Linux bwrap 两种访问范围，简化 `shell` 与 session 工具共享运行时
 - DB 表、事件、run cancel 对 command 的级联 kill
 - 前端 Shell 面板 + command 卡片展示状态和 tail
 
@@ -297,7 +296,7 @@ PTY 模式需要新增：
 - 软超时：任务仍运行，前端和事件提示用户选择。
 - 硬超时：任务被杀，状态为 `timed_out`，退出信息可追踪。
 - run cancel：该 run 启动的 running command 被级联终止；shell 记录保留。
-- bwrap enforce：工作区外不可见，网络 disabled 时 clone 失败，enabled 时按预期执行。
+- 完整会话隔离：其他会话和未授权用户目录不可见，网络 disabled 时 clone 失败，enabled 时按预期执行；容器范围访问保持原容器文件与网络范围，两者均保护托管资源只读。
 - 日志大于 `TOOL_MAX_OUTPUT`：LLM 只收到 tail，完整日志可分页查看。
 - 用户打开历史 run：仍能看到 session、command 最终状态和完整日志。
 

@@ -11,10 +11,10 @@ type PromptPlaceholderDefinition = Omit<PromptPlaceholder, 'token' | 'content'>;
 const PLACEHOLDER_DEFINITIONS: PromptPlaceholderDefinition[] = [
   { key: 'workspace.root', label: '工作区路径', description: '本次运行分配的持久工作区根目录。', runtime: true },
   { key: 'user.filesRoot', label: '用户文件目录', description: '当前用户的跨会话文件目录；未授权时为已禁用。', runtime: true },
-  { key: 'sandbox.mode', label: '沙箱模式', description: '系统当前配置的工具沙箱模式。', runtime: false },
+  { key: 'sandbox.mode', label: '工具策略', description: '系统当前配置的附加工具策略，不决定 Shell 隔离范围。', runtime: false },
   { key: 'sandbox.backend', label: '沙箱后端', description: '系统当前配置的 shell 沙箱后端。', runtime: false },
-  { key: 'shell.hostPath', label: '容器直接执行', description: 'shell 是否绕过 bwrap，直接在 RunForge 容器中执行。', runtime: false },
-  { key: 'network.mode', label: '网络模式', description: '工具运行环境是否允许网络访问。', runtime: false },
+  { key: 'shell.hostPath', label: '容器范围访问', description: 'Linux Shell 是否保留容器文件与网络范围；托管资源仍由 bwrap 只读保护。', runtime: false },
+  { key: 'network.mode', label: '网络策略', description: '完整隔离的 Shell 网络开关；启用工具策略时也限制 Web 工具。', runtime: false },
   { key: 'skills.catalog', label: 'Skill 目录', description: 'Skill 使用规则和运行时可用目录。', runtime: true },
   { key: 'mcp.catalog', label: 'MCP 目录', description: 'MCP 使用规则和当前空间可用目录。', runtime: false },
   { key: 'runtime.environment', label: '工作负载环境', description: '本次运行注入的短期令牌、资源端点和数据源摘要。', runtime: true },
@@ -43,6 +43,10 @@ const HTML_ARTIFACT_PROMPT = `- 仅在 Mermaid 或 Markdown 无法表达的图�
 - 创建 artifact 后，最终回答必须用 Markdown 链接语法说明产物路径。
 - 除非用户明确要求原始 JSON，否则不要把界面写成声明式 JSON 或组件树。`;
 const DATABASE_ACCESS_PROMPT = '- 涉及数据库、数据源、schema、库表、字段或数据统计时，必须先激活 database-access skill；不要使用宿主进程 DATABASE_URL、长期密码或服务端私密环境变量。';
+export const IMAGE_INPUT_PROMPT = `图片理解规则：
+- 图片内容只能使用支持图片输入的多模态模型分析；不得安装或使用 OCR 作为替代，也不得根据文件名、路径或不可见的画面臆测内容。
+- file_read 或附件提示图片未进入模型时，不要声称已看见图片。尺寸或像素超限时，使用已有图片工具在当前工作区另存裁剪或缩放副本，再重新读取；长截图优先按顺序分段裁剪，保留全部内容和字迹清晰，不改写原图。无法处理时再明确告知用户实际限制。
+- 当前模型不支持图片时，要求选择支持图片的多模态模型；不要绕过本地限制、另建 OCR 环境或向其他模型/网络服务发送被拒绝的图片。`;
 /** 文件链接是网页预览入口规则，运行时追加以覆盖已经保存的空间提示词模板。 */
 export function renderFileLinkRules(userFilesRoot: string | null): string {
   const userRule = userFilesRoot
@@ -60,7 +64,7 @@ const WORKSPACE_RUNTIME_PROMPT = `运行时文件系统上下文:
 - 临时产物和当前会话文件写入工作区；仅需跨会话保留的个人数据写入已启用的用户文件目录。用户目录为“已禁用”时不得尝试访问。
 - 不要把需要保留的文件写到当前会话工作区和已启用用户目录之外的路径，例如 /home/user、/tmp 或应用仓库根目录，除非用户明确要求且工具策略允许。
 - Python 依赖必须安装在虚拟环境中；优先在工作区创建 .venv 并使用 uv 管理依赖，不要全局安装 pip 包。
-- 工具沙箱: {{sandbox.mode}}；shell 后端: {{sandbox.backend}}；shell 绕过 bwrap 直接执行: {{shell.hostPath}}；网络: {{network.mode}}。容器 PATH 中已安装的命令默认可用，危险命令规则仅防误操作。
+- 工具策略: {{sandbox.mode}}；shell 后端配置: {{sandbox.backend}}；shell 保留容器范围开关: {{shell.hostPath}}；网络策略: {{network.mode}}。Linux Shell 始终通过 bwrap 保护托管资源只读；容器范围保留原有网络，完整隔离使用网络策略。容器 PATH 中已安装的命令默认可用，危险命令规则仅防误操作。
 - shell 是托管资源：优先用 shell_session_reuse/open 获取 session，再用 shell_exec 执行命令；短命令用 wait=foreground，长命令用 wait=background 后用 shell_poll 观察，必要时用 shell_kill 终止。
 - shell session 会长期记住当前目录；需要切换目录时直接执行 cd。`;
 const RUNTIME_RESOURCES_PROMPT = `运行时内部能力:

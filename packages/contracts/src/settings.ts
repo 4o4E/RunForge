@@ -1,5 +1,10 @@
 export type SandboxBackendName = 'auto' | 'none' | 'bwrap';
 
+/** Shell 隔离范围独立于工具策略；平台与 bwrap 可用性由运行时检查。 */
+export function usesShellSessionIsolation(backend: SandboxBackendName, useHostPath: boolean): boolean {
+  return backend !== 'none' && !useHostPath;
+}
+
 export interface ToolSettings {
   sandbox: 'off' | 'enforce';
   sandboxBackend: SandboxBackendName;
@@ -8,6 +13,8 @@ export interface ToolSettings {
   shellUseHostPath: boolean;
   shellPathMode: 'system' | 'custom';
   shellPath: string;
+  pipIndexUrl: string;
+  npmRegistry: string;
   network: 'enabled' | 'disabled';
   shellDeny: string[];
   maxOutput: number;

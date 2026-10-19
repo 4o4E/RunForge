@@ -9,7 +9,7 @@
 - 工具调用：原生工具默认加载；Skill 与 MCP 按 run 激活，另有 shell、文件读写、web、workflow、subagent 等能力。
 - 执行可观测：通过 REST/WebSocket 输出 step、reasoning、tool_call、tool_result、subagent、shell、final 等事件。
 - 持久化：使用 PostgreSQL 保存 thread、run、step、message、event、shell session、subagent run 和运行配置。
-- 隔离基础：提供工具策略层和可选 bwrap shell 沙箱，为后续云端隔离执行打基础。
+- 隔离基础：Linux Shell 通过 bwrap 保护只读资源，支持容器范围访问和完整会话隔离。
 
 当前实现是 Node.js/TypeScript 后端 + React/Vite 前端的单实例通用 Agent 运行平台。它已经能完成端到端 Agent 执行闭环，并支持多租户身份与数据隔离、租户空间配置、外部调用入口、服务启动后恢复中断 run、托管 shell 长耗时命令、Skill 渐进加载和异步只读 subagent。队列调度、跨 worker 接管、per-run 工作区、资源配额和跨 thread memory 等多 worker 平台能力仍在路线图中。
 
@@ -69,7 +69,7 @@ Compose 中为该目录增加只读 bind mount。Office 转换服务地址也直
 - Node.js >= 24
 - pnpm 11.x
 - PostgreSQL，或使用仓库内 Compose 单独启动开发数据库
-- Linux 环境如需强制 bwrap 沙箱，需要提前安装 bubblewrap（常见包名为 `bubblewrap`）
+- Linux 执行 Shell 必须安装 bubblewrap（常见包名为 `bubblewrap`），并允许创建所需 namespace；容器安全配置见 [部署说明](deploy/security/README.md)。
 
 ### 1. 安装依赖
 
@@ -125,6 +125,7 @@ AGENT_HARD_STEP_CAP=1000
 
 TOOL_SANDBOX=enforce
 TOOL_SANDBOX_BACKEND=bwrap
+SHELL_USE_HOST_PATH=false
 TOOL_WORKSPACE_ROOT=/absolute/path/to/RunForge/workspace
 TOOL_NETWORK=disabled
 TOOL_MAX_OUTPUT=40000
@@ -181,6 +182,8 @@ psql "$DATABASE_URL" -c "\dt"
 `TOOL_WORKSPACE_ROOT`，不会写入数据库；所有空间统一派生为
 `<TOOL_WORKSPACE_ROOT>/<spaceId>/c/<threadId>`。生产 Compose 把会话工作区挂载到 `/w`，
 把用户跨会话文件单独挂载到 `/u`；用户文件路径为 `/u/<userId>`，不从旧目录迁移。
+
+系统管理员在 `/sys-admin/settings/tools-sandbox` 独立配置工具策略与 Shell 访问范围，并维护 Python（pip / uv）与 Node（npm / pnpm）镜像源。默认使用清华 PyPI 镜像和 npmmirror；保存后随后启动的命令立即使用新值，已运行进程不变。两种 Linux 访问范围都通过 bwrap 保护插件、Skill 和 SDK；缺失或不可用时明确失败。完整边界及图片多模态输入限制见 [工具沙箱设计](docs/tool-sandbox.md)。
 
 ```bash
 psql "$DATABASE_URL" -c "select key, value from app_settings order by key;"

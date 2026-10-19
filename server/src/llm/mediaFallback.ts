@@ -5,7 +5,7 @@ export interface OmittedImage {
   name: string;
 }
 
-/** 仅检查明确的上游图片拒绝；网络、鉴权和额度错误不能被改写成文本续聊。 */
+/** 只有上游明确否定模型的图片能力才降级；格式、尺寸和泛化的 unsupported image 只属于本次输入。 */
 export function isExplicitImageRejection(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false;
   const row = error as { statusCode?: unknown; status?: unknown; responseBody?: unknown; data?: unknown; message?: unknown };
@@ -14,9 +14,10 @@ export function isExplicitImageRejection(error: unknown): boolean {
   const detail = [row.responseBody, row.data, row.message]
     .map((value) => typeof value === 'string' ? value : JSON.stringify(value ?? ''))
     .join(' ');
-  return (/(?:image|vision|image_url|input_image)/i.test(detail)
-    && /(?:not supported|unsupported|does not support|not accept|invalid image format)/i.test(detail))
-    || /(?:不支持|无法处理|不接受).{0,24}(?:图片|图像)|(?:图片|图像).{0,24}(?:不支持|无法处理|不接受)/.test(detail);
+  return /\bmodel\b[^\n.!?]{0,80}\b(?:does\s+not|doesn't|cannot|can't|can\s+not)\s+(?:support|accept|process)\s+(?:(?:any|the)\s+)?(?:images?|image\s+inputs?|vision|visual\s+inputs?)(?=\s*(?:[.,;:!?\n"'}\]]|$))/i.test(detail)
+    || /\b(?:images?|image\s+inputs?|vision|visual\s+inputs?)\s+(?:are|is)\s+not\s+supported\s+by\s+(?:(?:this|the|current|selected)\s+)?model\b/i.test(detail)
+    || /\b(?:this|the|current|selected)\s+model\s+(?:is|supports?)\s+(?:text-only|only\s+text)\b/i.test(detail)
+    || /模型[^。\n！？]{0,40}(?:不支持|不接受|无法处理)(?:图片|图像|视觉)(?:输入)?(?=\s*(?:[。，；：！？\n"'}\]]|$))/.test(detail);
 }
 
 /** 仅派生本次请求的纯文本视图，不修改持久化的用户消息和文件引用。 */
@@ -34,7 +35,7 @@ export function omitImagesForTextContinuation(messages: LlmMessage[]): { message
     const names = images.map((part) => part.name ?? part.path).join('、');
     return {
       ...message,
-      content: `${text}\n\n[本轮图片内容未进入模型：${names}。请勿推断图片中的具体内容；如需分析，请说明当前无法查看图片。]`.trim(),
+      content: `${text}\n\n[本轮图片内容未进入模型：${names}。请勿推断图片中的具体内容；当前模型无法查看图片，请选择支持图片的多模态模型后重新读取。]`.trim(),
       contentParts: undefined,
     };
   });

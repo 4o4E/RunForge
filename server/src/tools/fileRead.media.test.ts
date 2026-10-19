@@ -9,6 +9,8 @@ import sharp from 'sharp';
 import { normalizeToolSettings } from '../settings.js';
 import { fileReadTool } from './fileRead.js';
 import type { ToolResult } from './types.js';
+import { appendImageAttachmentTokens, hydrateImageAttachments } from '../llm/attachments.js';
+import { ImageInputRejectedError } from '../llm/imageInput.js';
 
 const execFileAsync = promisify(execFile);
 const scope = { tenantId: 'tenant_media_test', userId: 'user_media_test' };
@@ -74,6 +76,55 @@ test('file_read detects and converts an extensionless AVIF image to a controlled
   const textResult = await fileReadTool.run({ path, mode: 'text' }, context()) as ToolResult;
   assert.equal(textResult.contentParts, undefined);
   assert.match(textResult.text, /不包含画面像素内容/);
+});
+
+test('file_read 本地拒绝生产尺寸长图，用户裁剪后的 JPEG 和 PNG 仍能形成多模态输入', async () => {
+  const path = join(root, 'work', 'long-screenshot.jpg');
+  const original = await sharp({ create: { width: 1027, height: 15000, channels: 3, background: '#2450aa' } }).jpeg().toBuffer();
+  await writeFile(path, original);
+  await assert.rejects(fileReadTool.run({ path }, context()), (error: unknown) => {
+    assert.ok(error instanceof ImageInputRejectedError);
+    assert.match(error.message, /1027×15000/);
+    assert.match(error.message, /8000/);
+    assert.match(error.message, /24000000/);
+    assert.match(error.message, /裁剪或缩放.*长截图.*优先分段裁剪.*字迹清晰/);
+    assert.doesNotMatch(error.message, /已读取|已交给视觉/);
+    return true;
+  });
+
+  for (const format of ['jpeg', 'png'] as const) {
+    // 模拟用户按提示保留清晰字迹并裁剪；读取工具本身绝不修改原图。
+    const croppedPath = join(root, 'work', `cropped.${format}`);
+    const cropped = await sharp(original).extract({ left: 0, top: 0, width: 1027, height: 1500 })
+      .toFormat(format).toBuffer();
+    await writeFile(croppedPath, cropped);
+    const result = await fileReadTool.run({ path: croppedPath }, context()) as ToolResult;
+    assert.equal(result.contentParts?.length, 1);
+    assert.equal(result.contentParts?.[0]?.type, 'image');
+    const image = result.contentParts![0]!;
+    if (image.type !== 'image') throw new Error('裁剪图片没有进入多模态结果');
+    assert.equal(image.data, cropped.toString('base64'));
+    const hydrated = await hydrateImageAttachments([
+      { role: 'assistant', content: null, toolCalls: [
+        { id: `read_${format}`, name: 'file_read', arguments: JSON.stringify({ path: croppedPath }) },
+      ] },
+      { role: 'tool', toolCallId: `read_${format}`, content: appendImageAttachmentTokens(result.text, result.contentParts, `read_${format}`) },
+    ], root);
+    assert.deepEqual(hydrated.map((message) => message.role), ['assistant', 'tool', 'user']);
+    const hydratedImage = hydrated[2]?.contentParts?.[0];
+    assert.equal(hydratedImage?.type, 'image');
+    if (hydratedImage?.type !== 'image') throw new Error('裁剪图片没有恢复为多模态输入');
+    assert.equal(hydratedImage.mimeType, `image/${format}`);
+    assert.equal(hydratedImage.data, cropped.toString('base64'));
+  }
+});
+
+test('file_read 在转换前明确拒绝像素超限图片，实际宽高不被 sharp 默认限制吞掉', async () => {
+  const path = join(root, 'work', 'pixel-limit.svg');
+  for (const [width, height] of [[6000, 4001], [30000, 30000]]) {
+    await writeFile(path, `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="1" height="1"/></svg>`);
+    await assert.rejects(fileReadTool.run({ path }, context()), new RegExp(`${width}×${height}.*24000000.*裁剪或缩放`));
+  }
 });
 
 test('file_read extracts timestamped video frames with ffmpeg', async () => {

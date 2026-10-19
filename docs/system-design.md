@@ -344,20 +344,20 @@ LLM tool call
 
 - 主 agent 的原生工具默认全部注册，不提供系统级工具 allow/deny 管理页。
 - Skill 通过 `skill_activate(id)` 加载入口说明；MCP 通过 `mcp_activate(id)` 按当前 run 加载远端工具 schema。
-- `TOOL_SANDBOX=enforce` 时启用文件路径围栏、shell 开关和网络开关。
+- `TOOL_SANDBOX=enforce` 时启用附加文件路径围栏、shell 开关/危险命令和 Web 网络限制，不改变 Shell 隔离范围。
 - `TOOL_WORKSPACE_ROOT` 定义受控工作区根目录。
 - `SHELL_ENABLED` 控制 shell 工具是否可用。
 - `SHELL_DENY` 阻止明显危险命令模式。
-- `TOOL_NETWORK` 控制 web 工具和 shell 网络能力。
+- `TOOL_NETWORK` 控制完整隔离的 Shell 网络，并在启用工具策略时限制 Web 工具。
 - `TOOL_MAX_OUTPUT` 限制单条工具结果长度，默认 40000 字符，且在任何沙箱模式下都生效。
 
-shell 沙箱后端：
+Linux Shell 始终通过 bwrap 保护资源；后端缺失或不可用时明确失败。系统后台提供两种访问范围：
 
-- `TOOL_SANDBOX_BACKEND=none`：宿主执行。
-- `TOOL_SANDBOX_BACKEND=auto`：Linux 且 bwrap 可用时使用 bwrap，否则回落宿主执行并告警。
-- `TOOL_SANDBOX_BACKEND=bwrap`：强制使用 bwrap，不可用则失败。
+- 完整会话隔离：`shellUseHostPath=false`，后端为 `auto` 或 `bwrap`。只读投射容器系统目录和 PATH 目录，可写投射当前会话及获准用户目录，按网络开关决定是否共享容器网络。
+- 容器范围访问：`shellUseHostPath=true` 或后端为 `none`。保留原容器文件与网络范围，但当前托管资源的逻辑入口及真实目标仍只读。
+- `TOOL_SANDBOX=off/enforce` 只控制附加工具策略，不改变 Shell 隔离范围；后台独立配置，用户目录映射统一按 Linux 完整隔离能力和空间/执行用户授权决定。
 
-bwrap 模式会只读投射容器系统目录和 PATH 目录，可写投射当前会话工作区，默认不共享网络命名空间。危险命令正则只防误操作，不承担隔离职责。
+Skill 和 SDK 的物化副本保留原有文件权限，资源只读由 bwrap 挂载提供。插件快照、源文件和内容哈希不变；危险命令正则只防误操作，不承担资源只读保护或隔离职责。包管理镜像源及图片多模态输入边界见 [工具沙箱设计](tool-sandbox.md)。
 
 ## 当前边界
 

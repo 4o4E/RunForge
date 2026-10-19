@@ -1,5 +1,6 @@
 import {
   spaceConfigSchema,
+  usesShellSessionIsolation,
   type RuntimeCapabilitiesSettings,
   type RuntimeCapabilityName,
   type LlmModelOption,
@@ -511,9 +512,8 @@ export class SpaceConfigService {
     const capabilitySnapshot = runtimeSnapshot(catalog, selectedRuntimeCapabilities);
     const runtimeValues = runtimeCapabilityPromptValues(capabilitySnapshot);
     const allowedCapabilities = capabilitySnapshot.allowedCapabilities.join(', ') || '无';
-    const userFilesMapped = toolSettings.sandbox === 'enforce'
-      && toolSettings.sandboxBackend === 'bwrap'
-      && !toolSettings.shellUseHostPath;
+    const userFilesMapped = process.platform === 'linux'
+      && usesShellSessionIsolation(toolSettings.sandboxBackend, toolSettings.shellUseHostPath);
 
     return {
       placeholders: buildPromptPlaceholders({

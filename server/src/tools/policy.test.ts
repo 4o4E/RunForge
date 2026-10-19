@@ -42,20 +42,16 @@ test('用户文件目录只允许访问当前用户的根目录', () => {
   assert.equal(policy.check('file_read', { path: resolve(own, '../us_other/notes.md') }).ok, false);
 });
 
-test('materialized agent resource directories are readonly for file writes', () => {
-  const p = createPolicy(cfg({ sandbox: 'off' }));
-  const blockedSkill = p.check('file_write', { path: resolve(ROOT, '.agents/skills/database-access/SKILL.md') });
-  assert.equal(blockedSkill.ok, false);
-  assert.equal(p.check('file_write', { path: resolve(ROOT, '.skills/private/SKILL.md') }).ok, false);
-  assert.equal(p.check('file_write', { path: resolve(ROOT, '.plugins/private/plugin.json') }).ok, false);
-  assert.match((blockedSkill as { reason: string }).reason, /只读/);
-  const blockedBusinessPlugin = p.check('file_write', { path: resolve(ROOT, 'plugins/crm/skills/query/SKILL.md') });
-  assert.equal(blockedBusinessPlugin.ok, false);
-  const blockedWorkloadSdk = p.check('file_write', { path: resolve(ROOT, '.agents/runforge-workload-sdk/index.mjs') });
-  assert.equal(blockedWorkloadSdk.ok, false);
+test('workspace JSON 重定向和只读插件执行不会被整条命令误判', () => {
+  const p = createPolicy(cfg());
+  const command = `cd ${ROOT} && cat > fwd.json <<'EOF'\n{"text":"plugins/qq-bot"}\nEOF\nnode plugins/qq-bot/bot.mjs fwd.json; cat out_fwd.json`;
+  for (const name of ['shell', 'shell_exec']) {
+    assert.equal(p.check(name, { command }).ok, true);
+    assert.equal(p.check(name, { command: 'sed -i s/old/new/ result.json; cat plugins/demo/README.md' }).ok, true);
+  }
 });
 
-test('off mode skips path confinement but keeps always-on resource guards', () => {
+test('off mode skips path confinement', () => {
   const p = createPolicy(cfg({ sandbox: 'off' }));
   assert.equal(p.check('file_read', { path: resolve('/etc/passwd') }).ok, true);
 });

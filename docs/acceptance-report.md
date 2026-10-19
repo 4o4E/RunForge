@@ -52,11 +52,11 @@
 
 - 所有工具调用先经过 tool policy（工具策略）。
 - 主 agent 的原生工具默认加载；安全边界由路径围栏、shell 开关、网络开关、只读资源保护和输出上限执行。
-- shell 支持可选 bwrap（bubblewrap，Linux 用户态沙箱）后端；`auto` 模式在 bwrap 不可用时会回落宿主执行，强制隔离需要 `TOOL_SANDBOX_BACKEND=bwrap`。
+- Linux Shell 始终通过 bwrap（bubblewrap，Linux 用户态沙箱）保护只读资源；容器范围访问和完整会话隔离均在后端不可用时明确失败，只有后者限制其他会话和用户目录的可见性。
 - 支持托管 shell session：命令可以前台等待或后台运行，后续通过 `shell_poll` 观察、`shell_kill` 终止，并在右侧 Shell 面板持续展示输出。
 - shell session 和命令日志会落库，用户也可以在 UI 中打开、关闭、重命名、执行命令和标记输出给 LLM 参考。
 
-边界：默认 `TOOL_SANDBOX=off`；当前没有 per-run workspace、CPU/内存/进程数/磁盘配额，也没有域名 allowlist。托管 shell 仍依赖当前 server 进程和本机后端，尚未支持远程 worker 接管。
+边界：默认容器范围访问（`SHELL_USE_HOST_PATH=true`），托管资源仍只读；当前没有 per-run workspace、CPU/内存/进程数/磁盘配额，也没有域名 allowlist。托管 shell 仍依赖当前 server 进程和本机后端，尚未支持远程 worker 接管。
 
 ### Skill 与 Subagent
 

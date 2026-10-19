@@ -34,6 +34,20 @@ function networkMode(v: string | undefined): 'enabled' | 'disabled' {
   return 'disabled';
 }
 
+/** 镜像地址只在配置入口校验；空值统一恢复实例默认，不改变 TLS 校验。 */
+export function packageRegistryUrl(value: unknown, fallback: string, label: string): string {
+  if (value === undefined || (typeof value === 'string' && !value.trim())) return fallback;
+  if (typeof value !== 'string') throw new Error(`${label}必须是 HTTP(S) URL`);
+  const trimmed = value.trim();
+  try {
+    const url = new URL(trimmed);
+    if (!/^https?:\/\//i.test(trimmed) || /[\s\\]/.test(trimmed) || !url.hostname) throw new Error();
+    return trimmed;
+  } catch {
+    throw new Error(`${label}必须是有效的 HTTP(S) URL`);
+  }
+}
+
 const DEFAULT_LLM_MODEL = 'gpt-4o-mini';
 const DEFAULT_LLM_CAPABILITY = catalogCapability(DEFAULT_LLM_MODEL);
 const DEFAULT_LLM_CONTEXT_WINDOW = DEFAULT_LLM_CAPABILITY.contextWindow;
@@ -135,17 +149,19 @@ export const config = {
   // 沙箱、网络开关和具体工具约束承担。
   tools: {
     sandbox: ((process.env.TOOL_SANDBOX ?? 'off') === 'enforce' ? 'enforce' : 'off') as 'off' | 'enforce',
-    // shell 子进程沙箱后端:auto=Linux+bwrap 时启用,none=直通,bwrap=强制启用。
+    // Linux 始终使用 bwrap 保护资源；none 仅关闭完整会话隔离，保留容器范围访问。
     sandboxBackend: sandboxBackend(process.env.TOOL_SANDBOX_BACKEND),
     // Filesystem tools are confined under this root in enforce mode. thread 工作目录固定派生为
     // `<root>/<spaceId>/<threadId>`；该实例路径只由启动环境配置。
     workspaceRoot: resolve(process.env.TOOL_WORKSPACE_ROOT ?? '/w'),
     userFilesRoot: resolve(process.env.RUNFORGE_USER_FILES_ROOT ?? '/u'),
     shellEnabled: (process.env.SHELL_ENABLED ?? 'true') !== 'false',
-    // true 时 shell 直接使用容器 PATH 和 cwd=workspaceRoot，不经过 bwrap 文件隔离。
+    // true 时保留容器范围文件和网络访问，Linux 仍由 bwrap 强制保护只读资源。
     shellUseHostPath: (process.env.SHELL_USE_HOST_PATH ?? 'true') !== 'false',
     shellPathMode: (process.env.SHELL_PATH ? 'custom' : 'system') as 'system' | 'custom',
     shellPath: process.env.SHELL_PATH ?? process.env.PATH ?? '',
+    pipIndexUrl: packageRegistryUrl(process.env.PIP_INDEX_URL, 'https://pypi.tuna.tsinghua.edu.cn/simple', 'Python 镜像源'),
+    npmRegistry: packageRegistryUrl(process.env.NPM_CONFIG_REGISTRY, 'https://registry.npmmirror.com/', 'Node 镜像源'),
     // 网络总开关:enabled=不限制网络,disabled=阻断网络。
     network: networkMode(process.env.TOOL_NETWORK),
     // Command patterns blocked in enforce mode (regex, case-insensitive).

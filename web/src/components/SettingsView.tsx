@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Activity, ArchiveRestore, HardDrive, Moon, Palette, Plus, RefreshCw, Save, Sun, Trash2 } from 'lucide-react';
+import { usesShellSessionIsolation } from '@runforge/contracts';
 import {
   deleteThread,
   getCurrentUser,
@@ -437,7 +438,7 @@ export function ToolsSettingsPanel({
   return (
     <SettingsPanelShell
       title="Shell / 沙箱"
-      description="原生工具默认加载；Shell 使用容器 PATH 中的指令，文件与网络访问由沙箱控制"
+      description="Linux Shell 始终通过 bwrap 保护只读资源，可选择容器范围访问或完整会话隔离"
       contentClassName="grid content-start gap-4"
       actions={
         <>
@@ -451,37 +452,28 @@ export function ToolsSettingsPanel({
     >
       <div className="grid gap-4">
         <div className="grid gap-4 md:grid-cols-3">
-            <Field label="Shell 执行方式">
-              <Select
-                value={settings.shellUseHostPath ? 'host' : 'sandbox'}
-                onValueChange={(value) => setSettings({ ...settings, shellUseHostPath: value === 'host' })}
-              >
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="host">容器直接执行</SelectItem>
-                  <SelectItem value="sandbox">bwrap 沙箱执行</SelectItem>
-                </SelectContent>
-              </Select>
-            </Field>
-            <Field label="Shell 策略模式">
+            <Field label="工具策略">
               <Select value={settings.sandbox} onValueChange={(value) => setSettings({ ...settings, sandbox: value as ToolSettings['sandbox'] })}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="off">off</SelectItem>
-                  <SelectItem value="enforce">enforce</SelectItem>
+                  <SelectItem value="enforce">启用工具限制</SelectItem>
+                  <SelectItem value="off">关闭工具限制</SelectItem>
                 </SelectContent>
               </Select>
             </Field>
-            <Field label="Shell 沙箱后端">
+            <Field label="Shell 访问范围">
               <Select
-                value={settings.sandboxBackend}
-                onValueChange={(value) => setSettings({ ...settings, sandboxBackend: value as ToolSettings['sandboxBackend'] })}
+                value={usesShellSessionIsolation(settings.sandboxBackend, settings.shellUseHostPath) ? 'workspace' : 'container'}
+                onValueChange={(value) => setSettings({
+                  ...settings,
+                  sandboxBackend: 'auto',
+                  shellUseHostPath: value === 'container',
+                })}
               >
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="auto">auto</SelectItem>
-                  <SelectItem value="none">none</SelectItem>
-                  <SelectItem value="bwrap">bwrap</SelectItem>
+                  <SelectItem value="container">容器范围访问，资源只读</SelectItem>
+                  <SelectItem value="workspace">完整会话隔离，资源只读</SelectItem>
                 </SelectContent>
               </Select>
             </Field>
@@ -502,6 +494,32 @@ export function ToolsSettingsPanel({
                 onChange={(event) => setSettings({ ...settings, maxOutput: Number(event.target.value) })}
               />
             </Field>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            插件、Skill 和 SDK 始终只读。工具策略与 Shell 范围独立；完整会话隔离仅开放当前会话、授权资源和用户目录。网络开关控制完整隔离的 Shell 网络，并在启用工具策略时控制 Web 工具；容器范围 Shell 保留原容器网络。
+          </p>
+          <div className="grid gap-4 md:grid-cols-2">
+            <Field label="Python 镜像源（pip / uv）">
+              <Input
+                type="url"
+                placeholder="https://pypi.tuna.tsinghua.edu.cn/simple"
+                value={settings.pipIndexUrl}
+                onChange={(event) => setSettings({ ...settings, pipIndexUrl: event.target.value })}
+              />
+            </Field>
+            <Field label="Node 镜像源（npm / pnpm）">
+              <Input
+                type="url"
+                placeholder="https://registry.npmmirror.com/"
+                value={settings.npmRegistry}
+                onChange={(event) => setSettings({ ...settings, npmRegistry: event.target.value })}
+              />
+            </Field>
+            <p className="text-xs text-muted-foreground md:col-span-2">
+              仅支持 HTTP(S)，可填写官方源或私有源；留空恢复实例默认源（默认清华 PyPI / npmmirror）。
+              保存后所有新启动的命令（包括已有 Shell 会话）使用新源，正在安装的进程不受影响。
+              不关闭 TLS 校验；命令显式指定的源、作用域源或锁文件下载地址仍由包管理器处理。
+            </p>
           </div>
           <div className="grid gap-4 md:grid-cols-2">
             <div className="grid gap-4 content-start">

@@ -1,10 +1,12 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { readFile, rm, unlink } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
+import { createInterface } from 'node:readline';
+import type { Readable } from 'node:stream';
 import { runBus } from '../agent/bus.js';
 import { runTraceWriter } from '../observability/runTrace.js';
 import type { AgentEvent } from '../agent/types.js';
-import { shellPathForSettings, type ToolSettings } from '../settings.js';
+import { shellEnvironment, shellPathForSettings, type ToolSettings } from '../settings.js';
 import { store } from '../store/index.js';
 import type { Scope, ShellActor, ShellCommandRow, ShellLogStream, ShellSessionRow } from '../store/types.js';
 import { buildShellSpawnSpec } from '../tools/sandbox.js';
@@ -32,6 +34,8 @@ export interface ShellToolContext {
 
 interface ActiveCommand {
   process: ChildProcess;
+  sandboxPid?: number | null;
+  pendingSignal?: NodeJS.Signals;
   scope: Scope;
   threadId: string;
   sessionId: string;
@@ -396,6 +400,23 @@ export class ShellManager {
         managedReadRoots: input.managedReadRoots,
         context: input.context,
       });
+    } catch (error) {
+      // 启动前尚无进程负责收尾；持久化失败并释放会话后继续抛出，不改变明确失败的语义。
+      if (command && !this.active.has(command.id)) {
+        await store.updateShellCommand(input.scope, command.id, {
+          status: 'failed', error: (error as Error).message, ended_at: nowIso(),
+        });
+        const currentSession = await store.getShellSession(input.scope, input.sessionId);
+        if (currentSession?.status === 'busy') {
+          await store.updateShellSession(input.scope, input.sessionId, { status: 'idle', lease_actor: null, lease_run_id: null });
+        }
+        await this.emit(input.scope, input.context.threadId, input.context.runId, input.context.stepId ?? null, {
+          type: 'shell_command_finished', step: input.context.step ?? 0, sessionId: input.sessionId,
+          commandId: command.id, status: 'failed', exitCode: null, signal: null,
+          durationMs: Date.now() - Date.parse(command.started_at),
+        });
+      }
+      throw error;
     } finally {
       admission.finish();
       this.finishCommandStart();
@@ -506,13 +527,12 @@ export class ShellManager {
     context: ShellToolContext;
   }): Promise<ActiveCommand> {
     const shellCfg = {
-      policyMode: input.settings.sandbox,
       backend: input.settings.sandboxBackend,
       workspaceRoot: input.session.workspace_root,
       useHostPath: input.settings.shellUseHostPath,
       envPath: shellPathForSettings(input.settings),
       shareNet: input.settings.network === 'enabled',
-      env: input.env,
+      env: await shellEnvironment(input.env),
       pluginExecutables: input.pluginExecutables,
       pluginRoots: input.pluginRoots,
       managedReadRoots: input.managedReadRoots,
@@ -521,11 +541,12 @@ export class ShellManager {
     };
     const spec = buildShellSpawnSpec(input.commandText, shellCfg);
     await store.updateShellCommand(input.scope, input.command.id, { status: 'running' });
+    if (spec.backend === 'bwrap') spec.args.unshift('--json-status-fd', '3');
     const child = spawn(spec.file, spec.args, {
       cwd: spec.cwd,
       env: spec.env,
       detached: process.platform !== 'win32',
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: spec.backend === 'bwrap' ? ['pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe'],
     });
 
     const active: ActiveCommand = {
@@ -545,11 +566,24 @@ export class ShellManager {
       cleanupPaths: spec.cleanupPaths ?? [],
       writeChain: Promise.resolve(),
     };
+    if (spec.backend === 'bwrap') active.sandboxPid = null;
     this.active.set(input.command.id, active);
 
     void store.updateShellCommand(input.scope, input.command.id, { host_pid: child.pid ?? null }).catch((err) => {
       console.warn(`shell host pid update failed for ${input.command.id}: ${(err as Error).message}`);
     });
+    if (spec.backend === 'bwrap') {
+      const status = createInterface({ input: child.stdio[3] as Readable });
+      status.on('line', (line) => {
+        const info = JSON.parse(line) as { 'child-pid'?: number };
+        if (info['child-pid'] === undefined) return;
+        active.sandboxPid = info['child-pid'];
+        if (active.pendingSignal) {
+          this.killProcess(active, active.pendingSignal);
+          delete active.pendingSignal;
+        }
+      });
+    }
     child.stdout?.on('data', (chunk) => this.enqueueOutput(active, 'stdout', chunk));
     child.stderr?.on('data', (chunk) => this.enqueueOutput(active, 'stderr', chunk));
     child.once('error', (err) => {
@@ -700,16 +734,22 @@ export class ShellManager {
   }
 
   private killProcess(active: ActiveCommand, signal: NodeJS.Signals): void {
-    const pid = active.process.pid;
+    // 先通知隔离进程组，让任务执行退出处理并写完输出；不能提前杀死 bwrap 监控进程。
+    if (active.sandboxPid === null && signal !== 'SIGKILL') {
+      active.pendingSignal = signal;
+      return;
+    }
+    const pid = active.sandboxPid ?? active.process.pid;
     if (!pid) return;
     try {
       if (process.platform === 'win32') active.process.kill(signal);
       else process.kill(-pid, signal);
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
       try {
-        active.process.kill(signal);
-      } catch {
-        /* 进程可能已经退出。 */
+        process.kill(pid, signal);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
       }
     }
   }

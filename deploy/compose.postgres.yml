@@ -22,11 +22,11 @@ services:
       RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD: ${RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD:?请设置 RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD}
       # Agent 单次运行的最大步骤数，必须为正整数。
       AGENT_HARD_STEP_CAP: "1000"
-      # 工具路径和命令限制。可选值：off、enforce。
+      # 工具路径和命令限制：off、enforce。Linux Shell始终通过bwrap保护只读资源。
       TOOL_SANDBOX: "off"
-      # Shell 隔离后端。可选值：auto、none、bwrap。
+      # 隔离范围：auto/bwrap配合SHELL_USE_HOST_PATH=false完整隔离；none为容器范围，与工具策略独立。
       TOOL_SANDBOX_BACKEND: auto
-      # 工具网络访问。可选值：disabled、enabled。
+      # 网络访问：disabled、enabled；Shell仅完整会话隔离受此开关控制。
       TOOL_NETWORK: disabled
       # 单条工具结果的最大字符数，可选范围：1000 至 40000。
       TOOL_MAX_OUTPUT: "40000"

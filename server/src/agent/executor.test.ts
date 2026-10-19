@@ -45,6 +45,8 @@ function testToolSettings(overrides: Partial<ToolSettings> = {}): ToolSettings {
     network: 'enabled',
     shellDeny: [],
     maxOutput: 40000,
+    pipIndexUrl: 'https://pypi.tuna.tsinghua.edu.cn/simple',
+    npmRegistry: 'https://registry.npmmirror.com/',
     ...overrides,
   };
 }
@@ -221,14 +223,13 @@ test('executeRun: runs the loop across steps and finalizes', async () => {
   assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'tool', 'assistant']);
 });
 
-test('executeRun: 使用 run 的空间配置副本装配提示词、工具和上下文预算', async () => {
+test('executeRun: 使用 run 的空间配置副本装配工具和上下文预算', async () => {
   const store = new MemoryStore();
   const thread = await store.createThread(scope);
-  const observed: { systemPrompt: string; tools: string[] } = { systemPrompt: '', tools: [] };
+  const observed: { tools: string[] } = { tools: [] };
   const provider: Provider = {
     name: 'space-snapshot',
-    async completeStream(messages, tools) {
-      observed.systemPrompt = messages.find((message) => message.role === 'system')?.content ?? '';
+    async completeStream(_messages, tools) {
       observed.tools = tools.map((tool) => tool.name);
       return { content: 'snapshot applied', toolCalls: [], finishReason: 'stop' };
     },
@@ -266,8 +267,6 @@ test('executeRun: 使用 run 的空间配置副本装配提示词、工具和上
     toolSettings: testToolSettings(),
   });
 
-  assert.match(observed.systemPrompt, /^SPACE-SNAPSHOT-SECOND\n\nSPACE-SNAPSHOT-FIRST\n\n文件链接规则：/);
-  assert.match(observed.systemPrompt, /点击后会在右侧工作文件预览面板打开/);
   assert.deepEqual(observed.tools, ['file_read']);
   const usage = published.find((event): event is Extract<AgentEvent, { type: 'usage_update' }> => event.type === 'usage_update');
   assert.equal(usage?.contextBudget, 12_345);

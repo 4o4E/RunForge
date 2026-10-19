@@ -42,7 +42,11 @@ ENV NODE_ENV=production \
     TOOL_WORKSPACE_ROOT=/w \
     RUNFORGE_USER_FILES_ROOT=/u \
     RUNFORGE_TRACE_DIR=/app/traces \
-    RUNFORGE_BUSINESS_PLUGIN_ROOTS=/app/business-plugins
+    RUNFORGE_BUSINESS_PLUGIN_ROOTS=/app/business-plugins \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple \
+    NPM_CONFIG_REGISTRY=https://registry.npmmirror.com/ \
+    PNPM_CONFIG_REGISTRY=https://registry.npmmirror.com/
 
 RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
     && apt-get update && apt-get install --yes --no-install-recommends \
@@ -86,7 +90,7 @@ RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.
       /app/traces \
       /app/business-plugins \
     && chown -R node:node /w /u /app/traces /app/business-plugins
-ARG NPM_REGISTRY=https://registry.npmjs.org/
+ARG NPM_REGISTRY=https://registry.npmmirror.com/
 RUN npm install --global pnpm@11.5.3 --registry "${NPM_REGISTRY}"
 COPY --from=uv /uv /uvx /usr/local/bin/
 

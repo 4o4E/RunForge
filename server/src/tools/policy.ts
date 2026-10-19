@@ -79,37 +79,6 @@ export function createPolicy(cfg: ToolPolicyConfig, userFilesMountPath?: string)
 
   function check(name: string, args: Record<string, unknown>): PolicyDecision {
     const meta = META[name] ?? { kind: 'safe' as const };
-    const readonlyAgentRoots = [
-      resolve(cfg.workspaceRoot, '.agents'),
-      resolve(cfg.workspaceRoot, '.skills'),
-      resolve(cfg.workspaceRoot, '.plugins'),
-      resolve(cfg.workspaceRoot, '.agents/skills'),
-      resolve(cfg.workspaceRoot, '.agents/runforge-workload-sdk'),
-      resolve(cfg.workspaceRoot, 'plugins'),
-    ];
-
-    // 内置 agent 资源 materialize 后是只读运行时资源；写保护不依赖 sandbox 开关。
-    if (meta.kind === 'fs-write' && meta.pathArgs) {
-      for (const key of meta.pathArgs) {
-        const raw = args[key];
-        if (raw == null || raw === '') continue;
-        const target = resolveFromWorkspace(cfg.workspaceRoot, String(raw));
-        const readonlyRoot = readonlyAgentRoots.find((root) => isWithin(root, target));
-        if (readonlyRoot) {
-          return { ok: false, reason: `内置 agent 资源目录只读：${readonlyRoot}` };
-        }
-      }
-    }
-
-    if (meta.kind === 'exec') {
-      const command = String(args.command ?? '');
-      const mentionsReadonlyAgentRoot = readonlyAgentRoots.some((root) => command.includes(root) || command.includes(root.replace(`${cfg.workspaceRoot}/`, '')));
-      const writeLike = /(^|[;&|]\s*)(rm|mv|cp)\b|>\s*[^&|;]*(?:\.agents\/(?:skills|runforge-workload-sdk)|plugins\/)|tee\b[^&|;]*(?:\.agents\/(?:skills|runforge-workload-sdk)|plugins\/)|sed\s+-i\b/.test(command);
-      if (mentionsReadonlyAgentRoot && writeLike) {
-        return { ok: false, reason: `内置 agent 资源目录只读：${readonlyAgentRoots.join(', ')}` };
-      }
-    }
-
     if (cfg.sandbox === 'off') return { ok: true };
 
     // 2) filesystem confinement.

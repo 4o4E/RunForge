@@ -31,6 +31,8 @@ function testToolSettings(): ToolSettings {
     shellUseHostPath: true,
     shellPathMode: 'system',
     shellPath: process.env.PATH ?? '',
+    pipIndexUrl: 'https://pypi.tuna.tsinghua.edu.cn/simple',
+    npmRegistry: 'https://registry.npmmirror.com/',
     network: 'enabled',
     shellDeny: [],
     maxOutput: 40000,
