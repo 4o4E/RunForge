@@ -205,6 +205,11 @@ CREATE TABLE shell_session_events (
 
 前端实时展示优先读事件；历史详情从 `shell_command_logs` 分页读取。
 
+Store 返回 shell 行时统一完成数据库类型转换：所有时间字段为 ISO 字符串（可空字段保留 `null`），
+日志 `id`、`seq` 和命令 `output_bytes` 为 JavaScript 安全整数，超出范围立即报错。
+该边界覆盖创建、单条读取、列表、未完成命令恢复、日志追加和分页，不修改全局 pg parser。
+事件与前台工具结果只消费转换后的行；`shell_session_events` 当前仅写入审计、不直接返回数据库行。
+
 ## 8. 前端体验
 
 - thread 右侧提供 Shell 面板，展示当前可用 session、lease 持有者和最近命令。

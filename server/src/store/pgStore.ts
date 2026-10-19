@@ -63,6 +63,12 @@ import {
   newUserId,
 } from '../id.js';
 import {
+  type PgShellSessionRow,
+  type PgShellCommandRow,
+  type PgShellCommandLogRow,
+  toShellSessionRow,
+  toShellCommandRow,
+  toShellCommandLogRow,
   nullableJson,
   requiredJson,
   serialId,
@@ -1631,7 +1637,7 @@ export class PgStore implements Store {
     configSnapshot?: Record<string, unknown> | null;
   }): Promise<ShellSessionRow> {
     const id = newShellSessionId();
-    const { rows } = await query<ShellSessionRow>(
+    const { rows } = await query<PgShellSessionRow>(
       `INSERT INTO shell_sessions (id, tenant_id, thread_id, name, owner, workspace_root, cwd, backend, status, config_snapshot)
        SELECT $1, $2, $3, $4, $5, $6, $7, $8, 'idle', $9::jsonb
        WHERE EXISTS (SELECT 1 FROM threads WHERE id = $3 AND tenant_id = $2 AND user_id = $10)
@@ -1650,31 +1656,31 @@ export class PgStore implements Store {
       ],
     );
     if (!rows.length) throw new Error('threadId 不存在或不属于当前用户');
-    return rows[0];
+    return toShellSessionRow(rows[0]);
   }
 
   async getShellSession(scope: Scope, id: string): Promise<ShellSessionRow | null> {
-    const { rows } = await query<ShellSessionRow>(
+    const { rows } = await query<PgShellSessionRow>(
       `SELECT ss.* FROM shell_sessions ss JOIN threads t ON t.id = ss.thread_id
        WHERE ss.id = $1 AND t.tenant_id = $2 AND t.user_id = $3`,
       [id, scope.tenantId, scope.userId],
     );
-    return rows[0] ?? null;
+    return rows[0] ? toShellSessionRow(rows[0]) : null;
   }
 
   async listShellSessions(scope: Scope, threadId: string, workspaceRoot?: string): Promise<ShellSessionRow[]> {
     const base = `SELECT ss.* FROM shell_sessions ss JOIN threads t ON t.id = ss.thread_id
       WHERE ss.thread_id = $1 AND t.tenant_id = $2 AND t.user_id = $3 AND ss.deleted_at IS NULL`;
     const { rows } = workspaceRoot
-      ? await query<ShellSessionRow>(
+      ? await query<PgShellSessionRow>(
           `${base} AND ss.workspace_root = $4 ORDER BY ss.updated_at DESC, ss.created_at DESC`,
           [threadId, scope.tenantId, scope.userId, workspaceRoot],
         )
-      : await query<ShellSessionRow>(
+      : await query<PgShellSessionRow>(
           `${base} ORDER BY ss.updated_at DESC, ss.created_at DESC`,
           [threadId, scope.tenantId, scope.userId],
         );
-    return rows;
+    return rows.map(toShellSessionRow);
   }
 
   async updateShellSession(
@@ -1712,7 +1718,7 @@ export class PgStore implements Store {
     hardTimeoutAt?: string | null;
   }): Promise<ShellCommandRow> {
     const id = newShellCommandId();
-    const { rows } = await query<ShellCommandRow>(
+    const { rows } = await query<PgShellCommandRow>(
       `INSERT INTO shell_commands (
          id, session_id, run_id, step_id, actor, command, cwd, wait_mode, status,
          soft_timeout_ms, hard_timeout_ms, soft_timeout_at, hard_timeout_at
@@ -1741,46 +1747,46 @@ export class PgStore implements Store {
       ],
     );
     if (!rows.length) throw new Error('sessionId 不存在或不属于当前用户');
-    return rows[0];
+    return toShellCommandRow(rows[0]);
   }
 
   async getShellCommand(scope: Scope, id: string): Promise<ShellCommandRow | null> {
-    const { rows } = await query<ShellCommandRow>(
+    const { rows } = await query<PgShellCommandRow>(
       `SELECT sc.* FROM shell_commands sc
        JOIN shell_sessions ss ON ss.id = sc.session_id JOIN threads t ON t.id = ss.thread_id
        WHERE sc.id = $1 AND t.tenant_id = $2 AND t.user_id = $3`,
       [id, scope.tenantId, scope.userId],
     );
-    return rows[0] ?? null;
+    return rows[0] ? toShellCommandRow(rows[0]) : null;
   }
 
   async listShellCommandsBySession(scope: Scope, sessionId: string, limit = 20): Promise<ShellCommandRow[]> {
-    const { rows } = await query<ShellCommandRow>(
+    const { rows } = await query<PgShellCommandRow>(
       `SELECT sc.* FROM shell_commands sc
        JOIN shell_sessions ss ON ss.id = sc.session_id JOIN threads t ON t.id = ss.thread_id
        WHERE sc.session_id = $1 AND t.tenant_id = $2 AND t.user_id = $3
        ORDER BY sc.started_at DESC LIMIT $4`,
       [sessionId, scope.tenantId, scope.userId, limit],
     );
-    return rows;
+    return rows.map(toShellCommandRow);
   }
 
   async listRunningShellCommandsByRun(scope: Scope, runId: string): Promise<ShellCommandRow[]> {
-    const { rows } = await query<ShellCommandRow>(
+    const { rows } = await query<PgShellCommandRow>(
       `SELECT sc.* FROM shell_commands sc
        JOIN runs r ON r.id = sc.run_id JOIN threads t ON t.id = r.thread_id
        WHERE sc.run_id = $1 AND sc.status = 'running' AND t.tenant_id = $2 AND t.user_id = $3
        ORDER BY sc.started_at`,
       [runId, scope.tenantId, scope.userId],
     );
-    return rows;
+    return rows.map(toShellCommandRow);
   }
 
   async listRunningShellCommandsUnscoped(): Promise<ShellCommandRow[]> {
-    const { rows } = await query<ShellCommandRow>(
+    const { rows } = await query<PgShellCommandRow>(
       `SELECT * FROM shell_commands WHERE status IN ('queued', 'running') ORDER BY updated_at`,
     );
-    return rows;
+    return rows.map(toShellCommandRow);
   }
 
   async cancelShellCommandsForDeletion(threadIds: string[]): Promise<void> {
@@ -1881,7 +1887,7 @@ export class PgStore implements Store {
   }
 
   async appendShellCommandLog(scope: Scope, commandId: string, stream: ShellLogStream, chunk: string): Promise<ShellCommandLogRow> {
-    const { rows } = await query<ShellCommandLogRow>(
+    const { rows } = await query<PgShellCommandLogRow>(
       `WITH next_seq AS (
          SELECT COALESCE(max(seq), 0) + 1 AS seq FROM shell_command_logs WHERE command_id = $1
        )
@@ -1896,11 +1902,11 @@ export class PgStore implements Store {
       [commandId, stream, chunk, scope.tenantId, scope.userId],
     );
     if (!rows.length) throw new Error('commandId 不存在或不属于当前用户');
-    return rows[0];
+    return toShellCommandLogRow(rows[0]);
   }
 
   async getShellCommandLogs(scope: Scope, commandId: string, sinceSeq = 0, limit = 200): Promise<ShellCommandLogRow[]> {
-    const { rows } = await query<ShellCommandLogRow>(
+    const { rows } = await query<PgShellCommandLogRow>(
       `SELECT scl.* FROM shell_command_logs scl
        JOIN shell_commands sc ON sc.id = scl.command_id
        JOIN shell_sessions ss ON ss.id = sc.session_id JOIN threads t ON t.id = ss.thread_id
@@ -1908,7 +1914,7 @@ export class PgStore implements Store {
        ORDER BY scl.seq LIMIT $3`,
       [commandId, sinceSeq, limit, scope.tenantId, scope.userId],
     );
-    return rows;
+    return rows.map(toShellCommandLogRow);
   }
 
   async addShellSessionEvent(scope: Scope, sessionId: string, actor: ShellActor, kind: string, data: unknown): Promise<void> {

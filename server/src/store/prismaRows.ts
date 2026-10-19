@@ -16,6 +16,9 @@ import type { GoalState } from '../agent/goal.js';
 import type { AskUserSpec } from '../agent/types.js';
 import type {
   AuthTokenRow,
+  ShellSessionRow,
+  ShellCommandRow,
+  ShellCommandLogRow,
   RunRow,
   SpaceRow,
   StepRow,
@@ -53,6 +56,62 @@ export function serialId(value: bigint): number {
   const id = Number(value);
   if (!Number.isSafeInteger(id)) throw new Error(`数据库序列 ID 超出 JavaScript 安全整数范围：${value}`);
   return id;
+}
+
+// pg 原生查询保留 Date 和 bigint 字符串，在 Store 边界统一转换。
+export type PgShellSessionRow = Omit<ShellSessionRow, 'created_at' | 'updated_at' | 'deleted_at'> & {
+  created_at: Date;
+  updated_at: Date;
+  deleted_at: Date | null;
+};
+
+export type PgShellCommandRow = Omit<ShellCommandRow,
+  'started_at' | 'ended_at' | 'updated_at' | 'soft_timeout_at' | 'hard_timeout_at' | 'last_output_at' | 'output_bytes'
+> & {
+  started_at: Date;
+  ended_at: Date | null;
+  updated_at: Date;
+  soft_timeout_at: Date | null;
+  hard_timeout_at: Date | null;
+  last_output_at: Date | null;
+  output_bytes: string;
+};
+
+export type PgShellCommandLogRow = Omit<ShellCommandLogRow, 'id' | 'seq' | 'created_at'> & {
+  id: string;
+  seq: string;
+  created_at: Date;
+};
+
+export function toShellSessionRow(row: PgShellSessionRow): ShellSessionRow {
+  return {
+    ...row,
+    created_at: timestamp(row.created_at)!,
+    updated_at: timestamp(row.updated_at)!,
+    deleted_at: timestamp(row.deleted_at),
+  };
+}
+
+export function toShellCommandRow(row: PgShellCommandRow): ShellCommandRow {
+  return {
+    ...row,
+    started_at: timestamp(row.started_at)!,
+    ended_at: timestamp(row.ended_at),
+    updated_at: timestamp(row.updated_at)!,
+    soft_timeout_at: timestamp(row.soft_timeout_at),
+    hard_timeout_at: timestamp(row.hard_timeout_at),
+    last_output_at: timestamp(row.last_output_at),
+    output_bytes: serialId(BigInt(row.output_bytes)),
+  };
+}
+
+export function toShellCommandLogRow(row: PgShellCommandLogRow): ShellCommandLogRow {
+  return {
+    ...row,
+    id: serialId(BigInt(row.id)),
+    seq: serialId(BigInt(row.seq)),
+    created_at: timestamp(row.created_at)!,
+  };
 }
 
 export function toThreadRow(row: threads, fallbackTitle?: string | null): ThreadRow {
