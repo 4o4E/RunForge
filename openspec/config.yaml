@@ -1,0 +1,43 @@
+schema: spec-driven
+
+context: |
+  Language: zh-CN. 使用中文编写内容，保留 OpenSpec 的结构标题、SHALL/MUST 和 WHEN/THEN 标记。
+  RunForge 是面向 Web 用户和外部应用的单实例、多租户 AI Agent 运行平台。
+  使用 Node.js >=24、TypeScript、pnpm 11、React/Vite、PostgreSQL/Prisma 7、Vercel AI SDK。
+  结构为 server、web、packages/contracts、packages/workload-sdk；现行专题说明在 docs。
+  先读 AGENTS.md 与 docs/agents/domain.md；本机环境只读取不入库的 AGENTS.local.md。
+  需求与场景以 openspec/specs 为准，待实施修改位于 openspec/changes/<change>。
+  架构选择、理由、代价和用户确认记录在该 change 的 design.md，完成后保留在 archive。
+  领域术语使用 GLOSSARY.md；GitHub Issues 只跟踪工作项并引用 OpenSpec，不复制规格正文。
+  开发助手 .agents/skills 与产品运行 Skill 相互独立。
+  保护现有未提交内容；默认使用原项目目录和当前分支，不自动创建 worktree、提交或推送。
+  数据库 schema、业务或架构决定需要用户确认；部署、迁移和共享实例操作必须明确授权。
+  压缩不覆盖 step 原文；tool_call/tool_result 始终配对；L2 内存裁剪不删除持久历史。
+  历史从 steps.result、steps.tool_results 和 messages 顺序索引派生，不从 trace 或请求快照恢复。
+  当前没有多 worker、跨实例接管、计算资源配额和跨会话 Gene Memory，不把设计写成实现。
+
+rules:
+  proposal:
+    - 说明具体用户场景、目标、非目标、受影响能力和授权范围。
+    - 区分当前实现、待实施行为和未知信息；已有能力基线不伪装成新增产品功能。
+  specs:
+    - 每条需求使用 SHALL 或 MUST，并至少给出一个可观察的 WHEN/THEN 场景。
+    - 覆盖相关权限、状态转换与错误边界；现有主题使用 delta，不复制整份规格另行维护。
+    - 正文不记录凭证、秘密入口、生产数据或虚构的验收结果。
+  design:
+    - 记录背景、状态、用户确认、决定、理由、真实备选方案与后果；没有实际取舍不制造架构决定。
+    - 已有决定变化时引用原 change/design.md 并说明替代关系，不覆盖历史归档。
+    - 需求归规格、任务归 tasks；架构决定只保存在本文件，不生成独立 ADR 文档。
+  tasks:
+    - 每项任务有可验证结果，包含实际运行验收与正式文档更新。
+    - 只有观察到验收结果才勾选完成；代码完成不等于部署完成。
+
+operations:
+  apply:
+    guidance:
+      - 先解决尚未确认的业务或架构问题，再实施；不改写其他会话的未提交内容。
+      - 运行实际变更入口与定向检查，不使用假模型、mock 或跳过错误制造成功。
+  archive:
+    guidance:
+      - 核对已完成任务与实际验证证据，同步 delta 后保留 design.md 中的决定及来源。
+      - 归档只代表本次变更完成，不代表应用已发布、部署或生产验收。

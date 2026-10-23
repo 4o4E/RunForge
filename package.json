@@ -2,7 +2,7 @@
   "name": "runforge",
   "version": "0.19.0",
   "private": true,
-  "description": "RunForge: Node/TypeScript backend + React web console for general-purpose AI agent runs",
+  "description": "Multi-tenant AI agent runtime for Web and external applications, with persistent tasks, tools, skills, MCP and business plugins",
   "type": "module",
   "packageManager": "pnpm@11.5.3",
   "scripts": {

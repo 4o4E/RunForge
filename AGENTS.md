@@ -8,7 +8,7 @@
 
 - `server/` — Node/TypeScript 后端（agent 主循环、LLM provider、工具、PG 持久化）
 - `web/` — React/Vite 前端（对话渲染 + Markdown/Mermaid/LaTeX + HTML artifact 预览）
-- `docs/` — 方案文档；`docs/impl-log/` 为分阶段实施记录
+- `docs/` — 使用、协议与实现解释；`openspec/` — 行为规格、变更方案和架构决定
 
 核心设计文档：
 
@@ -33,7 +33,7 @@
 5. **从数据库和 run trace 分析这次 run**：确认
    - run `status`（done / error / canceled）与 `error`
    - `steps.result` 中每次完整模型请求的聚合输出、用量与流式统计
-   - run trace 中是否有 `compaction`，其 `estBefore/estAfter/masked/dropped`
+   - run trace 中是否有 `compaction`，以及对应输入规模、压缩选择和上下文变化
    - step 工具结果的总量、最大单条工具结果（应 ≤ `TOOL_MAX_OUTPUT`）、run 元数据中的压缩选择
    - DB 查询的具体做法见 `AGENTS.local.md`。
 
@@ -46,10 +46,20 @@
 - **提交时机**：仅在用户明确要求时提交/推送。
 - **业务插件打包**：只在仓库根目录执行 `pnpm package:business-plugin <插件ID>`。脚本必须先按业务插件协议验证源码并复核压缩包可真实导入；交付物固定写入 `build/business-plugins/<插件ID>-<manifest.version>.zip`，不手工选择其他输出目录或临时压缩插件目录。
 - **前端组件**：能用组件库的控件一律用组件库，优先复用 `web/src/components/ui/` 已有 shadcn 组件；缺少组件时按 shadcn/Radix 官方模式补本地封装，不要手写外观相似但行为自造的替代组件。
-- **压缩不变式**（改压缩务必守住，见设计文档 §6）：
+- **压缩不变式**（改压缩务必守住，见长任务设计）：
   - `tool_call ↔ tool_result` 配对永不破坏；
-  - step 聚合响应与工具结果永远保留原文，压缩只派生视图、从不覆盖/删除；
+  - `steps.result` 与 `steps.tool_results` 永远保留原文，压缩只派生视图、从不覆盖或删除；
   - 滑动窗口 drop 仅内存安全阀、不落库（落库会真丢数据）。
+
+
+## Agent skills
+
+- 执行工程技能前，必须读取 [领域文档](docs/agents/domain.md)；规格与架构决定统一使用 OpenSpec。
+- 需求与场景读取 `openspec/specs/`；实施前读取相关活动变更，架构选择读取相关活动或归档变更的 `design.md`。
+- OpenSpec CLI 使用 `pnpm dlx @fission-ai/openspec@1.14.3`；官方技能示例中的 `openspec` 均按此前缀执行，避免误用系统其他同名程序。
+- [开发技能入口](docs/agents/README.md)记录项目级技能来源和更新方式；[问题跟踪](docs/agents/issue-tracker.md)记录 GitHub 工作项规则，[分流标签](docs/agents/triage-labels.md)记录状态词汇。
+- 项目技能不得自动创建 worktree、重置或切换分支、提交、推送、发布或操作共享实例；执行这些动作必须得到用户授权。子任务不得继续创建子任务。
+- 已有本机 `.workspace/ADR.md` 与 `.workspace/CTX.md` 只引用正式来源，架构决定不维护第二份正文。
 
 ## 对话规范
 

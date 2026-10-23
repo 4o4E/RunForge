@@ -149,7 +149,7 @@ HTTP/HTTPS，并且 `url` 与 `urlConfigKey` 必须二选一。
 
 ## 历史 thread 插件副本迁移
 
-新 run 会自动使用上述相对符号链接；旧 thread 中尚未重新运行的实体插件副本可由维护脚本一次性转换。脚本只枚举数据库登记的 thread，在同租户的 `runs.plugin_lock` 中查找该插件最近使用的内容 hash，要求正式快照存在且插件声明文件一致；没有锁定记录或快照的目录保留原样。内置 `.agents/skills`、`.agents/workflows` 和 `.agents/runforge-workload-sdk` 仍由运行时复制，不属于此脚本范围。
+新 run 会自动使用上述相对符号链接；旧 thread 中尚未重新运行的实体插件副本可由维护脚本一次性转换。脚本只枚举数据库登记的 thread，在同租户的 `runs.plugin_lock` 中查找该插件最近使用的内容 hash，要求正式快照存在且插件声明文件一致；没有锁定记录或快照的目录保留原样。内置 Skill 和 Workload SDK 由运行时准备并通过受控链接提供，不属于此脚本范围。
 
 脚本默认只预览。先预览迁移范围，再按运行环境的部署命令停止 RunForge；保持数据库可访问，执行迁移后再启动服务：
 

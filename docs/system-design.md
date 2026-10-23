@@ -4,15 +4,11 @@
 
 ## 设计意图
 
-`RunForge` 的目标是构建一个通用 AI Agent 平台原型：用户提交一段自然语言任务，平台启动一个自主 agent，在后端运行环境中调用 LLM 进行推理，调用工具读写文件、执行命令或访问网络，循环迭代直到任务完成，最后返回结果并保留完整过程。
+RunForge 面向 Web 用户与外部可信应用提供通用 Agent 执行。租户拥有用户与空间，空间定义模型、提示词和可用能力；会话组织多轮任务，任务调用模型和工具并保存执行结果。
 
-项目参考 `corint-cognition` 的架构思想，但做了三点简化：
+当前服务采用 Node.js/TypeScript、React/Vite 与 PostgreSQL，在单个活动实例中运行 Agent 循环、API 和事件分发。身份鉴权、租户隔离、空间授权和审计已实现；独立队列、跨 worker 接管与计算资源配额尚未实现。
 
-- 后端用 Node.js / TypeScript 实现。
-- 数据库直接使用 PostgreSQL。
-- 不拆分 gateway 和 runtime，当前版本是单体服务，Agent 执行循环在进程内运行。
-
-这个取舍让原型更容易本地启动和迭代，但也意味着它还不是完整云端多 worker 平台。独立队列、worker 调度、多租户鉴权和资源配额属于后续平台化能力。
+行为契约见 [OpenSpec](../openspec/README.md)，本文解释实现结构；待实施变更的架构选择保存在对应 OpenSpec `design.md`。
 
 ## 当前能力
 
@@ -26,7 +22,7 @@
 - 支持上下文压缩、持久 Goal 状态、取消 run、服务启动恢复、工具输出截断和工具策略。
 - 支持托管 shell session，长耗时命令可以后台运行、轮询、终止，并在右侧 Shell 面板中持续观察。
 - 支持 Skill 文件协议，按空间准备只读内置资源，并按需用 `skill_activate` 加载正文和资源；普通会话不能创建或修改 Skill。
-- 支持异步只读 subagent，主 agent 可派发子任务、轮询结果，并在前端资源栏查看。
+- 支持异步 subagent，主 agent 可派发子任务、轮询结果，并在前端资源栏查看；readonly/writer 工具权限由 runtime profile 与主 agent 授权限定。
 - 服务端统一聚合 Token 与存储占用，支持租户、用户、空间和时间维度；统计口径见[用量与存储分析](usage-and-storage-analysis.md)。
 
 ## 对话模型
@@ -41,50 +37,31 @@
 
 ## 架构概览
 
-```text
-React Web
-  |
-  | REST / WebSocket
-  v
-Server (Node.js / TypeScript 单体)
-  |
-  |-- API 层
-  |     |-- REST: thread / run / settings / files / shell / subagent / datasource
-  |     `-- WebSocket: run 事件订阅和 thread 级 shell 事件
-  |
-  |-- Agent 执行循环
-  |     |-- ContextManager: system prompt、历史消息、Goal 派生裁剪和压缩视图
-  |     |-- ProviderRunner: invocation/attempt 持久化、统一重试、原始流观测
-  |     |     `-- Provider 抽象: AI SDK 协议实现
-  |     |-- Skill / MCP registry: 按 run 渐进加载外部能力
-  |     |-- Tool registry: 工具注册、策略检查、输出截断
-  |     |-- Subagent runner: 异步只读子任务
-  |     `-- Run bus: 进程内事件发布
-  |
-  |-- Shell manager: 托管 shell session、命令日志、终止和接管
-  |
-  |-- Store 抽象
-  |     |-- PgStore: PostgreSQL 持久化
-  |     `-- MemoryStore: 测试和离线运行
-  |
-  v
-PostgreSQL
+```mermaid
+flowchart TD
+    Web["React 控制台"] --> API["REST / WebSocket"]
+    External["外部可信应用"] --> API
+    API --> Auth["身份、租户与空间授权"]
+    Auth --> Runtime["单实例 Agent 执行循环"]
+    Runtime --> Context["历史上下文、Goal 与压缩视图"]
+    Runtime --> Provider["ProviderRunner 与 AI SDK"]
+    Runtime --> Tools["工具、Skill 与 MCP"]
+    Runtime --> Shell["托管 Shell 与 bwrap"]
+    Runtime --> Subagent["按 profile 授权的异步子任务"]
+    Runtime --> Store["PgStore"]
+    Store --> PG[("PostgreSQL")]
+    Runtime --> Trace["按运行分隔的本地 trace"]
+    API --> Files["会话文件与多模态预览"]
 ```
 
 执行主线：
 
-```text
-Web 创建 thread
--> Web 在 thread 内启动 run
--> 后端创建 run 记录
--> executeRun 进程内异步执行
--> 每个 step 调用 LLM
--> LLM 请求工具时执行工具
--> 工具结果回填上下文
--> 流式事件经 WebSocket 实时推送并写入本地 run trace
--> 模型请求完成后把聚合结果一次写入 steps.result
--> Agent 输出最终汇报且计划已进入 reporting 后 run done
-```
+1. Web 在 thread 中发起任务，后端创建 run 记录。
+2. 当前服务进程异步执行 `executeRun`，每个 step 调用 LLM。
+3. 模型请求工具时，执行授权工具并将结果回填上下文。
+4. 流式事件经 WebSocket 实时推送，同时写入本地 run trace。
+5. 完整模型响应保存到 `steps.result`，工具结果保存到 `steps.tool_results`。
+6. 没有待处理外部追加输入时，无工具调用、正常 stop 且非空的最终回复结束 run；Goal 同时收敛并保留真实未完成或失败条目。
 
 当前关键设计：
 
@@ -365,12 +342,12 @@ Skill 和 SDK 的物化副本保留原有文件权限，资源只读由 bwrap �
 
 - 独立任务队列和多 worker 横向扩展。
 - run 级 lease、心跳和跨 worker 接管；当前只有单进程服务启动恢复。
-- 多租户鉴权、用户隔离、项目隔离和审计权限。
+- 当前权限按租户、用户、空间和资源执行；没有独立项目实体或统一 resource URL 权限体系。
 - per-run 独立工作区生命周期管理。
 - CPU、内存、进程数、磁盘和网络资源配额。
-- subagent 目前是异步只读推理子任务，尚未支持独立工具执行、独立沙箱和跨进程恢复。
+- subagent 已按 readonly/writer profile 与主任务授权执行工具，共享会话工作区；独立沙箱和跨进程恢复尚未实现。
 - 托管 shell 目前依赖当前 server 进程和本机 shell 后端，尚未支持 Docker/E2B/远程 worker 或 run 级资源配额。
-- skill 系统已支持文件协议和按需激活，但远程 skill、签名、多租户隔离、前端管理面和 per-skill 资源配额仍未实现。
+- Skill 已有租户业务插件隔离和管理预览；独立远程 Skill 安装、签名与 per-skill 资源配额尚未实现。
 - 跨 thread memory / gene 系统尚未实现；当前只有 thread 内历史消息和压缩摘要。
 
 相关设计和路线见：

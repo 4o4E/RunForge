@@ -1,17 +1,40 @@
 # RunForge
 
-`RunForge` 是一个通用 AI Agent 平台原型：用户提交自然语言任务后，后端启动一个自主 agent，在受控工作区中调用 LLM 和工具，循环执行直到完成，并把过程和结果实时展示在 Web 控制台。
+RunForge 是面向 Web 用户和外部应用的通用 AI Agent 运行平台。用户提交任务后，Agent 在受控会话工作区中调用模型和工具，完成多步执行；控制台实时展示过程、文件和结果，并保存可恢复的任务历史。
 
-项目目标不是做某个垂直领域助手，而是验证一套可扩展的 Cloud Agent Platform（云端 Agent 运行平台）基础能力：
+平台以 `tenant → space → thread → run → step` 组织身份、配置、会话和执行：
 
-- Agent 编排：围绕 `thread -> run -> step` 组织多轮任务和执行步骤。
-- LLM 集成：通过 AI SDK 支持 OpenAI Responses、OpenAI Chat Completions 和 Anthropic Messages 三种协议。
-- 工具调用：原生工具默认加载；Skill 与 MCP 按 run 激活，另有 shell、文件读写、web、workflow、subagent 等能力。
-- 执行可观测：通过 REST/WebSocket 输出 step、reasoning、tool_call、tool_result、subagent、shell、final 等事件。
-- 持久化：使用 PostgreSQL 保存 thread、run、step、message、event、shell session、subagent run 和运行配置。
-- 隔离基础：Linux Shell 通过 bwrap 保护只读资源，支持容器范围访问和完整会话隔离。
+- **多租户与空间**：账号登录、角色权限、系统资源授权，Web 对话空间与外部应用空间分别管理。
+- **模型接入**：通过 AI SDK 支持 OpenAI Responses、OpenAI Chat Completions、Anthropic Messages；按空间选择模型与上下文预算。
+- **长任务执行**：计划、上下文压缩、取消、服务重启恢复，以及托管 Shell 和异步子任务。
+- **能力扩展**：原生文件、Shell 与 Web 工具，按运行激活 Skill/MCP，通过租户业务插件和 Workload SDK 接入业务能力。
+- **文件与多模态**：会话文件管理、图片、PDF、Office、音频和视频读取，以及 Markdown、Mermaid、LaTeX 和 HTML 文件预览。
+- **运行记录**：REST/WebSocket 实时输出，PostgreSQL 保存任务与 step 聚合，按运行保存本地 trace，提供 Token 与存储用量分析。
+- **Linux Shell 保护**：使用 bwrap 保护只读运行资源，管理员可以选择容器范围访问或完整会话隔离。
 
-当前实现是 Node.js/TypeScript 后端 + React/Vite 前端的单实例通用 Agent 运行平台。它已经能完成端到端 Agent 执行闭环，并支持多租户身份与数据隔离、租户空间配置、外部调用入口、服务启动后恢复中断 run、托管 shell 长耗时命令、Skill 渐进加载和异步只读 subagent。队列调度、跨 worker 接管、per-run 工作区、资源配额和跨 thread memory 等多 worker 平台能力仍在路线图中。
+当前采用 Node.js/TypeScript 后端、React/Vite 前端和 PostgreSQL，部署为单个活动服务实例。多 worker 调度、跨实例接管、每次运行独立工作区、CPU/内存/磁盘配额和跨会话 Gene Memory 尚未实现。本文与 [OpenSpec](openspec/README.md) 描述当前源码，不代表本机或生产实例已经更新；发布内容以 [GitHub Release](https://github.com/4o4E/RunForge/releases) 为准。
+
+## 界面展示
+
+截图取自本机运行实例，文件预览使用已有示例文件，账号信息已隐藏。点击图片可查看原图。
+
+### 对话与文件预览
+
+在同一页面查看任务过程、模型回复、工作区文件和文档预览，无需离开对话切换文件查看工具。
+
+[![RunForge 对话、任务过程与 Markdown 文件预览](docs/images/conversation-files.png)](docs/images/conversation-files.png)
+
+### 空间与业务插件
+
+按空间管理 Web 对话或外部运行模式、执行用户、默认模型和已启用的业务插件。
+
+[![RunForge 空间管理与业务插件概览](docs/images/space-management.png)](docs/images/space-management.png)
+
+### 用量分析
+
+按时间、用户和空间筛选模型用量，查看有效 Token、尝试 Token、缓存输入与每日变化。
+
+[![RunForge 模型用量汇总与每日 Token 图表](docs/images/usage-analytics.png)](docs/images/usage-analytics.png)
 
 ## Docker 部署
 
@@ -61,6 +84,16 @@ Compose 中为该目录增加只读 bind mount。Office 转换服务地址也直
 
 发布流程接受 `v*.*.*` tag。它会构建 `linux/amd64` 镜像，推送版本标签与 `latest`，验证匿名
 拉取，并创建带两套 Compose 和环境变量模板的 GitHub Release。
+
+## 首次使用
+
+1. 打开部署地址，选择租户，使用引导 owner 账号 `admin@local` 登录。系统管理员入口为 `/sys-admin`，账号为 `sysadmin@local`；两者初始密码分别由部署模板中的引导密码配置指定。
+2. 系统管理员在“系统设置”配置模型供应商、协议、模型能力和凭证，再在“租户授权”中授予租户可用模型与数据源。
+3. 租户管理员在“空间”中设置可见成员、允许模型、默认模型、提示词和业务插件。普通用户进入有权限的 Web 空间后创建对话、发送任务。
+4. 对话页面查看实时输出、计划和资源面板；文件面板用于上传、下载与预览，Shell 面板用于观察托管命令，子任务面板用于查看异步结果。
+5. 外部应用使用 external 空间，由管理员选择执行用户并签发调用方 Token；接入协议见[空间与外部运行](docs/space-runtime-design.md#5-外部协议)。Web 可见成员只能查看内容，租户管理员另可管理共享对话状态。
+
+首次启动后及时修改初始密码。对外提供服务时使用 HTTPS/WSS，并避免访问日志记录外部调用方秘密入口。身份、租户权限、Shell 访问范围分别承担不同边界；容器范围访问不等于完整会话隔离。
 
 ## 源代码部署
 
@@ -117,7 +150,9 @@ cp .env.example .env
 
 ```bash
 PORT=8080
-RUNFORGE_ACCESS_TOKEN=<strong-access-token>
+RUNFORGE_JWT_SECRET=<strong-jwt-signing-secret>
+RUNFORGE_BOOTSTRAP_ADMIN_PASSWORD=<strong-owner-password>
+RUNFORGE_BOOTSTRAP_SYSADMIN_PASSWORD=<strong-system-admin-password>
 RUNFORGE_SHARE_SECRET=<strong-share-secret>
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/runforge
 
@@ -134,7 +169,7 @@ TOOL_MAX_OUTPUT=40000
 OFFICE_PREVIEW_CONVERTER_URL=http://127.0.0.1:3002
 ```
 
-`RUNFORGE_ACCESS_TOKEN` 用来保护后端 `/api/**` 和 `/ws`，前端只通过 `Authorization: Bearer <token>` Header 发送，不放 Cookie，也不放 URL。`RUNFORGE_SHARE_SECRET` 用来生成文件分享签名；分享链接只允许访问同一个文件的读取/预览接口，不能浏览目录、访问设置或操作 agent。
+Web 用户登录后使用 JWT access token 和 refresh token；脚本可以使用用户 API token。REST 通过 `Authorization: Bearer <token>` 传递身份，WebSocket 使用 `Sec-WebSocket-Protocol` 中的 `runforge-token.<base64url-token>`，不把登录 token 放入 URL。`RUNFORGE_ACCESS_TOKEN` 仅用于旧部署在启动时注册引导 owner 的 API token，全新部署不需要配置。`RUNFORGE_SHARE_SECRET` 用于文件分享签名；签名链接仅授权指定作用域内的同一文件读取或预览，不授权目录浏览、设置或任务执行。
 
 Office 预览走后端转换：`doc/docx/ppt/pptx/xls/xlsx` 等文件先通过 `OFFICE_PREVIEW_CONVERTER_URL` 指向的 LibreOffice 转换服务生成 PDF，前端再用 PDF.js 只读渲染。RunForge 后端和转换服务在同一个 Docker 网络时，建议填服务名地址；如果转换服务单独绑定在宿主机端口，再填宿主机可访问地址。转换容器需要按部署环境挂载常用中英文字体，否则 LibreOffice 可能因字体替换产生版式偏移；字体目录或转换服务镜像变更后，递增 `OFFICE_PREVIEW_CACHE_VERSION` 可让旧 PDF 预览缓存自动失效。
 
@@ -185,13 +220,20 @@ psql "$DATABASE_URL" -c "\dt"
 
 系统管理员在 `/sys-admin/settings/tools-sandbox` 独立配置工具策略与 Shell 访问范围，并维护 Python（pip / uv）与 Node（npm / pnpm）镜像源。默认使用清华 PyPI 镜像和 npmmirror；保存后随后启动的命令立即使用新值，已运行进程不变。两种 Linux 访问范围都通过 bwrap 保护插件、Skill 和 SDK；缺失或不可用时明确失败。完整边界及图片多模态输入限制见 [工具沙箱设计](docs/tool-sandbox.md)。
 
-```bash
-psql "$DATABASE_URL" -c "select key, value from app_settings order by key;"
-```
+配置可能包含凭证，不要把完整 `app_settings` 查询结果写入日志或交付资料。通过管理页面检查已保存配置。
 
 ### 5. 启动服务
 
-本机开发服务在 Docker 容器中运行；`pnpm` 只负责构建、数据库迁移和测试，不控制容器。开发容器使用不入库的 `ref/` 配置；当前机器的准备条件、启动和停止命令记录在 `AGENTS.local.md`。生产环境使用 `deploy/` 下的 Compose 配置。
+在已安装 Linux 工具依赖的环境中，先构建再启动后端：
+
+```bash
+pnpm build
+pnpm start:server
+```
+
+另开终端执行 `pnpm dev:web`，启动带 API/WebSocket 代理的 Vite 开发页面。后端运行时从仓库根目录 `.env` 加载配置。需要由后端直接提供已构建前端时，在启动后端前把 `RUNFORGE_WEB_DIST` 设置为 `web/dist` 的绝对路径，此时使用后端端口访问统一页面。
+
+当前工作站使用 Docker 开发容器；准备条件、构建与启停方式只记录在不入库的 `AGENTS.local.md`。生产环境使用 `deploy/` 下的 Compose；`pnpm` 不负责容器启停。
 
 访问入口：
 
@@ -212,7 +254,7 @@ psql "$DATABASE_URL" -c "select key, value from app_settings order by key;"
 - 前端能看到多轮 step、reasoning、tool_call、tool_result 和 final。
 - 任务过程会使用文件读取、grep 或 shell 等工具。
 - 长耗时命令可以走右侧 Shell 面板持续观察；适合拆分的只读检查可以由 subagent 后台执行并回收结果。
-- 最终输出默认使用 Markdown/Mermaid/LaTeX；复杂报告可通过 shell 或文件写入工具生成 HTML artifact，计划收口后直接以最终汇报完成。
+- 最终输出默认使用 Markdown/Mermaid/LaTeX；复杂报告可通过 shell 或文件写入工具生成 HTML artifact。最终回复结束运行时，计划继续保留真实未完成或失败状态。
 - 数据库中能查到对应 run、完整 step 聚合和消息顺序索引；原始事件在 trace 文件中查看。
 - 人为降低 `LLM_CONTEXT_BUDGET` 时，可以观察到 `compaction` 事件。
 
@@ -220,8 +262,18 @@ psql "$DATABASE_URL" -c "select key, value from app_settings order by key;"
 
 ```bash
 pnpm --filter server test
-pnpm --filter server typecheck
+pnpm typecheck
 ```
+
+PostgreSQL 集成、真实模型和浏览器验收的环境条件与覆盖范围见 [CI 与真实验收分层](docs/testing/ci-and-verification.md)。数据库验证使用专用测试库；真实模型验收会产生费用。单元测试成功不代表真实模型、浏览器或已部署实例验收成功。
+
+## 开发规范与项目级 skills
+
+- [OpenSpec 入口](openspec/README.md)：现有行为规格、变更提案、架构决定、实施任务与归档。
+- [开发技能配置](docs/agents/README.md)：来自 `4o4E/skills` 的项目级工程技能、GitHub Issues 与 OpenSpec 的职责，以及更新方式。
+- [领域术语](GLOSSARY.md)：会话、任务、空间与用量的统一名称。
+
+开发助手的 skills 保存在源码仓库 `.agents/skills/`；它们服务于 RunForge 的开发过程。运行中的 Agent 只使用平台内置和空间选中的业务 Skill，不扫描源码仓库的开发技能目录。
 
 ## 文档导航
 
@@ -230,27 +282,28 @@ pnpm --filter server typecheck
 - [托管 Shell 资源设计](docs/background-shell-design.md)：shell session、前台/后台命令、轮询、接管和跨 run 生命周期。
 - [工具沙箱设计](docs/tool-sandbox.md)：工具权限、bwrap 沙箱选型、读写范围与命令限制。
 - [Skill 系统设计](docs/skill-system-design.md)：当前 Skill 文件协议、空间只读资源、运行级激活生命周期和安全边界。
-- [Subagent 与 Gene Memory 设计](docs/subagent-memory-design.md)：当前 subagent v1 协作语义，以及后续 runtime profile、gene 读写、RAG 召回、经验提升和退化流程。
-- [题面验收报告](docs/acceptance-report.md)：当前完成范围、未实现边界和后续平台化设计。
-- [架构改造方案](docs/refactor-plan.md)：AI SDK、AI Elements、Streamdown、HTML artifact、可观测和沙箱路线。
-- [实施日志](docs/impl-log/)：各阶段落地记录、验证结果和遗留事项。
+- [Subagent 与 Gene Memory 设计](docs/subagent-memory-design.md)：当前 runtime profile、工具授权与共享工作区，以及后续 gene 读写、RAG 召回、经验提升和退化设计。
+- [能力与验收边界](docs/acceptance-report.md)：当前源码能力、尚未实现的范围与验证入口。
+- [架构改造方案](docs/refactor-plan.md)：早期方案，当前行为以 OpenSpec 和现行专题为准。
+- [实施日志](docs/impl-log/)：各阶段实施记录和验证证据，不替代现行规格。
 - [.env.example](.env.example)：本地环境变量模板。
 
 ## 项目结构
 
-```text
-RunForge/
-├── server/              # Node.js / TypeScript 后端
-├── web/                 # React / Vite 前端控制台
-├── docs/                # 设计文档与实施日志
-├── deploy/              # 自带 PostgreSQL 与外部 PostgreSQL 的生产 Compose
-├── docker/              # 容器启动脚本
-├── scripts/             # Linux 启停脚本
-├── workspace/           # 默认工作区
-├── Dockerfile           # 前后端单镜像构建
-├── docker-compose.yml   # 源代码开发使用的 PostgreSQL
-└── package.json         # pnpm workspace 根配置
-```
+| 路径 | 职责 |
+| --- | --- |
+| `server/` | Node.js/TypeScript 后端、Prisma migration、内置 Skill |
+| `web/` | React/Vite 控制台 |
+| `packages/contracts/` | 前后端共享契约 |
+| `packages/workload-sdk/` | 运行中可信脚本使用的资源 SDK |
+| `plugins/business/` | 仓库维护的业务插件源码 |
+| `openspec/` | 行为规格、变更方案与架构决定 |
+| `.agents/skills/` | 开发助手使用的项目级 skills |
+| `docs/` | 使用、协议、架构说明与验证指南 |
+| `deploy/`、`docker/` | 生产 Compose、安全配置和镜像入口 |
+| `scripts/` | CI 与容器验证脚本 |
+| `workspace/` | 非生产配置下的默认会话文件根目录 |
+| `docker-compose.yml` | 源代码开发使用的 PostgreSQL |
 
 ## License
 
