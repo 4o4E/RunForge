@@ -16,7 +16,7 @@
 - skill 系统已经按文件夹协议实现，`SKILL.md` 是入口，激活后才加载正文和资源。
 - skill 激活是 run 级状态，run 结束后清空，避免工具暴露和上下文持续膨胀。
 - 当前没有原生 workflow 子系统；稳定执行方法由 skill 和 `update_plan` 表达。
-- subagent v1 已实现异步只读推理：主 agent 可以派发子任务，拿到 `subagentRunId` 后轮询或跨 run 查看结果。
+- subagent 已实现异步协作：主 agent 派发后取得 `subagentRunId`，可继续其他工作，再由运行时等待真实终态；同一 thread 的后续 run 也可读取结果。
 - 当前没有跨 thread 的 memory 系统，也没有经验检索、写入、引用和退化闭环。
 
 在已落地能力之上，后续设计继续做这些改变：
@@ -542,23 +542,21 @@ Router 汇总时必须能看到：
 
 ### 执行语义
 
-subagent 是 thread 级异步资源，不阻塞入口 agent 的主循环。
+subagent 是 thread 级异步资源；启动不阻塞入口 agent，等待结果时则由运行时持有当前工具调用。
 
 当前语义：
 
 - `subagent_run` 只负责创建任务单并返回 `subagentRunId`，不等待子任务完成。
 - 后台执行完成后写回 `subagent_runs.output/error/usage`，并追加 `subagent_finished` 或
   `subagent_failed` 事件。
-- 入口 agent 可以连续启动多个 subagent，再用 `subagent_poll` 查询单个结果，或用
-  `subagent_list` 查看当前 thread 的所有 subagent。
-- subagent 归属 thread，而不是只归属当前 run；后续 run 可以继续轮询和使用之前 run
-  创建的 subagent 结果。
-- 第一版后台任务依赖当前服务进程存活；如果服务重启，`running` 状态任务需要后续补
-  recovery worker 或超时标记机制。
+- 入口 agent 可以连续启动多个 subagent，再用 `subagent_poll(subagentRunId)` 等待单个真实终态；`subagent_list` 只用于查看当前 thread 的资源目录，不是等待机制。
+- `subagent_poll` 不接受 `waitSeconds/timeoutSeconds`，也不因定时观察到期返回 `running`。当前 run 的新 external `next_step` 输入可以提前唤醒等待，取消与服务关闭会中断等待。
+- subagent 归属 thread，而不是只归属当前 run；后续 run 可以等待和使用之前 run 创建的结果。查询先验证 thread 可见性，不能读取其他 thread 的子任务。
+- 活动执行在对外发布 started 前登记，真实终态持久化并完成收口后才移除。读取到 `running` 却没有可连接活动执行时，按条件原子标记孤儿错误，再读取实际终态；并发完成的成功、输出和 usage 不得被覆盖。
+- 活动登记仍是进程内状态，不提供跨进程重连或分布式 worker 协调。同一应用数据库必须由单个服务实例管理该登记；服务重启遗留的子任务明确报告不可恢复，不能当作成功或无限等待。
+- 重复目录查询和其他无进展工具调用继续受循环保护约束；真实的新 `next_step` 输入开启新的进展判断，不能把正常输入打断误判为重复轮询。
 
-这样设计的原因是：异步协作模型里，入口 agent 的职责是分派、协调和综合，不应该
-被某一个子任务的 LLM 调用卡住；否则多个 subagent 只是同步工具调用，无法模拟真实多人
-并行协作。
+这样设计保留异步分派和并行执行，但不把等待拆成反复的新模型请求；入口 agent 在确实需要结果时一次等待，再根据终态综合结论。
 
 ## 数据模型
 

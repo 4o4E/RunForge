@@ -100,7 +100,7 @@ const STREAM_STATS_MIN_INTERVAL_MS = 250;
 // 最后一个模型轮次专门整理结论，防止工具调用耗尽后把空结果误报为成功。
 const SUBAGENT_READONLY_MAX_TURNS = 6;
 const SUBAGENT_WRITER_MAX_TURNS = 12;
-const SUBAGENT_POLL_MAX_WAIT_SECONDS = 120;
+const activeSubagentExecutions = new Set<string>();
 const SUBAGENT_FORBIDDEN_TOOLS = new Set([
   ASK_USER_TOOL_NAME,
   'update_plan',
@@ -373,13 +373,6 @@ function detectLoopGuard(signatures: string[], failures: string[]): LoopGuardHit
   return null;
 }
 
-function isPendingToolWait(name: string, result: string): boolean {
-  if (name === 'shell_poll') {
-    return /^shell command: [^\n]+\nsession: [^\n]+\nstatus: running(?:\n|$)/.test(result);
-  }
-  return (name === SUBAGENT_POLL_TOOL_NAME || name === SUBAGENT_LIST_TOOL_NAME)
-    && /\bstatus: running\b/.test(result);
-}
 
 function renderAbnormalFinishMessage(finishReason: FinishReason, rawFinishReason: string | undefined, hasText: boolean): string {
   const raw = rawFinishReason && rawFinishReason !== finishReason ? `，上游原始原因：${rawFinishReason}` : '';
@@ -872,8 +865,17 @@ async function executeRunControlled(
       () => runLoop(),
     );
   } catch (err) {
+    if (cancellationSignal.aborted) {
+      const missing = findMissingToolResults(await store.loadThreadMessages(scope, threadId, { runId }));
+      for (const call of missing) {
+        const result = `工具调用 "${call.name}" 已因${isExecutionShuttingDown() ? '服务关闭' : '运行取消'}中断；未取得完成结果，请根据持久化状态恢复。`;
+        await store.recordInterruptedToolResult(scope, call.assistantMessageId, call.id, result);
+        await emit(null, { type: 'tool_result', step: currentStepIdx, id: call.id, name: call.name, result });
+      }
+    }
     if (isExecutionShuttingDown()) return;
     if (cancellationSignal.aborted) {
+      await shellManager.killRunCommands(scope, runId, 'run_cancel');
       const current = await store.getRun(scope, runId);
       if (current && current.status !== 'canceled') {
         const message = cancellationSignal.reason instanceof Error
@@ -889,14 +891,18 @@ async function executeRunControlled(
       await store.setRunStatus(scope, runId, 'error', { error: message });
     }
   } finally {
-    const cleanup = await Promise.allSettled([
-      mcpSession.dispose(),
-      runtimeResources.businessPluginHandle?.dispose() ?? Promise.resolve(),
-      deps.releaseRuntimeResources?.(runId) ?? Promise.resolve(0),
-    ]);
-    for (const result of cleanup) {
-      if (result.status === 'rejected') {
-        console.warn(`run ${runId} 运行资源释放失败：${(result.reason as Error).message}`);
+    try {
+      await publishCompletedStep();
+    } finally {
+      const cleanup = await Promise.allSettled([
+        mcpSession.dispose(),
+        runtimeResources.businessPluginHandle?.dispose() ?? Promise.resolve(),
+        deps.releaseRuntimeResources?.(runId) ?? Promise.resolve(0),
+      ]);
+      for (const result of cleanup) {
+        if (result.status === 'rejected') {
+          console.warn(`run ${runId} 运行资源释放失败：${(result.reason as Error).message}`);
+        }
       }
     }
   }
@@ -1116,6 +1122,7 @@ async function executeRunControlled(
           }),
         ].join('\n')
       : '';
+    // 图片读取属于统一执行约束，已有空间的自定义模板也必须使用多模态流程。
     const prompt = [basePrompt, IMAGE_INPUT_PROMPT, onDemandToolPrompt, renderFileLinkRules(userFiles?.mountPath ?? null)].filter(Boolean).join('\n\n');
     const userMediaRefs = mediaRefsFromUserText(runtimeUserInput);
     const ctx = new ContextManager(prior, runtimeUserInput, renderGoal(goal), {
@@ -1231,7 +1238,7 @@ async function executeRunControlled(
       if (row.status === 'done') lines.push('', row.output ?? 'subagent 已完成，但没有返回文本结果。');
       if (row.status === 'error') lines.push('', `subagent 执行失败：${row.error ?? '未知错误'}`);
       if (row.status === 'running') {
-        lines.push('', 'subagent 仍在后台执行。可以稍后继续调用 subagent_poll，或用 subagent_list 查看当前 thread 的所有 subagent。');
+        lines.push('', 'subagent 仍在后台执行。subagent_poll 会在运行时等待终态；subagent_list 只提供即时目录。');
       }
       return lines.join('\n');
     };
@@ -1456,6 +1463,7 @@ async function executeRunControlled(
           durationMs: durationMs(startedAt, endedAt),
         });
       } catch (err) {
+        if (isExecutionShuttingDown() && abortSignal.aborted) return;
         const error = (err as Error).message;
         const endedAt = new Date().toISOString();
         await store.finishSubagentRun(scope, row.id, { status: 'error', error });
@@ -1499,7 +1507,9 @@ async function executeRunControlled(
         taskAssignment,
         skillNames,
       });
-      await emit(stepId, {
+      const subagentExecution = retainRunExecution(runId);
+      activeSubagentExecutions.add(row.id);
+      const started = emit(stepId, {
         type: 'subagent_started',
         step: stepIdx,
         subagentRunId: row.id,
@@ -1510,12 +1520,19 @@ async function executeRunControlled(
         startedAt: toolStartedAt,
       });
 
-      const subagentExecution = retainRunExecution(runId);
-      void completeSubagent(row, args, stepId, stepIdx, toolStartedAt, subagentExecution.signal)
+      void started.then(() => completeSubagent(row, args, stepId, stepIdx, toolStartedAt, subagentExecution.signal))
+        .catch(async (error) => {
+          if (!isExecutionShuttingDown()) {
+            await store.finishSubagentRun(scope, row.id, { status: 'error', error: (error as Error).message });
+          }
+          console.warn(`subagent ${row.id} 收口失败：${(error as Error).message}`);
+        })
         .finally(() => {
+          activeSubagentExecutions.delete(row.id);
           notifyRunActivity(runId);
           subagentExecution.finish();
-        });
+        })
+        .catch((error) => console.warn(`subagent ${row.id} 中断状态无法持久化：${(error as Error).message}`));
       return {
         text: [
           `subagentRunId: ${row.id}`,
@@ -1524,7 +1541,7 @@ async function executeRunControlled(
           `modelRef: ${modelRef ?? '主 agent 默认模型'}`,
           '',
           'subagent 已在后台启动，本次工具调用不会等待它完成。',
-          '后续可以调用 subagent_poll 查询该子任务，或调用 subagent_list 查看当前 thread 的所有 subagent；这些查询可以跨 run 使用。',
+          '后续调用 subagent_poll 等待该子任务终态，或调用 subagent_list 查看当前 thread 的即时目录；可跨 run 使用。',
         ].join('\n'),
       };
     };
@@ -1532,8 +1549,7 @@ async function executeRunControlled(
     const pollSubagent = async (args: Record<string, unknown>): Promise<{ text: string }> => {
       const subagentRunId = optionalString(args.subagentRunId);
       if (!subagentRunId) return { text: 'subagent_poll 缺少必填 subagentRunId。' };
-      const waitSeconds = Math.min(Math.max(numericArg(args.waitSeconds ?? args.timeoutSeconds, 0), 0), SUBAGENT_POLL_MAX_WAIT_SECONDS);
-      const deadline = Date.now() + waitSeconds * 1000;
+      cancellationSignal.throwIfAborted();
       let row = await store.getSubagentRun(scope, subagentRunId);
       if (!row) return { text: `没有找到 subagentRunId: ${subagentRunId}` };
       const rowId = row.id;
@@ -1541,23 +1557,32 @@ async function executeRunControlled(
       if (!visibleRows.some((item) => item.id === rowId)) {
         return { text: `当前 thread 无权读取 subagentRunId: ${subagentRunId}` };
       }
-      while (row.status === 'running' && Date.now() < deadline) {
-        cancellationSignal.throwIfAborted();
-        // 同进程会被 next_step 或子任务完成事件唤醒；每秒复查一次数据库以覆盖跨进程请求。
-        const timeoutMs = Math.min(1000, deadline - Date.now());
-        await waitForRunActivity(runId, timeoutMs, cancellationSignal);
-        row = (await store.getSubagentRun(scope, subagentRunId)) ?? row;
-        const parentRun = await store.getRun(scope, runId);
-        if (parentRun && parentRun.input_version > lastAppliedExternalInputVersion) {
-          return {
-            text: `${renderSubagentRow(row, false)}\n\n主对话已收到新的 next_step 输入，先返回处理该输入；子任务仍可稍后继续查询。`,
-          };
+      while (true) {
+        const activity = waitForRunActivity([runId, row.parent_run_id], cancellationSignal);
+        try {
+          const latest = await store.getSubagentRun(scope, subagentRunId);
+          if (!latest) return { text: `subagentRunId 已删除或不可读：${subagentRunId}` };
+          row = latest;
+          cancellationSignal.throwIfAborted();
+          if (row.status !== 'running') return { text: renderSubagentRow(row, true) };
+          if (!activeSubagentExecutions.has(row.id)) {
+            // 仅原子终结仍 running 的孤儿，再读取实际终态；不得覆盖并发完成的结果。
+            await store.finishSubagentRun(scope, row.id, {
+              status: 'error',
+              error: '子任务没有可连接的活动执行（可能因服务重启中断），无法恢复或确认执行成功。',
+            });
+            const orphan = await store.getSubagentRun(scope, row.id);
+            return { text: orphan ? renderSubagentRow(orphan, true) : `subagentRunId 已删除：${row.id}` };
+          }
+          const parentRun = await store.getRun(scope, runId);
+          if (acceptsNextStep && parentRun && parentRun.input_version > lastAppliedExternalInputVersion) {
+            return { text: `${renderSubagentRow(row, false)}\n\n主对话已收到新的 next_step 输入，先返回处理该输入；子任务仍可再次等待。` };
+          }
+          await activity.promise;
+        } finally {
+          activity.dispose();
         }
       }
-      if (row.status === 'running' && waitSeconds > 0) {
-        return { text: `${renderSubagentRow(row, false)}\n\n等待 ${waitSeconds} 秒后仍未完成，返回当前状态。` };
-      }
-      return { text: renderSubagentRow(row, true) };
     };
 
     const listSubagents = async (args: Record<string, unknown>): Promise<{ text: string }> => {
@@ -2169,9 +2194,11 @@ async function executeRunControlled(
               stopToolHeartbeat();
             }
           },
-        );
-        cancellationSignal.throwIfAborted();
-        if (call.name === 'update_plan') {
+        ).catch((error) => {
+          if (!cancellationSignal.aborted) throw error;
+          return { text: `工具调用 "${call.name}" 已因${isExecutionShuttingDown() ? '服务关闭' : '运行取消'}中断；未取得完成结果。` };
+        });
+        if (call.name === 'update_plan' && !cancellationSignal.aborted) {
           goal = mergeGoal(goal, parseGoalPatch(args));
           await store.setGoalState(scope, runId, goal);
           const completeGoal = renderGoal(goal);
@@ -2212,7 +2239,8 @@ async function executeRunControlled(
         const failure = /^(工具 .* 抛出异常|工具策略已阻止|未知工具：)/.test(result.text)
           ? `${signature}:${result.text.slice(0, 240)}`
           : '';
-        if (!isPendingToolWait(call.name, result.text)) recordToolGuard(signature, failure);
+        recordToolGuard(signature, failure);
+        cancellationSignal.throwIfAborted();
 
       }
       const guardHit = detectLoopGuard(recentToolSignatures, recentFailures);

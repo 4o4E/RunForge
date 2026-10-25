@@ -20,9 +20,9 @@ RunForge 面向 Web 用户与外部可信应用提供通用 Agent 执行。租�
 - 对话按 `thread -> run -> step` 组织并持久化到 PostgreSQL。
 - 前端提供 React 聊天控制台，可查看 reasoning、工具调用、工具结果和最终输出。
 - 支持上下文压缩、持久 Goal 状态、取消 run、服务启动恢复、工具输出截断和工具策略。
-- 支持托管 shell session，长耗时命令可以后台运行、轮询、终止，并在右侧 Shell 面板中持续观察。
+- 支持托管 shell session，长命令可后台运行、等待终态和终止；右侧 Shell 面板继续即时观察，不让模型反复轮询保活。
 - 支持 Skill 文件协议，按空间准备只读内置资源，并按需用 `skill_activate` 加载正文和资源；普通会话不能创建或修改 Skill。
-- 支持异步 subagent，主 agent 可派发子任务、轮询结果，并在前端资源栏查看；readonly/writer 工具权限由 runtime profile 与主 agent 授权限定。
+- 支持异步 subagent，主 agent 可派发子任务、等待真实终态并在资源栏查看；工具权限由 runtime profile 与主 agent 授权限定。
 - 服务端统一聚合 Token 与存储占用，支持租户、用户、空间和时间维度；统计口径见[用量与存储分析](usage-and-storage-analysis.md)。
 
 ## 对话模型
@@ -130,7 +130,7 @@ flowchart TD
 - `registry.ts`：工具注册表和统一执行入口。
 - `policy.ts`：工具 allow/deny、路径围栏、shell 开关、网络开关、输出截断。
 - `sandbox.ts`：shell 子进程执行后端，支持宿主执行和 bwrap。
-- `managedShell.ts`：托管 shell 工具，提供 session 复用、前台/后台命令、轮询和终止。
+- `managedShell.ts`：托管 shell 工具，提供 session 复用、前台/后台命令、运行时终态等待和终止；UI/API 保留即时快照查询。
 - `skillActivate.ts`、`subagentRun.ts`：skill 和 subagent 入口。
 - 具体工具：`shell`、`shell_session_open`、`shell_session_reuse`、`shell_session_list`、`shell_exec`、`shell_poll`、`shell_kill`、`shell_session_close`、`file_read`、`file_write`、`file_edit`、`glob`、`grep`、`web_fetch`、`web_search`、`ask_user`、`update_plan`、`skill_activate`、`subagent_run`、`subagent_poll`、`subagent_list`。
 

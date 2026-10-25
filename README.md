@@ -279,7 +279,7 @@ PostgreSQL 集成、真实模型和浏览器验收的环境条件与覆盖范围
 
 - [系统设计](docs/system-design.md)：总体架构、执行主线、对话模型、Provider、Store、API、数据模型。
 - [长任务设计](docs/long-task-design.md)：Goal 锚点、上下文压缩、token 预算、取消与长任务验证链路。
-- [托管 Shell 资源设计](docs/background-shell-design.md)：shell session、前台/后台命令、轮询、接管和跨 run 生命周期。
+- [托管 Shell 资源设计](docs/background-shell-design.md)：shell session、前台/后台命令、运行时终态等待、即时 UI 观察、接管和跨 run 生命周期。
 - [工具沙箱设计](docs/tool-sandbox.md)：工具权限、bwrap 沙箱选型、读写范围与命令限制。
 - [Skill 系统设计](docs/skill-system-design.md)：当前 Skill 文件协议、空间只读资源、运行级激活生命周期和安全边界。
 - [Subagent 与 Gene Memory 设计](docs/subagent-memory-design.md)：当前 runtime profile、工具授权与共享工作区，以及后续 gene 读写、RAG 召回、经验提升和退化设计。

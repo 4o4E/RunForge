@@ -691,6 +691,7 @@ export interface Store {
   ): Promise<void>;
   appendShellCommandLog(scope: Scope, commandId: string, stream: ShellLogStream, chunk: string): Promise<ShellCommandLogRow>;
   getShellCommandLogs(scope: Scope, commandId: string, sinceSeq?: number, limit?: number): Promise<ShellCommandLogRow[]>;
+  getShellCommandLogTail(scope: Scope, commandId: string, sinceSeq?: number, limit?: number): Promise<ShellCommandLogRow[]>;
   addShellSessionEvent(scope: Scope, sessionId: string, actor: ShellActor, kind: string, data: unknown): Promise<void>;
 
   upsertPushSubscription(scope: Scope, input: WebPushSubscriptionInput, userAgent?: string | null): Promise<PushSubscriptionRow>;

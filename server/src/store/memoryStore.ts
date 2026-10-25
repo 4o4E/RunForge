@@ -1083,7 +1083,7 @@ export class MemoryStore implements Store {
     fields: { status: 'done' | 'error'; output?: string | null; error?: string | null; usage?: Record<string, unknown> | null },
   ): Promise<void> {
     const row = this.subagentRuns.get(id);
-    if (!this.subagentRunOwnedBy(row, scope)) return;
+    if (!this.subagentRunOwnedBy(row, scope) || row.status !== 'running') return;
     row.status = fields.status;
     if (fields.output !== undefined) row.output = fields.output;
     if (fields.error !== undefined) row.error = fields.error;
@@ -1322,6 +1322,11 @@ export class MemoryStore implements Store {
   async getShellCommandLogs(scope: Scope, commandId: string, sinceSeq = 0, limit = 200): Promise<ShellCommandLogRow[]> {
     if (!this.shellCommandOwnedBy(this.shellCommands.get(commandId), scope)) return [];
     return (this.shellLogs.get(commandId) ?? []).filter((row) => row.seq > sinceSeq).slice(0, limit);
+  }
+
+  async getShellCommandLogTail(scope: Scope, commandId: string, sinceSeq = 0, limit = 200): Promise<ShellCommandLogRow[]> {
+    if (!this.shellCommandOwnedBy(this.shellCommands.get(commandId), scope)) return [];
+    return (this.shellLogs.get(commandId) ?? []).slice(-limit).filter((row) => row.seq > sinceSeq);
   }
 
   async addShellSessionEvent(scope: Scope, sessionId: string, _actor: ShellActor, _kind: string, _data: unknown): Promise<void> {

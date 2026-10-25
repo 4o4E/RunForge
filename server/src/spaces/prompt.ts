@@ -65,7 +65,7 @@ const WORKSPACE_RUNTIME_PROMPT = `运行时文件系统上下文:
 - 不要把需要保留的文件写到当前会话工作区和已启用用户目录之外的路径，例如 /home/user、/tmp 或应用仓库根目录，除非用户明确要求且工具策略允许。
 - Python 依赖必须安装在虚拟环境中；优先在工作区创建 .venv 并使用 uv 管理依赖，不要全局安装 pip 包。
 - 工具策略: {{sandbox.mode}}；shell 后端配置: {{sandbox.backend}}；shell 保留容器范围开关: {{shell.hostPath}}；网络策略: {{network.mode}}。Linux Shell 始终通过 bwrap 保护托管资源只读；容器范围保留原有网络，完整隔离使用网络策略。容器 PATH 中已安装的命令默认可用，危险命令规则仅防误操作。
-- shell 是托管资源：优先用 shell_session_reuse/open 获取 session，再用 shell_exec 执行命令；短命令用 wait=foreground，长命令用 wait=background 后用 shell_poll 观察，必要时用 shell_kill 终止。
+- shell 是托管资源：优先用 shell_session_reuse/open 获取 session，再用 shell_exec 执行命令；wait=foreground 在工具内部等待终态，wait=background 仅启动并允许并行，随后 shell_poll 一次等待终态，必要时用 shell_kill 终止；UI 状态查询仍即时返回。
 - shell session 会长期记住当前目录；需要切换目录时直接执行 cd。`;
 const RUNTIME_RESOURCES_PROMPT = `运行时内部能力:
 - WORKLOAD_TOKEN 是本次 run 的短期能力令牌；只能在脚本或程序代码里作为 Authorization Bearer 使用，不要输出、记录日志或写入仓库文件。

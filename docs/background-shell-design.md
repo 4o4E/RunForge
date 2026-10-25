@@ -8,16 +8,14 @@
 - **所有 shell 都走托管资源。** 不再把 `shell(command)` 当一次性黑盒；先有 `shell_session`，
   再有 `shell_exec` 产生的 `shell_command`。
 - **Linux Shell 始终通过 bwrap 保护资源。** bwrap 构造受限进程树；session/command 生命周期由后端 `ShellManager` 管理，后台可选择容器范围访问或完整会话隔离。
-- **命令可前台也可后台。** `shell_exec(wait=foreground)` 等待完成或超时；`wait=background`
-  立即返回 `commandId`，后续用 `poll/kill` 管理。
-- **LLM 只观察，不保活。** 定时、超时、进程回收由后端 `ShellManager` 做；LLM 通过工具轮询状态并决策下一步。
-- **日志不进入完整上下文。** 全量 stdout/stderr 落库或落文件；返回给 LLM 的只有增量、tail 和摘要。
-- **旧 `shell` 仅作兼容层。** 迁移期可把它实现成“自动创建临时 session + 前台 exec”；新能力要求显式
-  open/reuse session。
+- **命令可前台也可后台。** `shell_exec(wait=foreground)` 在运行时等待真实终态（含失败、取消与硬超时）；`wait=background` 立即返回 `commandId`，后续用 `shell_poll` 等待或用 `shell_kill` 终止。
+- **LLM 不轮询保活。** 定时、超时、等待和进程回收由 `ShellManager` 管理；模型工具不因观察时间到期反复返回 `running`。UI/API 的即时状态查询保持非阻塞。
+- **日志不进入完整上下文。** 全量 stdout/stderr 落库或落文件；返回给 LLM 的是有界末尾输出，不能只取日志第一页而漏掉最终结果。
+- **简化 `shell` 复用同一运行时。** 它自动创建或复用当前 thread 的 session，并按前台语义等待；显式管理后台命令仍使用 session 工具。
 
-## 2. 当前逻辑与问题
+## 2. 改造前的逻辑与问题
 
-当前 `shell` 工具路径：
+改造前的 `shell` 工具路径：
 
 1. `server/src/tools/shell.ts` 接收 `command + timeout_ms`。
 2. `server/src/tools/sandbox.ts` 选择宿主 shell 或 bwrap。
@@ -78,13 +76,15 @@ queued -> running -> succeeded | failed | killed | timed_out | orphaned
   - 复用现有 session；不传时返回当前 thread 下推荐 session。
 - `shell_session_list()`
   - 列出当前 thread/workspace 可见 shell 以及最近命令。
-- `shell_exec(sessionId, command, wait?, timeout_ms?, soft_timeout_ms?, hard_timeout_ms?)`
-  - `wait=foreground`：等待命令完成或超时，返回 exit code 和 tail。
+- `shell_exec(sessionId, command, wait?, soft_timeout_ms?, hard_timeout_ms?)`
+  - `wait=foreground`：保持当前工具调用直到命令终态，返回真实状态、退出信息和末尾输出；不接受观察用 `timeout_ms`。
   - `wait=background`：立即返回 `commandId`，命令继续运行。
   - session 会记住 `cwd`；切目录用 `cd`，不要给每次命令单独传 cwd。
   - 默认超时：短任务 10 分钟软超时、30 分钟硬超时；可按命令类型和用户配置覆盖。
 - `shell_poll(commandId | sessionId, sinceSeq?)`
-  - 返回 command/session 状态、运行时长、退出码、增量输出、tail、`nextPollMs`。
+  - 在运行时等待所选 command 的终态，返回真实状态与有界末尾输出；传 session id 时固定等待调用时选中的命令，不跟随后续命令切换。
+  - `sinceSeq` 限定输出起点，读取最新日志尾页而非最早一页。UI/API 即时查询仍返回快照、增量输出与 `nextPollMs`，不采用模型工具的阻塞语义。
+  - 取消一次 poll 等待本身不杀所观察命令；前台执行取消只终止自身启动的命令，run 取消与服务关闭按资源归属统一回收。
 - `shell_kill(commandId, signal?)`
   - 默认先 `SIGTERM`，超时后 `SIGKILL`。
 - `shell_session_close(sessionId)`
@@ -92,10 +92,10 @@ queued -> running -> succeeded | failed | killed | timed_out | orphaned
 
 工具返回给 LLM 的文本必须短：最多包含最近 N 行、退出码、下一步建议；完整日志通过前端或下载查看。
 
-兼容策略：
+简化入口与显式管理：
 
-- 旧 `shell(command)` 工具保留一段时间，内部等价于 `open temp session -> exec foreground -> close`。
-- 新提示词要求 LLM 使用托管 shell；涉及长任务、交互、跨 run 连续性时禁止使用旧 `shell`。
+- `shell(command, timeout_ms?)` 与托管工具共享 `ShellManager`、日志和生命周期；`timeout_ms` 不再让模型收到观察超时的 `running` 快照，原有硬超时计算保留。
+- 需要并行工作时先用 `shell_exec(wait=background)` 启动，继续其他工作，最后一次 `shell_poll` 等待真实终态；不能用反复短轮询制造新模型轮次。
 
 ## 6. 后端实现
 
@@ -291,7 +291,7 @@ PTY 模式需要新增：
 
 ## 12. 验收
 
-- `git clone` 大仓库：`shell_exec(wait=background)` 立即返回，LLM 可继续下一 step，`poll` 能看到增量输出。
+- 长后台命令：`shell_exec(wait=background)` 立即返回，LLM 可继续下一 step；UI 能即时观察增量输出，模型一次 `shell_poll` 取得终态与末尾输出。
 - 普通短命令：`shell_exec(wait=foreground)` 等价于原同步 shell，但有 session/command 审计。
 - 软超时：任务仍运行，前端和事件提示用户选择。
 - 硬超时：任务被杀，状态为 `timed_out`，退出信息可追踪。

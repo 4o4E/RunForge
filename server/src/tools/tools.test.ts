@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile, mkdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { getEventListeners } from 'node:events';
 import sharp from 'sharp';
 import { shellTool } from './shell.js';
 import { fileReadTool } from './fileRead.js';
@@ -12,7 +13,11 @@ import { globTool } from './glob.js';
 import { grepTool } from './grep.js';
 import { truncateFetchText } from './webFetch.js';
 import { getTool, runTool, toolSchemas } from './registry.js';
-import { shellExecTool } from './managedShell.js';
+import { shellExecTool, shellPollTool } from './managedShell.js';
+import { ShellManager, shellManager } from '../shell/manager.js';
+import { shellBus } from '../shell/bus.js';
+import { store as shellStore } from '../store/index.js';
+import type { AgentEvent } from '../agent/types.js';
 import { requiresDatabaseAccess } from './databaseAccessGuard.js';
 import type { ToolResult, ToolRunContext } from './types.js';
 import { normalizeMcpSettings, normalizeToolSettings } from '../settings.js';
@@ -339,4 +344,233 @@ test('web_fetch truncation respects very small limits', () => {
 test('tool settings clamp maxOutput to the context-safe ceiling', () => {
   const settings = normalizeToolSettings({ maxOutput: 100000 });
   assert.equal(settings.maxOutput, 40000);
+});
+
+function shellOutputWait(threadId: string, marker: string, signal: AbortSignal) {
+  let resolveOutput!: () => void;
+  let rejectOutput!: (error: unknown) => void;
+  const promise = new Promise<void>((resolve, reject) => { resolveOutput = resolve; rejectOutput = reject; });
+  const dispose = () => {
+    unsubscribe();
+    signal.removeEventListener('abort', abort);
+  };
+  const unsubscribe = shellBus.subscribe(threadId, (event: AgentEvent) => {
+    if (event.type !== 'shell_command_output' || !event.text.includes(marker)) return;
+    dispose();
+    resolveOutput();
+  });
+  const abort = () => { dispose(); rejectOutput(signal.reason); };
+  signal.addEventListener('abort', abort, { once: true });
+  void promise.catch(() => undefined);
+  return { promise, dispose };
+}
+
+test('shell_poll waits once for a real background command and reads beyond the first 200 log chunks', { timeout: 5000 }, async (t) => {
+  const initialAbortListeners = getEventListeners(t.signal, 'abort').length;
+  const thread = await shellStore.createThread(TEST_SCOPE);
+  const settings = normalizeToolSettings({ workspaceRoot: dir, sandbox: 'off', shellUseHostPath: true });
+  const session = await shellManager.openSession({ scope: TEST_SCOPE, threadId: thread.id, settings });
+  const gate = join(dir, `${session.id}-gate`);
+  const ready = shellOutputWait(thread.id, 'background-ready', t.signal);
+  const ctx = { scope: TEST_SCOPE, settings, threadId: thread.id, abortSignal: t.signal };
+  let commandId = '';
+  try {
+    const started = text(await shellExecTool.run({
+      sessionId: session.id, wait: 'background',
+      command: `printf 'background-ready\\n'; while [ ! -f '${gate}' ]; do sleep 0.01; done; printf 'background-final-output\\n'`,
+    }, ctx));
+    commandId = started.match(/不是完成）：([^\n]+)/)?.[1] ?? '';
+    assert.ok(commandId);
+    assert.match(started, /不是完成/);
+    await ready.promise;
+    // 已持久化历史超过一页；真实进程最后写入的输出必须仍出现在消费者结果中。
+    for (let i = 0; i < 250; i++) await shellStore.appendShellCommandLog(TEST_SCOPE, commandId, 'stdout', `history-${i}\n`);
+    let settled = false;
+    const waiting = shellPollTool.run({ id: commandId }, ctx).then((result) => { settled = true; return text(result); });
+    const snapshot = await shellManager.poll(TEST_SCOPE, commandId);
+    assert.equal(snapshot.command?.status, 'running');
+    assert.equal(settled, false, 'UI 即时查询不能等到命令结束');
+    await writeFile(gate, 'release');
+    const terminal = await waiting;
+    assert.match(terminal, /status: succeeded/);
+    assert.match(terminal, /background-final-output/);
+    assert.doesNotMatch(terminal, /history-0\n/);
+    assert.equal(getEventListeners(t.signal, 'abort').length, initialAbortListeners);
+  } finally {
+    ready.dispose();
+    await writeFile(gate, 'release');
+    if (commandId) await shellManager.kill(TEST_SCOPE, commandId, 'test_cleanup');
+  }
+});
+
+test('foreground shell remains inside the tool after a tiny observation timeout', { timeout: 5000 }, async (t) => {
+  const initialAbortListeners = getEventListeners(t.signal, 'abort').length;
+  const thread = await shellStore.createThread(TEST_SCOPE);
+  const settings = normalizeToolSettings({ workspaceRoot: dir, sandbox: 'off', shellUseHostPath: true });
+  const session = await shellManager.reuseSession({ scope: TEST_SCOPE, threadId: thread.id, settings });
+  const gate = join(dir, `${session.id}-gate`);
+  const ready = shellOutputWait(thread.id, 'foreground-ready', t.signal);
+  let settled = false;
+  const executing = shellTool.run({
+    timeout_ms: 1,
+    command: `printf 'foreground-ready\\n'; while [ ! -f '${gate}' ]; do sleep 0.01; done; printf 'foreground-final-output\\n'`,
+  }, { scope: TEST_SCOPE, settings, threadId: thread.id, abortSignal: t.signal }).then((result) => { settled = true; return text(result); });
+  try {
+    await ready.promise;
+    const snapshot = await shellManager.poll(TEST_SCOPE, session.id);
+    assert.equal(snapshot.command?.status, 'running');
+    assert.equal(settled, false);
+    await writeFile(gate, 'release');
+    assert.match(await executing, /status: succeeded[\s\S]*foreground-final-output/);
+    assert.equal(getEventListeners(t.signal, 'abort').length, initialAbortListeners);
+  } finally {
+    ready.dispose();
+    await writeFile(gate, 'release');
+    const command = (await shellManager.poll(TEST_SCOPE, session.id)).command;
+    if (command) await shellManager.kill(TEST_SCOPE, command.id, 'test_cleanup');
+    await executing;
+  }
+});
+
+test('shell wait propagates abort without killing an unrelated command and removes abort listeners', { timeout: 5000 }, async (t) => {
+  const manager = shellManager;
+  const thread = await shellStore.createThread(TEST_SCOPE);
+  const settings = normalizeToolSettings({ workspaceRoot: dir, sandbox: 'off', shellUseHostPath: true });
+  const session = await manager.openSession({ scope: TEST_SCOPE, threadId: thread.id, settings });
+  const other = await manager.openSession({ scope: TEST_SCOPE, threadId: thread.id, settings });
+  const gate = join(dir, `${session.id}-gate`);
+  const controller = new AbortController();
+  try {
+    const target = await manager.exec({ scope: TEST_SCOPE, sessionId: session.id, command: `while [ ! -f '${gate}' ]; do sleep 0.01; done`, settings, context: { threadId: thread.id }, waitMode: 'background' });
+    const unrelated = await manager.exec({ scope: TEST_SCOPE, sessionId: other.id, command: `while [ ! -f '${gate}' ]; do sleep 0.01; done; printf 'unrelated-final\\n'`, settings, context: { threadId: thread.id }, waitMode: 'background' });
+    const waiting = runTool('shell_poll', { id: target.command.id }, { scope: TEST_SCOPE, settings, threadId: thread.id, abortSignal: controller.signal });
+    const reason = new Error('用户取消本次等待');
+    controller.abort(reason);
+    await assert.rejects(waiting, (error) => error === reason);
+    assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+    assert.equal((await manager.poll(TEST_SCOPE, unrelated.command.id)).command?.status, 'running');
+    await writeFile(gate, 'release');
+    const terminal = await manager.wait(TEST_SCOPE, unrelated.command.id, 0, t.signal);
+    assert.equal(terminal.command?.status, 'succeeded');
+    assert.ok(terminal.logs.some((log) => log.chunk.includes('unrelated-final')));
+  } finally {
+    await writeFile(gate, 'release');
+    for (const owned of [session, other]) {
+      const command = (await manager.poll(TEST_SCOPE, owned.id)).command;
+      if (command) {
+        await manager.kill(TEST_SCOPE, command.id, 'test_cleanup');
+        await manager.wait(TEST_SCOPE, command.id);
+      }
+    }
+  }
+});
+
+test('manager shutdown interrupts model waiting but drains command terminal state and final output', { timeout: 5000 }, async (t) => {
+  const initialAbortListeners = getEventListeners(t.signal, 'abort').length;
+  const manager = new ShellManager();
+  const thread = await shellStore.createThread(TEST_SCOPE);
+  const settings = normalizeToolSettings({ workspaceRoot: dir, sandbox: 'off', shellUseHostPath: true });
+  const session = await manager.openSession({ scope: TEST_SCOPE, threadId: thread.id, settings });
+  const ready = shellOutputWait(thread.id, 'shutdown-ready', t.signal);
+  try {
+    const command = await manager.exec({
+      scope: TEST_SCOPE, sessionId: session.id, settings, context: { threadId: thread.id }, waitMode: 'background',
+      command: `trap 'printf "shutdown-final-output\\n"; exit 0' TERM; printf 'shutdown-ready\\n'; while :; do sleep 0.01; done`,
+    });
+    await ready.promise;
+    const waiting = manager.wait(TEST_SCOPE, command.command.id, 0, t.signal);
+    const shutdown = manager.shutdown();
+    await assert.rejects(waiting, /服务正在关闭/);
+    await shutdown;
+    const final = await manager.poll(TEST_SCOPE, command.command.id);
+    assert.equal(final.command?.status, 'killed');
+    assert.equal(final.command?.attention, 'server_shutdown');
+    assert.ok(final.logs.some((log) => log.chunk.includes('shutdown-final-output')));
+    assert.equal(getEventListeners(t.signal, 'abort').length, initialAbortListeners);
+  } finally {
+    ready.dispose();
+    await manager.shutdown();
+  }
+});
+
+test('shell wait reports orphaned persisted commands and does not alter another thread', async () => {
+  const manager = new ShellManager();
+  const thread = await shellStore.createThread(TEST_SCOPE);
+  const other = await shellStore.createThread(TEST_SCOPE);
+  const settings = normalizeToolSettings({ workspaceRoot: dir });
+  const session = await manager.openSession({ scope: TEST_SCOPE, threadId: thread.id, settings });
+  const command = await shellStore.createShellCommand(TEST_SCOPE, {
+    sessionId: session.id, actor: 'agent', command: 'interrupted command', cwd: dir, waitMode: 'background',
+  });
+  await assert.rejects(manager.wait(TEST_SCOPE, command.id, 0, undefined, other.id), /不属于当前 thread/);
+  assert.equal((await shellStore.getShellCommand(TEST_SCOPE, command.id))?.status, 'queued');
+  const terminal = await manager.wait(TEST_SCOPE, command.id, 0, undefined, thread.id);
+  assert.equal(terminal.command?.status, 'orphaned');
+  assert.match(terminal.command?.error ?? '', /无法连接/);
+});
+
+test('foreground shell_exec returns the real hard-timeout terminal result without another poll', { timeout: 5000 }, async (t) => {
+  const initialAbortListeners = getEventListeners(t.signal, 'abort').length;
+  const thread = await shellStore.createThread(TEST_SCOPE);
+  const settings = normalizeToolSettings({ workspaceRoot: dir, sandbox: 'off', shellUseHostPath: true });
+  const session = await shellManager.openSession({ scope: TEST_SCOPE, threadId: thread.id, settings });
+  try {
+    // 验证平台上的真实命令硬超时与进程组终止，不使用模拟计时器替代子进程生命周期。
+    const result = text(await shellExecTool.run({
+      sessionId: session.id,
+      wait: 'foreground',
+      hard_timeout_ms: 200,
+      command: `printf 'hard-timeout-started\\n'; while :; do sleep 0.01; done`,
+    }, { scope: TEST_SCOPE, settings, threadId: thread.id, abortSignal: t.signal }));
+    assert.match(result, /status: timed_out/);
+    assert.match(result, /hard-timeout-started/);
+    assert.doesNotMatch(result, /status: running/);
+    const command = (await shellManager.poll(TEST_SCOPE, session.id)).command;
+    assert.equal(command?.attention, 'hard_timeout');
+    assert.ok(command?.ended_at);
+    assert.equal(getEventListeners(t.signal, 'abort').length, initialAbortListeners);
+  } finally {
+    const command = (await shellManager.poll(TEST_SCOPE, session.id)).command;
+    if (command) await shellManager.kill(TEST_SCOPE, command.id, 'test_cleanup');
+  }
+});
+
+test('canceling a foreground shell_exec drains only its own command before propagating abort', { timeout: 5000 }, async (t) => {
+  const thread = await shellStore.createThread(TEST_SCOPE);
+  const settings = normalizeToolSettings({ workspaceRoot: dir, sandbox: 'off', shellUseHostPath: true });
+  const session = await shellManager.openSession({ scope: TEST_SCOPE, threadId: thread.id, settings });
+  const other = await shellManager.openSession({ scope: TEST_SCOPE, threadId: thread.id, settings });
+  const gate = join(dir, `${other.id}-gate`);
+  const controller = new AbortController();
+  const ready = shellOutputWait(thread.id, 'cancel-foreground-ready', t.signal);
+  const ctx = { scope: TEST_SCOPE, settings, threadId: thread.id, abortSignal: controller.signal };
+  const unrelated = await shellManager.exec({
+    scope: TEST_SCOPE, sessionId: other.id, settings, context: { threadId: thread.id }, waitMode: 'background',
+    command: `while [ ! -f '${gate}' ]; do sleep 0.01; done; printf 'other-run-final\\n'`,
+  });
+  const executing = shellExecTool.run({
+    sessionId: session.id, wait: 'foreground',
+    command: `printf 'cancel-foreground-ready\\n'; while :; do sleep 0.01; done`,
+  }, ctx).then(() => assert.fail('已取消的工具不应返回普通结果'), (error: unknown) => error);
+  try {
+    await ready.promise;
+    const reason = new Error('仅取消本次前台命令');
+    controller.abort(reason);
+    assert.equal(await executing, reason);
+    const canceled = (await shellManager.poll(TEST_SCOPE, session.id)).command;
+    assert.equal(canceled?.status, 'killed');
+    assert.equal(canceled?.attention, 'run_cancel');
+    assert.ok(canceled?.ended_at);
+    assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+    assert.equal((await shellManager.poll(TEST_SCOPE, unrelated.command.id)).command?.status, 'running');
+    await writeFile(gate, 'release');
+    assert.equal((await shellManager.wait(TEST_SCOPE, unrelated.command.id)).command?.status, 'succeeded');
+  } finally {
+    ready.dispose();
+    controller.abort(new Error('test_cleanup'));
+    await executing;
+    await writeFile(gate, 'release');
+    await shellManager.kill(TEST_SCOPE, unrelated.command.id, 'test_cleanup');
+    await shellManager.wait(TEST_SCOPE, unrelated.command.id);
+  }
 });

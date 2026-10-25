@@ -1589,6 +1589,7 @@ export class PgStore implements Store {
       `UPDATE subagent_runs sr
        SET status = $2, output = $3, error = $4, usage = $5::jsonb, updated_at = now(), finished_at = now()
        WHERE sr.id = $1
+         AND sr.status = 'running'
          AND sr.parent_run_id IN (
            SELECT r.id FROM runs r JOIN threads t ON t.id = r.thread_id WHERE t.tenant_id = $6 AND t.user_id = $7
          )`,
@@ -1915,6 +1916,18 @@ export class PgStore implements Store {
       [commandId, sinceSeq, limit, scope.tenantId, scope.userId],
     );
     return rows.map(toShellCommandLogRow);
+  }
+
+  async getShellCommandLogTail(scope: Scope, commandId: string, sinceSeq = 0, limit = 200): Promise<ShellCommandLogRow[]> {
+    const { rows } = await query<PgShellCommandLogRow>(
+      `SELECT scl.* FROM shell_command_logs scl
+       JOIN shell_commands sc ON sc.id = scl.command_id
+       JOIN shell_sessions ss ON ss.id = sc.session_id JOIN threads t ON t.id = ss.thread_id
+       WHERE scl.command_id = $1 AND scl.seq > $2 AND t.tenant_id = $4 AND t.user_id = $5
+       ORDER BY scl.seq DESC LIMIT $3`,
+      [commandId, sinceSeq, limit, scope.tenantId, scope.userId],
+    );
+    return rows.reverse().map(toShellCommandLogRow);
   }
 
   async addShellSessionEvent(scope: Scope, sessionId: string, actor: ShellActor, kind: string, data: unknown): Promise<void> {

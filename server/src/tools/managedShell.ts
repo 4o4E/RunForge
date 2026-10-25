@@ -91,14 +91,13 @@ export const shellSessionListTool: Tool = {
 export const shellExecTool: Tool = {
   name: 'shell_exec',
   description:
-    '在托管 shell session 中执行命令。wait=foreground 时等待完成或等待超时；wait=background 时立即返回 commandId，后续用 shell_poll 查看进度。',
+    '在托管 shell session 中执行命令。wait=foreground 时在工具内部等待真实终态；wait=background 时立即返回启动信息（不是完成），后续 shell_poll 等待终态。',
   parameters: {
     type: 'object',
     properties: {
       sessionId: { type: 'string', description: 'shell session id。可先调用 shell_session_reuse 获取。' },
       command: { type: 'string', description: '要执行的 shell 命令。' },
       wait: { type: 'string', enum: ['foreground', 'background'], description: 'foreground=等待完成；background=后台运行。' },
-      timeout_ms: { type: 'number', description: 'foreground 最多等待多久；超时后命令继续后台运行。默认 60000。' },
       soft_timeout_ms: { type: 'number', description: '软超时；到点提示但不终止。默认 10 分钟。' },
       hard_timeout_ms: { type: 'number', description: '硬超时；到点终止。默认 30 分钟。' },
     },
@@ -122,7 +121,8 @@ export const shellExecTool: Tool = {
       settings,
       context: shellCtx,
       waitMode: parseWaitMode(args.wait),
-      waitTimeoutMs: numberArg(args.timeout_ms, null) ?? undefined,
+      waitForTerminal: true,
+      abortSignal: ctx?.abortSignal,
       softTimeoutMs: numberArg(args.soft_timeout_ms, null),
       hardTimeoutMs: numberArg(args.hard_timeout_ms, null),
       actor: parseShellActor(args.actor),
@@ -131,13 +131,16 @@ export const shellExecTool: Tool = {
       pluginRoots: ctx?.pluginRoots,
       managedReadRoots: ctx?.managedReadRoots,
     });
+    if (parseWaitMode(args.wait) === 'background') {
+      return `shell command 已启动（不是完成）：${result.command.id}\nsession: ${result.command.session_id}\nstatus: ${result.command.status}\n使用 shell_poll(id="${result.command.id}") 等待真实终态。`;
+    }
     return formatCommandResult(result);
   },
 };
 
 export const shellPollTool: Tool = {
   name: 'shell_poll',
-  description: '查看 shell session 或 command 的最新状态和增量输出。',
+  description: '在运行时等待所选 shell command 的真实终态并返回末尾输出；传 session id 时固定等待调用时的最新命令。UI 状态查询不受此等待影响。',
   parameters: {
     type: 'object',
     properties: {
@@ -150,7 +153,7 @@ export const shellPollTool: Tool = {
     if (!ctx?.scope) throw new Error('托管 shell 需要当前身份 scope，上下文缺失。');
     const id = String(args.id ?? '').trim();
     const sinceSeq = numberArg(args.sinceSeq, 0) ?? 0;
-    const result = await shellManager.poll(ctx.scope, id, sinceSeq);
+    const result = await shellManager.wait(ctx.scope, id, sinceSeq, ctx.abortSignal, ctx.threadId);
     if (!result.command) {
       return `shell session: ${result.session?.id}\nstatus: ${result.session?.status}\n暂无命令。`;
     }

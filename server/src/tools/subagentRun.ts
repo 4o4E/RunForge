@@ -3,7 +3,7 @@ import type { Tool } from './types.js';
 export const subagentRunTool: Tool = {
   name: 'subagent_run',
   description:
-    '启动一个异步 subagent 子任务，立即返回 subagentRunId，不等待完成。runtimeProfileId=writer 时可按主 agent 授权使用读写文件和 shell 工具；其他 profile 默认只读推理。可一次启动多个，再用 subagent_poll 或 subagent_list 轮询结果。',
+    '启动一个异步 subagent 子任务，立即返回 subagentRunId，不等待完成。runtimeProfileId=writer 时可按主 agent 授权使用读写文件和 shell 工具；其他 profile 默认只读推理。可一次启动多个，再用 subagent_poll 等待结果；subagent_list 仅用于查看目录。',
   parameters: {
     type: 'object',
     properties: {
@@ -31,13 +31,11 @@ export const subagentRunTool: Tool = {
 
 export const subagentPollTool: Tool = {
   name: 'subagent_poll',
-  description: '查询一个 subagent 子任务的当前状态和结果。可设置 waitSeconds 等待完成；等待期间当前 run 收到新的 external next_step 输入时会提前返回，让主 agent 在下一轮先处理新输入。超时后返回当前状态，避免连续轮询。',
+  description: '在运行时等待 subagent 子任务的真实终态与结果，不定时返回 running。当前 run 收到新的 external next_step 输入时可提前返回处理新输入；取消或服务关闭会中断等待。',
   parameters: {
     type: 'object',
     properties: {
       subagentRunId: { type: 'string', description: 'subagent_run 返回的 subagentRunId。' },
-      waitSeconds: { type: 'number', description: '最多等待多少秒让 subagent 完成；0 或不填表示立即返回。最大 120。' },
-      timeoutSeconds: { type: 'number', description: 'waitSeconds 的兼容别名；最多等待多少秒。' },
     },
     required: ['subagentRunId'],
   },

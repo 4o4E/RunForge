@@ -1,5 +1,5 @@
 import { getToolSettings, shellEnvironment, shellPathForSettings } from '../settings.js';
-import { formatCommandResult, shellManager } from '../shell/manager.js';
+import { formatCommandResult, shellManager, ShellWaitInterruptedError } from '../shell/manager.js';
 import { redactShellOutput } from '../shell/redact.js';
 import { runShellCommand } from './sandbox.js';
 import type { Tool } from './types.js';
@@ -19,7 +19,7 @@ export const shellTool: Tool = {
         type: 'string',
         description: '要执行的命令。需要持久保留的文件请使用工作区路径。',
       },
-      timeout_ms: { type: 'number', description: '超时时间，单位毫秒（默认 60000）。' },
+      timeout_ms: { type: 'number', description: '命令超时基准，默认 60000 毫秒。托管命令软超时不少于 10 分钟、硬超时不少于 30 分钟，始终等待真实终态。' },
     },
     required: ['command'],
   },
@@ -50,7 +50,8 @@ export const shellTool: Tool = {
           settings,
           context: { threadId: ctx.threadId, runId: ctx.runId, stepId: ctx.stepId, step: ctx.step, pluginRoots: ctx.pluginRoots, managedReadRoots: ctx.managedReadRoots, spaceRoot: ctx.spaceRoot, userFiles: ctx.userFiles },
           waitMode: 'foreground',
-          waitTimeoutMs: timeout,
+          waitForTerminal: true,
+          abortSignal: ctx.abortSignal,
           softTimeoutMs: Math.max(timeout, 10 * 60_000),
           hardTimeoutMs: Math.max(timeout * 3, 30 * 60_000),
           env: ctx.env,
@@ -76,6 +77,8 @@ export const shellTool: Tool = {
       const output = [stdout, stderr && `[stderr]\n${stderr}`].filter(Boolean).join('\n').trim();
       return output ? redactShellOutput(output) : '（无输出）';
     } catch (err) {
+      ctx?.abortSignal?.throwIfAborted();
+      if (err instanceof ShellWaitInterruptedError) throw err;
       const e = err as { stdout?: string; stderr?: string; message?: string };
       return redactShellOutput(`命令执行失败：${e.message}\n${e.stdout ?? ''}\n${e.stderr ?? ''}`.trim());
     }

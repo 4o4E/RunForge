@@ -43,26 +43,39 @@ export function notifyRunActivity(runId: string): void {
   for (const wake of waiters) wake();
 }
 
-/** 等待 run 活动；超时由调用方重新核对数据库，以兼容多进程部署。 */
-export function waitForRunActivity(runId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+export interface RunActivityWait {
+  promise: Promise<void>;
+  dispose(): void;
+}
+
+/** 先订阅再读取持久化状态，避免完成或新输入落在查询与等待之间。 */
+export function waitForRunActivity(runIds: readonly string[], signal?: AbortSignal): RunActivityWait {
   signal?.throwIfAborted();
-  return new Promise((resolve) => {
+  let wake!: () => void;
+  let rejectWait!: (reason: unknown) => void;
+  const promise = new Promise<void>((resolve, reject) => {
+    wake = resolve;
+    rejectWait = reject;
+  });
+  const subscriptions = [...new Set(runIds)].map((runId) => {
     const waiters = runActivityWaiters.get(runId) ?? new Set<() => void>();
     runActivityWaiters.set(runId, waiters);
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      signal?.removeEventListener('abort', finish);
-      waiters.delete(finish);
-      if (!waiters.size) runActivityWaiters.delete(runId);
-      resolve();
-    };
-    const timer = setTimeout(finish, timeoutMs);
-    waiters.add(finish);
-    signal?.addEventListener('abort', finish, { once: true });
+    return { runId, waiters };
   });
+  const dispose = () => {
+    signal?.removeEventListener('abort', abort);
+    for (const { runId, waiters } of subscriptions) {
+      waiters.delete(finish);
+      if (!waiters.size && runActivityWaiters.get(runId) === waiters) runActivityWaiters.delete(runId);
+    }
+  };
+  const finish = () => { dispose(); wake(); };
+  const abort = () => { dispose(); rejectWait(signal?.reason); };
+  for (const { waiters } of subscriptions) waiters.add(finish);
+  signal?.addEventListener('abort', abort, { once: true });
+  // 状态查询期间也可能取消；提前挂拒绝处理，真正 await 时仍传播原始原因。
+  void promise.catch(() => undefined);
+  return { promise, dispose };
 }
 
 export interface RunExecutionRegistration {

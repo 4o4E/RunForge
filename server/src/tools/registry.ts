@@ -6,6 +6,7 @@ import { getToolSettings, type McpSettings } from '../settings.js';
 import type { Scope } from '../store/types.js';
 import { callMcpTool, mcpToolSchemas, parseMcpToolName, type McpMappedTool } from '../mcp/client.js';
 import { shellTool } from './shell.js';
+import { ShellWaitInterruptedError } from '../shell/manager.js';
 import { fileReadTool } from './fileRead.js';
 import { fileWriteTool } from './fileWrite.js';
 import { fileEditTool } from './fileEdit.js';
@@ -131,6 +132,7 @@ export async function runTool(
     return { ...result, text: policy.capOutput(result.text) };
   } catch (err) {
     ctx.abortSignal?.throwIfAborted();
+    if (err instanceof ShellWaitInterruptedError) throw err;
     return { text: `工具 ${name} 抛出异常：${(err as Error).message}` };
   }
 }

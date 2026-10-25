@@ -1,11 +1,13 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { getEventListeners } from 'node:events';
+import { mkdtemp, mkdir, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { executeRun } from './executor.js';
 import { MemoryStore } from '../store/memoryStore.js';
+import { store as defaultStore } from '../store/index.js';
 import type { Provider } from '../llm/types.js';
 import type { AgentEvent } from './types.js';
 import { config } from '../config.js';
@@ -19,7 +21,7 @@ import { BusinessPluginRegistry } from '../businessPlugins/registry.js';
 import { BusinessPluginRuntimeService } from '../businessPlugins/runtime.js';
 import { createBusinessPluginSelection } from '../businessPlugins/cordis.js';
 import { createSpaceRuntimeLock } from '../plugins/lock.js';
-import { abortRunExecution, waitForRunExecution } from './executionControl.js';
+import { abortRunExecution, notifyRunActivity, waitForRunActivity, waitForRunExecution } from './executionControl.js';
 
 const scope: Scope = { tenantId: 'default', userId: 'us_test' };
 
@@ -42,11 +44,11 @@ function testToolSettings(overrides: Partial<ToolSettings> = {}): ToolSettings {
     shellUseHostPath: true,
     shellPathMode: 'system',
     shellPath: process.env.PATH ?? '',
+    pipIndexUrl: 'https://pypi.tuna.tsinghua.edu.cn/simple',
+    npmRegistry: 'https://registry.npmmirror.com/',
     network: 'enabled',
     shellDeny: [],
     maxOutput: 40000,
-    pipIndexUrl: 'https://pypi.tuna.tsinghua.edu.cn/simple',
-    npmRegistry: 'https://registry.npmmirror.com/',
     ...overrides,
   };
 }
@@ -113,6 +115,8 @@ class NextStepMemoryStore extends MemoryStore {
     const list = this.pending.get(runId) ?? [];
     list.push({ inputId: `ri_test_${this.version}`, version: this.version, content });
     this.pending.set(runId, list);
+    if (run) run.input_version = this.version;
+    notifyRunActivity(runId);
   }
 
   override async applyPendingRunInputs(scopeValue: Scope, runId: string): Promise<AppliedRunInput[]> {
@@ -223,7 +227,7 @@ test('executeRun: runs the loop across steps and finalizes', async () => {
   assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'tool', 'assistant']);
 });
 
-test('executeRun: 使用 run 的空间配置副本装配工具和上下文预算', async () => {
+test('executeRun: 使用 run 的空间配置副本限定工具和上下文预算', async () => {
   const store = new MemoryStore();
   const thread = await store.createThread(scope);
   const observed: { tools: string[] } = { tools: [] };
@@ -1349,7 +1353,7 @@ test('executeRun: writer subagent can use scheduled write tools and poll waits f
         if (parentTurn === 2 && subagentRunId) {
           return {
             content: null,
-            toolCalls: [{ id: 'poll_1', name: 'subagent_poll', arguments: JSON.stringify({ subagentRunId, waitSeconds: 2 }) }],
+            toolCalls: [{ id: 'poll_1', name: 'subagent_poll', arguments: JSON.stringify({ subagentRunId }) }],
           };
         }
 
@@ -1374,62 +1378,371 @@ test('executeRun: writer subagent can use scheduled write tools and poll waits f
   const pollResult = msgs.find((m) => m.role === 'tool' && m.toolCallId === 'poll_1')?.content ?? '';
   assert.match(pollResult, /status: done/);
   assert.match(pollResult, /writer file done:/);
-  assert.doesNotMatch(pollResult, /等待 2 秒后仍未完成/);
 });
 
-test('executeRun: repeated running subagent polls do not trigger loop guard', async () => {
+test('executeRun: one default subagent poll waits without another parent provider turn', async () => {
   const store = new MemoryStore();
   const thread = await store.createThread(scope);
   const run = await store.createRun(scope, thread.id, 'wait for slow subagent');
   const published: AgentEvent[] = [];
   let parentTurn = 0;
-  let observedRunningPolls = 0;
-
-  await executeRun(run.id, {
+  let release!: () => void;
+  const childGate = new Promise<void>((resolve) => { release = resolve; });
+  const executing = executeRun(run.id, {
     store,
     provider: {
       name: 'slow-subagent',
       async completeStream(messages) {
         const prompt = messages.map((m) => m.content ?? '').join('\n');
         if (prompt.includes('异步只读推理型 subagent')) {
-          // 先真实观察到重复运行中结果，再完成子任务；不依赖宿主机调度速度。
-          await waitUntil(() => observedRunningPolls >= 3, 5000);
+          await childGate;
           return { content: '慢速 subagent 已完成。', toolCalls: [] };
         }
         parentTurn += 1;
-        if (parentTurn === 1) {
-          return {
-            content: null,
-            toolCalls: [{ id: 'sub_1', name: 'subagent_run', arguments: JSON.stringify({ task: '慢速检查。' }) }],
-          };
+        if (parentTurn === 1) return { content: null, toolCalls: [{ id: 'sub_1', name: 'subagent_run', arguments: JSON.stringify({ task: '慢速检查。' }) }] };
+        if (parentTurn === 2) {
+          const subagentRunId = prompt.match(/subagentRunId: (sr_[A-Za-z0-9]+)/)?.[1];
+          assert.ok(subagentRunId);
+          return { content: null, toolCalls: [{ id: 'poll_1', name: 'subagent_poll', arguments: JSON.stringify({ subagentRunId }) }] };
         }
-        const history = messages.map((m) => m.content ?? '').join('\n');
-        const subagentRunId = history.match(/subagentRunId: (sr_[A-Za-z0-9]+)/)?.[1];
-        if (subagentRunId && !history.includes('慢速 subagent 已完成。')) {
-          observedRunningPolls = messages.filter((message) => message.role === 'tool'
-            && message.toolCallId?.startsWith('poll_')
-            && /\bstatus: running\b/.test(message.content ?? '')).length;
-          return {
-            content: null,
-            toolCalls: [{ id: `poll_${parentTurn}`, name: 'subagent_poll', arguments: JSON.stringify({
-              subagentRunId,
-              ...(observedRunningPolls >= 3 ? { waitSeconds: 2 } : {}),
-            }) }],
-          };
-        }
+        const poll = messages.find((m) => m.role === 'tool' && m.toolCallId === 'poll_1');
+        assert.match(poll?.content ?? '', /status: done/);
+        assert.match(poll?.content ?? '', /慢速 subagent 已完成/);
         return { content: '已汇总慢速 subagent 结果。', toolCalls: [] };
       },
     },
-    publish: (_id, e) => published.push(e),
-    hardStepCap: 10,
+    publish: (_id, event) => published.push(event),
+    hardStepCap: 4,
     toolSettings: testToolSettings(),
   });
-
+  try {
+    await waitUntil(() => published.some((event) => event.type === 'tool_call' && event.id === 'poll_1'));
+    assert.equal(parentTurn, 2);
+    assert.equal(published.some((event) => event.type === 'tool_result' && event.id === 'poll_1'), false);
+  } finally {
+    release();
+    await executing;
+  }
+  assert.equal(parentTurn, 3);
   assert.equal((await store.getRun(scope, run.id))?.status, 'done');
   assert.equal(published.some((event) => event.type === 'progress_stalled'), false);
-  const pollResults = (await store.loadThreadMessages(scope, thread.id)).filter((msg) => msg.role === 'tool' && msg.toolCallId?.startsWith('poll_'));
-  assert.ok(pollResults.filter((msg) => /\bstatus: running\b/.test(msg.content ?? '')).length >= 3);
-  assert.equal(pollResults.some((msg) => /\bstatus: done\b/.test(msg.content ?? '')), true);
+  assert.equal(published.filter((event) => event.type === 'tool_result' && event.id === 'poll_1').length, 1);
+});
+
+test('executeRun: repeated subagent directory calls cannot bypass the loop guard', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'list pending subagents');
+  const published: AgentEvent[] = [];
+  let turn = 0;
+  let release!: () => void;
+  const childGate = new Promise<void>((resolve) => { release = resolve; });
+  try {
+    await executeRun(run.id, {
+      store,
+      provider: {
+        name: 'directory-loop',
+        async completeStream(messages) {
+          if (messages.some((message) => message.content?.includes('异步只读推理型 subagent'))) {
+            await childGate;
+            return { content: '检查完成。', toolCalls: [] };
+          }
+          turn += 1;
+          return turn === 1
+            ? { content: null, toolCalls: [{ id: 'start', name: 'subagent_run', arguments: '{"task":"保持 pending"}' }] }
+            : { content: null, toolCalls: [{ id: `list_${turn}`, name: 'subagent_list', arguments: '{}' }] };
+        },
+      },
+      publish: (_id, event) => published.push(event),
+      hardStepCap: 10,
+      toolSettings: testToolSettings(),
+    });
+    assert.equal(turn, 4);
+    assert.equal((await store.getRun(scope, run.id))?.status, 'waiting_for_user');
+    assert.equal(published.filter((event) => event.type === 'tool_result' && event.name === 'subagent_list').length, 3);
+    assert.equal(published.some((event) => event.type === 'progress_stalled'), true);
+  } finally {
+    release();
+    await waitForRunExecution(run.id);
+  }
+});
+
+test('executeRun: pending subagent wait wakes for each real next_step without false loop guard', async () => {
+  const store = new NextStepMemoryStore();
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, '等子任务，同时接收输入', {
+    modelRef: 'main:model-a',
+    spaceConfigSnapshot: {
+      schemaVersion: 1, spaceId: thread.space_id, mode: 'external', systemPrompt: '',
+      model: { modelRef: 'main:model-a', allowedModelRefs: ['main:model-a'], contextWindow: 40_000, contextBudget: 20_000, contextBudgetSource: 'space-config' },
+      capabilities: { tools: ['subagent_run', 'subagent_poll'], mcpServers: [], runtime: [] },
+      external: { allowTrustedPrompt: false, allowNextStep: true },
+    },
+  });
+  const published: AgentEvent[] = [];
+  let turn = 0;
+  let release!: () => void;
+  const childGate = new Promise<void>((resolve) => { release = resolve; });
+  const executing = executeRun(run.id, {
+    store,
+    provider: {
+      name: 'next-step-wait',
+      async completeStream(messages) {
+        const prompt = messages.map((message) => message.content ?? '').join('\n');
+        if (prompt.includes('异步只读推理型 subagent')) {
+          await childGate;
+          return { content: '子任务终态结论。', toolCalls: [] };
+        }
+        turn += 1;
+        if (turn === 1) return { content: null, toolCalls: [{ id: 'start', name: 'subagent_run', arguments: '{"task":"检查"}' }] };
+        if (turn <= 5) {
+          for (let input = 1; input < turn - 1; input++) assert.ok(messages.some((message) => message.role === 'user' && message.content === `新证据 ${input}`));
+          const subagentRunId = prompt.match(/subagentRunId: (sr_[A-Za-z0-9]+)/)?.[1];
+          return { content: null, toolCalls: [{ id: `poll_${turn}`, name: 'subagent_poll', arguments: JSON.stringify({ subagentRunId }) }] };
+        }
+        assert.match(messages.find((message) => message.toolCallId === 'poll_5')?.content ?? '', /status: done/);
+        return { content: '已处理全部输入与结论。', toolCalls: [] };
+      },
+    },
+    publish: (_id, event) => published.push(event),
+    hardStepCap: 7,
+    toolSettings: testToolSettings(),
+  });
+  try {
+    for (let input = 1; input <= 3; input++) {
+      await waitUntil(() => published.some((event) => event.type === 'tool_call' && event.id === `poll_${input + 1}`));
+      await store.enqueue(scope, run.id, `新证据 ${input}`);
+      await waitUntil(() => published.some((event) => event.type === 'external_input_applied' && event.version === input));
+    }
+    await waitUntil(() => published.some((event) => event.type === 'tool_call' && event.id === 'poll_5'));
+    assert.equal(turn, 5);
+  } finally {
+    release();
+    await executing;
+  }
+  assert.equal((await store.getRun(scope, run.id))?.status, 'done');
+  assert.equal(turn, 6);
+  assert.equal(published.some((event) => event.type === 'progress_stalled'), false);
+});
+
+test('run activity subscription rejects cancellation and removes listeners on wake and dispose', async () => {
+  const controller = new AbortController();
+  const activity = waitForRunActivity(['run-a', 'run-b'], controller.signal);
+  notifyRunActivity('run-b');
+  await activity.promise;
+  const canceled = waitForRunActivity(['run-a'], controller.signal);
+  const reason = new Error('取消等待');
+  controller.abort(reason);
+  await assert.rejects(canceled.promise, (error) => error === reason);
+  activity.dispose();
+  canceled.dispose();
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+});
+
+test('executeRun: another run waits for a live same-thread subagent from its original parent', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread(scope);
+  const first = await store.createRun(scope, thread.id, 'start child');
+  let release!: () => void;
+  const childGate = new Promise<void>((resolve) => { release = resolve; });
+  let firstTurn = 0;
+  await executeRun(first.id, {
+    store,
+    provider: {
+      name: 'start-live-child',
+      async completeStream(messages) {
+        if (messages.some((message) => message.content?.includes('异步只读推理型 subagent'))) {
+          await childGate;
+          return { content: '原 parent 的真实终态结果。', toolCalls: [] };
+        }
+        firstTurn += 1;
+        return firstTurn === 1
+          ? { content: null, toolCalls: [{ id: 'start', name: 'subagent_run', arguments: '{"task":"跨 run 检查"}' }] }
+          : { content: '已启动，不代表完成。', toolCalls: [] };
+      },
+    },
+    publish: () => {}, hardStepCap: 3, toolSettings: testToolSettings(),
+  });
+  const [child] = await store.listSubagentRunsByThread(scope, thread.id);
+  assert.equal(child.status, 'running');
+  const second = await store.createRun(scope, thread.id, 'wait previous child');
+  const events: AgentEvent[] = [];
+  let turns = 0;
+  const executing = executeRun(second.id, {
+    store,
+    provider: {
+      name: 'cross-run-wait',
+      async completeStream(messages) {
+        turns += 1;
+        if (turns === 1) return { content: null, toolCalls: [{ id: 'poll_previous', name: 'subagent_poll', arguments: JSON.stringify({ subagentRunId: child.id }) }] };
+        assert.match(messages.find((message) => message.toolCallId === 'poll_previous')?.content ?? '', /status: done[\s\S]*原 parent 的真实终态结果/);
+        return { content: '已读取终态。', toolCalls: [] };
+      },
+    },
+    publish: (_id, event) => events.push(event), hardStepCap: 3, toolSettings: testToolSettings(),
+  });
+  try {
+    await waitUntil(() => events.some((event) => event.type === 'tool_call' && event.id === 'poll_previous'));
+    assert.equal(turns, 1);
+  } finally {
+    release();
+    await executing;
+    await waitForRunExecution(first.id);
+  }
+  assert.equal(turns, 2);
+  assert.equal((await store.getRun(scope, second.id))?.status, 'done');
+});
+
+test('executeRun: orphan subagent is terminal error only after thread visibility check', async () => {
+  const store = new MemoryStore();
+  const ownerThread = await store.createThread(scope);
+  const ownerRun = await store.createRun(scope, ownerThread.id, 'old parent');
+  const ownerStep = await store.createStep(scope, ownerRun.id, 1);
+  const orphan = await store.createSubagentRun(scope, { parentRunId: ownerRun.id, parentStepId: ownerStep.id, taskAssignment: { task: 'interrupted' } });
+  await store.setRunStatus(scope, ownerRun.id, 'done');
+  for (const [thread, visible] of [[await store.createThread(scope), false], [ownerThread, true]] as const) {
+    const run = await store.createRun(scope, thread.id, 'read child');
+    let turns = 0;
+    await executeRun(run.id, {
+      store,
+      provider: {
+        name: 'orphan-poll',
+        async completeStream(messages) {
+          turns += 1;
+          if (turns === 1) return { content: null, toolCalls: [{ id: 'poll_orphan', name: 'subagent_poll', arguments: JSON.stringify({ subagentRunId: orphan.id }) }] };
+          const text = messages.find((message) => message.toolCallId === 'poll_orphan')?.content ?? '';
+          assert.match(text, visible ? /status: error[\s\S]*没有可连接的活动执行/ : /当前 thread 无权读取/);
+          return { content: '已报告实际状态。', toolCalls: [] };
+        },
+      },
+      publish: () => {}, hardStepCap: 3, toolSettings: testToolSettings(),
+    });
+    assert.equal((await store.getSubagentRun(scope, orphan.id))?.status, visible ? 'error' : 'running');
+  }
+});
+
+test('executeRun: stale orphan observation cannot overwrite a completed subagent result', async () => {
+  let childId = '';
+  let reads = 0;
+  class CompletionRaceStore extends MemoryStore {
+    override async getSubagentRun(s: Scope, id: string) {
+      const row = await super.getSubagentRun(s, id);
+      if (id === childId && row?.status === 'running' && ++reads === 2) {
+        const snapshot = { ...row };
+        await super.finishSubagentRun(s, id, {
+          status: 'done', output: 'completed before orphan transition', usage: { totalTokens: 7 },
+        });
+        return snapshot;
+      }
+      return row;
+    }
+  }
+  const store = new CompletionRaceStore();
+  const thread = await store.createThread(scope);
+  const owner = await store.createRun(scope, thread.id, 'old parent');
+  const child = await store.createSubagentRun(scope, { parentRunId: owner.id, taskAssignment: { task: 'previous child' } });
+  childId = child.id;
+  await store.setRunStatus(scope, owner.id, 'done');
+  const run = await store.createRun(scope, thread.id, 'read previous result');
+  const events: AgentEvent[] = [];
+  let turns = 0;
+  await executeRun(run.id, {
+    store,
+    provider: {
+      name: 'completion-race',
+      async completeStream() {
+        return ++turns === 1
+          ? { content: null, toolCalls: [{ id: 'poll_race', name: 'subagent_poll', arguments: JSON.stringify({ subagentRunId: child.id }) }] }
+          : { content: 'result received', toolCalls: [] };
+      },
+    },
+    publish: (_id, event) => events.push(event), hardStepCap: 3, toolSettings: testToolSettings(),
+  });
+  const finished = await store.getSubagentRun(scope, child.id);
+  assert.equal(finished?.status, 'done');
+  assert.equal(finished?.output, 'completed before orphan transition');
+  assert.deepEqual(finished?.usage, { totalTokens: 7 });
+  const result = events.find((event) => event.type === 'tool_result' && event.id === 'poll_race');
+  assert.ok(result?.type === 'tool_result');
+  assert.match(result.result, /status: done[\s\S]*completed before orphan transition/);
+});
+
+test('executeRun: completion history failure still releases an owned OS resource', async () => {
+  const thread = await defaultStore.createThread(scope);
+  const run = await defaultStore.createRun(scope, thread.id, 'cleanup on publication failure');
+  const handle = await open(join(testWorkspace, `${run.id}-owned-resource`), 'w');
+  const getHistorySteps = defaultStore.getHistorySteps;
+  defaultStore.getHistorySteps = async (...args) => {
+    if (args[1] === run.id && (await defaultStore.getRun(args[0], args[1]))?.status === 'error') {
+      throw new Error('completion-history-unavailable');
+    }
+    return getHistorySteps.apply(defaultStore, args);
+  };
+  try {
+    await assert.rejects(executeRun(run.id, {
+      scope,
+      provider: { name: 'transport-failure', async completeStream() { throw new Error('transport unavailable'); } },
+      providerDescriptor: { provider: 'transport-failure', model: 'offline', retries: 0 },
+      publish: () => {}, hardStepCap: 1, generateThreadTitle: false, traceWriter: null,
+      toolSettings: testToolSettings(),
+      workloadRuntimeEnv: async () => ({ env: { WORKLOAD_TOKEN: 'wlt_test_cleanup' }, summary: '' }),
+      releaseRuntimeResources: async () => { await handle.close(); return 1; },
+    }), /completion-history-unavailable/);
+    await assert.rejects(handle.stat(), { code: 'EBADF' });
+  } finally {
+    defaultStore.getHistorySteps = getHistorySteps;
+    await handle.close();
+  }
+});
+
+test('executeRun: canceled terminal wait pairs every tool and preserves interruption trace tail', async () => {
+  const store = new MemoryStore();
+  const thread = await store.createThread(scope);
+  const run = await store.createRun(scope, thread.id, 'cancel child wait');
+  const events: AgentEvent[] = [];
+  let turns = 0;
+  let release!: () => void;
+  const childGate = new Promise<void>((resolve) => { release = resolve; });
+  const executing = executeRun(run.id, {
+    store,
+    provider: {
+      name: 'cancel-wait',
+      async completeStream(messages) {
+        const prompt = messages.map((message) => message.content ?? '').join('\n');
+        if (prompt.includes('异步只读推理型 subagent')) {
+          await childGate;
+          return { content: '不应伪造为正常完成。', toolCalls: [] };
+        }
+        turns += 1;
+        if (turns === 1) return { content: null, toolCalls: [{ id: 'start', name: 'subagent_run', arguments: '{"task":"等待取消"}' }] };
+        const subagentRunId = prompt.match(/subagentRunId: (sr_[A-Za-z0-9]+)/)?.[1];
+        return { content: null, toolCalls: [
+          { id: 'poll_cancel', name: 'subagent_poll', arguments: JSON.stringify({ subagentRunId }) },
+          { id: 'not_executed', name: 'subagent_list', arguments: '{}' },
+        ] };
+      },
+    },
+    publish: (_id, event) => events.push(event), hardStepCap: 4, toolSettings: testToolSettings(),
+  });
+  try {
+    await waitUntil(() => events.some((event) => event.type === 'tool_call' && event.id === 'poll_cancel'));
+    assert.equal(abortRunExecution(run.id), true);
+    await executing;
+    assert.equal((await store.getRun(scope, run.id))?.status, 'canceled');
+    assert.equal(turns, 2);
+    const messages = await store.loadThreadMessages(scope, thread.id);
+    for (const id of ['poll_cancel', 'not_executed']) {
+      const results = messages.filter((message) => message.role === 'tool' && message.toolCallId === id);
+      assert.equal(results.length, 1);
+      assert.match(results[0].content ?? '', /中断/);
+      assert.equal(events.filter((event) => event.type === 'tool_result' && event.id === id).length, 1);
+    }
+    assert.equal(await store.getLastCompletedStepIndex(scope, run.id), 2);
+  } finally {
+    release();
+    await executing;
+    await waitForRunExecution(run.id);
+  }
 });
 
 test('executeRun: streams tool input stats without double counting final tool args', async () => {

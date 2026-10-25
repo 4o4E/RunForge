@@ -8,7 +8,7 @@ import { runTraceWriter } from '../observability/runTrace.js';
 import type { AgentEvent } from '../agent/types.js';
 import { shellEnvironment, shellPathForSettings, type ToolSettings } from '../settings.js';
 import { store } from '../store/index.js';
-import type { Scope, ShellActor, ShellCommandRow, ShellLogStream, ShellSessionRow } from '../store/types.js';
+import type { Scope, ShellActor, ShellCommandRow, ShellCommandLogRow, ShellLogStream, ShellSessionRow } from '../store/types.js';
 import { buildShellSpawnSpec } from '../tools/sandbox.js';
 import { shellBus } from './bus.js';
 import { redactShellOutput } from './redact.js';
@@ -19,6 +19,14 @@ const DEFAULT_SOFT_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_HARD_TIMEOUT_MS = 30 * 60_000;
 const KILL_GRACE_MS = 5_000;
 const LOG_TAIL_LIMIT = 120;
+
+export interface ShellPollResult {
+  session?: ShellSessionRow;
+  command?: ShellCommandRow;
+  logs: ShellCommandLogRow[];
+}
+
+export class ShellWaitInterruptedError extends Error {}
 
 export interface ShellToolContext {
   threadId: string;
@@ -34,6 +42,7 @@ export interface ShellToolContext {
 
 interface ActiveCommand {
   process: ChildProcess;
+  // undefined 为非 bwrap；null 表示等待原生状态管道报告隔离进程组 PID。
   sandboxPid?: number | null;
   pendingSignal?: NodeJS.Signals;
   scope: Scope;
@@ -50,6 +59,7 @@ interface ActiveCommand {
   cleanupPaths: string[];
   softTimer?: NodeJS.Timeout;
   hardTimer?: NodeJS.Timeout;
+  killTimer?: NodeJS.Timeout;
   killRequested?: boolean;
   finishStarted?: boolean;
   processError?: string;
@@ -198,9 +208,11 @@ export class ShellManager {
   private startingCommands = 0;
   private readonly commandStartsDrained = new Set<() => void>();
   private shutdownPromise: Promise<void> | null = null;
+  private readonly shutdownController = new AbortController();
 
   stopAcceptingCommands(): void {
     this.acceptingCommands = false;
+    this.shutdownController.abort(new ShellWaitInterruptedError('服务正在关闭，shell 等待已中断。'));
   }
 
   shutdown(): Promise<void> {
@@ -330,6 +342,8 @@ export class ShellManager {
     context: ShellToolContext;
     waitMode?: 'foreground' | 'background';
     waitTimeoutMs?: number;
+    waitForTerminal?: boolean;
+    abortSignal?: AbortSignal;
     softTimeoutMs?: number | null;
     hardTimeoutMs?: number | null;
     cwd?: string;
@@ -339,6 +353,7 @@ export class ShellManager {
     pluginRoots?: string[];
     managedReadRoots?: string[];
   }): Promise<{ command: ShellCommandRow; timedOutWaiting: boolean; tail: string }> {
+    input.abortSignal?.throwIfAborted();
     this.beginCommandStart();
     let admission: ReturnType<typeof deletionGate.enter>;
     try {
@@ -425,8 +440,23 @@ export class ShellManager {
       return { command: await store.getShellCommand(input.scope, command.id) ?? command, timedOutWaiting: false, tail: '' };
     }
 
-    const waitMs = input.waitTimeoutMs ?? DEFAULT_WAIT_MS;
-    const waitResult = await raceWithTimeout(active.done, waitMs);
+    const waitResult = input.waitForTerminal
+      ? {
+        type: 'completed' as const,
+        value: await this.waitForCommand(input.scope, command.id, input.abortSignal).catch(async (error) => {
+          if (input.abortSignal?.aborted && !this.shutdownController.signal.aborted) {
+            // 只清理本次前台调用刚启动的命令；poll 别的 run/session 不获得终止权限。
+            try {
+              await this.kill(input.scope, command.id, 'run_cancel');
+              await active.done;
+            } catch (cleanupError) {
+              console.warn(`前台 shell ${command.id} 取消清理失败：${(cleanupError as Error).message}`);
+            }
+          }
+          throw error;
+        }),
+      }
+      : await raceWithTimeout(active.done, input.waitTimeoutMs ?? DEFAULT_WAIT_MS);
     if (waitResult.type === 'timeout') {
       const logs = await store.getShellCommandLogs(input.scope, command.id, 0, 50);
       return {
@@ -435,11 +465,11 @@ export class ShellManager {
         tail: redactShellOutput(tailText(logs)),
       };
     }
-    const logs = await store.getShellCommandLogs(input.scope, command.id, 0, 200);
+    const logs = await store.getShellCommandLogTail(input.scope, command.id);
     return { command: waitResult.value, timedOutWaiting: false, tail: redactShellOutput(tailText(logs, 4000)) };
   }
 
-  async poll(scope: Scope, id: string, sinceSeq = 0): Promise<{ session?: ShellSessionRow; command?: ShellCommandRow; logs: Awaited<ReturnType<typeof store.getShellCommandLogs>> }> {
+  async poll(scope: Scope, id: string, sinceSeq = 0): Promise<ShellPollResult> {
     const command = await store.getShellCommand(scope, id);
     if (command) {
       return { command, logs: await store.getShellCommandLogs(scope, id, sinceSeq, 200) };
@@ -449,6 +479,80 @@ export class ShellManager {
     const commands = await store.listShellCommandsBySession(scope, session.id, 1);
     const latest = commands[0];
     return { session, command: latest, logs: latest ? await store.getShellCommandLogs(scope, latest.id, sinceSeq, 200) : [] };
+  }
+
+  /** 模型等待固定 command 的终态；UI 的 poll 仍只读取即时快照。 */
+  async waitForCommand(scope: Scope, commandId: string, signal?: AbortSignal): Promise<ShellCommandRow> {
+    signal?.throwIfAborted();
+    this.shutdownController.signal.throwIfAborted();
+    let command = await store.getShellCommand(scope, commandId);
+    if (!command) throw new Error(`shell command 不存在：${commandId}`);
+    // queued 可能还处于 spawn 创建阶段，先等待创建落定，不能误判成孤儿。
+    if (!this.active.has(commandId) && !commandDone(command.status) && this.startingCommands) {
+      let drained!: () => void;
+      const starts = new Promise<void>((resolveStarts) => { drained = resolveStarts; });
+      this.commandStartsDrained.add(drained);
+      try {
+        await this.awaitCommandValue(starts, signal);
+      } finally {
+        this.commandStartsDrained.delete(drained);
+      }
+    }
+    const active = this.active.get(commandId);
+    if (active) return this.awaitCommandValue(active.done, signal);
+    command = await store.getShellCommand(scope, commandId);
+    if (!command) throw new Error(`shell command 已删除：${commandId}`);
+    signal?.throwIfAborted();
+    this.shutdownController.signal.throwIfAborted();
+    if (!commandDone(command.status)) {
+      await store.updateShellCommand(scope, commandId, {
+        status: 'orphaned',
+        attention: 'process_unavailable',
+        error: '无法连接此 shell 命令的执行进程，不能等待或确认执行成功。',
+        ended_at: nowIso(),
+      });
+      const session = await store.getShellSession(scope, command.session_id);
+      const [latest] = await store.listShellCommandsBySession(scope, command.session_id, 1);
+      if (latest?.id === commandId && session?.status === 'busy') {
+        await store.updateShellSession(scope, command.session_id, { status: 'idle', lease_actor: null, lease_run_id: null });
+      }
+      const orphan = await store.getShellCommand(scope, commandId);
+      if (!orphan) throw new Error(`shell command 已删除：${commandId}`);
+      command = orphan;
+    }
+    signal?.throwIfAborted();
+    this.shutdownController.signal.throwIfAborted();
+    return command;
+  }
+
+  private awaitCommandValue<T>(value: Promise<T>, signal?: AbortSignal): Promise<T> {
+    return new Promise<T>((resolveValue, rejectValue) => {
+      const shutdownSignal = this.shutdownController.signal;
+      const cleanup = () => {
+        signal?.removeEventListener('abort', abort);
+        shutdownSignal.removeEventListener('abort', abort);
+      };
+      const abort = () => {
+        cleanup();
+        rejectValue(signal?.aborted ? signal.reason : shutdownSignal.reason);
+      };
+      signal?.addEventListener('abort', abort, { once: true });
+      shutdownSignal.addEventListener('abort', abort, { once: true });
+      value.then(
+        (row) => { cleanup(); resolveValue(row); },
+        (error) => { cleanup(); rejectValue(error); },
+      );
+      if (signal?.aborted || shutdownSignal.aborted) abort();
+    });
+  }
+
+  async wait(scope: Scope, id: string, sinceSeq = 0, signal?: AbortSignal, threadId?: string): Promise<ShellPollResult> {
+    const selected = await this.poll(scope, id, sinceSeq);
+    const session = selected.session ?? (selected.command ? await store.getShellSession(scope, selected.command.session_id) : null);
+    if (threadId && session?.thread_id !== threadId) throw new Error('shell session/command 不属于当前 thread');
+    if (!selected.command) return selected;
+    const command = await this.waitForCommand(scope, selected.command.id, signal);
+    return { ...selected, command, logs: await store.getShellCommandLogTail(scope, command.id, sinceSeq) };
   }
 
   async kill(scope: Scope, commandId: string, reason = 'user_requested_kill', signal: NodeJS.Signals = 'SIGTERM'): Promise<ShellCommandRow> {
@@ -462,13 +566,19 @@ export class ShellManager {
       }
       return (await store.getShellCommand(scope, commandId)) ?? command;
     }
-    await store.updateShellCommand(scope, commandId, { attention: reason, signal });
-    await this.emitCommandEvent(active, { type: 'shell_command_killed', step: active.step, sessionId: active.sessionId, commandId, signal, reason });
-    active.killRequested = true;
-    this.killProcess(active, signal);
-    setTimeout(() => {
-      if (this.active.has(commandId)) this.killProcess(active, 'SIGKILL');
-    }, KILL_GRACE_MS).unref();
+    // 自然退出已开始收尾时，不再接纳终止请求或改写真实执行结果。
+    if (!active.finishStarted) {
+      active.killRequested = true;
+      await store.updateShellCommand(scope, commandId, { attention: reason, signal });
+      await this.emitCommandEvent(active, { type: 'shell_command_killed', step: active.step, sessionId: active.sessionId, commandId, signal, reason });
+      if (!active.finishStarted && this.active.has(commandId)) {
+        this.killProcess(active, signal);
+        clearTimeout(active.killTimer);
+        active.killTimer = setTimeout(() => {
+          if (this.active.has(commandId)) this.killProcess(active, 'SIGKILL');
+        }, KILL_GRACE_MS).unref();
+      }
+    }
     const waitResult = await raceWithTimeout(active.done, 1_000);
     if (waitResult.type === 'completed') return waitResult.value;
     return (await store.getShellCommand(scope, commandId)) ?? command;
@@ -476,7 +586,9 @@ export class ShellManager {
 
   async killRunCommands(scope: Scope, runId: string, reason = 'run_cancel'): Promise<void> {
     for (const command of await store.listRunningShellCommandsByRun(scope, runId)) {
+      const completion = this.active.get(command.id)?.done;
       await this.kill(scope, command.id, reason);
+      await completion;
     }
   }
 
@@ -608,11 +720,11 @@ export class ShellManager {
       startedAt: input.command.started_at,
     });
 
-    if (input.command.soft_timeout_ms != null) {
+    if (!active.finishStarted && this.active.has(active.commandId) && input.command.soft_timeout_ms != null) {
       active.softTimer = setTimeout(() => void this.softTimeout(active), input.command.soft_timeout_ms);
       active.softTimer.unref();
     }
-    if (input.command.hard_timeout_ms != null) {
+    if (!active.finishStarted && this.active.has(active.commandId) && input.command.hard_timeout_ms != null) {
       active.hardTimer = setTimeout(() => void this.hardTimeout(active), input.command.hard_timeout_ms);
       active.hardTimer.unref();
     }
@@ -677,8 +789,10 @@ export class ShellManager {
       runtimeMs: Date.now() - active.startedAt,
       message: 'shell command 已超过硬超时，正在终止。',
     });
+    if (active.finishStarted || !this.active.has(active.commandId)) return;
     this.killProcess(active, 'SIGTERM');
-    setTimeout(() => {
+    clearTimeout(active.killTimer);
+    active.killTimer = setTimeout(() => {
       if (this.active.has(active.commandId)) this.killProcess(active, 'SIGKILL');
     }, KILL_GRACE_MS).unref();
   }
@@ -695,6 +809,7 @@ export class ShellManager {
     active.finishStarted = true;
     if (active.softTimer) clearTimeout(active.softTimer);
     if (active.hardTimer) clearTimeout(active.hardTimer);
+    clearTimeout(active.killTimer);
     // close 在进程退出且 stdout/stderr 流关闭后触发；等待完整写链，避免截断末尾输出。
     await active.writeChain;
     await Promise.all(active.cleanupPaths.map((path) => rm(path, { recursive: true, force: true }).catch(() => undefined)));
@@ -779,7 +894,7 @@ export function parseShellActor(value: unknown): ShellActor {
   return normalizeActor(value);
 }
 
-export function formatCommandResult(input: { command: ShellCommandRow; timedOutWaiting?: boolean; tail?: string; logs?: Awaited<ReturnType<typeof store.getShellCommandLogs>> }): string {
+export function formatCommandResult(input: { command: ShellCommandRow; timedOutWaiting?: boolean; tail?: string; logs?: ShellCommandLogRow[] }): string {
   const command = input.command;
   const logsTail = input.tail ?? (input.logs ? tailText(input.logs, 4000) : '');
   const tail = redactShellOutput(logsTail.trim());
@@ -788,7 +903,7 @@ export function formatCommandResult(input: { command: ShellCommandRow; timedOutW
       `shell command 仍在运行：${command.id}`,
       `session: ${command.session_id}`,
       `status: ${command.status}`,
-      `后续使用 shell_poll(commandId="${command.id}") 查看进度，或 shell_kill(commandId="${command.id}") 终止。`,
+      `后续使用 shell_poll(id="${command.id}") 等待终态，或 shell_kill(commandId="${command.id}") 终止。`,
       tail ? `最近输出：\n${tail}` : '',
     ].filter(Boolean).join('\n');
   }
@@ -798,6 +913,7 @@ export function formatCommandResult(input: { command: ShellCommandRow; timedOutW
     `status: ${command.status}`,
     command.exit_code != null ? `exit_code: ${command.exit_code}` : '',
     command.signal ? `signal: ${command.signal}` : '',
+    command.error ? `error: ${command.error}` : '',
     tail ? `输出：\n${tail}` : '（无输出）',
   ].filter(Boolean).join('\n');
 }
