@@ -1,6 +1,6 @@
 schemaVersion: 2
 id: audio-video-tools
-version: 0.2.0
+version: 0.2.1
 displayName: 通用音视频文件解析
 description: 提供 ffmpeg、ffprobe 和 Speaches 转写，用于各来源音视频文件的通用解析。
 

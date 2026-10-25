@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -44,16 +44,6 @@ async function apiJson(url) {
 }
 
 const video = await videoUrl(input);
-if (operation === 'comments' || operation === 'video') {
-  // 分档必须发生在转写之后；评论允许配合空转写判断，画面只供详细分析使用。
-  const transcripts = (await readdir(output)).filter((name) =>
-    name.startsWith(`${video.bvid}-p${video.page}`) && name.endsWith('.srt'));
-  if (transcripts.length !== 1) throw new Error('先完成实际音轨转写，再决定是否读取评论或关键帧');
-  if (operation === 'video') {
-    const transcript = await readFile(join(output, transcripts[0]), 'utf8');
-    if (!transcript.trim()) throw new Error('转写为空、没有有效讲话；不能进入需要画面的详细分析');
-  }
-}
 if (operation === 'metadata') {
   const data = await apiJson(`https://api.bilibili.com/x/web-interface/view?bvid=${video.bvid}`);
   const part = data.pages?.[video.page - 1];
