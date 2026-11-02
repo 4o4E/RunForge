@@ -28,8 +28,33 @@ Bot先采集原始资料，通过`run.create.input`传入本插件。`triage`在
 
 ## 输入、暂存与投递
 
-- `triage`：输入原始候选、时间、已知事实标识及各群真实已发送内容；输出引用原始ID的分流结果与过滤依据，每个原始候选都必须有归属。
-- `hourly_compose`：输入带固定数字ID的待发布快照及本群真实已发送内容；输出引用这些ID的成稿与明确丢弃记录。未选中且未丢弃的候选保留至下轮。
-- 具体JSON结构由调用方协议提供；不自行写文件维护跨任务队列，不连接Bot PostgreSQL。
-- Bot保存候选、预留快照和统一事实投递记录，发送结果仅以真实协议回执确认；本插件不能把成稿或预留当作已经发送。
-- 采集筛选、小时整理和通知时段均由Bot后台定时任务配置，没有新闻时不发送消息。普通群成员只看到新闻、实际时间和对应来源，不展示候选、队列或筛选过程。
+- `triage`：输入原始候选与时间，输出引用原始ID的分流结果与过滤依据，每个原始候选都必须有归属。历史由脚本按批查询。
+- `hourly_compose`：输入带固定数字ID的待发布快照，输出引用这些ID的成稿与明确丢弃记录。对所有已有事实编号批量查询历史投递状态；未选中且未丢弃的候选保留至下轮。
+- 具体JSON结构由调用方协议提供；不自行写文件维护跨任务队列，不连接Bot PostgreSQL。历史接口使用调用方可信提示提供的`news_history_api_base`和`news_history_work_token`，仅通过环境变量传入脚本；不要求新增tenant Secret或长期数据库账号。
+- Bot保存候选、预留快照和统一事实投递记录，发送结果仅以真实协议回执确认；本插件不能把成稿或预留当作已经发送。历史查询不是最终发送资格检查，Bot发送时仍会重新检查。
+
+## 新闻历史查询脚本
+
+`skills/daily-news-research/scripts/news-history.mjs`是无额外依赖的Node ESM客户端，提供可导入API：
+
+```js
+import { createNewsHistoryClient } from './news-history.mjs';
+
+const client = createNewsHistoryClient({ baseUrl, token });
+const checked = await client.check({ queries: [{ id: 'source-1', terms: ['RunForge'], limit: 5 }] });
+// 需要核对正文时，使用check实际返回的eventKey/updateKey调用details。
+```
+
+命令行支持真实文件路径及插件提供的符号链接路径，从JSON文件读取单次请求体，凭证只从环境变量读取；缺少参数或凭证时以失败状态退出：
+
+```bash
+NEKO_NEWS_API_BASE='https://bot.example/api/agent/v1/news' \
+NEKO_NEWS_WORK_TOKEN='任务工作令牌' \
+node skills/daily-news-research/scripts/news-history.mjs check check.json
+```
+
+`news_history_api_base`是完整新闻查询入口，脚本直接使用，不再追加API前缀。`details`命令同样使用`node .../news-history.mjs details details.json`；每批最多20条事实。check每批最多50条候选，超过时分批；每条查询的`id`须在本批唯一。候选有`eventKey`时只检索该事件，提供`updateKey`时只检索该事实；没有`eventKey`时来源URL与关键词取并集，多个关键词必须全部命中。分页返回的`total`、`hasMore`与结果必须保留；有`hasMore`时按下一`offset`继续check，不能把截断结果当成完整历史。
+
+匹配类型含义不同：`exact_fact`是同一事实，`same_event`只说明同一事件，`source_url`仅为来源链接命中，`related`为关键词相关；URL/关键词命中不代表相同事实。只有需要判断事实增量或消除歧义时才读取`details`。结果按群隔离：`SENT`为已发送，`PENDING`/`SENDING`不是发送成功，`UNKNOWN`不能据此重发，`NOT_SENT`表示没有已确认发送；没有匹配记录也不能保证语义上无重复。脚本不会自动重试HTTP错误、跟随重定向或回退为“未发送”，错误信息不输出凭证，输出仅为本次API精简响应而非全量历史。
+
+采集筛选、小时整理和通知时段均由Bot后台定时任务配置，没有新闻时不发送消息。普通群成员只看到新闻、实际时间和对应来源，不展示候选、队列或筛选过程。
