@@ -1,6 +1,6 @@
 schemaVersion: 2
 id: brix
-version: 0.1.0
+version: 0.2.0
 displayName: Brix 浏览器自动化
 description: 通过 Brix 执行通用浏览器操作和受控服务端脚本，Google Lens 是其中一项内置能力。
 
@@ -8,7 +8,9 @@ skills:
   - id: brix-browser
     path: skills/brix-browser
 
-executables: []
+executables:
+  - name: brix
+    path: bin/brix
 secrets:
   - key: brix.base-url
     required: true
